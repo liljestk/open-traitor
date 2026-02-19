@@ -10,3 +10,9 @@ __pycache__
 tests/
 .env
 config/.env
+
+# Frontend — exclude local node_modules and dist from build context;
+# the multi-stage Docker build installs and builds these fresh.
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+dashboard/frontend/.vite/

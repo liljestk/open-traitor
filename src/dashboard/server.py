@@ -34,9 +34,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncGenerator, Optional
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.utils.logger import get_logger
 
@@ -527,3 +530,24 @@ def _serialize_event_attrs(event) -> dict:
         return raw
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Static frontend (React/Vite build)
+# The Dockerfile copies the built frontend into src/dashboard/static/.
+# In local dev the directory won't exist — fall back to API-only mode.
+# ---------------------------------------------------------------------------
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+if _STATIC_DIR.is_dir():
+    # Serve hashed JS/CSS bundles at /assets (Vite default output dir)
+    app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR / "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str):
+        """Catch-all: return index.html so React Router handles client-side paths."""
+        index = _STATIC_DIR / "index.html"
+        if index.is_file():
+            return FileResponse(str(index))
+        raise HTTPException(status_code=404, detail="Frontend not built")

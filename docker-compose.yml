@@ -185,9 +185,9 @@ services:
       - "3000:3000"  # Langfuse Web UI
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_SECRET: auto-traitor-langfuse-secret-change-me
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-run-setup-ps1}
       NEXTAUTH_URL: http://localhost:3000
-      SALT: auto-traitor-langfuse-salt-change-me
+      SALT: ${LANGFUSE_SALT:-change-me-run-setup-ps1}
       LANGFUSE_INIT_ORG_ID: auto-traitor
       LANGFUSE_INIT_ORG_NAME: Auto-Traitor
       LANGFUSE_INIT_PROJECT_ID: trading-agent
@@ -196,7 +196,7 @@ services:
       LANGFUSE_INIT_PROJECT_SECRET_KEY: at-secret-key
       LANGFUSE_INIT_USER_EMAIL: admin@auto-traitor.local
       LANGFUSE_INIT_USER_NAME: admin
-      LANGFUSE_INIT_USER_PASSWORD: changeme123
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-changeme123}
     healthcheck:
       test: [ "CMD", "wget", "-qO-", "http://localhost:3000/api/public/health" ]
       interval: 30s

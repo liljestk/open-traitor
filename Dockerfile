@@ -1,3 +1,17 @@
+# =============================================================
+# Stage 1 — Build the React/Vite frontend
+# =============================================================
+FROM node:24-slim AS frontend-builder
+
+WORKDIR /frontend
+COPY dashboard/frontend/package.json dashboard/frontend/package-lock.json ./
+RUN npm ci
+COPY dashboard/frontend/ ./
+RUN npm run build
+
+# =============================================================
+# Stage 2 — Python runtime
+# =============================================================
 FROM python:3.13-slim
 
 # Security: non-root user
@@ -19,8 +33,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ src/
 COPY config/ config/
 
-# Create data dirs
-RUN mkdir -p data/trades data/news logs && \
+# Copy built frontend into the image so FastAPI can serve it
+COPY --from=frontend-builder /frontend/dist src/dashboard/static/
+
+# Create data dirs (match what the app expects at runtime)
+RUN mkdir -p data/trades data/news data/journal data/audit logs && \
     chown -R trader:trader /app
 
 # Switch to non-root user
