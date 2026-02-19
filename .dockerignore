@@ -1,0 +1,12 @@
+.git
+.gitignore
+.vscode
+.idea
+data/
+logs/
+__pycache__
+*.pyc
+*.md
+tests/
+.env
+config/.env

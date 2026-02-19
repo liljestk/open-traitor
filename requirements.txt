@@ -1,0 +1,62 @@
+# Coinbase API
+coinbase-advanced-py>=1.8.2
+
+# LLM (OpenAI-compatible client for Ollama)
+openai>=2.21.0
+
+# Technical Analysis
+pandas>=3.0.1
+numpy>=2.4.2
+ta>=0.11.0
+
+# Telegram Bot
+python-telegram-bot>=22.6
+
+# News Aggregation
+praw>=7.8.1
+feedparser>=6.0.12
+beautifulsoup4>=4.14.3
+aiohttp>=3.13.3
+
+# Redis
+redis>=7.2.0
+
+# Web Server (health endpoints)
+flask>=3.1.3
+flask-cors>=6.0.2
+waitress>=3.0.2
+
+# Dashboard API & WebSocket
+fastapi>=0.129.0
+uvicorn[standard]>=0.41.0
+httpx>=0.28.1
+python-multipart>=0.0.22
+
+# LLM Observability (Langfuse)
+langfuse>=3.14.4
+
+# Configuration
+python-dotenv>=1.2.1
+pyyaml>=6.0.3
+
+# Scheduling
+apscheduler>=3.11.2
+schedule>=1.2.2
+
+# Temporal workflow engine (multi-horizon planning)
+temporalio>=1.23.0
+
+# Data Models
+pydantic>=2.12.5
+
+# WebSocket (real-time market data)
+websocket-client>=1.9.0
+
+# Utilities
+requests>=2.32.5
+colorama>=0.4.6
+rich>=14.3.3
+
+# Testing
+pytest>=9.0.2
+pytest-asyncio>=1.3.0
