@@ -1,4 +1,4 @@
-# ===========================================================================
+﻿# ===========================================================================
 #  Auto-Traitor Setup Script
 #  Interactive setup that creates config/.env and guides through everything.
 # ===========================================================================
@@ -31,7 +31,7 @@ function Write-Step {
     param([int]$Num, [string]$Title)
     Write-Host ""
     Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
-    Write-Host "  STEP $Num: $Title" -ForegroundColor Yellow
+    Write-Host "  STEP ${Num}: $Title" -ForegroundColor Yellow
     Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -227,7 +227,10 @@ Write-Host "    1. Go to https://www.coinbase.com/settings/api" -ForegroundColor
 Write-Host "    2. Click 'New API Key'" -ForegroundColor DarkGray
 Write-Host "    3. Select portfolios and permissions:" -ForegroundColor DarkGray
 Write-Host "       - View ✅  Trade ✅  Transfer ❌" -ForegroundColor DarkGray
-Write-Host "    4. Copy the API Key and Secret" -ForegroundColor DarkGray
+Write-Host "    4. Coinbase will show you TWO values:" -ForegroundColor DarkGray
+Write-Host "         API Key Name  — looks like: organizations/xxxx/apiKeys/xxxx" -ForegroundColor DarkGray
+Write-Host "         Private Key   — a multi-line EC private key (PEM format)" -ForegroundColor DarkGray
+Write-Host "    5. Copy both before closing the dialog (private key shown once!)" -ForegroundColor DarkGray
 Write-Host ""
 
 if ($tradingMode -eq "paper") {
@@ -239,11 +242,16 @@ else {
 }
 
 if ($setupCoinbase) {
-    $cbKey = Prompt-Required -Prompt "Coinbase API Key" -Help "Organizations/xxxx-xxxx/apiKeys/xxxx-xxxx"
-    $cbSecret = Prompt-Required -Prompt "Coinbase API Secret" -Secret
+    $cbKey = Prompt-Required -Prompt "API Key Name" -Help "e.g. organizations/xxxx-xxxx/apiKeys/xxxx-xxxx"
+    Write-Host ""
+    Write-Info "Paste your Private Key (PEM). It starts with -----BEGIN EC PRIVATE KEY-----"
+    Write-Info "Paste it as a single line with \n replacing newlines, or just paste the key name path if using a key file."
+    Write-Host "  Tip: In the Coinbase dialog, click the copy icon next to 'Private Key'." -ForegroundColor DarkGray
+    Write-Host ""
+    $cbSecret = Prompt-Required -Prompt "Private Key"
 
-    Append-Env -Key "COINBASE_API_KEY" -Value $cbKey -Comment "Coinbase Advanced Trade API"
-    Append-Env -Key "COINBASE_API_SECRET" -Value $cbSecret
+    Append-Env -Key "COINBASE_API_KEY" -Value $cbKey -Comment "Coinbase Advanced Trade — API Key Name (organizations/xxx/apiKeys/xxx)"
+    Append-Env -Key "COINBASE_API_SECRET" -Value $cbSecret -Comment "Coinbase Advanced Trade — EC Private Key (PEM)"
 }
 else {
     Write-Info "Skipping Coinbase API — paper mode will simulate."
@@ -503,6 +511,7 @@ Add-Content -Path $rootEnv -Value "LANGFUSE_NEXTAUTH_SECRET=$lf_secret"
 Add-Content -Path $rootEnv -Value "LANGFUSE_SALT=$lf_salt"
 Add-Content -Path $rootEnv -Value "LANGFUSE_ADMIN_PASSWORD=$lf_adminpw"
 Add-Content -Path $rootEnv -Value "LANGFUSE_DB_PASSWORD=$lf_dbpw"
+Add-Content -Path $rootEnv -Value "REDIS_PASSWORD=$redisPassword"
 
 Write-OK "Langfuse secrets generated (root .env)."
 Write-Host "     Langfuse admin login: admin@auto-traitor.local / $lf_adminpw" -ForegroundColor DarkGray

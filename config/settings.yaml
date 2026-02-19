@@ -10,9 +10,9 @@ trading:
   # Main analysis/trade loop interval in seconds
   interval: 120
   # Minimum confidence to execute a trade (0.0 - 1.0)
-  min_confidence: 0.7
+  min_confidence: 1.1  # SETUP MODE: impossible threshold — no trades will execute
   # Max concurrent open positions
-  max_open_positions: 3
+  max_open_positions: 0
   # How many trading cycles between live position reconciliation checks
   # (live mode only — set higher to reduce Coinbase API calls)
   reconcile_every_cycles: 10
@@ -27,15 +27,15 @@ trading:
 # regardless of any LLM reasoning or market conditions.
 absolute_rules:
   # Maximum USD to spend on a single trade
-  max_single_trade_usd: 500
+  max_single_trade_usd: 0  # SETUP MODE: locked — no trades
   # Maximum total daily spending
-  max_daily_spend_usd: 2000
+  max_daily_spend_usd: 0   # SETUP MODE: locked — no trades
   # Maximum daily loss before all trading stops
-  max_daily_loss_usd: 300
+  max_daily_loss_usd: 0    # SETUP MODE: locked — no trades
   # Maximum portfolio percentage at risk at any time
-  max_portfolio_risk_pct: 0.20
+  max_portfolio_risk_pct: 0.00  # SETUP MODE: locked
   # Require Telegram approval for trades above this USD amount
-  require_approval_above_usd: 200
+  require_approval_above_usd: 0  # SETUP MODE: everything requires approval
   # Never trade these pairs (blacklist)
   never_trade_pairs: []
   # Only trade these pairs if set (whitelist, empty = allow all)
@@ -43,9 +43,9 @@ absolute_rules:
   # Minimum time between trades in seconds (prevent rapid fire)
   min_trade_interval_seconds: 60
   # Maximum number of trades per day
-  max_trades_per_day: 20
+  max_trades_per_day: 0  # SETUP MODE: locked
   # Never use more than this % of available cash in a single trade
-  max_cash_per_trade_pct: 0.25
+  max_cash_per_trade_pct: 0.00  # SETUP MODE: locked
   # Emergency stop: if portfolio drops below this USD value, stop everything
   emergency_stop_portfolio_usd: 5000
   # Always use stop-loss (true = never open a position without stop-loss)
