@@ -110,10 +110,18 @@ def main():
     # Safety confirmation for live mode
     if not paper_mode:
         logger.warning("⚠️ ⚠️ ⚠️  LIVE TRADING MODE — REAL MONEY AT RISK  ⚠️ ⚠️ ⚠️")
-        confirm = input("Type 'I UNDERSTAND THE RISKS' to continue: ")
-        if confirm != "I UNDERSTAND THE RISKS":
-            print("Aborting.")
-            sys.exit(0)
+        # Allow headless/Docker deployments to confirm via environment variable
+        if os.environ.get("LIVE_TRADING_CONFIRMED", "").strip() == "I UNDERSTAND THE RISKS":
+            logger.warning("Live mode confirmed via LIVE_TRADING_CONFIRMED environment variable.")
+        else:
+            try:
+                confirm = input("Type 'I UNDERSTAND THE RISKS' to continue: ")
+            except EOFError:
+                print("Aborting: no interactive terminal and LIVE_TRADING_CONFIRMED not set.")
+                sys.exit(1)
+            if confirm != "I UNDERSTAND THE RISKS":
+                print("Aborting.")
+                sys.exit(0)
 
     # =========================================================================
     # Initialize Components
