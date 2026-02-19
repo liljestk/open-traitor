@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import requests
+
 from src.utils.logger import get_logger
 
 logger = get_logger("core.coinbase")
@@ -17,16 +19,38 @@ logger = get_logger("core.coinbase")
 # Currencies that are pegged ~1:1 to USD and should be counted at face value
 _USD_EQUIVALENTS = {"USD", "USDC", "USDT", "FDUSD", "PYUSD", "DAI", "EURC", "USDS"}
 
-# Approximate fiat-to-USD fallback rates (used only when Coinbase can't price the pair)
-# Updated periodically — acceptable for small balance rounding, not for large trades
-_FIAT_FALLBACK_USD = {
-    "EUR": 1.05,
-    "GBP": 1.27,
-    "CHF": 1.12,
-    "CAD": 0.74,
-    "AUD": 0.63,
-    "SGD": 0.75,
-}
+# Live fiat-to-USD rate cache {currency: (rate, fetched_at_epoch)}
+_FIAT_RATE_CACHE: dict[str, tuple[float, float]] = {}
+_FIAT_RATE_TTL = 6 * 3600  # 6 hours — fiat rates are stable intraday
+_FIAT_RATE_URL = "https://api.frankfurter.app/latest?from=USD"  # ECB rates, no API key
+
+
+def _get_fiat_rate_usd(currency: str) -> float:
+    """
+    Return the number of USD per 1 unit of *currency* (e.g. EUR → ~1.05).
+    Fetches a single bulk request for all major fiats and caches for 6 hours.
+    Returns 0 if the currency is unknown or the request fails.
+    """
+    now = time.time()
+    cached = _FIAT_RATE_CACHE.get(currency)
+    if cached and (now - cached[1]) < _FIAT_RATE_TTL:
+        return cached[0]
+
+    try:
+        resp = requests.get(_FIAT_RATE_URL, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        # Response: {"base": "USD", "rates": {"EUR": 0.952, "GBP": 0.789, ...}}
+        # rates[X] = how many X per 1 USD  →  USD per X = 1 / rates[X]
+        for code, per_usd in data.get("rates", {}).items():
+            if per_usd and per_usd > 0:
+                _FIAT_RATE_CACHE[code] = (1.0 / per_usd, now)
+        logger.debug(f"Fiat exchange rates refreshed ({len(data.get('rates', {}))} currencies)")
+    except Exception as e:
+        logger.warning(f"⚠️ Fiat rate fetch failed: {e} — using cached/zero rate for {currency}")
+
+    result = _FIAT_RATE_CACHE.get(currency)
+    return result[0] if result else 0.0
 
 
 class CoinbaseClient:
@@ -220,9 +244,9 @@ class CoinbaseClient:
         Convert a currency amount to its approximate USD value.
         Order of preference:
           1. USD / known stablecoins → 1:1
-          2. Cached price for {currency}-USD
+          2. Cached price for {currency}-USD (Coinbase crypto price)
           3. Live fetch of {currency}-USD from Coinbase
-          4. Known fiat fallback rate (EUR, GBP, etc.)
+          4. Live fiat exchange rate from Frankfurter (ECB), cached 6 h
           5. Log a warning and return 0
         """
         if amount <= 0:
@@ -235,11 +259,11 @@ class CoinbaseClient:
             price = self.get_current_price(pair)
         if price > 0:
             return amount * price
-        # Fiat fallback (avoids a zero for EUR cash balances when pair not tradeable)
-        fallback = _FIAT_FALLBACK_USD.get(currency, 0)
-        if fallback > 0:
-            logger.debug(f"Using approximate rate for {currency}: {fallback:.4f} USD")
-            return amount * fallback
+        # Fiat fallback — live ECB rate via Frankfurter (EUR, GBP, CHF, etc.)
+        fiat_rate = _get_fiat_rate_usd(currency)
+        if fiat_rate > 0:
+            logger.debug(f"Using live fiat rate for {currency}: {fiat_rate:.4f} USD")
+            return amount * fiat_rate
         logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
         return 0.0
 
