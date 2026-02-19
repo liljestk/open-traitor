@@ -243,6 +243,13 @@ def main():
         )
         telegram_bot.start()
         logger.info("📱 Telegram bot started")
+        # Give the polling thread a moment to connect, then send startup ping
+        time.sleep(2)
+        telegram_bot.send_message(
+            f"👋 *Auto-Traitor is online!*\n\n"
+            f"Mode: `{mode.upper()}`\n"
+            f"Ready and listening. 🚀"
+        )
     else:
         logger.warning("⚠️ Telegram not configured — running without notifications")
 
