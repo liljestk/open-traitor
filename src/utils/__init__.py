@@ -1,5 +1,5 @@
 from .logger import setup_logger, get_logger
-from .helpers import format_currency, format_percentage, get_timestamp
+from .helpers import format_currency, format_percentage, timestamp_now
 from .rate_limiter import RateLimiter, get_rate_limiter
 from .security import sanitize_input, validate_trading_pair
 from .journal import TradeJournal
@@ -10,7 +10,7 @@ __all__ = [
     "get_logger",
     "format_currency",
     "format_percentage",
-    "get_timestamp",
+    "timestamp_now",
     "RateLimiter",
     "get_rate_limiter",
     "sanitize_input",
