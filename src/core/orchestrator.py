@@ -254,24 +254,52 @@ class Orchestrator:
                 # ─── Portfolio Rotation (autonomous swaps) ───
                 self._run_rotation()
 
-                # Update trailing stops with current prices
+                # Update trailing stops with current prices — execute sells for triggered stops
                 triggered = self.trailing_stops.update_prices(
                     self.state.current_prices
                 )
                 for t in triggered:
-                    self.audit.log_trade(
-                        pair=t["pair"], action="trailing_stop_exit",
-                        amount=0, price=t.get("trigger_price", 0),
+                    pair = t["pair"]
+                    trigger_price = t.get("trigger_price", 0)
+                    entry_price = t.get("entry_price", 0)
+
+                    # ── EXECUTE THE SELL ORDER ────────────────────────────────
+                    close_result = self.executor.close_position_by_pair(
+                        pair, trigger_price, "trailing_stop"
                     )
-                    event_msg = (
-                        f"Trailing stop triggered on {t['pair']} "
-                        f"at {format_currency(t.get('trigger_price', 0))}"
-                    )
+                    if close_result:
+                        self.trailing_stops.remove_stop(pair)
+                        pnl = close_result.get("pnl")
+                        self.audit.log_trade(
+                            pair=pair, action="trailing_stop_exit",
+                            amount=close_result.get("close_price", trigger_price) or 0,
+                            price=close_result.get("close_price", trigger_price) or 0,
+                        )
+                        if pnl is not None and pnl < 0:
+                            self.rules.record_loss(abs(pnl))
+                        event_msg = (
+                            f"Trailing stop executed on {pair} "
+                            f"at {format_currency(trigger_price)}"
+                            + (f" — PnL: {format_currency(pnl)}" if pnl is not None else "")
+                        )
+                        if not close_result.get("success", True):
+                            logger.error(
+                                f"❌ Trailing stop sell FAILED for {pair} — "
+                                "position state unchanged; will retry next cycle."
+                            )
+                    else:
+                        # No open trade found — stop is stale; remove it
+                        self.trailing_stops.remove_stop(pair)
+                        event_msg = (
+                            f"Trailing stop triggered on {pair} "
+                            f"at {format_currency(trigger_price)} (no open position found)"
+                        )
+
                     self.chat_handler.queue_event(event_msg)
                     if self.telegram:
                         self.telegram.send_trade_notification(
                             f"🎯 {event_msg}\n"
-                            f"Entry: {format_currency(t.get('entry_price', 0))}"
+                            f"Entry: {format_currency(entry_price)}"
                         )
 
                 # Check stop-losses on all positions
@@ -315,6 +343,9 @@ class Orchestrator:
                 # Sync state to Redis
                 self._sync_to_redis()
 
+                # Prune stale pending approvals (> 1 hour old)
+                self._prune_stale_approvals()
+
                 # Update health status
                 components = check_component_health(
                     ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -328,11 +359,14 @@ class Orchestrator:
 
             except Exception as e:
                 consecutive_errors += 1
+                # Full traceback in server logs; redact message before broadcasting
+                # to Telegram — exception text can contain connection strings, paths,
+                # or credential fragments.
                 logger.error(f"Pipeline error: {e}", exc_info=True)
                 if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
                     alert_msg = (
                         f"🚨 *Auto-Traitor alert*: {consecutive_errors} consecutive pipeline "
-                        f"errors — last: `{type(e).__name__}: {str(e)[:120]}`"
+                        f"errors — last type: `{type(e).__name__}` (see server logs for details)"
                     )
                     logger.error(alert_msg)
                     if self.telegram:
@@ -414,6 +448,16 @@ class Orchestrator:
         else:
             self.rate_limiter.wait("coinbase_rest")
             price = self.coinbase.get_current_price(pair)
+
+        # Guard: never proceed with a zero/negative price — it would corrupt
+        # stop-loss calculations and position sizing.
+        if price <= 0:
+            logger.warning(
+                f"⚠️ Skipping pipeline for {pair}: price is {price} "
+                "(both WebSocket and REST returned an invalid value)"
+            )
+            return
+
         self.state.update_price(pair, price)
 
         # Get latest news headlines
@@ -537,6 +581,7 @@ class Orchestrator:
             )
             trade_id = f"pending_{uuid.uuid4().hex[:8]}"
             with self._pending_approvals_lock:
+                risk_result["_queued_at"] = datetime.now(timezone.utc).isoformat()
                 self._pending_approvals[trade_id] = risk_result
 
             if self.telegram:
@@ -757,6 +802,39 @@ class Orchestrator:
             )
         except Exception as e:
             logger.debug(f"Failed to load pending approvals: {e}")
+
+    _PENDING_APPROVAL_TTL_SECONDS: int = 3600  # 1 hour
+
+    def _prune_stale_approvals(self) -> None:
+        """Remove pending approvals that have been waiting longer than the TTL.
+
+        Prevents the dict from growing indefinitely when approvals are never
+        acted on (e.g. the operator stopped reading Telegram for a long time).
+        A stale pending approval is re-evaluated fresh on the next cycle anyway.
+        """
+        now = datetime.now(timezone.utc)
+        stale_ids = []
+        with self._pending_approvals_lock:
+            for trade_id, approval in self._pending_approvals.items():
+                queued_at_str = approval.get("_queued_at")
+                if not queued_at_str:
+                    # Legacy entry with no timestamp — treat as stale
+                    stale_ids.append(trade_id)
+                    continue
+                try:
+                    queued_at = datetime.fromisoformat(queued_at_str)
+                    age = (now - queued_at).total_seconds()
+                    if age > self._PENDING_APPROVAL_TTL_SECONDS:
+                        stale_ids.append(trade_id)
+                except Exception:
+                    stale_ids.append(trade_id)
+            for trade_id in stale_ids:
+                self._pending_approvals.pop(trade_id, None)
+        if stale_ids:
+            logger.info(
+                f"🧹 Pruned {len(stale_ids)} stale pending approval(s) "
+                f"(TTL={self._PENDING_APPROVAL_TTL_SECONDS}s): {stale_ids}"
+            )
 
     # =========================================================================
     # LLM Chat Handler — Function Registry

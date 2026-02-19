@@ -121,7 +121,7 @@ class ExecutorAgent(BaseAgent):
 
                 # Record in state and rules
                 self.state.add_trade(trade)
-                self.rules.record_trade(usd_amount)
+                self.rules.record_trade(usd_amount, action=action)
 
                 self.logger.info(f"✅ Trade executed: {trade.to_summary()}")
 
@@ -164,6 +164,19 @@ class ExecutorAgent(BaseAgent):
             "returning last-known state; position marked PENDING."
         )
         return initial_order
+
+    def close_position_by_pair(self, pair: str, price: float, reason: str) -> dict | None:
+        """Find the open BUY trade for *pair* and close it at *price*.
+
+        Called by the orchestrator when a trailing stop fires so that the
+        actual sell order is placed — returns the close result dict or None
+        if no matching open trade was found.
+        """
+        for trade in self.state.get_open_trades():
+            if trade.pair == pair and trade.action == TradeAction.BUY:
+                return self._close_position(trade, price, reason)
+        self.logger.warning(f"close_position_by_pair: no open BUY trade found for {pair}")
+        return None
 
     def check_stop_losses(self) -> list[dict]:
         """Check all open positions against their stop-losses."""

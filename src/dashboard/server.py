@@ -134,12 +134,22 @@ if not _DASHBOARD_API_KEY:
 
 @app.middleware("http")
 async def _api_key_middleware(request: Request, call_next):
-    """Require X-API-Key on /api/* and /ws/* when DASHBOARD_API_KEY is configured."""
+    """Require X-API-Key on /api/* and /ws/* when DASHBOARD_API_KEY is configured.
+
+    WebSocket upgrade requests are also HTTP requests, but browsers cannot set
+    custom headers on ``new WebSocket(url)``.  We therefore accept the key as a
+    ``?api_key=`` query parameter as a secondary credential path, **only** for
+    WebSocket paths where the header mechanism is unavailable.
+    """
     if _DASHBOARD_API_KEY and (
         request.url.path.startswith("/api/")
         or request.url.path.startswith("/ws/")
     ):
+        # Primary: X-API-Key header (server-side / curl / fetch clients)
         api_key = request.headers.get("X-API-Key", "")
+        if not api_key and request.url.path.startswith("/ws/"):
+            # Fallback for browser WebSocket: ?api_key=... query parameter
+            api_key = request.query_params.get("api_key", "")
         # Constant-time comparison prevents timing-oracle attacks
         if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
             return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)

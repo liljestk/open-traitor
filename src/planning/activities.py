@@ -33,9 +33,11 @@ logger = get_logger("planning.activities")
 _DB_PATH = os.path.join("data", "stats.db")
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("LLM_MODEL", "llama3.2"))
-_LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
-_LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
-_LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
+
+# NOTE: Langfuse credentials are intentionally NOT read at module-import time.
+# The planning worker imports this module before dotenv is loaded, so reading
+# them here would always produce empty strings.  _get_planning_tracer() reads
+# them lazily at call time instead.
 
 # Module-level singletons -- created once per Temporal worker process
 _llm_client: LLMClient | None = None
@@ -62,13 +64,17 @@ def _get_planning_tracer():
     """Return a module-level LLMTracer for the planning worker, or None."""
     try:
         from src.utils.tracer import LLMTracer
+        # Read credentials lazily so dotenv has been loaded by the time we get here.
+        langfuse_host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+        langfuse_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+        langfuse_sk = os.environ.get("LANGFUSE_SECRET_KEY", "")
         if LLMTracer._instance is None:
-            if not _LANGFUSE_PUBLIC_KEY or not _LANGFUSE_SECRET_KEY:
+            if not langfuse_pk or not langfuse_sk:
                 return None
             LLMTracer.init(
-                public_key=_LANGFUSE_PUBLIC_KEY,
-                secret_key=_LANGFUSE_SECRET_KEY,
-                host=_LANGFUSE_HOST,
+                public_key=langfuse_pk,
+                secret_key=langfuse_sk,
+                host=langfuse_host,
                 enabled=True,
             )
         return LLMTracer._instance

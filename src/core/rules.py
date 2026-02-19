@@ -81,14 +81,21 @@ class AbsoluteRules:
             )
             conn = sqlite3.connect(db_path, timeout=5)
             try:
+                # Only sum BUY trades for spend — sell proceeds are not an expense.
                 row = conn.execute(
                     """SELECT COUNT(*) as cnt, COALESCE(SUM(usd_amount), 0) as spend
                        FROM trades WHERE ts >= ?""",
                     (today_start,),
                 ).fetchone()
+                spend_row = conn.execute(
+                    """SELECT COALESCE(SUM(usd_amount), 0) as spend
+                       FROM trades WHERE ts >= ? AND action = 'buy'""",
+                    (today_start,),
+                ).fetchone()
                 if row:
                     self._daily_trade_count = int(row[0])
-                    self._daily_spend = float(row[1])
+                if spend_row:
+                    self._daily_spend = float(spend_row[0])
 
                 loss_row = conn.execute(
                     """SELECT COALESCE(SUM(ABS(pnl)), 0) as loss
@@ -202,8 +209,8 @@ class AbsoluteRules:
                 "Reduce position size",
             ))
 
-        # --- Rule: Max daily spend ---
-        if self._daily_spend + usd_value > self.max_daily_spend_usd:
+        # --- Rule: Max daily spend (BUY only — sells are returns, not expenses) ---
+        if action == TradeAction.BUY and self._daily_spend + usd_value > self.max_daily_spend_usd:
             violations.append(RuleViolation(
                 "max_daily_spend",
                 f"Daily spend would be ${self._daily_spend + usd_value:,.2f}, max is ${self.max_daily_spend_usd:,.0f}",
@@ -236,8 +243,8 @@ class AbsoluteRules:
                     "Wait before trading again",
                 ))
 
-        # --- Rule: Max cash per trade ---
-        if cash_balance > 0:
+        # --- Rule: Max cash per trade (BUY only — not meaningful when selling an asset) ---
+        if action == TradeAction.BUY and cash_balance > 0:
             cash_pct = usd_value / cash_balance
             if cash_pct > self.max_cash_per_trade_pct:
                 violations.append(RuleViolation(
@@ -287,11 +294,16 @@ class AbsoluteRules:
         is_allowed = len(violations) == 0
         return is_allowed, violations, needs_approval
 
-    def record_trade(self, usd_value: float) -> None:
-        """Record a trade for daily tracking."""
+    def record_trade(self, usd_value: float, action: str = "buy") -> None:
+        """Record a trade for daily tracking.
+
+        Only BUY trades count against ``_daily_spend``; SELL trades still
+        increment the trade-count (rate-limiting) but do not consume spend budget.
+        """
         with self._lock:
             self._reset_daily_if_needed()
-            self._daily_spend += usd_value
+            if action == "buy":
+                self._daily_spend += usd_value
             self._daily_trade_count += 1
             self._last_trade_time = datetime.now(timezone.utc)
 
