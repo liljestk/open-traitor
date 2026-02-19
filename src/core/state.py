@@ -234,7 +234,7 @@ class TradingState:
     def recent_signals(self) -> list[Signal]:
         """Get the 10 most recent signals."""
         with self._lock:
-            return list(self.signals[-10:])
+            return list(self.signals)[-10:]
 
     @property
     def recent_trades(self) -> list[Trade]:
@@ -287,7 +287,7 @@ class TradingState:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "summary": self.to_summary(),
                 "trades": [t.model_dump(mode="json") for t in self.trades[-100:]],
-                "signals": [s.model_dump(mode="json") for s in self.signals[-50:]],
+                "signals": [s.model_dump(mode="json") for s in list(self.signals)[-50:]],
             }
 
         # Write to temp file then rename for atomicity
