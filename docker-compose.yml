@@ -204,23 +204,47 @@ services:
       retries: 5
       start_period: 60s
 
+  # =========================================================================
+  # Temporal DB — PostgreSQL backend for Temporal workflow engine
+  # =========================================================================
+  temporal-db:
+    image: postgres:16-alpine
+    container_name: auto-traitor-temporal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U temporal" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   temporal:
     image: temporalio/auto-setup:latest
     container_name: auto-traitor-temporal
     restart: unless-stopped
+    depends_on:
+      temporal-db:
+        condition: service_healthy
     ports:
       - "127.0.0.1:7233:7233"  # gRPC endpoint — local only
       - "127.0.0.1:8233:8233"  # Web UI — local only
     environment:
-      - DB=sqlite
-    volumes:
-      - temporal_data:/etc/temporal
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-db
     healthcheck:
       test: [ "CMD", "temporal", "workflow", "list", "--namespace", "default" ]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 60s
 
   # =========================================================================
   # Planning Worker - Temporal workflow worker for multi-horizon planning
@@ -264,5 +288,5 @@ services:
 volumes:
   ollama_data:
   redis_data:
-  temporal_data:
+  temporal_db_data:
   langfuse_db_data:
