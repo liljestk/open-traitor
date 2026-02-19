@@ -14,6 +14,20 @@ from src.utils.logger import get_logger
 
 logger = get_logger("core.coinbase")
 
+# Currencies that are pegged ~1:1 to USD and should be counted at face value
+_USD_EQUIVALENTS = {"USD", "USDC", "USDT", "FDUSD", "PYUSD", "DAI", "EURC", "USDS"}
+
+# Approximate fiat-to-USD fallback rates (used only when Coinbase can't price the pair)
+# Updated periodically — acceptable for small balance rounding, not for large trades
+_FIAT_FALLBACK_USD = {
+    "EUR": 1.05,
+    "GBP": 1.27,
+    "CHF": 1.12,
+    "CAD": 0.74,
+    "AUD": 0.63,
+    "SGD": 0.75,
+}
+
 
 class CoinbaseClient:
     """Wrapper around the Coinbase Advanced Trade API with paper trading support."""
@@ -201,17 +215,40 @@ class CoinbaseClient:
 
         return []
 
+    def _currency_to_usd(self, currency: str, amount: float) -> float:
+        """
+        Convert a currency amount to its approximate USD value.
+        Order of preference:
+          1. USD / known stablecoins → 1:1
+          2. Cached price for {currency}-USD
+          3. Live fetch of {currency}-USD from Coinbase
+          4. Known fiat fallback rate (EUR, GBP, etc.)
+          5. Log a warning and return 0
+        """
+        if amount <= 0:
+            return 0.0
+        if currency in _USD_EQUIVALENTS:
+            return amount
+        pair = f"{currency}-USD"
+        price = self._last_prices.get(pair, 0)
+        if price == 0:
+            price = self.get_current_price(pair)
+        if price > 0:
+            return amount * price
+        # Fiat fallback (avoids a zero for EUR cash balances when pair not tradeable)
+        fallback = _FIAT_FALLBACK_USD.get(currency, 0)
+        if fallback > 0:
+            logger.debug(f"Using approximate rate for {currency}: {fallback:.4f} USD")
+            return amount * fallback
+        logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
+        return 0.0
+
     def get_portfolio_value(self) -> float:
         """Get total portfolio value in USD."""
         if self.paper_mode:
-            total = self._paper_balance.get("USD", 0)
+            total = 0.0
             for currency, amount in self._paper_balance.items():
-                if currency != "USD" and amount > 0:
-                    pair = f"{currency}-USD"
-                    price = self._last_prices.get(pair, 0)
-                    if price == 0:
-                        price = self.get_current_price(pair)
-                    total += amount * price
+                total += self._currency_to_usd(currency, amount)
             return total
 
         accounts = self.get_accounts()
@@ -220,20 +257,9 @@ class CoinbaseClient:
             balance = account.get("available_balance", {})
             value = float(balance.get("value", 0))
             currency = balance.get("currency", "")
-            if value == 0:
+            if not currency or value == 0:
                 continue
-            if currency == "USD":
-                total += value
-            else:
-                pair = f"{currency}-USD"
-                price = self._last_prices.get(pair, 0)
-                if price == 0:
-                    # Price not cached yet (e.g. called at startup) — fetch live
-                    price = self.get_current_price(pair)
-                if price > 0:
-                    total += value * price
-                else:
-                    logger.warning(f"⚠️ No price available for {pair} — excluding {value} {currency} from portfolio value")
+            total += self._currency_to_usd(currency, value)
         return total
 
     # =========================================================================

@@ -5,6 +5,7 @@
 trading:
   mode: paper
   pairs:
+    - ATOM-USD
     - BTC-USD
     - ETH-USD
   # Main analysis/trade loop interval in seconds
@@ -47,7 +48,7 @@ absolute_rules:
   # Never use more than this % of available cash in a single trade
   max_cash_per_trade_pct: 0.00  # SETUP MODE: locked
   # Emergency stop: if portfolio drops below this USD value, stop everything
-  emergency_stop_portfolio_usd: 5000
+  emergency_stop_portfolio_usd: 20  # Set to ~half your minimum acceptable balance
   # Always use stop-loss (true = never open a position without stop-loss)
   always_use_stop_loss: true
   # Maximum stop-loss distance percentage
