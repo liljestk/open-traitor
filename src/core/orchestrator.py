@@ -107,7 +107,14 @@ class Orchestrator:
         self.rate_limiter = get_rate_limiter()
 
         # Trading state
-        initial_balance = coinbase.get_portfolio_value() if not coinbase.paper_mode else 10000.0
+        if coinbase.paper_mode:
+            initial_balance = 10000.0
+        else:
+            try:
+                initial_balance = coinbase.get_portfolio_value()
+            except Exception as _e:
+                logger.warning(f"⚠️ Could not fetch live portfolio value on startup: {_e} — defaulting to $0")
+                initial_balance = 0.0
         self.state = TradingState(initial_balance=initial_balance)
         self.state.is_running = True
 
@@ -153,6 +160,7 @@ class Orchestrator:
         # Tasks
         self.active_tasks: list[Task] = []
         self._pending_approvals: dict[str, dict] = {}
+        self._pending_approvals_lock = threading.Lock()
         self._load_pending_approvals()
 
         # ─── Stats Database (persistent analytics) ───
@@ -221,6 +229,8 @@ class Orchestrator:
             )
 
         cycle_count = 0
+        consecutive_errors = 0
+        _MAX_CONSECUTIVE_ERRORS = 3
 
         while self.state.is_running:
             if self.state.is_paused:
@@ -317,7 +327,21 @@ class Orchestrator:
                 )
 
             except Exception as e:
+                consecutive_errors += 1
                 logger.error(f"Pipeline error: {e}", exc_info=True)
+                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    alert_msg = (
+                        f"🚨 *Auto-Traitor alert*: {consecutive_errors} consecutive pipeline "
+                        f"errors — last: `{type(e).__name__}: {str(e)[:120]}`"
+                    )
+                    logger.error(alert_msg)
+                    if self.telegram:
+                        try:
+                            self.telegram.send_alert(alert_msg)
+                        except Exception:
+                            pass
+            else:
+                consecutive_errors = 0
 
             logger.info(
                 f"💼 Portfolio: {format_currency(self.state.portfolio_value)} | "
@@ -512,7 +536,8 @@ class Orchestrator:
                 f"Confidence: {format_percentage(risk_result.get('confidence', 0))}"
             )
             trade_id = f"pending_{uuid.uuid4().hex[:8]}"
-            self._pending_approvals[trade_id] = risk_result
+            with self._pending_approvals_lock:
+                self._pending_approvals[trade_id] = risk_result
 
             if self.telegram:
                 self.telegram.request_approval(trade_desc, trade_id)
@@ -671,10 +696,12 @@ class Orchestrator:
                 ex=300,
             )
             # Persist pending approvals so they survive restarts
-            if self._pending_approvals:
+            with self._pending_approvals_lock:
+                pending_snapshot = dict(self._pending_approvals) if self._pending_approvals else None
+            if pending_snapshot:
                 self.redis.set(
                     "agent:pending_approvals",
-                    json.dumps(self._pending_approvals, default=str),
+                    json.dumps(pending_snapshot, default=str),
                     ex=86400,  # 24h TTL
                 )
         except Exception as e:
@@ -1050,8 +1077,9 @@ class Orchestrator:
 
     def _cmd_approve_trade(self, data: dict) -> str:
         trade_id = data.get("trade_id", "")
-        if trade_id in self._pending_approvals:
-            approved = self._pending_approvals.pop(trade_id)
+        with self._pending_approvals_lock:
+            approved = self._pending_approvals.pop(trade_id, None)
+        if approved is not None:
             result = self.executor.execute({"approved_trade": approved})
             if result.get("executed"):
                 return f"✅ Trade executed successfully!"
@@ -1060,8 +1088,9 @@ class Orchestrator:
 
     def _cmd_reject_trade(self, data: dict) -> str:
         trade_id = data.get("trade_id", "")
-        if trade_id in self._pending_approvals:
-            self._pending_approvals.pop(trade_id)
+        with self._pending_approvals_lock:
+            removed = self._pending_approvals.pop(trade_id, None)
+        if removed is not None:
             return "Trade rejected."
         return "Trade not found or already processed."
 
@@ -1118,10 +1147,11 @@ class Orchestrator:
                     # Escalate to owner via Telegram
                     swap_id = f"swap_{uuid.uuid4().hex[:8]}_{proposal.buy_pair}"
                     self.rotator.pending_swaps[swap_id] = proposal
-                    self._pending_approvals[swap_id] = {
-                        "_is_swap": True,
-                        "_swap_proposal": proposal,
-                    }
+                    with self._pending_approvals_lock:
+                        self._pending_approvals[swap_id] = {
+                            "_is_swap": True,
+                            "_swap_proposal": proposal,
+                        }
 
                     if self.telegram:
                         msg = self.rotator.format_swap_approval_request(proposal)

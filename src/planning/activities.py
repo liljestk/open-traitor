@@ -34,8 +34,8 @@ _DB_PATH = os.path.join("data", "stats.db")
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("LLM_MODEL", "llama3.2"))
 _LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
-_LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "at-public-key")
-_LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "at-secret-key")
+_LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+_LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
 
 # Module-level singletons -- created once per Temporal worker process
 _llm_client: LLMClient | None = None
@@ -63,6 +63,8 @@ def _get_planning_tracer():
     try:
         from src.utils.tracer import LLMTracer
         if LLMTracer._instance is None:
+            if not _LANGFUSE_PUBLIC_KEY or not _LANGFUSE_SECRET_KEY:
+                return None
             LLMTracer.init(
                 public_key=_LANGFUSE_PUBLIC_KEY,
                 secret_key=_LANGFUSE_SECRET_KEY,

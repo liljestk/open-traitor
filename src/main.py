@@ -134,19 +134,24 @@ def main():
     # LLM Tracer (Langfuse)
     dash_config = config.get("dashboard", {})
     if dash_config.get("langfuse_enabled", True):
-        try:
-            LLMTracer.init(
-                public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", "at-public-key"),
-                secret_key=os.environ.get("LANGFUSE_SECRET_KEY", "at-secret-key"),
-                host=os.environ.get(
-                    "LANGFUSE_HOST",
-                    dash_config.get("langfuse_host", "http://localhost:3000"),
-                ),
-                redis_client=redis_client,
-            )
-            logger.info("✅ LLM Tracer (Langfuse) initialised")
-        except Exception as e:
-            logger.warning(f"⚠️ LLM Tracer init failed: {e} — tracing disabled")
+        _langfuse_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+        _langfuse_sk = os.environ.get("LANGFUSE_SECRET_KEY", "")
+        if not _langfuse_pk or not _langfuse_sk:
+            logger.info("ℹ️ Langfuse keys not set — LLM tracing disabled")
+        else:
+            try:
+                LLMTracer.init(
+                    public_key=_langfuse_pk,
+                    secret_key=_langfuse_sk,
+                    host=os.environ.get(
+                        "LANGFUSE_HOST",
+                        dash_config.get("langfuse_host", "http://localhost:3000"),
+                    ),
+                    redis_client=redis_client,
+                )
+                logger.info("✅ LLM Tracer (Langfuse) initialised")
+            except Exception as e:
+                logger.warning(f"⚠️ LLM Tracer init failed: {e} — tracing disabled")
 
     # Ollama LLM
     llm_config = config.get("llm", {})

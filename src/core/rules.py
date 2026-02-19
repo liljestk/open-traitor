@@ -9,6 +9,7 @@ The only way to change them is by editing the config file and restarting.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -52,6 +53,9 @@ class AbsoluteRules:
         self.always_use_stop_loss = config.get("always_use_stop_loss", True)
         self.max_stop_loss_pct = config.get("max_stop_loss_pct", 0.05)
 
+        # Thread safety — protects all daily counter reads/writes
+        self._lock = threading.RLock()
+
         # Track daily stats
         self._daily_spend = 0.0
         self._daily_loss = 0.0
@@ -75,7 +79,7 @@ class AbsoluteRules:
                 .replace(hour=0, minute=0, second=0, microsecond=0)
                 .isoformat()
             )
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=5)
             try:
                 row = conn.execute(
                     """SELECT COUNT(*) as cnt, COALESCE(SUM(usd_amount), 0) as spend
@@ -148,7 +152,26 @@ class AbsoluteRules:
 
         Returns:
             (is_allowed, violations, needs_approval)
+
+        Acquires self._lock for the entire evaluation so two concurrent callers
+        (main loop + Telegram-approved trade) cannot both pass the same daily
+        spend / trade-count limits simultaneously.
         """
+        with self._lock:
+            return self._check_trade_impl(
+                pair, action, usd_value, portfolio_value, cash_balance, has_stop_loss
+            )
+
+    def _check_trade_impl(
+        self,
+        pair: str,
+        action: TradeAction,
+        usd_value: float,
+        portfolio_value: float,
+        cash_balance: float,
+        has_stop_loss: bool = False,
+    ) -> tuple[bool, list[RuleViolation], bool]:
+        """Inner implementation — caller must hold self._lock."""
         self._reset_daily_if_needed()
 
         violations: list[RuleViolation] = []
@@ -266,29 +289,32 @@ class AbsoluteRules:
 
     def record_trade(self, usd_value: float) -> None:
         """Record a trade for daily tracking."""
-        self._reset_daily_if_needed()
-        self._daily_spend += usd_value
-        self._daily_trade_count += 1
-        self._last_trade_time = datetime.now(timezone.utc)
+        with self._lock:
+            self._reset_daily_if_needed()
+            self._daily_spend += usd_value
+            self._daily_trade_count += 1
+            self._last_trade_time = datetime.now(timezone.utc)
 
     def record_loss(self, loss_usd: float) -> None:
         """Record a loss for daily tracking."""
-        self._reset_daily_if_needed()
-        self._daily_loss += abs(loss_usd)
+        with self._lock:
+            self._reset_daily_if_needed()
+            self._daily_loss += abs(loss_usd)
 
     def get_status(self) -> dict:
         """Get current rules status."""
-        self._reset_daily_if_needed()
-        return {
-            "daily_spend": self._daily_spend,
-            "daily_spend_remaining": max(0, self.max_daily_spend_usd - self._daily_spend),
-            "daily_loss": self._daily_loss,
-            "daily_loss_remaining": max(0, self.max_daily_loss_usd - self._daily_loss),
-            "trades_today": self._daily_trade_count,
-            "trades_remaining": max(0, self.max_trades_per_day - self._daily_trade_count),
-            "max_single_trade": self.max_single_trade_usd,
-            "approval_threshold": self.require_approval_above_usd,
-        }
+        with self._lock:
+            self._reset_daily_if_needed()
+            return {
+                "daily_spend": self._daily_spend,
+                "daily_spend_remaining": max(0, self.max_daily_spend_usd - self._daily_spend),
+                "daily_loss": self._daily_loss,
+                "daily_loss_remaining": max(0, self.max_daily_loss_usd - self._daily_loss),
+                "trades_today": self._daily_trade_count,
+                "trades_remaining": max(0, self.max_trades_per_day - self._daily_trade_count),
+                "max_single_trade": self.max_single_trade_usd,
+                "approval_threshold": self.require_approval_above_usd,
+            }
 
     def get_rules_text(self) -> str:
         """Get a human-readable summary of all rules."""

@@ -37,7 +37,7 @@ from typing import Any, AsyncGenerator, Optional
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -108,13 +108,40 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # tightened in production via config
-    allow_credentials=False,       # must be False when allow_origins is "*"
+    allow_origins=_cors_origins,
+    allow_credentials=False,       # must be False when allow_origins contains "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# API Key Authentication (active only when DASHBOARD_API_KEY env var is set)
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+if not _DASHBOARD_API_KEY:
+    logger.warning(
+        "⚠️  DASHBOARD_API_KEY not set — the dashboard API is open to all network "
+        "clients. Set this env var to require X-API-Key header authentication."
+    )
+
+
+@app.middleware("http")
+async def _api_key_middleware(request: Request, call_next):
+    """Require X-API-Key on /api/* and /ws/* when DASHBOARD_API_KEY is configured."""
+    if _DASHBOARD_API_KEY and (
+        request.url.path.startswith("/api/")
+        or request.url.path.startswith("/ws/")
+    ):
+        api_key = request.headers.get("X-API-Key", "")
+        if api_key != _DASHBOARD_API_KEY:
+            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +267,7 @@ def get_stats_summary():
         return stats
     except Exception as exc:
         logger.exception("stats/summary error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
@@ -287,7 +314,7 @@ def get_strategic(
         return {"plans": result, "count": len(result)}
     except Exception as exc:
         logger.exception("strategic error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
@@ -305,8 +332,17 @@ async def list_temporal_runs(
     if _temporal_client is None:
         return {"runs": [], "error": "Temporal client not available"}
     try:
-        query = "WorkflowType = 'DailyPlanWorkflow' OR WorkflowType = 'WeeklyReviewWorkflow' OR WorkflowType = 'MonthlyReviewWorkflow'"
+        query = " OR ".join(
+            f"WorkflowType = '{wt}'"
+            for wt in ("DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow")
+        )
+        _ALLOWED_WORKFLOW_TYPES = {"DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow"}
         if workflow_type:
+            if workflow_type not in _ALLOWED_WORKFLOW_TYPES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid workflow_type. Allowed: {sorted(_ALLOWED_WORKFLOW_TYPES)}",
+                )
             query = f"WorkflowType = '{workflow_type}'"
 
         runs = []
@@ -324,7 +360,7 @@ async def list_temporal_runs(
         return {"runs": runs, "count": len(runs)}
     except Exception as exc:
         logger.exception("temporal/runs error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/temporal/replay/{workflow_id}/{run_id}", summary="Full Temporal workflow event history")
@@ -372,7 +408,7 @@ async def get_temporal_replay(workflow_id: str, run_id: str):
         }
     except Exception as exc:
         logger.exception("temporal/replay error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/temporal/rerun/{workflow_id}/{run_id}", summary="Trigger a fresh planning workflow run")
@@ -419,7 +455,7 @@ async def rerun_temporal_workflow(workflow_id: str, run_id: str):
         }
     except Exception as exc:
         logger.exception("temporal/rerun error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ---------------------------------------------------------------------------
