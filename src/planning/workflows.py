@@ -206,4 +206,5 @@ class MonthlyReviewWorkflow:
             retry_policy=_RETRY,
         )
 
-        workflow.logger.info(f"MonthlyReviewWorkflow: complete --- {summary[:100]}")        return plan
+        workflow.logger.info(f"MonthlyReviewWorkflow: complete --- {summary[:100]}")
+        return plan
