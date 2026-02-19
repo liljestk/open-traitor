@@ -634,10 +634,12 @@ class Orchestrator:
         Runs every reconcile_every_cycles cycles (~20 min at default 120s interval).
         """
         try:
+            # Only reconcile USD-quoted pairs; cross pairs (e.g. ETH-BTC) would
+            # produce an incorrect derived pair ("ETH-USD") and corrupt state.
             expected = {
                 pair.split("-")[0]: qty
                 for pair, qty in self.state.open_positions.items()
-                if qty > 0
+                if qty > 0 and pair.endswith("-USD")
             }
             result = self.coinbase.reconcile_positions(expected)
 
@@ -708,14 +710,51 @@ class Orchestrator:
             logger.debug(f"Redis sync failed: {e}")
 
     def _load_pending_approvals(self) -> None:
-        """Load pending approvals from Redis on startup."""
+        """Load pending approvals from Redis on startup.
+
+        Re-validates each entry so a poisoned/corrupted Redis key cannot inject
+        arbitrary trade payloads that bypass AbsoluteRules on the next /approve.
+        """
         if not self.redis:
             return
         try:
             data = self.redis.get("agent:pending_approvals")
-            if data:
-                self._pending_approvals = json.loads(data)
-                logger.info(f"Loaded {len(self._pending_approvals)} pending approvals from Redis")
+            if not data:
+                return
+            loaded: dict = json.loads(data)
+            validated: dict = {}
+            for trade_id, approval in loaded.items():
+                is_swap = approval.get("_is_swap", False)
+                if is_swap:
+                    # Swap proposals are structurally different — keep but log
+                    validated[trade_id] = approval
+                    continue
+                pair = approval.get("pair", "")
+                action = approval.get("action", "")
+                try:
+                    usd_amount = float(approval.get("usd_amount") or 0)
+                except (TypeError, ValueError):
+                    usd_amount = 0.0
+                from src.utils.security import validate_trading_pair
+                if (
+                    not validate_trading_pair(pair)
+                    or action not in ("buy", "sell")
+                    or usd_amount <= 0
+                    or usd_amount > self.rules.max_single_trade_usd * 2
+                ):
+                    logger.warning(
+                        f"⚠️ Discarding invalid pending approval from Redis: "
+                        f"id={trade_id!r} pair={pair!r} action={action!r} "
+                        f"usd={usd_amount}"
+                    )
+                    continue
+                validated[trade_id] = approval
+            discarded = len(loaded) - len(validated)
+            self._pending_approvals = validated
+            logger.info(
+                f"Loaded {len(validated)} pending approvals from Redis"
+                + (f" ({discarded} discarded as invalid)" if discarded else "")
+            )
         except Exception as e:
             logger.debug(f"Failed to load pending approvals: {e}")
 
@@ -974,7 +1013,7 @@ class Orchestrator:
         )
 
     def _cmd_task(self, data: dict) -> str:
-        description = data.get("description", "")
+        description = sanitize_input(data.get("description", ""), max_length=300)
         if not description:
             return "Please provide a task description."
 
@@ -993,6 +1032,8 @@ class Orchestrator:
                 break
 
         task = Task(description=description, max_spend=max_spend, pair=pair)
+        # Evict completed/stale tasks; cap list at 20 to prevent unbounded growth
+        self.active_tasks = [t for t in self.active_tasks if not t.completed][-20:]
         self.active_tasks.append(task)
 
         return (
@@ -1066,8 +1107,16 @@ class Orchestrator:
         return "⏸️ Trading paused."
 
     def _cmd_resume(self, data: dict) -> str:
+        user_id = data.get("user_id", "telegram")
+        was_circuit_breaker = self.state.circuit_breaker_triggered
         self.state.is_paused = False
         self.state.circuit_breaker_triggered = False
+        self.audit.log_auth(user_id, authorized=True, command="resume_trading")
+        if was_circuit_breaker:
+            alert = f"⚠️ Circuit breaker manually reset and trading resumed by {user_id}."
+            logger.warning(alert)
+            if self.telegram:
+                self.telegram.send_alert(alert)
         return "▶️ Trading resumed."
 
     def _cmd_stop(self, data: dict) -> str:
@@ -1080,6 +1129,8 @@ class Orchestrator:
         with self._pending_approvals_lock:
             approved = self._pending_approvals.pop(trade_id, None)
         if approved is not None:
+            # Clear needs_approval so the executor does not short-circuit again
+            approved = {**approved, "needs_approval": False}
             result = self.executor.execute({"approved_trade": approved})
             if result.get("executed"):
                 return f"✅ Trade executed successfully!"

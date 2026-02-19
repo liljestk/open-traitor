@@ -246,7 +246,8 @@ class CoinbaseClient:
                     base_size=base_size,
                 )
                 result = order.to_dict() if hasattr(order, "to_dict") else dict(order)
-                logger.info(f"✅ Market BUY order placed: {product_id} | {result}")
+                logger.info(f"✅ Market BUY order placed: {product_id} | order_id={result.get('order_id', '?')}")
+                logger.debug(f"BUY order detail: {result}")
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place buy order: {e}")
@@ -273,7 +274,8 @@ class CoinbaseClient:
                     base_size=base_size,
                 )
                 result = order.to_dict() if hasattr(order, "to_dict") else dict(order)
-                logger.info(f"✅ Market SELL order placed: {product_id} | {result}")
+                logger.info(f"✅ Market SELL order placed: {product_id} | order_id={result.get('order_id', '?')}")
+                logger.debug(f"SELL order detail: {result}")
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place sell order: {e}")
@@ -356,11 +358,16 @@ class CoinbaseClient:
             quantity = float(base_size)
             usd_amount = quantity * fill_price
 
-        # Check balance
-        if self._paper_balance.get("USD", 0) < usd_amount:
+        # Check balance (include estimated fee so post-fee deduction cannot go negative)
+        fee_estimate = usd_amount * self._paper_fee_pct
+        if self._paper_balance.get("USD", 0) < usd_amount + fee_estimate:
             return {
                 "success": False,
-                "error": f"Insufficient balance. Have: ${self._paper_balance.get('USD', 0):.2f}, Need: ${usd_amount:.2f}",
+                "error": (
+                    f"Insufficient balance. "
+                    f"Have: ${self._paper_balance.get('USD', 0):.2f}, "
+                    f"Need: ${usd_amount + fee_estimate:.2f} (incl. fee)"
+                ),
             }
 
         # Execute paper trade

@@ -27,6 +27,7 @@ Or programmatically:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import sqlite3
@@ -139,7 +140,8 @@ async def _api_key_middleware(request: Request, call_next):
         or request.url.path.startswith("/ws/")
     ):
         api_key = request.headers.get("X-API-Key", "")
-        if api_key != _DASHBOARD_API_KEY:
+        # Constant-time comparison prevents timing-oracle attacks
+        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
             return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
     return await call_next(request)
 
@@ -493,7 +495,9 @@ async def ws_live(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        _ws_connections.remove(websocket)
+        # Guard: the Redis subscriber may have already removed this socket
+        if websocket in _ws_connections:
+            _ws_connections.remove(websocket)
         logger.info(f"WS client disconnected ({len(_ws_connections)} remaining)")
 
 
@@ -542,15 +546,24 @@ async def _redis_subscriber():
 # ---------------------------------------------------------------------------
 
 @app.get("/health", include_in_schema=False)
-def health():
-    return {
-        "status": "ok",
-        "ts": _utcnow(),
-        "db": _stats_db is not None,
-        "redis": _redis_client is not None,
-        "temporal": _temporal_client is not None,
-        "ws_clients": len(_ws_connections),
-    }
+def health(request: Request):
+    # Return minimal info when unauthenticated to avoid leaking service topology.
+    # When the API key is configured and presented correctly, expose full detail.
+    authenticated = (
+        not _DASHBOARD_API_KEY
+        or hmac.compare_digest(
+            request.headers.get("X-API-Key", ""), _DASHBOARD_API_KEY
+        )
+    )
+    base = {"status": "ok", "ts": _utcnow()}
+    if authenticated:
+        base.update({
+            "db": _stats_db is not None,
+            "redis": _redis_client is not None,
+            "temporal": _temporal_client is not None,
+            "ws_clients": len(_ws_connections),
+        })
+    return base
 
 
 # ---------------------------------------------------------------------------

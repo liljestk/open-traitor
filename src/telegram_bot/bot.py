@@ -74,6 +74,7 @@ class TelegramBot:
             self.authorized_users.add(uid_str)
 
         self._unauthorized_attempts: dict[str, int] = {}
+        self._unauthorized_log_times: dict[str, float] = {}  # last log timestamp per user
 
         logger.info(
             f"🔒 Telegram bot initialized | Chat: {self.chat_id} | "
@@ -162,7 +163,13 @@ class TelegramBot:
         self._unauthorized_attempts[uid_str] = self._unauthorized_attempts.get(uid_str, 0) + 1
         count = self._unauthorized_attempts[uid_str]
 
-        if count <= 5 or count % 10 == 0:
+        # Always log on first attempt; then throttle to once per 60 s per user
+        # so a sustained brute-force is never silently swallowed in the logs.
+        import time as _time
+        now_mono = _time.monotonic()
+        last_log = self._unauthorized_log_times.get(uid_str, 0.0)
+        if count == 1 or (now_mono - last_log) >= 60:
+            self._unauthorized_log_times[uid_str] = now_mono
             logger.warning(
                 f"🚫 UNAUTHORIZED #{count} | "
                 f"User: {user_id} (@{username or '?'}) | "

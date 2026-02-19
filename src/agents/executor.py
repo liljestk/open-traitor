@@ -98,7 +98,22 @@ class ExecutorAgent(BaseAgent):
                 if order_id and not self.coinbase.paper_mode:
                     order = self._verify_fill(order_id, order)
 
-                trade.status = TradeStatus.FILLED
+                fill_status = order.get("status", "FILLED")
+                if fill_status == "FILLED" or self.coinbase.paper_mode:
+                    trade.status = TradeStatus.FILLED
+                elif fill_status in ("CANCELLED", "FAILED", "EXPIRED"):
+                    trade.status = TradeStatus.FAILED
+                    self.logger.error(
+                        f"❌ Order {order_id} ended with status {fill_status!r} — not recording as filled"
+                    )
+                    return {"executed": False, "error": f"Order {fill_status}", "trade_id": trade.id}
+                else:
+                    # Status unknown or still pending after polling — record conservatively
+                    trade.status = TradeStatus.PENDING
+                    self.logger.warning(
+                        f"⚠️ Order {order_id} fill unconfirmed (status={fill_status!r}) — "
+                        "recording as PENDING; verify on next reconciliation cycle."
+                    )
                 trade.coinbase_order_id = order_id
                 trade.filled_price = float(order.get("average_filled_price", price))
                 trade.filled_quantity = float(order.get("filled_size", quantity))
@@ -144,7 +159,10 @@ class ExecutorAgent(BaseAgent):
                 self.logger.debug(f"Fill check attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
             delay = min(delay * 2, 2.0)  # Back-off up to 2 s
-        self.logger.warning(f"Order {order_id} fill not confirmed after {max_attempts} attempts")
+        self.logger.warning(
+            f"⚠️ Order {order_id} fill not confirmed after {max_attempts} attempts — "
+            "returning last-known state; position marked PENDING."
+        )
         return initial_order
 
     def check_stop_losses(self) -> list[dict]:
