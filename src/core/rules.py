@@ -8,6 +8,7 @@ The only way to change them is by editing the config file and restarting.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -60,6 +61,49 @@ class AbsoluteRules:
 
         logger.info("🔒 Absolute Rules Engine initialized")
         self._log_rules()
+
+    def seed_daily_counters(self, db_path: str = "data/stats.db") -> None:
+        """Seed daily counters from persisted trades to survive restarts.
+
+        Should be called once during startup after the DB is known to exist.
+        Safe to call even when the DB does not yet exist — logs a warning and
+        continues with zero counters in that case.
+        """
+        try:
+            today_start = (
+                datetime.now(timezone.utc)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    """SELECT COUNT(*) as cnt, COALESCE(SUM(usd_amount), 0) as spend
+                       FROM trades WHERE ts >= ?""",
+                    (today_start,),
+                ).fetchone()
+                if row:
+                    self._daily_trade_count = int(row[0])
+                    self._daily_spend = float(row[1])
+
+                loss_row = conn.execute(
+                    """SELECT COALESCE(SUM(ABS(pnl)), 0) as loss
+                       FROM trades WHERE ts >= ? AND pnl < 0""",
+                    (today_start,),
+                ).fetchone()
+                if loss_row:
+                    self._daily_loss = float(loss_row[0])
+
+                self._last_reset_date = datetime.now(timezone.utc)
+                logger.info(
+                    f"📅 Daily counters seeded from DB — "
+                    f"spend=${self._daily_spend:.2f}, loss=${self._daily_loss:.2f}, "
+                    f"trades={self._daily_trade_count}"
+                )
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ Could not seed daily counters from DB (using zeros): {e}")
 
     def _log_rules(self) -> None:
         """Log all active rules."""

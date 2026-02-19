@@ -184,6 +184,7 @@ def main():
 
     # Absolute Rules
     rules = AbsoluteRules(config.get("absolute_rules", {}))
+    rules.seed_daily_counters()  # Seed today's counters from DB (survives restarts)
 
     # News Aggregator
     news_config = config.get("news", {})

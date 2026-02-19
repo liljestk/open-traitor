@@ -126,8 +126,13 @@ class ExecutorAgent(BaseAgent):
             self.logger.error(f"❌ Execution error: {e}", exc_info=True)
             return {"executed": False, "error": str(e), "trade_id": trade.id}
 
-    def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 5) -> dict:
-        """Poll order status to verify fill (for live orders)."""
+    def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
+        """Poll order status to verify fill (for live orders).
+
+        Uses a short initial poll interval (200 ms) with exponential back-off
+        so fast fills (the common case for market orders) are confirmed quickly.
+        """
+        delay = 0.2  # Start at 200 ms
         for attempt in range(max_attempts):
             try:
                 order = self.coinbase.get_order(order_id)
@@ -137,7 +142,8 @@ class ExecutorAgent(BaseAgent):
                     return order
             except Exception as e:
                 self.logger.debug(f"Fill check attempt {attempt + 1} failed: {e}")
-            time.sleep(1)
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)  # Back-off up to 2 s
         self.logger.warning(f"Order {order_id} fill not confirmed after {max_attempts} attempts")
         return initial_order
 
@@ -174,7 +180,12 @@ class ExecutorAgent(BaseAgent):
         return closed_trades
 
     def _close_position(self, trade: Trade, price: float, reason: str) -> dict:
-        """Close a position by selling."""
+        """Close a position by selling.
+
+        IMPORTANT: state.close_trade is only called when the sell order succeeds.
+        Calling it unconditionally would corrupt the internal position/cash state
+        if the exchange rejects the order.
+        """
         qty = trade.filled_quantity or trade.quantity
 
         result = self.coinbase.market_order_sell(
@@ -182,26 +193,35 @@ class ExecutorAgent(BaseAgent):
             base_size=str(qty),
         )
 
+        success = result.get("success", True) and "error" not in result
         close_price = price
         fees = 0.0
-        if result.get("success", True):
+
+        if success:
             order = result.get("order", result)
             close_price = float(order.get("average_filled_price", price))
             fees = float(order.get("fee", 0))
 
-        self.state.close_trade(trade.id, close_price, fees)
+            self.state.close_trade(trade.id, close_price, fees)
 
-        if trade.pnl and trade.pnl < 0:
-            self.rules.record_loss(abs(trade.pnl))
+            if trade.pnl and trade.pnl < 0:
+                self.rules.record_loss(abs(trade.pnl))
 
-        self.logger.info(
-            f"Position closed ({reason}): {trade.to_summary()}"
-        )
+            self.logger.info(
+                f"Position closed ({reason}): {trade.to_summary()}"
+            )
+        else:
+            error = result.get("error", "Unknown error")
+            self.logger.error(
+                f"❌ Failed to close position for {trade.pair} ({reason}): {error} — "
+                f"position state NOT updated; will retry on next cycle."
+            )
 
         return {
             "trade_id": trade.id,
             "pair": trade.pair,
             "close_price": close_price,
-            "pnl": trade.pnl,
+            "pnl": trade.pnl if success else None,
             "reason": reason,
+            "success": success,
         }

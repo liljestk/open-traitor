@@ -7,7 +7,7 @@ services:
     container_name: auto-traitor-ollama
     restart: unless-stopped
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"   # local only — LLM has no auth
     volumes:
       - ollama_data:/root/.ollama
     environment:
@@ -159,7 +159,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
       POSTGRES_DB: langfuse
     volumes:
       - langfuse_db_data:/var/lib/postgresql/data
@@ -182,21 +182,21 @@ services:
       langfuse-db:
         condition: service_healthy
     ports:
-      - "3000:3000"  # Langfuse Web UI
+      - "127.0.0.1:3000:3000"  # Langfuse Web UI — local only
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-run-setup-ps1}
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
       NEXTAUTH_URL: http://localhost:3000
-      SALT: ${LANGFUSE_SALT:-change-me-run-setup-ps1}
+      SALT: ${LANGFUSE_SALT}
       LANGFUSE_INIT_ORG_ID: auto-traitor
       LANGFUSE_INIT_ORG_NAME: Auto-Traitor
       LANGFUSE_INIT_PROJECT_ID: trading-agent
       LANGFUSE_INIT_PROJECT_NAME: Trading Agent
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: at-public-key
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: at-secret-key
-      LANGFUSE_INIT_USER_EMAIL: admin@auto-traitor.local
-      LANGFUSE_INIT_USER_NAME: admin
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD:-changeme123}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-at-secret-key}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@auto-traitor.local}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_ADMIN_NAME:-admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD}
     healthcheck:
       test: [ "CMD", "wget", "-qO-", "http://localhost:3000/api/public/health" ]
       interval: 30s
@@ -209,8 +209,8 @@ services:
     container_name: auto-traitor-temporal
     restart: unless-stopped
     ports:
-      - "7233:7233"  # gRPC endpoint for workers
-      - "8233:8233"  # Web UI
+      - "127.0.0.1:7233:7233"  # gRPC endpoint — local only
+      - "127.0.0.1:8233:8233"  # Web UI — local only
     environment:
       - DB=sqlite
     volumes:

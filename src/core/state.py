@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -47,7 +48,7 @@ class TradingState:
         self.cash_balance: float = initial_balance
 
         # History
-        self.signals: list[Signal] = []
+        self.signals: deque = deque(maxlen=1000)
         self.trades: list[Trade] = []
         self.portfolio_history: list[PortfolioSnapshot] = []
 
@@ -115,9 +116,6 @@ class TradingState:
         """Add a new signal to history."""
         with self._lock:
             self.signals.append(signal)
-            # Keep last 1000 signals
-            if len(self.signals) > 1000:
-                self.signals = self.signals[-500:]
             self.last_analysis_time = signal.timestamp
 
     def add_trade(self, trade: Trade) -> None:

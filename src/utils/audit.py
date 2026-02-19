@@ -76,7 +76,7 @@ class AuditLog:
     def _compute_hash(self, data: str, prev_hash: str) -> str:
         """Compute the chain hash for an entry."""
         content = f"{prev_hash}|{data}"
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()  # full 64-char SHA-256
 
     def log(
         self,

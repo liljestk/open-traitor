@@ -79,6 +79,9 @@ def validate_amount(amount: float, min_val: float = 0.01, max_val: float = 10000
     return min_val <= amount <= max_val
 
 
+_ALLOWED_HMAC_ALGORITHMS = frozenset({"sha256", "sha512"})
+
+
 def verify_hmac(
     message: str,
     signature: str,
@@ -86,6 +89,11 @@ def verify_hmac(
     algorithm: str = "sha256",
 ) -> bool:
     """Verify an HMAC signature — constant-time comparison."""
+    if algorithm not in _ALLOWED_HMAC_ALGORITHMS:
+        raise ValueError(
+            f"Unsupported HMAC algorithm: {algorithm!r}. "
+            f"Allowed: {sorted(_ALLOWED_HMAC_ALGORITHMS)}"
+        )
     expected = hmac.new(
         secret.encode("utf-8"),
         message.encode("utf-8"),

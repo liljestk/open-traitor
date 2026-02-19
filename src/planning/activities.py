@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -37,18 +39,22 @@ _LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "at-secret-key")
 
 # Module-level singletons -- created once per Temporal worker process
 _llm_client: LLMClient | None = None
+_llm_client_lock = threading.Lock()
 
 
 def _get_llm_client() -> LLMClient:
-    """Lazy-initialised LLMClient for use inside activities."""
+    """Thread-safe lazy-initialised LLMClient for use inside activities."""
     global _llm_client
     if _llm_client is None:
-        _llm_client = LLMClient(
-            base_url=_OLLAMA_BASE,
-            model=_PLANNING_MODEL,
-            temperature=0.3,
-            max_tokens=2000,
-        )
+        with _llm_client_lock:
+            # Double-checked locking
+            if _llm_client is None:
+                _llm_client = LLMClient(
+                    base_url=_OLLAMA_BASE,
+                    model=_PLANNING_MODEL,
+                    temperature=0.3,
+                    max_tokens=2000,
+                )
     return _llm_client
 
 
@@ -82,81 +88,79 @@ def _get_conn() -> sqlite3.Connection:
 @activity.defn
 async def fetch_trade_history(days: int = 7, pair: str | None = None) -> list[dict]:
     """Fetch closed trade history from StatsDB for the planning LLM."""
-    conn = _get_conn()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    if pair:
-        rows = conn.execute(
-            """SELECT ts, pair, action, price, usd_amount, confidence,
-                      signal_type, pnl, fee_usd, reasoning
-               FROM trades WHERE ts >= ? AND pair = ? AND pnl IS NOT NULL
-               ORDER BY ts DESC LIMIT 500""",
-            (cutoff, pair),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT ts, pair, action, price, usd_amount, confidence,
-                      signal_type, pnl, fee_usd, reasoning
-               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
-               ORDER BY ts DESC LIMIT 500""",
-            (cutoff,),
-        ).fetchall()
-    conn.close()
+    with closing(_get_conn()) as conn:
+        if pair:
+            rows = conn.execute(
+                """SELECT ts, pair, action, price, usd_amount, confidence,
+                          signal_type, pnl, fee_usd, reasoning
+                   FROM trades WHERE ts >= ? AND pair = ? AND pnl IS NOT NULL
+                   ORDER BY ts DESC LIMIT 500""",
+                (cutoff, pair),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT ts, pair, action, price, usd_amount, confidence,
+                          signal_type, pnl, fee_usd, reasoning
+                   FROM trades WHERE ts >= ? AND pnl IS NOT NULL
+                   ORDER BY ts DESC LIMIT 500""",
+                (cutoff,),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
 @activity.defn
 async def fetch_portfolio_history(days: int = 7) -> dict:
     """Fetch portfolio performance summary for the planning LLM."""
-    conn = _get_conn()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    trade_stats = conn.execute(
-        """SELECT
-            COUNT(*) as total_trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning,
-            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing,
-            COALESCE(SUM(pnl), 0) as total_pnl,
-            COALESCE(AVG(pnl), 0) as avg_pnl,
-            COALESCE(MAX(pnl), 0) as best_pnl,
-            COALESCE(MIN(pnl), 0) as worst_pnl,
-            COALESCE(AVG(confidence), 0) as avg_confidence,
-            COALESCE(SUM(usd_amount), 0) as total_volume,
-            COALESCE(SUM(fee_usd), 0) as total_fees
-           FROM trades WHERE ts >= ? AND pnl IS NOT NULL""",
-        (cutoff,),
-    ).fetchone()
+    with closing(_get_conn()) as conn:
+        trade_stats = conn.execute(
+            """SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning,
+                SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing,
+                COALESCE(SUM(pnl), 0) as total_pnl,
+                COALESCE(AVG(pnl), 0) as avg_pnl,
+                COALESCE(MAX(pnl), 0) as best_pnl,
+                COALESCE(MIN(pnl), 0) as worst_pnl,
+                COALESCE(AVG(confidence), 0) as avg_confidence,
+                COALESCE(SUM(usd_amount), 0) as total_volume,
+                COALESCE(SUM(fee_usd), 0) as total_fees
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL""",
+            (cutoff,),
+        ).fetchone()
 
-    pair_breakdown = conn.execute(
-        """SELECT pair,
-            COUNT(*) as trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-            COALESCE(SUM(pnl), 0) as pnl,
-            COALESCE(AVG(confidence), 0) as avg_confidence
-           FROM trades WHERE ts >= ? AND pnl IS NOT NULL
-           GROUP BY pair ORDER BY pnl DESC""",
-        (cutoff,),
-    ).fetchall()
+        pair_breakdown = conn.execute(
+            """SELECT pair,
+                COUNT(*) as trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl), 0) as pnl,
+                COALESCE(AVG(confidence), 0) as avg_confidence
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
+               GROUP BY pair ORDER BY pnl DESC""",
+            (cutoff,),
+        ).fetchall()
 
-    portfolio_range = conn.execute(
-        """SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
-                  AVG(portfolio_value) as avg
-           FROM portfolio_snapshots WHERE ts >= ?""",
-        (cutoff,),
-    ).fetchone()
+        portfolio_range = conn.execute(
+            """SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
+                      AVG(portfolio_value) as avg
+               FROM portfolio_snapshots WHERE ts >= ?""",
+            (cutoff,),
+        ).fetchone()
 
-    # Fetch reasoning traces to understand what drove losses
-    reasoning_sample = conn.execute(
-        """SELECT ar.ts, ar.pair, ar.signal_type, ar.confidence,
-                  ar.reasoning_json, t.action, t.pnl
-           FROM agent_reasoning ar
-           LEFT JOIN trades t ON t.id = ar.trade_id
-           WHERE ar.ts >= ? AND ar.agent_name = 'market_analyst'
-             AND t.pnl IS NOT NULL
-           ORDER BY t.pnl ASC LIMIT 20""",
-        (cutoff,),
-    ).fetchall()
+        # Fetch reasoning traces to understand what drove losses
+        reasoning_sample = conn.execute(
+            """SELECT ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                      ar.reasoning_json, t.action, t.pnl
+               FROM agent_reasoning ar
+               LEFT JOIN trades t ON t.id = ar.trade_id
+               WHERE ar.ts >= ? AND ar.agent_name = 'market_analyst'
+                 AND t.pnl IS NOT NULL
+               ORDER BY t.pnl ASC LIMIT 20""",
+            (cutoff,),
+        ).fetchall()
 
-    conn.close()
     return {
         "trade_stats": dict(trade_stats) if trade_stats else {},
         "pair_breakdown": [dict(r) for r in pair_breakdown],

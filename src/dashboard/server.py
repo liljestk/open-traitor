@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -110,7 +111,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # tightened in production via config
-    allow_credentials=True,
+    allow_credentials=False,       # must be False when allow_origins is "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -124,6 +125,19 @@ def _require_db():
     if _stats_db is None:
         raise HTTPException(status_code=503, detail="Stats DB not initialised")
     return _stats_db
+
+
+def _fresh_conn() -> sqlite3.Connection:
+    """Open a fresh SQLite connection for this request.
+
+    Avoids relying on the thread-local connection inside StatsDB, which is
+    not safe to share across FastAPI's async threadpool workers.
+    """
+    _require_db()
+    conn = sqlite3.connect(_stats_db._db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -166,10 +180,9 @@ def get_cycle(cycle_id: str):
 @app.get("/api/stats/summary", summary="Portfolio and trade stats overview")
 def get_stats_summary():
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
-    db = _require_db()
+    _require_db()
+    conn = _fresh_conn()
     try:
-        conn = db._get_conn()
-
         # Overall trade stats
         trade_row = conn.execute(
             """SELECT
@@ -228,6 +241,8 @@ def get_stats_summary():
     except Exception as exc:
         logger.exception("stats/summary error")
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +255,9 @@ def get_strategic(
     limit: int = Query(20, ge=1, le=100),
 ):
     """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    db = _require_db()
+    _require_db()
+    conn = _fresh_conn()
     try:
-        conn = db._get_conn()
         if horizon:
             rows = conn.execute(
                 """SELECT id, horizon, plan_json, summary_text, ts,
@@ -273,6 +288,8 @@ def get_strategic(
     except Exception as exc:
         logger.exception("strategic error")
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -332,15 +349,18 @@ async def get_temporal_replay(workflow_id: str, run_id: str):
         # Cross-link with Langfuse trace ID from StatsDB
         langfuse_trace_id = None
         if _stats_db:
-            conn = _stats_db._get_conn()
-            row = conn.execute(
-                """SELECT langfuse_trace_id FROM strategic_context
-                   WHERE temporal_workflow_id = ? AND temporal_run_id = ?
-                   LIMIT 1""",
-                (workflow_id, run_id),
-            ).fetchone()
-            if row:
-                langfuse_trace_id = row[0]
+            conn = _fresh_conn()
+            try:
+                row = conn.execute(
+                    """SELECT langfuse_trace_id FROM strategic_context
+                       WHERE temporal_workflow_id = ? AND temporal_run_id = ?
+                       LIMIT 1""",
+                    (workflow_id, run_id),
+                ).fetchone()
+                if row:
+                    langfuse_trace_id = row[0]
+            finally:
+                conn.close()
 
         return {
             "workflow_id": workflow_id,
