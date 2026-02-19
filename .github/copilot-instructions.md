@@ -1,47 +1,41 @@
 # Copilot Instructions for auto-traitor
 
 ## Big picture architecture
-- This is a Python-first autonomous trading daemon with a separate React dashboard.
-- Core runtime starts in `src/main.py`, builds shared services, then runs `Orchestrator.run_forever()` in `src/core/orchestrator.py`.
-- Main decision flow per cycle is: market analysis → strategy → risk validation → execution, then rotation, trailing stops, reconciliation, snapshot/audit sync.
-- Treat `src/core/rules.py` (absolute rules) as hard safety boundaries; strategy output is never allowed to bypass them.
-- Temporal planning is a parallel subsystem (`src/planning/workflows.py`, `src/planning/activities.py`, `src/planning/worker.py`) that writes soft strategic context consumed by orchestrator/agents.
+- Python trading daemon + React dashboard.
+- Entry point: `src/main.py` initializes services, then runs `Orchestrator.run_forever()` in `src/core/orchestrator.py`.
+- Core cycle: market analysis → strategy → risk validation → execution → rotation/trailing stops/reconciliation → snapshot/audit sync.
+- `src/core/rules.py` (`AbsoluteRules`) is a hard boundary; no strategy/planning output may bypass it.
+- Temporal planning (`src/planning/workflows.py`, `activities.py`, `worker.py`) writes soft context, not hard trade overrides.
 
 ## Service boundaries and data flow
-- Persistent analytics/state are SQLite-backed via `StatsDB` (`src/utils/stats.py`, DB at `data/stats.db`, WAL mode).
-- LLM observability flows through `LLMTracer` (`src/utils/tracer.py`) into Langfuse + Redis pub/sub (`llm:events`) and is surfaced on dashboard WebSocket `/ws/live`.
-- Dashboard API (`src/dashboard/server.py`) reads `StatsDB` and exposes REST endpoints consumed by frontend `dashboard/frontend/src/api.ts`.
-- Frontend API calls are relative (`/api`, `/ws`) and rely on Vite proxy in `dashboard/frontend/vite.config.ts` during local dev.
+- Persistent state/analytics live in SQLite via `StatsDB` (`src/utils/stats.py`, `data/stats.db`, WAL).
+- LLM tracing path: agent span → `LLMTracer` (`src/utils/tracer.py`) → Langfuse + Redis `llm:events` → dashboard `/ws/live`.
+- Dashboard backend (`src/dashboard/server.py`) reads from `StatsDB`; frontend consumes via `dashboard/frontend/src/api.ts`.
+- Frontend uses relative `/api` + `/ws` and local Vite proxy (`dashboard/frontend/vite.config.ts`).
 
 ## Critical workflows and commands
-- First-time setup: run `./setup.ps1` (creates `config/.env` interactively, including security-critical Telegram settings).
-- Full stack runtime is Docker Compose (`docker-compose.yml`) with services: `agent`, `news-worker`, `planning-worker`, `ollama`, `redis`, `langfuse`, `temporal`.
-- Typical local run commands:
-  - `python -m src.main --mode paper`
-  - `python -m src.main --mode live`
-  - `python -m src.news.worker`
-  - `python -m src.planning.worker`
-- Frontend commands (`dashboard/frontend`): `npm run dev`, `npm run build`, `npm run lint`.
+- First-time setup: `./setup.ps1` (interactive `.env` generation, including Telegram auth).
+- Main runtime is Docker Compose (`docker-compose.yml`) with `agent`, `news-worker`, `planning-worker`, `ollama`, `redis`, `langfuse`, `temporal`.
+- Local commands: `python -m src.main --mode paper|live`, `python -m src.news.worker`, `python -m src.planning.worker`.
+- Frontend (`dashboard/frontend`): `npm run dev`, `npm run build`, `npm run lint`.
 
 ## Project-specific coding patterns
-- Agents inherit `BaseAgent` (`src/agents/base_agent.py`) and expose `run(context)`; orchestration should call `.execute()` for state/error tracking.
-- When adding/modifying LLM calls, pass tracing spans (`trace_ctx.start_span(...)`) and persist reasoning to `StatsDB.save_reasoning(...)` as done in `src/agents/market_analyst.py`.
-- Keep strategic context usage as calibration only (see market analyst prompt): it should influence confidence, not override technical/risk evidence.
-- Preserve graceful degradation: Redis, Langfuse, and WebSocket features are optional; core trading loop should continue if they are unavailable.
+- Agents inherit `BaseAgent` (`src/agents/base_agent.py`) and implement `run(context)`; call `.execute()` for tracking/error handling.
+- For LLM paths, create spans (`trace_ctx.start_span(...)`) and persist reasoning via `StatsDB.save_reasoning(...)` (see `src/agents/market_analyst.py`).
+- Strategic context should calibrate confidence only; do not override technical/risk evidence.
+- Keep graceful degradation: Redis/Langfuse/WebSocket/Temporal outages must not stop core trading.
 
 ## Security and safety constraints
-- `TELEGRAM_AUTHORIZED_USERS` is required; do not add fallback logic that allows unauthenticated Telegram control (`src/main.py`).
-- Respect container hardening decisions in `docker-compose.yml` (`read_only`, `no-new-privileges`, non-root runtime).
-- Keep paper/live mode behavior explicit and conservative; never remove live-mode confirmation prompts or circuit-breaker protections.
+- `TELEGRAM_AUTHORIZED_USERS` is mandatory (`src/main.py`); never add fallback auth paths.
+- Preserve deployment hardening from `docker-compose.yml` (`read_only`, `no-new-privileges`, non-root).
+- Keep paper/live safeguards explicit (live-mode confirmation, circuit breakers, conservative defaults).
 
 ## Engineering principles for this project
-- Follow least privilege by default: keep permissions, credentials, and runtime capabilities as narrow as possible.
-- Prefer modular design: add focused components in the existing boundaries (`src/agents`, `src/core`, `src/planning`, `src/utils`) instead of creating tightly coupled cross-cutting logic.
-- Keep interfaces explicit and stable across boundaries (agent outputs, dashboard API payloads, planning activity/workflow contracts).
-- Design for graceful degradation: optional dependencies (Redis, Langfuse, WebSocket, Temporal availability) must not break the core trading loop.
-- Favor small, testable changes: avoid broad refactors unless required by the task; preserve existing behavior and safety invariants.
-- Prioritize observability: when adding behavior, include structured logs and, for LLM paths, keep tracing + reasoning persistence patterns consistent.
-- Maintain secure-by-default behavior: never weaken auth, approval gates, or safety checks for convenience.
+- Apply least privilege by default for permissions, credentials, and runtime capabilities.
+- Prefer modular changes within existing boundaries (`src/agents`, `src/core`, `src/planning`, `src/utils`).
+- Keep contracts explicit/stable (agent outputs, dashboard payloads, planning activity/workflow schemas).
+- Favor small, testable, behavior-preserving changes; avoid broad refactors unless necessary.
+- Prioritize observability (structured logs + consistent tracing/reasoning persistence).
 
 ## Anti-patterns to avoid
 - Do not bypass `AbsoluteRules` through strategy, executor, Telegram commands, or planning outputs.
