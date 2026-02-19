@@ -6,6 +6,7 @@ Dramatically reduces false signals by requiring confluence.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from src.analysis.technical import TechnicalAnalyzer
@@ -44,6 +45,51 @@ class MultiTimeframeAnalyzer:
         self.technical = TechnicalAnalyzer(config.get("analysis", {}).get("technical", {}))
         self.rate_limiter = get_rate_limiter()
         self._candle_cache: dict[str, tuple[float, list[dict]]] = {}  # key -> (timestamp, candles)
+        self._cache_lock = __import__('threading').Lock()  # guard concurrent cache writes
+
+    def _fetch_timeframe(
+        self, pair: str, tf: dict
+    ) -> tuple[str, dict, float]:
+        """Fetch and analyse a single timeframe.
+
+        Returns (tf_name, result_dict, weighted_score_contribution).
+        Thread-safe: rate-limiter and cache access are both protected internally.
+        """
+        self.rate_limiter.wait("coinbase_rest")
+        cache_key = f"{pair}:{tf['granularity']}"
+        ttl = self._CACHE_TTL.get(tf["granularity"], 300)
+        now = time.time()
+
+        with self._cache_lock:
+            cached = self._candle_cache.get(cache_key)
+
+        if cached and (now - cached[0]) < ttl:
+            candles = cached[1]
+        else:
+            candles = self.coinbase.get_candles(
+                product_id=pair,
+                granularity=tf["granularity"],
+                limit=tf["candles"],
+            )
+            with self._cache_lock:
+                self._candle_cache[cache_key] = (now, candles)
+
+        analysis = self.technical.analyze(candles)
+
+        if "error" in analysis:
+            return tf["name"], {"error": analysis["error"]}, 0.0
+
+        tf_score = self._score_timeframe(analysis)
+        result = {
+            "score": tf_score,
+            "signal": self._score_to_signal(tf_score),
+            "rsi": analysis["indicators"].get("rsi"),
+            "macd_signal": analysis["indicators"].get("macd_signal"),
+            "ema_signal": analysis["indicators"].get("ema_signal"),
+            "bb_signal": analysis["indicators"].get("bb_signal"),
+            "price": analysis["current_price"],
+        }
+        return tf["name"], result, tf_score * tf["weight"]
 
     def analyze(self, pair: str) -> dict:
         """
@@ -68,50 +114,21 @@ class MultiTimeframeAnalyzer:
         tf_results = {}
         weighted_score = 0.0
 
-        for tf in TIMEFRAMES:
-            # Rate-limit Coinbase calls
-            self.rate_limiter.wait("coinbase_rest")
-
-            try:
-                cache_key = f"{pair}:{tf['granularity']}"
-                ttl = self._CACHE_TTL.get(tf["granularity"], 300)
-                cached = self._candle_cache.get(cache_key)
-                now = time.time()
-
-                if cached and (now - cached[0]) < ttl:
-                    candles = cached[1]
-                else:
-                    candles = self.coinbase.get_candles(
-                        product_id=pair,
-                        granularity=tf["granularity"],
-                        limit=tf["candles"],
-                    )
-                    self._candle_cache[cache_key] = (now, candles)
-
-                analysis = self.technical.analyze(candles)
-
-                if "error" in analysis:
-                    tf_results[tf["name"]] = {"error": analysis["error"]}
-                    continue
-
-                # Score this timeframe (-1 to 1)
-                tf_score = self._score_timeframe(analysis)
-
-                tf_results[tf["name"]] = {
-                    "score": tf_score,
-                    "signal": self._score_to_signal(tf_score),
-                    "rsi": analysis["indicators"].get("rsi"),
-                    "macd_signal": analysis["indicators"].get("macd_signal"),
-                    "ema_signal": analysis["indicators"].get("ema_signal"),
-                    "bb_signal": analysis["indicators"].get("bb_signal"),
-                    "price": analysis["current_price"],
-                }
-
-                weighted_score += tf_score * tf["weight"]
-
-            except Exception as e:
-                logger.warning(f"Multi-TF analysis failed for {tf['name']}: {e}")
-                tf_results[tf["name"]] = {"error": str(e)}
+        # Fetch and analyse all timeframes concurrently.
+        # Each worker rate-limits itself so Coinbase quotas are respected,
+        # but the *wait* times overlap instead of stacking sequentially.
+        with ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf") as pool:
+            futures = {pool.submit(self._fetch_timeframe, pair, tf): tf for tf in TIMEFRAMES}
+            for future in as_completed(futures):
+                tf_def = futures[future]
+                try:
+                    name, result, score_contrib = future.result()
+                    tf_results[name] = result
+                    weighted_score += score_contrib
+                except Exception as e:
+                    name = tf_def["name"]
+                    logger.warning(f"Multi-TF analysis failed for {name}: {e}")
+                    tf_results[name] = {"error": str(e)}
 
         # Determine confluence
         valid_scores = [

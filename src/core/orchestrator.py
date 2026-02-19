@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -176,6 +177,16 @@ class Orchestrator:
         self._reconcile_every: int = config.get("trading", {}).get("reconcile_every_cycles", 10)
         self._reconcile_counter: int = 0
 
+        # ─── Event-driven early pipeline triggers ────────────────────────────
+        # WS price-move trigger: if a tracked pair's price moves >= _ws_trigger_pct
+        # since the last pipeline run, we fire an early pipeline mid-interval.
+        self._ws_trigger_lock = threading.Lock()
+        self._ws_trigger_pairs: set[str] = set()    # pairs needing an early run
+        self._news_trigger_pairs: set[str] = set()  # pairs flagged by breaking news
+        self._ws_last_prices: dict[str, float] = {} # prices at last pipeline start
+        self._ws_trigger_pct: float = config.get("trading", {}).get("ws_trigger_pct", 0.005)
+        self._last_pipeline_ts: dict[str, float] = {}  # pair → epoch of last run
+
         # ─── LLM Chat Handler (conversational Telegram interface) ───
         self.chat_handler = TelegramChatHandler(
             llm_client=llm,
@@ -195,6 +206,13 @@ class Orchestrator:
 
         # Start health server
         start_health_server(port=config.get("health", {}).get("port", 8080))
+
+        # Register WS price-move detector (runs in WS thread, very lightweight)
+        if self.ws_feed:
+            self.ws_feed.add_ticker_callback(self._on_ws_ticker)
+
+        # Subscribe to Redis news:updates channel so fresh news triggers early pipelines
+        self._start_news_subscriber()
 
         logger.info("═══════════════════════════════════════════")
         logger.info("  🤖 Orchestrator initialized")
@@ -247,9 +265,32 @@ class Orchestrator:
             logger.info(f"━━━ Cycle #{cycle_count} ━━━━━━━━━━━━━━━━━━━━━━━━")
 
             try:
-                # Run the full pipeline for each pair
-                for pair in self.pairs:
-                    self._run_pipeline(pair)
+                # Run pipelines — parallelised across pairs so the IO-bound
+                # data-fetch portions (candles, prices, MTF) overlap.
+                # LLM calls serialise at Ollama internally; parallel dispatch
+                # still wins for the fetch overhead.
+                max_workers = min(
+                    len(self.pairs),
+                    self.config.get("trading", {}).get("pipeline_workers", 4),
+                )
+                if max_workers <= 1 or len(self.pairs) == 1:
+                    for pair in self.pairs:
+                        self._run_pipeline(pair)
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=max_workers,
+                        thread_name_prefix="pipeline",
+                    ) as pool:
+                        pair_futures = [
+                            pool.submit(self._run_pipeline, p) for p in self.pairs
+                        ]
+                        for fut in pair_futures:
+                            try:
+                                fut.result()
+                            except Exception as _pe:
+                                logger.error(
+                                    f"Pipeline worker error: {_pe}", exc_info=True
+                                )
 
                 # ─── Portfolio Rotation (autonomous swaps) ───
                 self._run_rotation()
@@ -387,10 +428,111 @@ class Orchestrator:
             # ─── Proactive Updates (LLM-generated) ───
             self._send_proactive_update()
 
-            # Wait for next cycle
-            time.sleep(self.interval)
+            # ─── Wait for next cycle, waking every 10 s to check early triggers ──
+            # WS price-move or news pub/sub events can fire a pipeline mid-interval
+            # so the agent reacts within seconds rather than waiting up to 120 s.
+            elapsed = 0.0
+            while (
+                elapsed < self.interval
+                and self.state.is_running
+                and not self.state.is_paused
+                and not self.state.circuit_breaker_triggered
+            ):
+                time.sleep(min(10.0, self.interval - elapsed))
+                elapsed += 10.0
+
+                with self._ws_trigger_lock:
+                    early_pairs = (
+                        self._ws_trigger_pairs | self._news_trigger_pairs
+                    ).intersection(set(self.pairs))
+                    self._ws_trigger_pairs.clear()
+                    self._news_trigger_pairs.clear()
+
+                if not early_pairs:
+                    continue
+
+                logger.info(
+                    f"⚡ Early-trigger pipeline for {sorted(early_pairs)} "
+                    f"({elapsed:.0f}s / {self.interval}s into cycle)"
+                )
+                for ep in early_pairs:
+                    try:
+                        self._run_pipeline(ep)
+                    except Exception as _ep_err:
+                        logger.error(
+                            f"Early-trigger pipeline error ({ep}): {_ep_err}",
+                            exc_info=True,
+                        )
+                # Reset WS baselines so these pairs don’t immediately re-trigger
+                if self.ws_feed:
+                    with self._ws_trigger_lock:
+                        for ep in early_pairs:
+                            p_now = self.ws_feed.get_price(ep)
+                            if p_now > 0:
+                                self._ws_last_prices[ep] = p_now
+                break  # restart the full interval after an early trigger
 
         logger.info("Orchestrator stopped.")
+
+    # =========================================================================
+    # Event-Driven Helpers — WS Trigger + News Pub/Sub
+    # =========================================================================
+
+    def _on_ws_ticker(self, data: dict) -> None:
+        """Called by the WS feed on every ticker tick (runs in WS thread).
+
+        Compares the new price against the snapshot recorded at the last pipeline
+        start for this pair.  If the move exceeds *_ws_trigger_pct* the pair is
+        queued for an early pipeline run during the idle sleep period.
+        """
+        pair = data.get("product_id", "")
+        price = float(data.get("price", 0))
+        if not pair or price <= 0 or pair not in self.pairs:
+            return
+
+        with self._ws_trigger_lock:
+            last = self._ws_last_prices.get(pair, 0)
+            if last > 0:
+                change_pct = abs(price - last) / last
+                if change_pct >= self._ws_trigger_pct:
+                    self._ws_trigger_pairs.add(pair)
+                    logger.info(
+                        f"📡 WS trigger: {pair} moved {change_pct:+.2%} "
+                        f"(${last:,.2f} → ${price:,.2f}) — early pipeline queued"
+                    )
+            # Always keep the running WS price current so the next check is fresh
+            self._ws_last_prices[pair] = price
+
+    def _start_news_subscriber(self) -> None:
+        """Subscribe to Redis *news:updates* pub/sub channel in a daemon thread.
+
+        When the news worker publishes a fresh batch all active pairs are added
+        to the news-trigger set so the main loop fetches up-to-date headlines
+        during the next early-pipeline check rather than waiting a full interval.
+        No-op if Redis is not configured.
+        """
+        if not self.redis:
+            return
+
+        def _listener() -> None:
+            try:
+                pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
+                pubsub.subscribe("news:updates")
+                for message in pubsub.listen():
+                    if not self.state.is_running:
+                        break
+                    if message and message.get("type") == "message":
+                        with self._ws_trigger_lock:
+                            self._news_trigger_pairs.update(self.pairs)
+                        logger.debug(
+                            "📰 Breaking news detected via pub/sub — early pipeline queued"
+                        )
+            except Exception as e:
+                logger.debug(f"News pub/sub subscriber error: {e}")
+
+        t = threading.Thread(target=_listener, daemon=True, name="news-sub")
+        t.start()
+        logger.info("📰 News pub/sub subscriber started")
 
     def _get_strategic_context(self) -> str:
         """Return the latest strategic context string (cached 60s, reads from StatsDB)."""
@@ -409,6 +551,18 @@ class Orchestrator:
                     if text:
                         parts.append(f"[{horizon} PLAN] {text}")
                 self._strategic_context_str = "\n".join(parts)
+                # Warn when the newest plan is older than 48 h (planning worker down?)
+                try:
+                    latest_ts_str = max(row["ts"] for row in rows)
+                    latest_ts = datetime.fromisoformat(latest_ts_str.replace("Z", "+00:00"))
+                    age_h = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 3600
+                    if age_h > 48:
+                        logger.warning(
+                            f"⚠️ Strategic context is {age_h:.0f}h old — "
+                            "planning worker may not be running; using stale plan."
+                        )
+                except Exception:
+                    pass
             self._strategic_context_ts = now
         except Exception as e:
             logger.debug(f"Failed to load strategic context: {e}")
@@ -417,6 +571,14 @@ class Orchestrator:
     def _run_pipeline(self, pair: str) -> None:
         """Run the full analysis → strategy → risk → execute pipeline for a pair."""
         logger.info(f"🔍 Analyzing {pair}...")
+
+        # Snapshot the current WS price as the baseline for the next WS trigger check.
+        # This means the trigger fires only if price moves *after* this pipeline starts.
+        if self.ws_feed:
+            with self._ws_trigger_lock:
+                ws_now = self.ws_feed.get_price(pair)
+                if ws_now > 0:
+                    self._ws_last_prices[pair] = ws_now
 
         # Cycle identifier — links all reasoning traces for this run together
         cycle_id = str(uuid.uuid4())
@@ -602,7 +764,11 @@ class Orchestrator:
                     pair=risk_result.get('pair', pair),
                     action=risk_result.get('action', 'unknown'),
                     price=risk_result.get('price', price),
-                    quantity=exec_result.get('quantity', 0),
+                    quantity=(
+                        exec_result.get('trade', {}).get('filled_quantity')
+                        or exec_result.get('trade', {}).get('quantity')
+                        or 0
+                    ),
                     usd_amount=risk_result.get('usd_amount', 0),
                     confidence=risk_result.get('confidence', 0),
                     signal_type=signal.get('signal_type', ''),
@@ -619,7 +785,11 @@ class Orchestrator:
             self.journal.log_trade(
                 pair=risk_result.get('pair', pair),
                 action=risk_result.get('action', 'unknown'),
-                quantity=exec_result.get('quantity', 0),
+                quantity=(
+                    exec_result.get('trade', {}).get('filled_quantity')
+                    or exec_result.get('trade', {}).get('quantity')
+                    or 0
+                ),
                 price=risk_result.get('price', price),
                 usd_amount=risk_result.get('usd_amount', 0),
                 confidence=risk_result.get('confidence', 0),

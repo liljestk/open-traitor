@@ -56,6 +56,9 @@ class CoinbaseWebSocketFeed:
         self._max_reconnect_delay = 60.0
         self._rate_limiter = get_rate_limiter()
 
+        # Additional ticker callbacks (registered post-construction)
+        self._extra_ticker_callbacks: list[Callable[[dict], None]] = []
+
         # Latest prices (updated in real-time)
         self.prices: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -151,6 +154,15 @@ class CoinbaseWebSocketFeed:
                             "best_ask": float(ticker.get("best_ask", 0)),
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         })
+                    for cb in self._extra_ticker_callbacks:
+                        try:
+                            cb({
+                                "product_id": product_id,
+                                "price": price,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except Exception as _cb_err:
+                            logger.debug(f"Extra ticker callback error: {_cb_err}")
 
     def _handle_trade(self, data: dict) -> None:
         """Handle market trade events."""
@@ -255,6 +267,15 @@ class CoinbaseWebSocketFeed:
         """Get the latest real-time price for a product."""
         with self._lock:
             return self.prices.get(product_id, 0.0)
+
+    def add_ticker_callback(self, fn: Callable[[dict], None]) -> None:
+        """Register an additional ticker callback.
+
+        Unlike *on_ticker* (set at construction), multiple callbacks may be
+        added here and all will be called on every tick.  Safe to call after
+        the feed has already started.
+        """
+        self._extra_ticker_callbacks.append(fn)
 
     def get_all_prices(self) -> dict[str, float]:
         """Get all latest prices."""

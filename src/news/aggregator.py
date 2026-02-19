@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -182,7 +183,6 @@ class NewsAggregator:
 
                     summary = entry.get("summary", "")
                     # Strip HTML tags from summary
-                    import re
                     summary = re.sub(r"<[^>]+>", "", summary)[:500]
 
                     article = NewsArticle(
@@ -248,13 +248,19 @@ class NewsAggregator:
             self.total_fetched += len(unique_articles)
             self.last_fetch_time = datetime.now(timezone.utc)
 
-        # Store in Redis if available
+        # Store in Redis if available; publish update signal for subscribers
         if self.redis:
             try:
                 self.redis.set(
                     "news:latest",
                     json.dumps([asdict(a) for a in self.articles[-20:]], default=str),
                     ex=600,  # 10 min TTL
+                )
+                # Notify any subscribers (e.g. orchestrator) that fresh news is available.
+                # Non-blocking: if the channel has no subscribers the message is silently dropped.
+                self.redis.publish(
+                    "news:updates",
+                    json.dumps({"count": len(unique_articles)}, default=str),
                 )
             except Exception as e:
                 logger.warning(f"Redis store failed: {e}")

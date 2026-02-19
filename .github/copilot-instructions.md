@@ -1,4 +1,5 @@
 # Copilot Instructions for auto-traitor
+We are not live yet, refactoring is okay if needed.
 
 ## Big picture architecture
 - Python trading daemon + React dashboard.
