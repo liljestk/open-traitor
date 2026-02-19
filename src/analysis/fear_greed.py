@@ -34,7 +34,7 @@ class FearGreedIndex:
         76-100 = Extreme Greed (potential sell signal)
     """
 
-    API_URL = "https://api.alternative.me/fcp/v1/fear-and-greed/?limit=7"
+    API_URL = "https://api.alternative.me/fng/?limit=7"
 
     def __init__(self):
         self.rate_limiter = get_rate_limiter()

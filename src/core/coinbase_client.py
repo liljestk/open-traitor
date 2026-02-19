@@ -190,9 +190,14 @@ class CoinbaseClient:
             try:
                 accounts = self._rest_client.get_accounts()
                 result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-                return result.get("accounts", [])
+                account_list = result.get("accounts", [])
+                if not account_list:
+                    logger.warning("⚠️ get_accounts: Coinbase returned empty account list (check API key permissions)")
+                return account_list
             except Exception as e:
                 logger.error(f"Error fetching accounts: {e}")
+        else:
+            logger.warning("⚠️ get_accounts: No Coinbase REST client available")
 
         return []
 
@@ -204,6 +209,8 @@ class CoinbaseClient:
                 if currency != "USD" and amount > 0:
                     pair = f"{currency}-USD"
                     price = self._last_prices.get(pair, 0)
+                    if price == 0:
+                        price = self.get_current_price(pair)
                     total += amount * price
             return total
 
@@ -213,12 +220,20 @@ class CoinbaseClient:
             balance = account.get("available_balance", {})
             value = float(balance.get("value", 0))
             currency = balance.get("currency", "")
+            if value == 0:
+                continue
             if currency == "USD":
                 total += value
             else:
                 pair = f"{currency}-USD"
                 price = self._last_prices.get(pair, 0)
-                total += value * price
+                if price == 0:
+                    # Price not cached yet (e.g. called at startup) — fetch live
+                    price = self.get_current_price(pair)
+                if price > 0:
+                    total += value * price
+                else:
+                    logger.warning(f"⚠️ No price available for {pair} — excluding {value} {currency} from portfolio value")
         return total
 
     # =========================================================================
