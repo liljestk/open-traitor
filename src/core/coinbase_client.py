@@ -145,6 +145,10 @@ class CoinbaseClient:
                 return result
             except Exception as e:
                 logger.error(f"Error fetching product {product_id}: {e}")
+                # Return empty dict — do NOT fall through to mock data
+                # when we have a real API client. Mock is only for paper mode
+                # without API access.
+                return {"product_id": product_id, "price": "0"}
 
         # Mock data for paper trading without API
         return self._mock_product(product_id)
@@ -153,7 +157,8 @@ class CoinbaseClient:
         """Get the current price for a trading pair."""
         product = self.get_product(pair)
         price = float(product.get("price", 0))
-        self._last_prices[pair] = price
+        if price > 0:
+            self._last_prices[pair] = price
         return price
 
     def get_candles(
@@ -397,27 +402,84 @@ class CoinbaseClient:
         Convert a currency amount to its approximate USD value.
         Order of preference:
           1. USD / known stablecoins → 1:1
-          2. Cached price for {currency}-USD (Coinbase crypto price)
-          3. Live fetch of {currency}-USD from Coinbase
-          4. Live fiat exchange rate from Frankfurter (ECB), cached 6 h
-          5. Log a warning and return 0
+          2. Cached price for {currency}-USD or {currency}-EUR→USD
+          3. Live fetch from Coinbase (try -USD then -EUR→USD)
+          4. Live fiat exchange rate from Frankfurter (ECB)
+          5. Return 0
         """
         if amount <= 0:
             return 0.0
         if currency in _USD_EQUIVALENTS:
             return amount
-        pair = f"{currency}-USD"
+
+        # Try {currency}-USD directly
+        pair_usd = f"{currency}-USD"
+        price = self._last_prices.get(pair_usd, 0)
+        if price == 0:
+            price = self.get_current_price(pair_usd)
+        if price > 0:
+            return amount * price
+
+        # Try {currency}-EUR → convert EUR value to USD
+        pair_eur = f"{currency}-EUR"
+        price_eur = self._last_prices.get(pair_eur, 0)
+        if price_eur == 0:
+            price_eur = self.get_current_price(pair_eur)
+        if price_eur > 0:
+            eur_to_usd = _get_fiat_rate_usd("EUR")  # USD per EUR
+            if eur_to_usd > 0:
+                return amount * price_eur * eur_to_usd
+            # If we can't get the EUR→USD rate, just use EUR price as rough estimate
+            return amount * price_eur
+
+        # Fiat fallback — live ECB rate via Frankfurter (EUR, GBP, CHF, etc.)
+        if currency in _KNOWN_FIAT:
+            fiat_rate = _get_fiat_rate_usd(currency)
+            if fiat_rate > 0:
+                logger.debug(f"Using live fiat rate for {currency}: {fiat_rate:.4f} USD")
+                return amount * fiat_rate
+
+        logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
+        return 0.0
+
+    def _currency_to_native(self, currency: str, amount: float, native: str) -> float:
+        """
+        Convert a currency amount to *native* account currency (e.g. EUR).
+        For display purposes — avoids the double-conversion error.
+        """
+        if amount <= 0:
+            return 0.0
+        if currency == native:
+            return amount
+        if currency in _USD_EQUIVALENTS and native == "USD":
+            return amount
+
+        # Try direct pair: {currency}-{native}  (e.g. ATOM-EUR)
+        pair = f"{currency}-{native}"
         price = self._last_prices.get(pair, 0)
         if price == 0:
             price = self.get_current_price(pair)
         if price > 0:
             return amount * price
-        # Fiat fallback — live ECB rate via Frankfurter (EUR, GBP, CHF, etc.)
-        fiat_rate = _get_fiat_rate_usd(currency)
-        if fiat_rate > 0:
-            logger.debug(f"Using live fiat rate for {currency}: {fiat_rate:.4f} USD")
-            return amount * fiat_rate
-        logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
+
+        # Fiat-to-fiat: use Frankfurter rates
+        if currency in _KNOWN_FIAT and native in _KNOWN_FIAT:
+            rate_cur = _get_fiat_rate_usd(currency)  # USD/unit of currency
+            rate_nat = _get_fiat_rate_usd(native)     # USD/unit of native
+            if rate_cur > 0 and rate_nat > 0:
+                return amount * (rate_cur / rate_nat)
+
+        # Fallback: try USD pair and convert USD→native
+        pair_usd = f"{currency}-USD"
+        price_usd = self._last_prices.get(pair_usd, 0)
+        if price_usd == 0:
+            price_usd = self.get_current_price(pair_usd)
+        if price_usd > 0 and native in _KNOWN_FIAT:
+            rate_nat = _get_fiat_rate_usd(native)
+            if rate_nat > 0:
+                return amount * price_usd / rate_nat
+
+        logger.warning(f"⚠️ No {native} price for {currency} — excluding {amount:.6f}")
         return 0.0
 
     def get_portfolio_value(self) -> float:

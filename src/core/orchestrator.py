@@ -19,7 +19,7 @@ from src.agents.market_analyst import MarketAnalystAgent
 from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
-from src.core.coinbase_client import CoinbaseClient
+from src.core.coinbase_client import CoinbaseClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
@@ -707,6 +707,8 @@ class Orchestrator:
         if strategy_result.get("action") == "hold":
             logger.info(f"📊 {pair}: HOLD — {strategy_result.get('reason', strategy_result.get('reasoning', 'No action'))}")
             self.journal.log_decision("hold", pair, "hold", {"signal": signal, "reasoning": strategy_result.get('reason', '')})
+            if trace_ctx is not None:
+                trace_ctx.finish(metadata={"action": "hold", "reason": strategy_result.get("reason", "")})
             return
 
         # Add current price to strategy result for risk manager
@@ -729,6 +731,8 @@ class Orchestrator:
                 "proposal": strategy_result,
             })
             self.audit.log_rule_check("risk_validation", passed=False, details=risk_result.get('reason', 'Unknown'))
+            if trace_ctx is not None:
+                trace_ctx.finish(metadata={"action": "rejected", "reason": risk_result.get("reason", "")})
             return
 
         # Step 5: Handle approval or execute
@@ -750,6 +754,8 @@ class Orchestrator:
                 self.telegram.request_approval(trade_desc, trade_id)
             else:
                 logger.warning("Trade needs approval but Telegram not configured — skipping")
+            if trace_ctx is not None:
+                trace_ctx.finish(metadata={"action": "pending_approval", "trade_id": trade_id})
             return
 
         # Step 6: Execute Trade
@@ -1015,18 +1021,29 @@ class Orchestrator:
         Fetch actual live account data directly from the Coinbase API.
 
         Returns a structured dict with:
-          native_currency   – detected account currency (e.g. "EUR")
-          total_value_native – total portfolio value in native currency
-          fiat_cash_native  – fiat/stablecoin cash balance in native currency
-          holdings          – list of {currency, amount, native_value, native_currency,
-                               pair, price_native, price_usd}
-          prices_by_pair    – {pair: price} for all tracked + held pairs
-          fetch_ts          – UTC timestamp of this fetch
+          native_currency    – detected account currency (e.g. "EUR")
+          total_portfolio    – total portfolio value in native currency
+          fiat_cash          – fiat/cash balance in native currency
+          currency_symbol    – display symbol (e.g. "€" or "$")
+          holdings           – list of {currency, amount, native_value, is_fiat, pair, price}
+          prices_by_pair     – {pair: price} for all tracked + held pairs
+          fetch_ts           – UTC timestamp of this fetch
         """
         from datetime import timezone as _tz
         fetch_ts = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        # Detect native currency from client (already detected at startup)
+        # Detect the native (quote) currency from the trading pairs
+        # e.g. pairs=["BTC-EUR","ETH-EUR","ATOM-EUR"] → native="EUR"
+        native = "USD"
+        for pair in self.pairs:
+            if "-" in pair:
+                _, quote = pair.rsplit("-", 1)
+                if quote in _KNOWN_FIAT:
+                    native = quote
+                    break
+        currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
+        symbol = currency_symbols.get(native, native + " ")
+
         try:
             accounts = self.coinbase._rest_client.get_accounts() if self.coinbase._rest_client else None
         except Exception as e:
@@ -1035,8 +1052,8 @@ class Orchestrator:
 
         holdings = []
         prices_by_pair: dict[str, float] = {}
-        total_native = 0.0
-        fiat_cash_native = 0.0
+        total_value = 0.0
+        fiat_cash = 0.0
 
         # Build a mapping of all tracked pairs to native currency pairs
         native_tracked = {}
@@ -1060,45 +1077,61 @@ class Orchestrator:
                 if amount <= 0 or not currency:
                     continue
 
-                native_val = self.coinbase._currency_to_usd(currency, amount)
-                # For native-currency accounts, convert USD value back to native
-                # Determine if currency is fiat/stablecoin
-                from src.core.coinbase_client import _KNOWN_FIAT, _USD_EQUIVALENTS
                 is_fiat = currency in _KNOWN_FIAT or currency in _USD_EQUIVALENTS
+
+                # Convert to native account currency (e.g. EUR)
+                native_val = self.coinbase._currency_to_native(currency, amount, native)
 
                 # Determine best price pair to quote for this asset
                 tracked_pair = native_tracked.get(currency)
-                price_native = 0.0
+                price = 0.0
                 if not is_fiat:
+                    # Try native pair first (e.g. ATOM-EUR)
+                    native_pair = f"{currency}-{native}"
                     if tracked_pair:
                         try:
-                            price_native = self.coinbase.get_current_price(tracked_pair)
-                            prices_by_pair[tracked_pair] = price_native
-                            self.state.update_price(tracked_pair, price_native)
+                            price = self.coinbase.get_current_price(tracked_pair)
+                            if price > 0:
+                                prices_by_pair[tracked_pair] = price
+                                self.state.update_price(tracked_pair, price)
                         except Exception:
                             pass
-                    if price_native == 0:
-                        # Try a USD pair as fallback
+                    elif native != "USD":
+                        # Try the native pair even if not tracked
+                        try:
+                            price = self.coinbase.get_current_price(native_pair)
+                            if price > 0:
+                                prices_by_pair[native_pair] = price
+                        except Exception:
+                            pass
+                    if price == 0:
+                        # Fallback: USD pair → convert to native
                         usd_pair = f"{currency}-USD"
                         try:
-                            price_usd_raw = self.coinbase.get_current_price(usd_pair)
-                            price_native = price_usd_raw  # label as USD price
-                            prices_by_pair[usd_pair] = price_usd_raw
+                            price_usd = self.coinbase.get_current_price(usd_pair)
+                            if price_usd > 0:
+                                prices_by_pair[usd_pair] = price_usd
+                                # Convert to native display price
+                                if native != "USD":
+                                    rate_nat = _get_fiat_rate_usd(native)
+                                    price = price_usd / rate_nat if rate_nat > 0 else price_usd
+                                else:
+                                    price = price_usd
                         except Exception:
                             pass
 
                 holding = {
                     "currency": currency,
                     "amount": amount,
-                    "native_value": round(native_val, 4),  # in USD internally
+                    "native_value": round(native_val, 4),
                     "is_fiat": is_fiat,
-                    "pair": tracked_pair or (f"{currency}-USD" if not is_fiat else None),
-                    "price": price_native,
+                    "pair": tracked_pair or (f"{currency}-{native}" if not is_fiat else None),
+                    "price": price,
                 }
                 holdings.append(holding)
-                total_native += native_val
+                total_value += native_val
                 if is_fiat:
-                    fiat_cash_native += native_val
+                    fiat_cash += native_val
 
         # Also fetch prices for tracked pairs that aren't in the account
         for pair in self.pairs:
@@ -1116,8 +1149,13 @@ class Orchestrator:
 
         return {
             "fetch_ts": fetch_ts,
-            "total_portfolio_usd": round(total_native, 2),
-            "fiat_cash_usd": round(fiat_cash_native, 2),
+            "native_currency": native,
+            "currency_symbol": symbol,
+            "total_portfolio": round(total_value, 2),
+            "fiat_cash": round(fiat_cash, 2),
+            # Legacy keys for backward compat
+            "total_portfolio_usd": round(total_value, 2),
+            "fiat_cash_usd": round(fiat_cash, 2),
             "holdings": holdings,
             "prices_by_pair": prices_by_pair,
             "tracked_pairs": self.pairs,
@@ -1137,16 +1175,19 @@ class Orchestrator:
             """Combine live Coinbase snapshot with agent state."""
             snap = self._live_coinbase_snapshot()
             return {
-                # Live Coinbase numbers
-                "portfolio_value_usd": snap["total_portfolio_usd"],
-                "fiat_cash_usd": snap["fiat_cash_usd"],
+                # Currency metadata
+                "native_currency": snap["native_currency"],
+                "currency_symbol": snap["currency_symbol"],
+                # Live Coinbase numbers (in native currency)
+                "portfolio_value": snap["total_portfolio"],
+                "fiat_cash": snap["fiat_cash"],
                 "holdings": snap["holdings"],
                 "tracked_pairs": snap["tracked_pairs"],
                 "prices": snap["prices_by_pair"],
                 "data_fetched_at": snap["fetch_ts"],
                 # Agent state (bot activity)
                 "bot_trades_executed": snap["bot_trades"],
-                "bot_total_pnl": snap["bot_pnl"],
+                "bot_pnl": snap["bot_pnl"],
                 "bot_open_positions": self.state.open_positions,
                 "win_rate": self.state.win_rate,
                 "max_drawdown": self.state.max_drawdown,
@@ -1163,9 +1204,11 @@ class Orchestrator:
             crypto_holdings = [h for h in snap["holdings"] if not h["is_fiat"]]
             return {
                 "data_source": "live_coinbase_api",
+                "native_currency": snap["native_currency"],
+                "currency_symbol": snap["currency_symbol"],
                 "fetched_at": snap["fetch_ts"],
                 "coinbase_holdings": crypto_holdings,
-                "total_crypto_usd": sum(h["native_value"] for h in crypto_holdings),
+                "total_crypto_value": sum(h["native_value"] for h in crypto_holdings),
                 # Also expose what the bot itself opened (may be subset/empty)
                 "bot_tracked_positions": self.state.open_positions,
             }
@@ -1179,13 +1222,14 @@ class Orchestrator:
             crypto = [h for h in snap["holdings"] if not h["is_fiat"]]
             return {
                 "data_source": "live_coinbase_api",
+                "native_currency": snap["native_currency"],
+                "currency_symbol": snap["currency_symbol"],
                 "fetched_at": snap["fetch_ts"],
-                "total_portfolio_usd": snap["total_portfolio_usd"],
-                "fiat_cash_usd": snap["fiat_cash_usd"],
+                "total_portfolio": snap["total_portfolio"],
+                "fiat_cash": snap["fiat_cash"],
                 "fiat_accounts": [{"currency": h["currency"], "amount": h["amount"]} for h in fiat],
-                "crypto_positions_usd": sum(h["native_value"] for h in crypto),
-                "bot_pnl_usd": snap["bot_pnl"],
-                "note": "Values in USD-equivalent. Actual account may be in EUR or other native currency.",
+                "crypto_positions_value": sum(h["native_value"] for h in crypto),
+                "bot_pnl": snap["bot_pnl"],
             }
 
         ch.register_function("get_balance", _live_get_balance)
