@@ -5,7 +5,7 @@ FROM node:24-slim AS frontend-builder
 
 WORKDIR /frontend
 COPY dashboard/frontend/package.json dashboard/frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 COPY dashboard/frontend/ ./
 RUN npm run build
 

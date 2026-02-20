@@ -364,6 +364,10 @@ def main():
     def shutdown_handler(signum, frame):
         logger.info("🛑 Shutdown signal received...")
         orchestrator.state.is_running = False
+        # Flush pending Langfuse events before exit
+        _tracer = get_llm_tracer()
+        if _tracer:
+            _tracer.flush()
         if telegram_bot:
             telegram_bot.send_message("🛑 *Auto-Traitor shutting down...*")
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,16 @@ class TradingState:
         self.current_prices: dict[str, float] = {}
         self.positions: dict[str, float] = {}  # pair -> quantity
         self.cash_balance: float = initial_balance
+
+        # ── Live Holdings (from Coinbase API) ──
+        self.live_holdings: list[dict] = []           # all Coinbase account balances
+        self.live_cash_balances: dict[str, float] = {}  # {"EUR": 0.55, "USDC": 0.0, ...}
+        self.live_portfolio_value: float = 0.0         # total portfolio in native currency
+        self.native_currency: str = "USD"              # detected account currency
+        self.currency_symbol: str = "$"                # display symbol
+        self._live_snapshot_ts: float = 0.0            # epoch of last refresh
+        self._initial_balance_synced: bool = False     # whether initial_balance has been corrected
+        self.positions_meta: dict[str, dict] = {}      # {pair: {"origin": "external"|"bot", ...}}
 
         # History
         self.signals: deque = deque(maxlen=1000)
@@ -106,6 +117,142 @@ class TradingState:
             )
         except Exception as e:
             logger.warning(f"Warm-start failed (non-fatal): {e}")
+
+    # =========================================================================
+    # Live Holdings Sync (from Coinbase API)
+    # =========================================================================
+
+    def sync_live_holdings(self, snapshot: dict, dust_threshold: float = 0.01) -> None:
+        """Merge live Coinbase snapshot into shared state.
+
+        Uses additive-only merge for positions: only adds holdings that are NOT
+        already tracked, preventing races with in-flight trades.
+
+        Args:
+            snapshot: Dict from Orchestrator._live_coinbase_snapshot().
+            dust_threshold: Minimum native-currency value to include.
+        """
+        with self._lock:
+            self.live_holdings = snapshot.get("holdings", [])
+            self.live_portfolio_value = snapshot.get("total_portfolio", 0.0)
+            self.native_currency = snapshot.get("native_currency", "USD")
+            self.currency_symbol = snapshot.get("currency_symbol", "$")
+            self._live_snapshot_ts = time.time()
+
+            # Populate live_cash_balances from all fiat/stablecoin holdings
+            self.live_cash_balances = {}
+            for h in self.live_holdings:
+                if h.get("is_fiat"):
+                    self.live_cash_balances[h["currency"]] = h.get("native_value", 0.0)
+
+            # Update cash_balance to reflect real fiat totals
+            total_cash = sum(self.live_cash_balances.values())
+            if total_cash > 0 or self.live_cash_balances:
+                self.cash_balance = total_cash
+
+            # Correct initial_balance on first successful sync
+            if not self._initial_balance_synced and self.live_portfolio_value > 0:
+                self.initial_balance = self.live_portfolio_value
+                self.peak_portfolio_value = self.live_portfolio_value
+                self._initial_balance_synced = True
+                logger.info(
+                    f"📊 Initial balance corrected to live portfolio: "
+                    f"{self.currency_symbol}{self.live_portfolio_value:,.2f}"
+                )
+
+            # Additive merge: only add crypto holdings NOT already in positions
+            synced_count = 0
+            for h in self.live_holdings:
+                if h.get("is_fiat"):
+                    continue
+                pair = h.get("pair")
+                amount = h.get("amount", 0)
+                if not pair or amount <= 0:
+                    continue
+                # setdefault — does NOT overwrite existing bot-opened positions
+                if pair not in self.positions:
+                    self.positions[pair] = amount
+                    ts_now = datetime.now(timezone.utc).isoformat()
+                    self.positions_meta[pair] = {
+                        "origin": "external",
+                        "synced_at": ts_now,
+                    }
+                    synced_count += 1
+                # Ensure price is tracked even for already-known positions
+                price = h.get("price", 0)
+                if price > 0 and pair not in self.current_prices:
+                    self.current_prices[pair] = price
+
+            asset_count = len([h for h in self.live_holdings if not h.get("is_fiat")])
+            logger.info(
+                f"📡 Live holdings synced: {asset_count} assets, "
+                f"total={self.currency_symbol}{self.live_portfolio_value:,.2f}"
+                + (f" ({synced_count} new positions added)" if synced_count else "")
+            )
+
+    @property
+    def holdings_summary(self) -> str:
+        """Formatted holdings text for the LLM strategist prompt.
+
+        Groups cash and crypto separately, uses detected currency_symbol,
+        and filters out dust holdings below threshold.
+        """
+        with self._lock:
+            if not self.live_holdings:
+                return "No live holdings data available."
+
+            sym = self.currency_symbol
+            lines = []
+
+            # Cash section
+            cash_parts = []
+            for currency, val in sorted(self.live_cash_balances.items()):
+                cash_parts.append(f"{sym}{val:,.2f} {currency}")
+            if cash_parts:
+                lines.append(f"- Cash: {', '.join(cash_parts)}")
+            else:
+                lines.append(f"- Cash: {sym}0.00")
+
+            # Crypto section — sorted by value descending, dust filtered
+            crypto_holdings = [
+                h for h in self.live_holdings
+                if not h.get("is_fiat") and h.get("native_value", 0) > 0
+            ]
+            crypto_holdings.sort(key=lambda h: h.get("native_value", 0), reverse=True)
+
+            if crypto_holdings:
+                lines.append("")
+                lines.append("ACTUAL COINBASE HOLDINGS (live from Coinbase API):")
+                shown = 0
+                for h in crypto_holdings:
+                    val = h.get("native_value", 0)
+                    if val < 0.01:  # hard minimum to avoid noise
+                        continue
+                    price = h.get("price", 0)
+                    amount = h.get("amount", 0)
+                    currency = h.get("currency", "?")
+                    price_str = f" @ {sym}{price:,.4f}" if price > 0 else ""
+                    lines.append(
+                        f"- {currency}: {amount:.6f}{price_str} (value: {sym}{val:,.2f})"
+                    )
+                    shown += 1
+                    if shown >= 50:  # hard cap to avoid token budget blowout
+                        remaining = len(crypto_holdings) - shown
+                        if remaining > 0:
+                            lines.append(f"  ... and {remaining} more small holdings")
+                        break
+            else:
+                lines.append("\nNo crypto holdings.")
+
+            lines.append("")
+            lines.append(
+                "NOTE: You can propose sells of ANY holding above, not just bot-opened positions."
+            )
+            lines.append(
+                "      For sells, specify the exact quantity from this list."
+            )
+
+            return "\n".join(lines)
 
     def update_price(self, pair: str, price: float) -> None:
         """Update the current price for a pair."""

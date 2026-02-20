@@ -474,6 +474,7 @@ class ProactiveEngine:
         # State & stats references (set by orchestrator)
         self._get_context: Optional[Callable] = None
         self._stats_db = None  # StatsDB reference
+        self._currency_symbol: str = "$"  # Updated from context on each tick
 
     def set_context_provider(self, provider: Callable) -> None:
         self._get_context = provider
@@ -545,10 +546,12 @@ class ProactiveEngine:
             return
 
         if pnl > 50:
-            self._send(f"🔥 *Nice win!* +${pnl:,.2f}\n\nMomentum is on our side.")
+            sym = self._currency_symbol
+            self._send(f"🔥 *Nice win!* +{sym}{pnl:,.2f}\n\nMomentum is on our side.")
         elif pnl < -50:
+            sym = self._currency_symbol
             self._send(
-                f"📉 Took a hit: ${pnl:,.2f}\n"
+                f"📉 Took a hit: {sym}{pnl:,.2f}\n"
                 f"Part of the game. Risk management kept it contained."
             )
 
@@ -580,6 +583,7 @@ class ProactiveEngine:
         hour = now_utc.hour
 
         ctx = self._get_context()
+        self._currency_symbol = ctx.get("currency_symbol", "$")
 
         # Always check price movements (even in quiet mode for held assets)
         if self._personality.detail_level >= 1:
@@ -641,9 +645,10 @@ class ProactiveEngine:
 
                 if abs(change) >= threshold:
                     d = "📈" if change > 0 else "📉"
+                    sym = self._currency_symbol
                     self._send(
                         f"{d} *{pair}* moved *{change*100:+.1f}%*\n"
-                        f"${last:,.2f} → ${price:,.2f}"
+                        f"{sym}{last:,.2f} → {sym}{price:,.2f}"
                     )
                     self._last_prices[pair] = price  # Reset after alert
             elif price > 0:
@@ -663,9 +668,10 @@ class ProactiveEngine:
             try:
                 s = self._stats_db.get_trade_stats(hours=4)
                 if s.get("total_trades", 0) > 0:
+                    sym = self._currency_symbol
                     stats_text = (
                         f"\nRecent stats (4h): {s['total_trades']} trades, "
-                        f"PnL: ${s['total_pnl']:+,.2f}, "
+                        f"PnL: {sym}{s['total_pnl']:+,.2f}, "
                         f"Win rate: {s['winning']}/{s['total_trades']}"
                     )
             except Exception:
@@ -706,13 +712,14 @@ RULES:
                 trades = self._stats_db.get_trades(hours=12)
                 events = self._stats_db.get_events(hours=12)
                 stats = self._stats_db.get_trade_stats(hours=12)
+                sym = self._currency_symbol
                 overnight_text = (
                     f"\nOvernight activity (12h):\n"
                     f"  Trades: {stats.get('total_trades', 0)}\n"
-                    f"  PnL: ${stats.get('total_pnl', 0):+,.2f}\n"
+                    f"  PnL: {sym}{stats.get('total_pnl', 0):+,.2f}\n"
                     f"  Events: {len(events)}\n"
-                    f"  Best PnL: ${stats.get('best_pnl', 0):+,.2f}\n"
-                    f"  Worst PnL: ${stats.get('worst_pnl', 0):+,.2f}"
+                    f"  Best PnL: {sym}{stats.get('best_pnl', 0):+,.2f}\n"
+                    f"  Worst PnL: {sym}{stats.get('worst_pnl', 0):+,.2f}"
                 )
             except Exception:
                 pass
@@ -752,15 +759,16 @@ Keep it under 12 lines. Specific prices and levels."""
                 stats = self._stats_db.get_trade_stats(hours=16)
                 bw = self._stats_db.get_best_worst_trades(hours=16)
                 port_range = self._stats_db.get_portfolio_range(hours=16)
+                sym = self._currency_symbol
                 day_text = (
                     f"\nToday's numbers:\n"
                     f"  Trades: {stats.get('total_trades', 0)} "
                     f"(W:{stats.get('winning', 0)} L:{stats.get('losing', 0)})\n"
-                    f"  PnL: ${stats.get('total_pnl', 0):+,.2f}\n"
-                    f"  Volume: ${stats.get('total_volume', 0):,.2f}\n"
-                    f"  Fees: ${stats.get('total_fees', 0):,.2f}\n"
-                    f"  Portfolio range: ${port_range.get('low', 0):,.2f} - "
-                    f"${port_range.get('high', 0):,.2f}"
+                    f"  PnL: {sym}{stats.get('total_pnl', 0):+,.2f}\n"
+                    f"  Volume: {sym}{stats.get('total_volume', 0):,.2f}\n"
+                    f"  Fees: {sym}{stats.get('total_fees', 0):,.2f}\n"
+                    f"  Portfolio range: {sym}{port_range.get('low', 0):,.2f} - "
+                    f"{sym}{port_range.get('high', 0):,.2f}"
                 )
 
                 # Save daily summary

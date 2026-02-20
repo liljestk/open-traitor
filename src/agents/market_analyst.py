@@ -65,6 +65,7 @@ class MarketAnalystAgent(BaseAgent):
             - fear_greed: str (optional, fear & greed summary)
             - multi_timeframe: str (optional, multi-TF confluence summary)
             - strategic_context: str (optional, daily/weekly/monthly plan text)
+            - currency_symbol: str (optional, e.g. "€")
             - cycle_id: str (optional, used to correlate reasoning with trade outcomes)
             - stats_db: StatsDB instance (optional, for persisting reasoning)
         """
@@ -74,6 +75,7 @@ class MarketAnalystAgent(BaseAgent):
         fear_greed = context.get("fear_greed", "")
         multi_timeframe = context.get("multi_timeframe", "")
         strategic_context = context.get("strategic_context", "")
+        currency_symbol = context.get("currency_symbol", "$")
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -94,6 +96,7 @@ class MarketAnalystAgent(BaseAgent):
             fear_greed=fear_greed,
             multi_timeframe=multi_timeframe,
             strategic_context=strategic_context,
+            currency_symbol=currency_symbol,
         )
 
         # Create a tracing span for this LLM call
@@ -159,8 +162,10 @@ class MarketAnalystAgent(BaseAgent):
         fear_greed: str = "",
         multi_timeframe: str = "",
         strategic_context: str = "",
+        currency_symbol: str = "$",
     ) -> str:
         """Build the analysis prompt for the LLM."""
+        sym = currency_symbol
         fg_section = f"\nFEAR & GREED INDEX:\n{fear_greed}\n" if fear_greed else ""
         mtf_section = f"\nMULTI-TIMEFRAME CONFLUENCE:\n{multi_timeframe}\n" if multi_timeframe else ""
         strategy_section = (
@@ -168,17 +173,17 @@ class MarketAnalystAgent(BaseAgent):
             if strategic_context else ""
         )
 
-        return f"""Analyze {pair} at current price ${price:,.2f}
+        return f"""Analyze {pair} at current price {sym}{price:,.2f}
 
 TECHNICAL INDICATORS:
 - RSI: {indicators.get('rsi', 'N/A'):.1f} ({indicators.get('rsi_signal', 'unknown')})
 - MACD: {indicators.get('macd_signal', 'unknown')} (hist: {indicators.get('macd_histogram', 'N/A')})
-- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: ${indicators.get('bb_upper', 0):,.2f}, lower: ${indicators.get('bb_lower', 0):,.2f})
+- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {sym}{indicators.get('bb_upper', 0):,.2f}, lower: {sym}{indicators.get('bb_lower', 0):,.2f})
 - EMA Signal: {indicators.get('ema_signal', 'unknown')}
-- EMA 9: ${indicators.get('ema_9', 0):,.2f} | EMA 21: ${indicators.get('ema_21', 0):,.2f} | EMA 50: ${indicators.get('ema_50', 0):,.2f}
+- EMA 9: {sym}{indicators.get('ema_9', 0):,.2f} | EMA 21: {sym}{indicators.get('ema_21', 0):,.2f} | EMA 50: {sym}{indicators.get('ema_50', 0):,.2f}
 - Volume: {indicators.get('volume_signal', 'unknown')} (ratio: {indicators.get('volume_ratio', 1):.2f}x average)
-- Support: ${indicators.get('support', 0):,.2f} | Resistance: ${indicators.get('resistance', 0):,.2f}
-- ATR: ${indicators.get('atr', 0):,.2f}
+- Support: {sym}{indicators.get('support', 0):,.2f} | Resistance: {sym}{indicators.get('resistance', 0):,.2f}
+- ATR: {sym}{indicators.get('atr', 0):,.2f}
 
 PRICE CHANGES:
 - 1 hour: {price_changes.get('1h', 0):+.2%}

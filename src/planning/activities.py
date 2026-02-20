@@ -32,7 +32,7 @@ logger = get_logger("planning.activities")
 
 _DB_PATH = os.path.join("data", "stats.db")
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("LLM_MODEL", "llama3.1:8b"))
+_PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("OLLAMA_MODEL", "llama3.1:8b"))
 
 # NOTE: Langfuse credentials are intentionally NOT read at module-import time.
 # The planning worker imports this module before dotenv is loaded, so reading
@@ -181,11 +181,35 @@ async def fetch_portfolio_history(days: int = 7) -> dict:
             (cutoff,),
         ).fetchall()
 
+    # Detect native currency from settings (same logic as Orchestrator)
+    currency_symbol = "$"
+    native_currency = "USD"
+    try:
+        import yaml
+        settings_path = os.path.join(os.path.dirname(_DB_PATH), "..", "config", "settings.yaml")
+        if os.path.exists(settings_path):
+            with open(settings_path) as f:
+                _cfg = yaml.safe_load(f) or {}
+            pairs = _cfg.get("trading", {}).get("pairs", [])
+            _known_fiat = {"USD", "EUR", "GBP", "CAD", "AUD", "CHF", "JPY"}
+            _currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
+            for pair in pairs:
+                if "-" in pair:
+                    _, quote = pair.rsplit("-", 1)
+                    if quote in _known_fiat:
+                        native_currency = quote
+                        currency_symbol = _currency_symbols.get(quote, quote + " ")
+                        break
+    except Exception:
+        pass  # fallback to USD/$
+
     return {
         "trade_stats": dict(trade_stats) if trade_stats else {},
         "pair_breakdown": [dict(r) for r in pair_breakdown],
         "portfolio_range": dict(portfolio_range) if portfolio_range else {},
         "reasoning_sample": [dict(r) for r in reasoning_sample],
+        "currency_symbol": currency_symbol,
+        "native_currency": native_currency,
     }
 
 
@@ -260,8 +284,12 @@ Respond ONLY with JSON:
     wins = stats.get("winning", 0)
     win_rate = (wins / total * 100) if total > 0 else 0
 
+    # Dynamic currency symbol — passed through review_data or defaults to '$'
+    sym = review_data.get("currency_symbol", "$")
+    native = review_data.get("native_currency", "USD")
+
     pairs_text = "\n".join(
-        f"  {p['pair']}: {p['trades']} trades, {p['wins']} wins, PnL ${p['pnl']:.2f}"
+        f"  {p['pair']}: {p['trades']} trades, {p['wins']} wins, PnL {sym}{p['pnl']:.2f}"
         for p in pairs[:10]
     ) or "  No data"
 
@@ -273,7 +301,7 @@ Respond ONLY with JSON:
                 rj = json.loads(r.get("reasoning_json") or "{}")
                 factors = rj.get("key_factors", [])[:2]
                 loss_reasoning.append(
-                    f"  {r['pair']} LOSS ${r['pnl']:.2f}: sig={r['signal_type']} "
+                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r['signal_type']} "
                     f"conf={r['confidence']:.0%} factors={factors}"
                 )
             except Exception:
@@ -281,26 +309,36 @@ Respond ONLY with JSON:
 
     loss_text = "\n".join(loss_reasoning) or "  No recent losses with reasoning."
 
-    user_message = f"""PERFORMANCE REVIEW ({horizon.upper()})
+    # NOTE on portfolio corrections:
+    # If portfolio_correction_note is set, the bot's portfolio tracking was recently
+    # corrected.  Tell the LLM to weight recent data more heavily.
+    correction_note = ""
+    if review_data.get("portfolio_correction_applied"):
+        correction_note = """\n
+IMPORTANT: The bot's portfolio tracking was recently corrected to reflect
+actual live Coinbase holdings. Earlier data may reflect stale or incorrect
+portfolio assumptions. Weight recent data and current holdings more heavily.\n"""
 
+    user_message = f"""PERFORMANCE REVIEW ({horizon.upper()})
+{correction_note}
 TRADE STATISTICS:
   Total trades: {total}
   Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing', 0)} losses)
-  Total PnL: ${stats.get('total_pnl', 0):.2f}
-  Avg PnL per trade: ${stats.get('avg_pnl', 0):.2f}
-  Best trade: ${stats.get('best_pnl', 0):.2f}
-  Worst trade: ${stats.get('worst_pnl', 0):.2f}
+  Total PnL: {sym}{stats.get('total_pnl', 0):.2f}
+  Avg PnL per trade: {sym}{stats.get('avg_pnl', 0):.2f}
+  Best trade: {sym}{stats.get('best_pnl', 0):.2f}
+  Worst trade: {sym}{stats.get('worst_pnl', 0):.2f}
   Avg confidence: {stats.get('avg_confidence', 0):.0%}
-  Total volume: ${stats.get('total_volume', 0):,.2f}
-  Total fees: ${stats.get('total_fees', 0):.2f}
+  Total volume: {sym}{stats.get('total_volume', 0):,.2f}
+  Total fees: {sym}{stats.get('total_fees', 0):.2f}
 
 PAIR BREAKDOWN:
 {pairs_text}
 
-PORTFOLIO VALUE RANGE:
-  Low: ${port.get('low', 0):,.2f}
-  High: ${port.get('high', 0):,.2f}
-  Avg: ${port.get('avg', 0):,.2f}
+PORTFOLIO VALUE RANGE ({native}):
+  Low: {sym}{port.get('low', 0):,.2f}
+  High: {sym}{port.get('high', 0):,.2f}
+  Avg: {sym}{port.get('avg', 0):,.2f}
 
 RECENT LOSS ANALYSIS (signal reasoning that led to losses):
 {loss_text}

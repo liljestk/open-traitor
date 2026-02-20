@@ -25,6 +25,7 @@ Consider:
 5. Recent trade history (avoid overtrading)
 6. Recent trade outcomes for this pair — adapt if similar setups have repeatedly lost
 7. Strategic context from longer-term planning (daily/weekly/monthly) — use as regime background, not hard override
+8. Actual Coinbase holdings — you may propose selling pre-existing holdings, not just bot-opened ones
 
 Respond with JSON:
 
@@ -32,7 +33,7 @@ Respond with JSON:
     "action": "buy" | "sell" | "hold",
     "pair": "BTC-USD",
     "confidence": 0.0-1.0,
-    "usd_amount": amount_in_usd_or_null,
+    "usd_amount": amount_in_native_currency_or_null,
     "quantity": crypto_quantity_or_null,
     "stop_loss_price": price_or_null,
     "take_profit_price": price_or_null,
@@ -46,7 +47,8 @@ Rules:
 - Always set stop-loss for buy orders
 - Consider the current portfolio before adding more of the same asset
 - If the signal is neutral but there's no compelling reason to trade, hold
-- Capital preservation is always the top priority"""
+- Capital preservation is always the top priority
+- For sells of existing holdings, use the quantity shown in ACTUAL COINBASE HOLDINGS"""
 
 
 class StrategistAgent(BaseAgent):
@@ -69,6 +71,9 @@ class StrategistAgent(BaseAgent):
             - strategic_context: str (optional, from planning workflows)
             - cycle_id: str (optional, for reasoning persistence)
             - stats_db: StatsDB instance (optional)
+            - live_holdings_summary: str (optional, formatted Coinbase holdings)
+            - native_currency: str (optional, e.g. "EUR")
+            - currency_symbol: str (optional, e.g. "€")
         """
         signal = context.get("signal", {})
         active_tasks = context.get("active_tasks", [])
@@ -77,6 +82,9 @@ class StrategistAgent(BaseAgent):
         recent_trades = context.get("recent_trades", [])
         recent_outcomes = context.get("recent_outcomes", "")
         strategic_context = context.get("strategic_context", "")
+        live_holdings_summary = context.get("live_holdings_summary", "")
+        currency_symbol = context.get("currency_symbol", "$")
+        native_currency = context.get("native_currency", "USD")
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -99,6 +107,9 @@ class StrategistAgent(BaseAgent):
             signal, active_tasks, balance, positions, recent_trades,
             recent_outcomes=recent_outcomes,
             strategic_context=strategic_context,
+            live_holdings_summary=live_holdings_summary,
+            currency_symbol=currency_symbol,
+            native_currency=native_currency,
         )
 
         # Create a tracing span for this LLM call
@@ -159,10 +170,14 @@ class StrategistAgent(BaseAgent):
         recent_trades: list,
         recent_outcomes: str = "",
         strategic_context: str = "",
+        live_holdings_summary: str = "",
+        currency_symbol: str = "$",
+        native_currency: str = "USD",
     ) -> str:
         """Build the strategy generation prompt."""
         pair = signal.get("pair", "?")
         price = signal.get("current_price", 0)
+        sym = currency_symbol
 
         tasks_text = "No active tasks."
         if tasks:
@@ -191,10 +206,18 @@ class StrategistAgent(BaseAgent):
             if strategic_context else ""
         )
 
+        # Cash display: use live balances if available, fallback to legacy
+        cash_display = f"{sym}{balance.get(native_currency, balance.get('USD', 0)):,.2f} {native_currency}"
+
+        # Live holdings section
+        holdings_section = ""
+        if live_holdings_summary:
+            holdings_section = f"\n{live_holdings_summary}\n"
+
         return f"""MARKET SIGNAL for {pair}:
 - Type: {signal.get('signal_type', 'neutral')}
 - Confidence: {signal.get('confidence', 0):.0%}
-- Current Price: ${price:,.2f}
+- Current Price: {sym}{price:,.2f}
 - Market Condition: {signal.get('market_condition', 'unknown')}
 - Reasoning: {signal.get('reasoning', 'N/A')}
 - Suggested Entry: {signal.get('suggested_entry', 'N/A')}
@@ -202,10 +225,10 @@ class StrategistAgent(BaseAgent):
 - Suggested Take-Profit: {signal.get('suggested_take_profit', 'N/A')}
 
 PORTFOLIO:
-- Cash (USD): ${balance.get('USD', 0):,.2f}
-- Open Positions:
+- Cash: {cash_display}
+- Bot-Tracked Positions:
 {positions_text}
-
+{holdings_section}
 ACTIVE USER TASKS:
 {tasks_text}
 

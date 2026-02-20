@@ -25,6 +25,7 @@ class RiskManagerAgent(BaseAgent):
         super().__init__("risk_manager", llm, state, config)
         self.rules = rules
         self.risk_config = config.get("risk", {})
+        self.trading_config = config.get("trading", {})
         self.stop_loss_pct = self.risk_config.get("stop_loss_pct", 0.03)
         self.take_profit_pct = self.risk_config.get("take_profit_pct", 0.06)
 
@@ -71,6 +72,26 @@ class RiskManagerAgent(BaseAgent):
                 "reason": "No valid trade amount specified",
             }
 
+        # Enforce max_open_positions for buy orders
+        if action == "buy":
+            max_positions = self.trading_config.get("max_open_positions", 3)
+            current_positions = len(self.state.open_positions)
+            if current_positions >= max_positions:
+                self.logger.info(
+                    f"🚫 Trade rejected: {current_positions} open positions "
+                    f"(max {max_positions})"
+                )
+                return {
+                    "approved": False,
+                    "action": action,
+                    "pair": pair,
+                    "usd_amount": usd_amount,
+                    "reason": (
+                        f"Max open positions reached ({current_positions}/{max_positions}). "
+                        f"Close an existing position before opening a new one."
+                    ),
+                }
+
         # Ensure stop-loss
         has_stop_loss = stop_loss is not None
         if not has_stop_loss and action == "buy" and price > 0:
@@ -116,7 +137,12 @@ class RiskManagerAgent(BaseAgent):
             )
 
         # Calculate final quantity
-        if price > 0:
+        # For sells with a specific quantity from the strategist (e.g. pre-existing
+        # holdings), preserve the original quantity rather than recalculating.
+        if action == "sell" and quantity > 0:
+            # Strategist specified exact quantity from ACTUAL COINBASE HOLDINGS
+            pass  # keep quantity as-is
+        elif price > 0:
             quantity = usd_amount / price
 
         result = {

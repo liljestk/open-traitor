@@ -624,7 +624,9 @@ class CoinbaseClient:
         import uuid
 
         price = self.get_current_price(product_id)
-        base_currency = product_id.split("-")[0]
+        parts = product_id.split("-")
+        base_currency = parts[0]
+        quote_currency = parts[1] if len(parts) > 1 else "USD"
 
         if not quote_size and not base_size:
             return {"success": False, "error": "Must specify quote_size or base_size"}
@@ -640,22 +642,23 @@ class CoinbaseClient:
 
         # Check balance (include estimated fee so post-fee deduction cannot go negative)
         fee_estimate = usd_amount * self._paper_fee_pct
-        if self._paper_balance.get("USD", 0) < usd_amount + fee_estimate:
+        quote_bal = self._paper_balance.get(quote_currency, 0)
+        if quote_bal < usd_amount + fee_estimate:
             return {
                 "success": False,
                 "error": (
                     f"Insufficient balance. "
-                    f"Have: ${self._paper_balance.get('USD', 0):.2f}, "
-                    f"Need: ${usd_amount + fee_estimate:.2f} (incl. fee)"
+                    f"Have: {quote_bal:,.2f} {quote_currency}, "
+                    f"Need: {usd_amount + fee_estimate:,.2f} {quote_currency} (incl. fee)"
                 ),
             }
 
         # Execute paper trade
-        self._paper_balance["USD"] -= usd_amount
+        self._paper_balance[quote_currency] = quote_bal - usd_amount
         self._paper_balance[base_currency] = self._paper_balance.get(base_currency, 0) + quantity
 
         fee = usd_amount * self._paper_fee_pct
-        self._paper_balance["USD"] -= fee
+        self._paper_balance[quote_currency] -= fee
 
         order_id = str(uuid.uuid4())
         order = {
@@ -686,7 +689,9 @@ class CoinbaseClient:
         import uuid
 
         price = self.get_current_price(product_id)
-        base_currency = product_id.split("-")[0]
+        parts = product_id.split("-")
+        base_currency = parts[0]
+        quote_currency = parts[1] if len(parts) > 1 else "USD"
         quantity = float(base_size)
 
         # Check balance
@@ -702,10 +707,10 @@ class CoinbaseClient:
 
         # Execute paper trade
         self._paper_balance[base_currency] -= quantity
-        self._paper_balance["USD"] += usd_amount
+        self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + usd_amount
 
         fee = usd_amount * self._paper_fee_pct
-        self._paper_balance["USD"] -= fee
+        self._paper_balance[quote_currency] -= fee
 
         order_id = str(uuid.uuid4())
         order = {

@@ -25,6 +25,19 @@ trading:
   # Simulated slippage for paper trading fills (0.0005 = 0.05%)
   # Buys fill slightly above mid, sells slightly below mid
   paper_slippage_pct: 0.0005
+  # ── Live Holdings Sync ──
+  # Master toggle for live holdings sync (false = legacy behavior, positions start empty)
+  live_holdings_sync: true
+  # How often to refresh live Coinbase holdings (seconds).
+  # Lower = more accurate during rapid trading, higher = fewer API calls.
+  holdings_refresh_seconds: 60
+  # Minimum native-currency value to include a holding in the LLM prompt.
+  # Filters out dust to keep prompts concise and within token budgets.
+  holdings_dust_threshold: 0.01
+  # One-time flag: set to true when a major system change means old strategic
+  # plans are based on wrong assumptions and need to be superseded.
+  # Auto-resets to false after the first startup so learned context is preserved.
+  invalidate_strategic_context: true
 
 # ===========================================
 # 🔒 ABSOLUTE RULES — NEVER BROKEN
@@ -53,7 +66,7 @@ absolute_rules:
   # Never use more than this % of available cash in a single trade
   max_cash_per_trade_pct: 0.00  # SETUP MODE: locked
   # Emergency stop: if portfolio drops below this USD value, stop everything
-  emergency_stop_portfolio_usd: 20  # Set to ~half your minimum acceptable balance
+  emergency_stop_portfolio_usd: 8000  # Stop all trading if portfolio drops below this (protects ~80% of capital)
   # Always use stop-loss (true = never open a position without stop-loss)
   always_use_stop_loss: true
   # Maximum stop-loss distance percentage

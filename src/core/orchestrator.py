@@ -167,6 +167,77 @@ class Orchestrator:
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
 
+        # ─── Live Holdings Sync (Coinbase API → TradingState) ───
+        trading_cfg = config.get("trading", {})
+        self._holdings_sync_enabled: bool = trading_cfg.get("live_holdings_sync", True)
+        self._holdings_refresh_seconds: float = float(trading_cfg.get("holdings_refresh_seconds", 60))
+        self._holdings_dust_threshold: float = float(trading_cfg.get("holdings_dust_threshold", 0.01))
+
+        # Initial sync on startup (live mode only)
+        if self._holdings_sync_enabled and not coinbase.paper_mode:
+            try:
+                snapshot = self._live_coinbase_snapshot()
+                self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)
+                logger.info("📡 Initial live holdings sync complete")
+
+                # One-time strategic context invalidation.
+                # Only fires when `invalidate_strategic_context: true` is set in
+                # settings.yaml.  After firing, the flag is auto-reset to false
+                # so normal restarts preserve learned strategic plans.
+                # Set this flag manually (or via Telegram /command) when a major
+                # system change means old plans are based on wrong assumptions.
+                if trading_cfg.get("invalidate_strategic_context", False):
+                    try:
+                        sym = self.state.currency_symbol
+                        pv = self.state.live_portfolio_value
+                        n_assets = len([h for h in self.state.live_holdings if not h.get("is_fiat")])
+                        correction_summary = (
+                            f"Portfolio tracking corrected to live Coinbase data: "
+                            f"{n_assets} crypto assets, total value {sym}{pv:,.2f}. "
+                            f"Previous plans may have assumed incorrect portfolio state — "
+                            f"weight current holdings and this correction heavily."
+                        )
+                        self.stats_db.save_strategic_context(
+                            horizon="daily",
+                            plan_json={
+                                "regime": "neutral",
+                                "confidence": 0.5,
+                                "risk_posture": "conservative",
+                                "key_observations": [
+                                    "Portfolio tracking was corrected to reflect actual live Coinbase holdings",
+                                    f"Real portfolio: {n_assets} crypto holdings, {sym}{pv:,.2f} total value",
+                                    "Previous plans may contain incorrect portfolio assumptions — treat with low weight",
+                                ],
+                                "today_focus": "Re-evaluate all positions with corrected portfolio data",
+                                "summary": correction_summary,
+                                "portfolio_correction_applied": True,
+                            },
+                            summary_text=correction_summary,
+                        )
+                        logger.info("📋 Inserted portfolio correction notice into strategic context")
+
+                        # Auto-reset the flag so it doesn't fire on every restart
+                        try:
+                            import yaml
+                            settings_path = os.path.join("config", "settings.yaml")
+                            with open(settings_path, "r", encoding="utf-8") as f:
+                                raw = f.read()
+                            raw = raw.replace(
+                                "invalidate_strategic_context: true",
+                                "invalidate_strategic_context: false",
+                            )
+                            with open(settings_path, "w", encoding="utf-8") as f:
+                                f.write(raw)
+                            logger.info("🔄 Auto-reset invalidate_strategic_context → false")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not auto-reset config flag: {e}")
+
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to insert correction notice (non-fatal): {e}")
+
+            except Exception as e:
+                logger.warning(f"⚠️ Initial holdings sync failed (non-fatal): {e}")
+
         # ─── Strategic context cache (refreshed every 60s from DB) ───
         self._strategic_context_str: str = ""
         self._strategic_context_ts: float = 0.0
@@ -177,7 +248,7 @@ class Orchestrator:
         self._reconcile_every: int = config.get("trading", {}).get("reconcile_every_cycles", 10)
         self._reconcile_counter: int = 0
 
-        # ─── Event-driven early pipeline triggers ────────────────────────────
+        # ─── Event-driven early pipeline triggers ────────────────────────
         # WS price-move trigger: if a tracked pair's price moves >= _ws_trigger_pct
         # since the last pipeline run, we fire an early pipeline mid-interval.
         self._ws_trigger_lock = threading.Lock()
@@ -214,11 +285,13 @@ class Orchestrator:
         # Subscribe to Redis news:updates channel so fresh news triggers early pipelines
         self._start_news_subscriber()
 
+        _sync_status = '✅ Enabled' if (self._holdings_sync_enabled and not coinbase.paper_mode) else '❌ Disabled'
         logger.info("═══════════════════════════════════════════")
         logger.info("  🤖 Orchestrator initialized")
         logger.info(f"  Trading pairs: {self.pairs}")
         logger.info(f"  Interval: {self.interval}s")
         logger.info(f"  WebSocket: {'✅ Enabled' if ws_feed else '❌ Disabled (polling)'}")
+        logger.info(f"  Live Holdings Sync: {_sync_status}")
         logger.info(f"  LLM Chat: ✅ Conversational mode")
         logger.info(f"  Fear & Greed: ✅ Enabled")
         logger.info(f"  Multi-Timeframe: ✅ Enabled")
@@ -568,6 +641,29 @@ class Orchestrator:
             logger.debug(f"Failed to load strategic context: {e}")
         return self._strategic_context_str
 
+    def _maybe_refresh_holdings(self) -> None:
+        """Refresh live Coinbase holdings if the TTL has elapsed.
+
+        TTL-cached: only calls the API if enough time has passed since the
+        last successful sync.  Graceful degradation: on failure, keeps the
+        previous snapshot and does NOT update the timestamp, so the next
+        cycle retries immediately.
+        """
+        if not self._holdings_sync_enabled or self.coinbase.paper_mode:
+            return
+        now = time.time()
+        if now - self.state._live_snapshot_ts < self._holdings_refresh_seconds:
+            return  # still fresh
+        try:
+            snapshot = self._live_coinbase_snapshot()
+            self.state.sync_live_holdings(
+                snapshot, dust_threshold=self._holdings_dust_threshold
+            )
+        except Exception as e:
+            # Graceful degradation: keep stale data, do NOT update _live_snapshot_ts
+            # so the next pipeline cycle retries immediately.
+            logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
+
     def _run_pipeline(self, pair: str) -> None:
         """Run the full analysis → strategy → risk → execute pipeline for a pair."""
         logger.info(f"🔍 Analyzing {pair}...")
@@ -583,6 +679,9 @@ class Orchestrator:
         # Cycle identifier — links all reasoning traces for this run together
         cycle_id = str(uuid.uuid4())
         strategic_context = self._get_strategic_context()
+
+        # Refresh live holdings if stale (TTL-cached, live mode only)
+        self._maybe_refresh_holdings()
 
         # Start a Langfuse trace for this cycle (no-op if tracer not initialised)
         tracer = get_llm_tracer()
@@ -657,7 +756,9 @@ class Orchestrator:
         # Get recent trade outcomes for outcome feedback (strategist prompt)
         recent_outcomes = ""
         try:
-            recent_outcomes = self.stats_db.get_recent_outcomes(pair, n=10)
+            recent_outcomes = self.stats_db.get_recent_outcomes(
+                pair, n=10, currency_symbol=self.state.currency_symbol
+            )
         except Exception as e:
             logger.debug(f"Failed to load recent outcomes: {e}")
 
@@ -669,6 +770,7 @@ class Orchestrator:
             "fear_greed": fg_prompt,
             "multi_timeframe": mtf_prompt,
             "strategic_context": strategic_context,
+            "currency_symbol": self.state.currency_symbol,
             "cycle_id": cycle_id,
             "stats_db": self.stats_db,
             "trace_ctx": trace_ctx,
@@ -701,6 +803,9 @@ class Orchestrator:
             "recent_trades": [t.to_summary() for t in self.state.recent_trades],
             "recent_outcomes": recent_outcomes,
             "strategic_context": strategic_context,
+            "live_holdings_summary": self.state.holdings_summary,
+            "native_currency": self.state.native_currency,
+            "currency_symbol": self.state.currency_symbol,
             "cycle_id": cycle_id,
             "stats_db": self.stats_db,
             "trace_ctx": trace_ctx,
@@ -717,10 +822,21 @@ class Orchestrator:
         strategy_result["current_price"] = price
 
         # Step 4: Risk Validation
+        # Use live portfolio value/cash when available, fallback to internal state
+        risk_portfolio_value = (
+            self.state.live_portfolio_value
+            if self.state.live_portfolio_value > 0
+            else self.state.portfolio_value
+        )
+        risk_cash_balance = (
+            sum(self.state.live_cash_balances.values())
+            if self.state.live_cash_balances
+            else self.state.cash_balance
+        )
         risk_result = self.risk_manager.execute({
             "proposal": strategy_result,
-            "portfolio_value": self.state.portfolio_value,
-            "cash_balance": self.state.cash_balance,
+            "portfolio_value": risk_portfolio_value,
+            "cash_balance": risk_cash_balance,
             "cycle_id": cycle_id,
             "stats_db": self.stats_db,
             "trace_ctx": trace_ctx,
@@ -857,20 +973,27 @@ class Orchestrator:
         Runs every reconcile_every_cycles cycles (~20 min at default 120s interval).
         """
         try:
-            # Only reconcile USD-quoted pairs; cross pairs (e.g. ETH-BTC) would
-            # produce an incorrect derived pair ("ETH-USD") and corrupt state.
-            expected = {
-                pair.split("-")[0]: qty
-                for pair, qty in self.state.open_positions.items()
-                if qty > 0 and pair.endswith("-USD")
-            }
+            # Reconcile fiat-quoted pairs (USD, EUR, GBP, etc.).
+            # Skip crypto-to-crypto cross pairs (e.g. ETH-BTC) because they
+            # would produce an incorrect derived pair and corrupt state.
+            # Build a mapping of base_currency -> original_pair for reconstruction.
+            base_to_pair: dict[str, str] = {}
+            expected: dict[str, float] = {}
+            for pair, qty in self.state.open_positions.items():
+                if qty <= 0 or "-" not in pair:
+                    continue
+                base, quote = pair.split("-", 1)
+                if quote in _KNOWN_FIAT or quote in _USD_EQUIVALENTS:
+                    expected[base] = qty
+                    base_to_pair[base] = pair
             result = self.coinbase.reconcile_positions(expected)
 
             if not result["matched"]:
                 for d in result["discrepancies"]:
                     currency = d["currency"]
                     actual_qty = d["actual"]
-                    pair = f"{currency}-USD"
+                    # Reconstruct the original pair (e.g. ATOM-EUR, not ATOM-USD)
+                    pair = base_to_pair.get(currency, f"{currency}-USD")
 
                     # Correct state to match actual Coinbase balance
                     with self.state._lock:
@@ -1530,23 +1653,24 @@ class Orchestrator:
     def _get_trading_context(self) -> dict:
         """Assemble trading context for the LLM."""
         s = self.state
+        sym = s.currency_symbol
         return {
-            "portfolio_value": format_currency(s.portfolio_value),
-            "cash_balance": format_currency(s.cash_balance),
+            "portfolio_value": format_currency(s.portfolio_value, sym),
+            "cash_balance": format_currency(s.cash_balance, sym),
             "return_pct": format_percentage(s.return_pct),
             "max_drawdown": format_percentage(s.max_drawdown),
             "total_trades": s.total_trades,
             "win_rate": format_percentage(s.win_rate),
-            "total_pnl": format_currency(s.total_pnl),
+            "total_pnl": format_currency(s.total_pnl, sym),
             "open_positions": {
                 pair: {
                     "qty": qty,
-                    "price": format_currency(s.current_prices.get(pair, 0)),
+                    "price": format_currency(s.current_prices.get(pair, 0), sym),
                 }
                 for pair, qty in s.open_positions.items()
             },
             "current_prices": {
-                pair: format_currency(price)
+                pair: format_currency(price, sym)
                 for pair, price in s.current_prices.items()
             },
             "is_paused": s.is_paused,
@@ -1563,6 +1687,7 @@ class Orchestrator:
             "raw_return_pct": s.return_pct,
             "raw_total_pnl": s.total_pnl,
             "raw_max_drawdown": s.max_drawdown,
+            "currency_symbol": s.currency_symbol,
         }
 
     # =========================================================================

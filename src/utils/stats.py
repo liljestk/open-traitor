@@ -564,12 +564,13 @@ class StatsDB:
         )
         conn.commit()
 
-    def get_recent_outcomes(self, pair: str, n: int = 10) -> str:
+    def get_recent_outcomes(self, pair: str, n: int = 10, currency_symbol: str = "$") -> str:
         """
         Return a human-readable summary of the last N closed trades for a pair,
         with the reasoning that produced them. Used for outcome feedback injection
         into agent prompts.
         """
+        sym = currency_symbol
         conn = self._get_conn()
         rows = conn.execute(
             """SELECT
@@ -589,7 +590,7 @@ class StatsDB:
 
         lines = []
         for r in rows:
-            pnl_str = f"+${r['pnl']:.2f}" if r["pnl"] >= 0 else f"-${abs(r['pnl']):.2f}"
+            pnl_str = f"+{sym}{r['pnl']:.2f}" if r["pnl"] >= 0 else f"-{sym}{abs(r['pnl']):.2f}"
             outcome = "WIN" if r["pnl"] >= 0 else "LOSS"
             key_factors = "N/A"
             if r["reasoning_json"]:
@@ -602,7 +603,7 @@ class StatsDB:
                     pass
             lines.append(
                 f"[{r['ts'][:10]}] {outcome} {pnl_str} | {r['action'].upper()} "
-                f"@ ${r['price']:,.2f} | signal={r['signal_type']} "
+                f"@ {sym}{r['price']:,.2f} | signal={r['signal_type']} "
                 f"conf={r['confidence']:.0%} | factors: {key_factors}"
             )
 
