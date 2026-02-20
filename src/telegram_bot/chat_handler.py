@@ -155,8 +155,8 @@ def _build_fast_patterns():
         # Balance
         (r"^/balance$|^balance\??$|^how much (do we|have).*\??$|^portfolio\??$",
          "get_balance", None),
-        # Positions (bot-tracked open positions)
-        (r"^/positions?$|^positions?\??$|^what('re| are) (our )?(open )?positions?\??$|^open positions?\??$",
+        # Positions (bot-tracked open positions only)
+        (r"^/positions?$|^positions?\??$|^what('re| are) (our )?positions?\??$|^open positions?\??$",
          "get_positions", None),
         # Prices
         (r"^/prices?$|^prices?\??$|^current prices?\??$|^what('s| is) (the )?price",
@@ -214,13 +214,14 @@ def _build_fast_patterns():
          "get_schedules", None),
         (r"^best.?worst|^winners?.?losers?",
          "get_best_worst", None),
-        # Account holdings (live Coinbase)
-        (r"^/holdings?$"
-         r"|^(my |our )?holdings?\??$"
-         r"|^what (do I|do we|are my|are our) (own|hold|have|holdings?).*\??$"
-         r"|^what('re| are) (my|our) holdings?\??$"
+        # Account holdings (live Coinbase) — broad match for natural language
+        (r"^/holdings?$|^holdings?\??$"
+         r"|my\s+(current\s+)?(portfolio\s+|wallet\s+|crypto\s+|account\s+)?holdings?\b"
+         r"|my\s+(current\s+)?wallet\b"
+         r"|my\s+(current\s+)?portfolio\s*\?*$"
+         r"|my\s+(current\s+)?crypto\s*\?*$"
+         r"|what (do I|do we|i) (own|hold|have)\??$"
          r"|^show.*(holdings|account|portfolio)$"
-         r"|^(my |our )portfolio holdings?\??$"
          r"|^account overview",
          "get_account_holdings", None),
     ]
