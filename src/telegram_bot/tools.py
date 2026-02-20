@@ -481,6 +481,90 @@ TOOL_GET_FEE_INFO = ToolDef(
     category="status",
 )
 
+TOOL_GET_SETTINGS_TIERS = ToolDef(
+    name="get_settings_tiers",
+    description=(
+        "Show which settings sections are safe, semi-safe, or blocked for Telegram updates. "
+        "Use when the user asks 'what can I change' or 'what settings are available'."
+    ),
+    category="config",
+)
+
+# ── Enable / Disable / Presets ───────────────────────────────────────────────
+
+TOOL_ENABLE_TRADING = ToolDef(
+    name="enable_trading",
+    description=(
+        "Enable trading by applying the Moderate preset (sensible defaults). "
+        "Use when the user says 'enable trading', 'start trading', 'turn on trading'. "
+        "Changes are persisted to disk and take effect immediately."
+    ),
+    category="control",
+    params=[
+        ParamDef(
+            "preset", "string",
+            "Which preset to use. Default: moderate.",
+            default="moderate",
+            enum=["conservative", "moderate", "aggressive"],
+        ),
+    ],
+)
+
+TOOL_DISABLE_TRADING = ToolDef(
+    name="disable_trading",
+    description=(
+        "Disable all trading by setting all limits to zero. "
+        "Use when the user says 'disable trading', 'stop trading', 'turn off trading'. "
+        "Changes are persisted to disk and take effect immediately."
+    ),
+    category="control",
+)
+
+TOOL_APPLY_PRESET = ToolDef(
+    name="apply_preset",
+    description=(
+        "Apply a named trading preset that configures absolute rules and trading params. "
+        "Presets: disabled, conservative, moderate, aggressive. "
+        "Changes are persisted to settings.yaml and take effect immediately."
+    ),
+    category="config",
+    params=[
+        ParamDef(
+            "preset", "string",
+            "Preset name to apply.",
+            required=True,
+            enum=["disabled", "conservative", "moderate", "aggressive"],
+        ),
+    ],
+)
+
+TOOL_UPDATE_SETTINGS = ToolDef(
+    name="update_settings",
+    description=(
+        "Update any setting in a given section. Validates, persists to disk, and "
+        "hot-reloads at runtime. Only sections marked 'safe' or 'semi_safe' are allowed "
+        "via Telegram. Use get_settings_tiers to see what's available."
+    ),
+    category="config",
+    params=[
+        ParamDef(
+            "section", "string",
+            "Settings section to update (e.g. 'risk', 'rotation', 'fees', 'telegram').",
+            required=True,
+        ),
+        ParamDef(
+            "param", "string",
+            "The specific parameter name within the section.",
+            required=True,
+        ),
+        ParamDef(
+            "value", "string",
+            "New value for the parameter (will be cast to the correct type).",
+            required=True,
+        ),
+    ],
+)
+
 # ── Simulated Trades ────────────────────────────────────────────────────────────────────
 
 TOOL_SIMULATE_TRADE = ToolDef(
@@ -536,10 +620,12 @@ _BUILTIN_TOOLS: list[ToolDef] = [
     TOOL_GET_STATS, TOOL_GET_TRADE_HISTORY, TOOL_GET_PAIR_STATS,
     TOOL_GET_BEST_WORST, TOOL_GET_DAILY_SUMMARIES, TOOL_GET_SCHEDULES,
     TOOL_GET_TRADING_RULES, TOOL_GET_FEE_INFO,
-    TOOL_GET_CONFIG,
+    TOOL_GET_CONFIG, TOOL_GET_SETTINGS_TIERS,
     TOOL_UPDATE_RULE, TOOL_UPDATE_TRADING_PARAM, TOOL_UPDATE_RISK_PARAM,
+    TOOL_UPDATE_SETTINGS,
     TOOL_ADD_PAIR, TOOL_REMOVE_PAIR, TOOL_BLACKLIST_PAIR, TOOL_UNBLACKLIST_PAIR,
     TOOL_PAUSE_TRADING, TOOL_RESUME_TRADING, TOOL_EMERGENCY_STOP,
+    TOOL_ENABLE_TRADING, TOOL_DISABLE_TRADING, TOOL_APPLY_PRESET,
     TOOL_ENABLE_HIGHSTAKES, TOOL_DISABLE_HIGHSTAKES,
     TOOL_APPROVE_ITEM, TOOL_REJECT_ITEM, TOOL_CANCEL_SWAP, TOOL_CREATE_TASK,
     TOOL_SCHEDULE_REPORT, TOOL_DELETE_SCHEDULE,

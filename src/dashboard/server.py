@@ -64,13 +64,17 @@ _coinbase_client = None   # CoinbaseClient instance (optional, for price lookups
 _ws_connections: list[WebSocket] = []
 
 
-def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}):
+_rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
+
+
+def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None):
     """Inject shared services.  Called from main.py before uvicorn starts."""
-    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client
+    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client, _rules_instance
     _stats_db = stats_db
     _redis_client = redis_client
     _temporal_client = temporal_client
     _config = config
+    _rules_instance = rules_instance
     # Spin up a read-only Coinbase client for live price lookups (market data only)
     try:
         from src.core.coinbase_client import CoinbaseClient
@@ -92,12 +96,13 @@ def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: di
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config: dict = {}) -> FastAPI:
+def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None) -> FastAPI:
     set_globals(
         stats_db=stats_db,
         redis_client=redis_client,
         temporal_client=temporal_client,
         config=config,
+        rules_instance=rules_instance,
     )
     return app
 
@@ -948,6 +953,110 @@ def _serialize_event_attrs(event) -> dict:
         return raw
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# REST — Settings (read, update, presets)
+# ---------------------------------------------------------------------------
+
+from src.utils.settings_manager import (
+    get_full_settings as _sm_get_full,
+    get_schema_metadata as _sm_get_schema,
+    update_section as _sm_update_section,
+    apply_preset as _sm_apply_preset,
+    push_to_runtime as _sm_push_runtime,
+    push_section_to_runtime as _sm_push_section,
+    PRESETS as _SM_PRESETS,
+    get_preset_summary as _sm_preset_summary,
+    is_trading_enabled as _sm_is_trading_enabled,
+    is_telegram_allowed as _sm_tg_allowed,
+    TELEGRAM_SAFETY_TIERS as _SM_TG_TIERS,
+)
+
+
+@app.get("/api/settings", summary="Get all settings with metadata")
+def get_settings():
+    """Returns the full settings.yaml content, schema metadata, and presets info."""
+    try:
+        full = _sm_get_full()
+        full["schema"] = _sm_get_schema()
+        return full
+    except Exception as exc:
+        logger.exception("settings GET error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class _SettingsUpdateBody(_BaseModel):
+    section: Optional[str] = None
+    updates: Optional[dict] = None
+    preset: Optional[str] = None
+
+
+@app.put("/api/settings", summary="Update settings section or apply preset")
+def update_settings(body: _SettingsUpdateBody):
+    """
+    Two modes:
+      1. ``{ "preset": "moderate" }`` — apply a named preset
+      2. ``{ "section": "risk", "updates": {"stop_loss_pct": 0.05} }`` — update individual fields
+
+    Changes are validated, persisted to settings.yaml, and pushed to the
+    live runtime immediately (no restart needed).
+    """
+    try:
+        # Mode 1: Apply preset
+        if body.preset:
+            ok, err, changes = _sm_apply_preset(body.preset)
+            if not ok:
+                raise HTTPException(status_code=400, detail=err)
+            _sm_push_runtime(_rules_instance, _config, changes)
+            return {
+                "ok": True,
+                "preset": body.preset,
+                "changes": changes,
+                "trading_enabled": _sm_is_trading_enabled(),
+            }
+
+        # Mode 2: Section update
+        if not body.section or not body.updates:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either {preset} or {section, updates}",
+            )
+
+        ok, err, changes = _sm_update_section(body.section, body.updates)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+
+        _sm_push_section(body.section, changes, _rules_instance, _config)
+        return {
+            "ok": True,
+            "section": body.section,
+            "changes": changes,
+            "trading_enabled": _sm_is_trading_enabled(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("settings PUT error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/settings/presets", summary="List available presets")
+def get_presets():
+    """Returns all available presets with their values and human descriptions."""
+    result = {}
+    for name in _SM_PRESETS:
+        result[name] = {
+            "values": _SM_PRESETS[name],
+            "summary": _sm_preset_summary(name),
+        }
+    return {"presets": result, "current_enabled": _sm_is_trading_enabled()}
+
+
+@app.get("/api/settings/telegram-tiers", summary="Telegram safety tier plan")
+def get_telegram_tiers():
+    """Returns which settings sections are safe/semi-safe/blocked for Telegram."""
+    return _SM_TG_TIERS
 
 
 # ---------------------------------------------------------------------------

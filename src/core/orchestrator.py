@@ -41,6 +41,7 @@ from src.utils.journal import TradeJournal
 from src.utils.audit import AuditLog
 from src.utils.stats import StatsDB
 from src.utils.tracer import get_llm_tracer
+from src.utils import settings_manager as sm
 from src.core.managers.pipeline_manager import PipelineManager
 from src.core.managers.state_manager import StateManager
 from src.core.health import check_component_health, update_health
@@ -1054,6 +1055,59 @@ class Orchestrator:
         ch.register_function("resume_trading", lambda p: self._cmd_resume({}))
         ch.register_function("emergency_stop", lambda p: self._cmd_stop({}))
 
+        # ─── Settings management (new) ─────────────────────────────────
+        def _enable_trading(p: dict) -> dict:
+            preset = p.get("preset", "moderate")
+            ok, err, changes = sm.apply_preset(preset)
+            if ok:
+                sm.push_to_runtime(self.rules, self.config, changes)
+                logger.warning(f"🟢 TRADING ENABLED via preset '{preset}' (Telegram)")
+                return {"ok": True, "preset": preset, "changes": changes}
+            return {"ok": False, "error": err}
+
+        def _disable_trading(p: dict) -> dict:
+            ok, err, changes = sm.apply_preset("disabled")
+            if ok:
+                sm.push_to_runtime(self.rules, self.config, changes)
+                logger.warning("🔴 TRADING DISABLED (Telegram)")
+                return {"ok": True, "preset": "disabled", "changes": changes}
+            return {"ok": False, "error": err}
+
+        def _apply_preset(p: dict) -> dict:
+            preset = p.get("preset", "")
+            if preset not in sm.PRESETS:
+                return {"ok": False, "error": f"Unknown preset: {preset!r}. Available: {list(sm.PRESETS.keys())}"}
+            ok, err, changes = sm.apply_preset(preset)
+            if ok:
+                sm.push_to_runtime(self.rules, self.config, changes)
+                logger.warning(f"📋 PRESET '{preset}' applied (Telegram)")
+                return {"ok": True, "preset": preset, "changes": changes}
+            return {"ok": False, "error": err}
+
+        def _update_settings(p: dict) -> dict:
+            section = p.get("section", "")
+            param = p.get("param", "")
+            value = p.get("value", "")
+            if not section or not param:
+                return {"ok": False, "error": "section and param are required"}
+            if not sm.is_telegram_allowed(section):
+                return {"ok": False, "error": f"Section '{section}' is blocked for Telegram updates. Use the Dashboard instead."}
+            ok, err, applied = sm.update_section(section, {param: value})
+            if ok:
+                sm.push_section_to_runtime(section, {param: applied[param]}, self.rules, self.config)
+                logger.warning(f"🔧 SETTINGS UPDATE via Telegram | {section}.{param} → {applied[param]}")
+                return {"ok": True, "section": section, "param": param, "new": applied[param]}
+            return {"ok": False, "error": err}
+
+        def _get_settings_tiers(_p: dict) -> dict:
+            return sm.TELEGRAM_SAFETY_TIERS
+
+        ch.register_function("enable_trading", _enable_trading)
+        ch.register_function("disable_trading", _disable_trading)
+        ch.register_function("apply_preset", _apply_preset)
+        ch.register_function("update_settings", _update_settings)
+        ch.register_function("get_settings_tiers", _get_settings_tiers)
+
         # ─── Stats & Analytics functions ───────────────────────────────
         ch.register_function("get_stats", lambda p: self.stats_db.get_performance_summary(
             hours=int(p.get("hours", 24))
@@ -1115,10 +1169,20 @@ class Orchestrator:
         })
 
         # ─── Config / settings write ───────────────────────────────────
-        ch.register_function("update_rule", lambda p: self.rules.update_param(
-            param=p.get("param", ""),
-            value=str(p.get("value", "")),
-        ))
+        def _update_rule(p: dict) -> dict:
+            result = self.rules.update_param(
+                param=p.get("param", ""),
+                value=str(p.get("value", "")),
+            )
+            # Persist to settings.yaml
+            if result.get("ok"):
+                try:
+                    sm.update_section("absolute_rules", {p["param"]: result["new"]})
+                except Exception as e:
+                    logger.error(f"Failed to persist rule update to disk: {e}")
+            return result
+
+        ch.register_function("update_rule", _update_rule)
 
         def _update_trading_param(p: dict) -> dict:
             param = p.get("param", "")
@@ -1140,6 +1204,11 @@ class Orchestrator:
             if param == "interval":
                 self.interval = new_val
             logger.warning(f"🔧 TRADING PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
+            # Persist to settings.yaml
+            try:
+                sm.update_section("trading", {param: new_val})
+            except Exception as e:
+                logger.error(f"Failed to persist trading param to disk: {e}")
             return {"ok": True, "param": param, "old": old_val, "new": new_val}
 
         ch.register_function("update_trading_param", _update_trading_param)
@@ -1168,6 +1237,11 @@ class Orchestrator:
             if param == "trailing_stop_pct":
                 self.trailing_stops.default_trail_pct = new_val
             logger.warning(f"🔧 RISK PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
+            # Persist to settings.yaml
+            try:
+                sm.update_section("risk", {param: new_val})
+            except Exception as e:
+                logger.error(f"Failed to persist risk param to disk: {e}")
             return {"ok": True, "param": param, "old": old_val, "new": new_val}
 
         ch.register_function("update_risk_param", _update_risk_param)

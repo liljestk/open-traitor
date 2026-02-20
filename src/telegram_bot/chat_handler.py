@@ -236,6 +236,18 @@ def _build_fast_patterns():
         # Simulations fast path
         (r"^/sims?$|^my simulations?\??$|^list simulations?\??$|^open simulations?\??$|^active simulations?\??$",
          "list_simulations", None),
+        # Enable / disable trading
+        (r"^/enable.?trading$|^enable\s*trading$|^turn on\s*trading$|^start\s*trading$",
+         "enable_trading", "🟢 Trading enabled (moderate preset applied)."),
+        (r"^/disable.?trading$|^disable\s*trading$|^turn off\s*trading$|^stop\s*trading$",
+         "disable_trading", "🔴 Trading disabled (all limits set to zero)."),
+        # Apply presets
+        (r"^/preset\s+(disabled|conservative|moderate|aggressive)$"
+         r"|^(set|apply|use)\s*(preset\s+)?(disabled|conservative|moderate|aggressive)$",
+         "apply_preset", None),
+        # Settings tiers info
+        (r"^/settings.?tiers?$|^(what|which)\s+settings?\s+(can|are)\s+(I|we)?\s*(change|update|safe|allowed)",
+         "get_settings_tiers", None),
     ]
     for pattern_str, func_name, template in patterns:
         FAST_PATTERNS.append((
@@ -444,6 +456,18 @@ def _format_simulations(data: dict) -> str:
 
 
 # Map function names to formatters
+def _format_settings_tiers(data: dict) -> str:
+    """Format Telegram safety tiers as a readable message."""
+    lines = ["🔒 **Telegram Settings Access Tiers**\n"]
+    tier_icons = {"safe": "🟢", "semi_safe": "🟡", "blocked": "🔴"}
+    for tier, sections in data.items():
+        icon = tier_icons.get(tier, "⚪")
+        label = tier.replace("_", " ").title()
+        lines.append(f"{icon} **{label}**: {', '.join(sections)}")
+    lines.append("\n_Use 'update settings' to change safe/semi-safe sections._")
+    return "\n".join(lines)
+
+
 DATA_FORMATTERS = {
     "get_status": _format_status,
     "get_balance": _format_balance,
@@ -454,6 +478,7 @@ DATA_FORMATTERS = {
     "get_recent_signals": _format_signals,
     "get_account_holdings": _format_account_holdings,
     "list_simulations": _format_simulations,
+    "get_settings_tiers": _format_settings_tiers,
 }
 
 
@@ -1022,7 +1047,19 @@ class TelegramChatHandler:
         text_clean = text.strip()
 
         for pattern, func_name, template in FAST_PATTERNS:
-            if pattern.search(text_clean):
+            m = pattern.search(text_clean)
+            if m:
+                # Special: extract preset name from the regex match groups
+                if func_name == "apply_preset":
+                    # Groups may be from /preset <name> or "apply preset <name>"
+                    preset = None
+                    for g in m.groups():
+                        if g and g.lower() in ("disabled", "conservative", "moderate", "aggressive"):
+                            preset = g.lower()
+                            break
+                    if not preset:
+                        return "⚠️ Please specify a preset: disabled, conservative, moderate, or aggressive."
+                    return self._execute_fast_with_args(func_name, {"preset": preset})
                 return self._execute_fast(func_name, template)
 
         # ── Contextual affirmatives ──────────────────────────────────────────
@@ -1141,6 +1178,22 @@ class TelegramChatHandler:
         # Fallback: dump as readable text
         if isinstance(data, dict):
             return f"```\n{json.dumps(data, indent=2, default=str)[:2000]}\n```"
+        return str(data)[:2000]
+
+    def _execute_fast_with_args(self, func_name: str, args: dict) -> str:
+        """Like _execute_fast but passes args to the handler."""
+        handler = self._function_handlers.get(func_name)
+        if not handler:
+            return f"⚙️ {func_name} not connected yet."
+        try:
+            data = handler(args)
+        except Exception as e:
+            return f"⚠️ Error: {str(e)[:100]}"
+        if isinstance(data, dict):
+            if data.get("ok"):
+                preset = args.get("preset", "")
+                return f"✅ Preset **{preset}** applied! Changes: {', '.join(f'`{k}`' for k in data.get('changes', {}).keys()) or 'none'}"
+            return f"⚠️ {data.get('error', 'Unknown error')}"
         return str(data)[:2000]
 
     # ────────────────────────────────────────────────────────────────────────

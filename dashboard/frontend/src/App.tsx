@@ -8,6 +8,7 @@ import PlanningAudit from './pages/PlanningAudit'
 import TradesLog from './pages/TradesLog'
 import SystemLogs from './pages/SystemLogs'
 import SimulatedTrades from './pages/SimulatedTrades'
+import Settings from './pages/Settings'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,6 +32,7 @@ export default function App() {
             <Route path="/logs" element={<SystemLogs />} />
             <Route path="/live" element={<LiveMonitor />} />
             <Route path="/planning" element={<PlanningAudit />} />
+            <Route path="/settings" element={<Settings />} />
           </Route>
         </Routes>
       </BrowserRouter>

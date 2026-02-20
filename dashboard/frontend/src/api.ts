@@ -243,6 +243,57 @@ export const fetchSimulatedTrades = (includeClosed = false) =>
 export const closeSimulatedTrade = (simId: number) =>
   apiFetch<SimulatedTrade>(`/simulated-trades/${simId}`, { method: 'DELETE' })
 
+// ─── Settings ──────────────────────────────────────────────────────────────
+
+export interface FieldSchema {
+  type: string
+  min?: number
+  max?: number
+  enum?: string[]
+}
+
+export interface SectionSchema {
+  label: string
+  telegram_tier: 'safe' | 'semi_safe' | 'blocked'
+  fields?: Record<string, FieldSchema>
+  nested?: Record<string, { fields: Record<string, FieldSchema> }>
+}
+
+export interface SettingsResponse {
+  settings: Record<string, any>
+  trading_enabled: boolean
+  sections: string[]
+  section_labels: Record<string, string>
+  telegram_tiers: Record<string, { sections: string[]; description: string }>
+  schema: Record<string, SectionSchema>
+}
+
+export interface SettingsUpdateResult {
+  ok: boolean
+  preset?: string
+  section?: string
+  changes: Record<string, any>
+  trading_enabled: boolean
+}
+
+export interface PresetInfo {
+  values: Record<string, Record<string, any>>
+  summary: string
+}
+
+export const fetchSettings = () =>
+  apiFetch<SettingsResponse>('/settings')
+
+export const updateSettings = (data: { section?: string; updates?: Record<string, any>; preset?: string }) =>
+  apiFetch<SettingsUpdateResult>('/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+
+export const fetchPresets = () =>
+  apiFetch<{ presets: Record<string, PresetInfo>; current_enabled: boolean }>('/settings/presets')
+
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {

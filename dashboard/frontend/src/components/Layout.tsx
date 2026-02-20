@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders } from 'lucide-react'
 import { useLiveStore } from '../store'
 import { openLiveSocket } from '../api'
 
@@ -19,6 +19,7 @@ const NAV = [
       { to: '/logs', icon: <Terminal size={16} />, label: 'System Logs' },
       { to: '/live', icon: <Activity size={16} />, label: 'Live Monitor' },
       { to: '/planning', icon: <BookOpen size={16} />, label: 'Planning Audit' },
+      { to: '/settings', icon: <Sliders size={16} />, label: 'Settings' },
     ]
   },
 ]
@@ -30,6 +31,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/logs': 'System Logs',
   '/live': 'Live Monitor',
   '/planning': 'Planning Audit',
+  '/settings': 'Settings',
 }
 
 export default function Layout() {
