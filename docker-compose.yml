@@ -7,7 +7,7 @@ services:
     container_name: auto-traitor-ollama
     restart: unless-stopped
     ports:
-      - "127.0.0.1:11434:11434"   # local only — LLM has no auth
+      - "127.0.0.1:11434:11434" # local only — LLM has no auth
     volumes:
       - ollama_data:/root/.ollama
     environment:
@@ -101,7 +101,6 @@ services:
       - ./logs:/app/logs
     ports:
       - "8080:8080" # Health check + Prometheus metrics
-      - "8090:8090" # LLM Traceability Dashboard
     # Security: read-only filesystem, drop capabilities
     read_only: true
     tmpfs:
@@ -115,6 +114,43 @@ services:
         limits:
           memory: 4G
           cpus: "2.0"
+
+  # =========================================================================
+  # Dashboard - Web UI and API Backend
+  # =========================================================================
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: auto-traitor-dashboard
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8090:8090" # Web Dashboard
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
 
   # =========================================================================
   # News Worker - Background News Aggregation
@@ -219,7 +255,7 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: [ "CMD", "mc", "ready", "local" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -243,7 +279,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:3000:3000"  # Langfuse Web UI — local only
+      - "127.0.0.1:3000:3000" # Langfuse Web UI — local only
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
@@ -366,8 +402,8 @@ services:
       temporal-db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:7233:7233"  # gRPC endpoint — local only
-      - "127.0.0.1:8233:8233"  # Web UI — local only
+      - "127.0.0.1:7233:7233" # gRPC endpoint — local only
+      - "127.0.0.1:8233:8233" # Web UI — local only
     environment:
       - DB=postgres12
       - DB_PORT=5432

@@ -107,8 +107,36 @@ def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Start background tasks on startup: Redis pub/sub listener + Temporal client."""
-    global _temporal_client
+    """Start background tasks on startup: Redis pub/sub listener + Temporal client.
+
+    When the dashboard is started standalone via ``uvicorn src.dashboard.server:app``
+    (e.g. inside the Docker container), ``set_globals()`` is never called by
+    ``main.py``, so _stats_db / _redis_client are ``None``.  We self-initialise
+    them here so the API is functional.
+    """
+    global _stats_db, _redis_client, _temporal_client
+
+    # --- Self-initialise StatsDB when not injected by main.py ---------------
+    if _stats_db is None:
+        try:
+            from src.utils.stats import StatsDB
+            _stats_db = StatsDB()
+            logger.info("📊 Dashboard self-initialised StatsDB")
+        except Exception as e:
+            logger.error(f"❌ Could not initialise StatsDB: {e}")
+
+    # --- Self-initialise Redis when not injected -----------------------------
+    if _redis_client is None:
+        try:
+            import redis as _redis_mod
+            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+            _redis_client = _redis_mod.from_url(redis_url, decode_responses=True)
+            _redis_client.ping()
+            logger.info(f"📡 Dashboard self-initialised Redis ({redis_url})")
+        except Exception as e:
+            logger.warning(f"⚠️ Redis not available: {e} — live feed disabled")
+            _redis_client = None
+
     task = None
     if _redis_client:
         task = asyncio.create_task(_redis_subscriber())
@@ -124,6 +152,23 @@ async def lifespan(application: FastAPI):
             logger.info(f"✅ Dashboard Temporal client connected ({_temporal_host})")
         except Exception as e:
             logger.warning(f"⚠️ Temporal not available: {e} — replay/rerun disabled")
+
+    # --- Initialise Coinbase price client if not already set -----------------
+    if _coinbase_client is None:
+        try:
+            from src.core.coinbase_client import CoinbaseClient
+            key_file = os.environ.get("COINBASE_KEY_FILE", "")
+            api_key = os.environ.get("COINBASE_API_KEY", "")
+            api_secret = os.environ.get("COINBASE_API_SECRET", "")
+            globals()["_coinbase_client"] = CoinbaseClient(
+                api_key=api_key or None,
+                api_secret=api_secret or None,
+                key_file=key_file or None,
+                paper_mode=True,
+            )
+            logger.info("✅ Dashboard Coinbase price client ready")
+        except Exception as e:
+            logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
 
     yield
     if task:
@@ -361,7 +406,7 @@ def get_stats_summary():
 
         # Latest portfolio snapshot
         snapshot = conn.execute(
-            """SELECT total_value_usd, total_pnl_usd, ts
+            """SELECT portfolio_value, total_pnl, ts
                FROM portfolio_snapshots ORDER BY ts DESC LIMIT 1"""
         ).fetchone()
 
