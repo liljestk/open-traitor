@@ -155,8 +155,8 @@ def _build_fast_patterns():
         # Balance
         (r"^/balance$|^balance\??$|^how much (do we|have).*\??$|^portfolio\??$",
          "get_balance", None),
-        # Positions
-        (r"^/positions?$|^positions?\??$|^what('re| are) (our )?positions?\??$|^open positions?\??$|^holdings?\??$",
+        # Positions (bot-tracked open positions)
+        (r"^/positions?$|^positions?\??$|^what('re| are) (our )?(open )?positions?\??$|^open positions?\??$",
          "get_positions", None),
         # Prices
         (r"^/prices?$|^prices?\??$|^current prices?\??$|^what('s| is) (the )?price",
@@ -215,7 +215,13 @@ def _build_fast_patterns():
         (r"^best.?worst|^winners?.?losers?",
          "get_best_worst", None),
         # Account holdings (live Coinbase)
-        (r"^/holdings?$|^holdings?\??$|^what (do I|do we) (own|hold|have)\??$|^show.*(holdings|account|portfolio)$|^account overview",
+        (r"^/holdings?$"
+         r"|^(my |our )?holdings?\??$"
+         r"|^what (do I|do we|are my|are our) (own|hold|have|holdings?).*\??$"
+         r"|^what('re| are) (my|our) holdings?\??$"
+         r"|^show.*(holdings|account|portfolio)$"
+         r"|^(my |our )portfolio holdings?\??$"
+         r"|^account overview",
          "get_account_holdings", None),
     ]
     for pattern_str, func_name, template in patterns:
