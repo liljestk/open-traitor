@@ -35,7 +35,7 @@ class BaseAgent(ABC):
         self.logger.info(f"🤖 Agent [{self.name}] initialized")
 
     @abstractmethod
-    def run(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Execute the agent's main logic.
 
@@ -56,13 +56,13 @@ class BaseAgent(ABC):
             "last_result_summary": str(result)[:200],
         })
 
-    def execute(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         """Execute the agent with error handling and state tracking."""
         self._last_run = datetime.now(timezone.utc)
         self._run_count += 1
 
         try:
-            result = self.run(context)
+            result = await self.run(context)
             self._update_state(result)
             return result
         except Exception as e:

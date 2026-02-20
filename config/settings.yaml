@@ -3,16 +3,16 @@
 # ===========================================
 
 trading:
-  mode: paper
+  mode: live
   pairs:
-    - ATOM-USD
-    - BTC-USD
-    - ETH-USD
+    - ATOM-EUR
+    - BTC-EUR
+    - ETH-EUR
   # Native quote currency — 'auto' = detect from Coinbase account on startup.
   # Override with e.g. 'EUR' or 'USD' to force a specific currency.
   # When 'auto' (or any non-USD currency is detected), pairs listed above are
   # automatically rewritten: BTC-USD → BTC-EUR, etc. if that product exists.
-  quote_currency: auto
+  quote_currency: EUR
   # Main analysis/trade loop interval in seconds
   interval: 120
   # Minimum confidence to execute a trade (0.0 - 1.0)
@@ -45,16 +45,16 @@ trading:
 # These are hard limits the agent will NEVER exceed,
 # regardless of any LLM reasoning or market conditions.
 absolute_rules:
-  # Maximum USD to spend on a single trade
-  max_single_trade_usd: 0  # SETUP MODE: locked — no trades
+  # Maximum amount (in quote currency) to spend on a single trade
+  max_single_trade: 0  # SETUP MODE: locked — no trades
   # Maximum total daily spending
-  max_daily_spend_usd: 0   # SETUP MODE: locked — no trades
+  max_daily_spend: 0   # SETUP MODE: locked — no trades
   # Maximum daily loss before all trading stops
-  max_daily_loss_usd: 0    # SETUP MODE: locked — no trades
+  max_daily_loss: 0    # SETUP MODE: locked — no trades
   # Maximum portfolio percentage at risk at any time
   max_portfolio_risk_pct: 0.00  # SETUP MODE: locked
-  # Require Telegram approval for trades above this USD amount
-  require_approval_above_usd: 0  # SETUP MODE: everything requires approval
+  # Require Telegram approval for trades above this amount
+  require_approval_above: 0  # SETUP MODE: everything requires approval
   # Never trade these pairs (blacklist)
   never_trade_pairs: []
   # Only trade these pairs if set (whitelist, empty = allow all)
@@ -65,8 +65,8 @@ absolute_rules:
   max_trades_per_day: 0  # SETUP MODE: locked
   # Never use more than this % of available cash in a single trade
   max_cash_per_trade_pct: 0.00  # SETUP MODE: locked
-  # Emergency stop: if portfolio drops below this USD value, stop everything
-  emergency_stop_portfolio_usd: 8000  # Stop all trading if portfolio drops below this (protects ~80% of capital)
+  # Emergency stop: if portfolio drops below this value, stop everything
+  emergency_stop_portfolio: 8000  # Stop all trading if portfolio drops below this (protects ~80% of capital)
   # Always use stop-loss (true = never open a position without stop-loss)
   always_use_stop_loss: true
   # Maximum stop-loss distance percentage
@@ -216,8 +216,8 @@ rotation:
   min_confidence: 0.65
   # Above this confidence, escalate to owner as "high impact"
   high_impact_confidence: 0.80
-  # Above this USD, always ask owner for approval
-  approval_threshold_usd: 200
+  # Above this amount, always ask owner for approval
+  approval_threshold: 200
   # Cooldown between swaps for the same pair (seconds)
   # Prevents churn that eats fees
   swap_cooldown_seconds: 3600
@@ -238,8 +238,8 @@ fees:
   safety_margin: 1.5
   # Minimum gain % after fees for a trade to be worthwhile
   min_gain_after_fees_pct: 0.005
-  # Below this USD, don't bother trading (fees eat everything)
-  min_trade_usd: 50
+  # Below this amount, don't bother trading (fees eat everything)
+  min_trade_quote: 50
   # Cooldown after a swap before the same pair can swap again
   swap_cooldown_seconds: 3600
 
@@ -250,7 +250,7 @@ fees:
 # Elevates trading limits for a defined duration.
 # STILL respects absolute rules — safety net never disabled.
 high_stakes:
-  # Multiplier for max_single_trade_usd during high-stakes
+  # Multiplier for max_single_trade during high-stakes
   trade_size_multiplier: 2.5
   # Multiplier for swap allocation during high-stakes
   swap_allocation_multiplier: 2.0
@@ -258,5 +258,5 @@ high_stakes:
   min_confidence: 0.50
   # Lower minimum swap gain threshold during high-stakes
   min_swap_gain_pct: 0.01
-  # Auto-approve trades up to this USD during high-stakes
-  auto_approve_up_to_usd: 500
+  # Auto-approve trades up to this amount during high-stakes
+  auto_approve_up_to: 500

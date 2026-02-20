@@ -31,9 +31,9 @@ Respond with JSON:
 
 {
     "action": "buy" | "sell" | "hold",
-    "pair": "BTC-USD",
+    "pair": "BTC-EUR",
     "confidence": 0.0-1.0,
-    "usd_amount": amount_in_native_currency_or_null,
+    "quote_amount": amount_in_quote_currency_or_null,
     "quantity": crypto_quantity_or_null,
     "stop_loss_price": price_or_null,
     "take_profit_price": price_or_null,
@@ -58,7 +58,7 @@ class StrategistAgent(BaseAgent):
         super().__init__("strategist", llm, state, config)
         self.min_confidence = config.get("trading", {}).get("min_confidence", 0.7)
 
-    def run(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Generate a trade proposal based on market analysis.
 
@@ -121,7 +121,7 @@ class StrategistAgent(BaseAgent):
                 model=self.llm.model,
             )
 
-        llm_response = self.llm.chat_json(
+        llm_response = await self.llm.chat_json(
             system_prompt=STRATEGY_SYSTEM_PROMPT,
             user_message=user_message,
             span=span,

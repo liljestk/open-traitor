@@ -47,7 +47,7 @@ class TradeJournal:
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp", "pair", "action", "quantity", "price",
-                "usd_amount", "fee", "stop_loss", "take_profit",
+                "quote_amount", "fee", "stop_loss", "take_profit",
                 "confidence", "signal_type", "reasoning",
                 "fear_greed", "rsi", "macd_signal",
             ])
@@ -92,7 +92,7 @@ class TradeJournal:
         action: str,
         quantity: float,
         price: float,
-        usd_amount: float,
+        quote_amount: float,
         fee: float = 0.0,
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
@@ -112,7 +112,7 @@ class TradeJournal:
             context={
                 "quantity": quantity,
                 "price": price,
-                "usd_amount": usd_amount,
+                "quote_amount": quote_amount,
                 "fee": fee,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
@@ -132,7 +132,7 @@ class TradeJournal:
                     writer = csv.writer(f)
                     writer.writerow([
                         datetime.now(timezone.utc).isoformat(),
-                        pair, action, quantity, price, usd_amount, fee,
+                        pair, action, quantity, price, quote_amount, fee,
                         stop_loss, take_profit, confidence, signal_type,
                         reasoning[:200],  # Truncate for CSV
                         fear_greed, rsi, macd_signal,

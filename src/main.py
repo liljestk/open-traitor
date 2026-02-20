@@ -220,20 +220,26 @@ def main():
 
     # Auto-detect the account's native fiat currency (e.g. EUR for EU accounts)
     # and rewrite the configured trading pairs accordingly so the bot actually
-    # trades against the currency sitting in the wallet (EUR, GBP, …).
+    # trades against the currency sitting in the wallet (EUR, GBP, ...).
+    quote_currency_setting = config.get("trading", {}).get("quote_currency", "auto").upper()
     native_currency: str = "USD"
-    if coinbase._rest_client:
+    
+    if quote_currency_setting != "AUTO":
+        native_currency = quote_currency_setting
+    elif coinbase._rest_client:
         native_currency = coinbase.detect_native_currency()
+
+    if coinbase._rest_client:
         raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
         adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
-        if adapted_pairs != raw_pairs:
+        if set(adapted_pairs) != set(raw_pairs):
             logger.info(
-                f"🌍 Pairs adapted for {native_currency} account: "
+                f"🌍 Trading pairs dynamically expanded: "
                 f"{raw_pairs} → {adapted_pairs}"
             )
             config.setdefault("trading", {})["pairs"] = adapted_pairs
         else:
-            logger.info(f"✓ Trading pairs unchanged (native currency: {native_currency})")
+            logger.info(f"✓ Trading pairs unchanged: {adapted_pairs}")
 
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).
@@ -332,33 +338,6 @@ def main():
         ws_feed=ws_feed,
     )
 
-    # Dashboard server
-    if dash_config.get("enabled", True):
-        from src.dashboard.server import create_app
-        dash_app = create_app(
-            stats_db=orchestrator.stats_db,
-            redis_client=redis_client,
-            temporal_client=None,  # Connected inside lifespan on uvicorn's event loop
-            config=config,
-        )
-        dash_port = int(dash_config.get("port", 8090))
-
-        def _run_dashboard():
-            uvicorn.run(
-                dash_app,
-                host="0.0.0.0",
-                port=dash_port,
-                log_level="warning",
-                access_log=False,
-            )
-
-        dashboard_thread = threading.Thread(
-            target=_run_dashboard,
-            name="dashboard",
-            daemon=True,
-        )
-        dashboard_thread.start()
-        logger.info(f"📊 Dashboard started on http://0.0.0.0:{dash_port}")
 
     # Handle graceful shutdown
     def shutdown_handler(signum, frame):

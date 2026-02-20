@@ -10,7 +10,7 @@ import re
 import time
 from typing import Any, Optional, TYPE_CHECKING
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from src.utils.logger import get_logger
 
@@ -46,7 +46,7 @@ class LLMClient:
         # Ollama exposes an OpenAI-compatible endpoint at /v1
         ollama_url = f"{base_url.rstrip('/')}/v1"
 
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(
             base_url=ollama_url,
             api_key="ollama",  # Ollama doesn't need a real key
             timeout=timeout,
@@ -61,7 +61,7 @@ class LLMClient:
             f"URL: {ollama_url} | Model: {model} | Temp: {temperature}"
         )
 
-    def chat(
+    async def chat(
         self,
         system_prompt: str,
         user_message: str,
@@ -89,7 +89,7 @@ class LLMClient:
         }
 
         try:
-            response = self.client.chat.completions.create(**kwargs)
+            response = await self.client.chat.completions.create(**kwargs)
             elapsed = time.time() - start_time
             elapsed_ms = elapsed * 1000
 
@@ -130,7 +130,7 @@ class LLMClient:
                 )
             raise
 
-    def chat_with_tools(
+    async def chat_with_tools(
         self,
         system_prompt: str,
         user_message: str,
@@ -177,7 +177,7 @@ class LLMClient:
             "tool_choice": "auto",
         }
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = await self.client.chat.completions.create(**kwargs)
         elapsed_ms = (time.time() - start_time) * 1000
         self._call_count += 1
 
@@ -227,7 +227,7 @@ class LLMClient:
 
         return text_content, parsed_calls, assistant_raw
 
-    def chat_json(
+    async def chat_json(
         self,
         system_prompt: str,
         user_message: str,
@@ -244,7 +244,7 @@ class LLMClient:
             "No markdown, no explanation, no code blocks. Just raw JSON."
         )
 
-        response = self.chat(
+        response = await self.chat(
             system_prompt=system_prompt + json_instruction,
             user_message=user_message,
             temperature=temperature,

@@ -57,6 +57,7 @@ class TechnicalSignals(BaseModel):
     price_change_24h: Optional[float] = None
     support_level: Optional[float] = None
     resistance_level: Optional[float] = None
+    atr: Optional[float] = None
 
 
 class SentimentSignals(BaseModel):

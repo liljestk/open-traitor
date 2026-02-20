@@ -433,6 +433,7 @@ def get_stats_summary():
             stats["win_rate"] = None
         if snapshot:
             stats["portfolio"] = dict(snapshot)
+        stats["currency"] = _config.get("trading", {}).get("quote_currency", "EUR")
         return stats
     except Exception as exc:
         logger.exception("stats/summary error")

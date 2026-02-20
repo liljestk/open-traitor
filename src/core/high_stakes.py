@@ -42,8 +42,8 @@ class HighStakesConfig:
     min_confidence: float = 0.5
     # Allow swaps with lower expected gain (still must beat fees)
     min_swap_gain_pct: float = 0.01
-    # Skip per-trade Telegram approval up to this USD
-    auto_approve_up_to_usd: float = 500.0
+    # Skip per-trade Telegram approval up to this amount
+    auto_approve_up_to: float = 500.0
 
 
 class HighStakesManager:
@@ -63,7 +63,7 @@ class HighStakesManager:
             swap_allocation_multiplier=self.config.get("swap_allocation_multiplier", 2.0),
             min_confidence=self.config.get("min_confidence", 0.5),
             min_swap_gain_pct=self.config.get("min_swap_gain_pct", 0.01),
-            auto_approve_up_to_usd=self.config.get("auto_approve_up_to_usd", 500.0),
+            auto_approve_up_to=self.config.get("auto_approve_up_to", self.config.get("auto_approve_up_to_usd", 500.0)),
         )
 
         # State
@@ -163,7 +163,7 @@ class HighStakesManager:
             f"  Trade size: {self.hs_config.trade_size_multiplier}x normal\n"
             f"  Swap allocation: {self.hs_config.swap_allocation_multiplier}x normal\n"
             f"  Min confidence: {self.hs_config.min_confidence}\n"
-            f"  Auto-approve up to: ${self.hs_config.auto_approve_up_to_usd:.0f}\n\n"
+            f"  Auto-approve up to: ${self.hs_config.auto_approve_up_to:.0f}\n\n"
             f"⚠️ Absolute rules still enforced.\n"
             f"Send /highstakes off to deactivate early."
         )
@@ -218,9 +218,9 @@ class HighStakesManager:
         adjusted = dict(base_limits)
 
         # Scale up trade sizes
-        if "max_single_trade_usd" in adjusted:
-            adjusted["max_single_trade_usd"] = (
-                adjusted["max_single_trade_usd"] * self.hs_config.trade_size_multiplier
+        if "max_single_trade" in adjusted:
+            adjusted["max_single_trade"] = (
+                adjusted["max_single_trade"] * self.hs_config.trade_size_multiplier
             )
 
         # Scale up swap allocation
@@ -235,8 +235,8 @@ class HighStakesManager:
             adjusted["min_confidence"] = self.hs_config.min_confidence
 
         # Raise auto-approve threshold
-        if "require_approval_above_usd" in adjusted:
-            adjusted["require_approval_above_usd"] = self.hs_config.auto_approve_up_to_usd
+        if "require_approval_above" in adjusted:
+            adjusted["require_approval_above"] = self.hs_config.auto_approve_up_to
 
         return adjusted
 

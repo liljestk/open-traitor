@@ -353,27 +353,59 @@ class CoinbaseClient:
 
     def adapt_pairs_to_account(self, pairs: list[str], native_currency: str) -> list[str]:
         """
-        Rewrite trading pairs so their quote matches the account's native currency.
-
-        Example: 'BTC-USD' → 'BTC-EUR' for a EUR account.
-
-        For each *-USD pair the method asks Coinbase whether a *-<native> product
-        exists and is not disabled.  If it does, the pair is rewritten; otherwise
-        the original USD pair is kept with a warning.
-        Non-USD pairs are returned unchanged.
+        Dynamically expands the configured pairs to include all valid, 
+        tradeable pairs between the extracted assets on Coinbase.
+        If the API is unavailable, falls back to basic adaptation.
         """
+        # Step 1: Extract all allowed assets
+        allowed_assets = {native_currency}
+        for pair in pairs:
+            if "-" in pair:
+                base, quote = pair.split("-", 1)
+                allowed_assets.add(base)
+                allowed_assets.add(quote)
+            else:
+                allowed_assets.add(pair)
+                
+        # Step 2: Fetch all products
+        if self._rest_client:
+            try:
+                products_resp = self._rest_client.get_products()
+                pdata = products_resp.to_dict() if hasattr(products_resp, "to_dict") else dict(products_resp)
+                all_products = pdata.get("products", [])
+                
+                dynamic_pairs: set[str] = set()
+                for prod in all_products:
+                    base = prod.get("base_currency_id")
+                    quote = prod.get("quote_currency_id")
+                    product_id = prod.get("product_id")
+                    
+                    if base in allowed_assets and quote in allowed_assets:
+                        if (not prod.get("trading_disabled", True) and 
+                            not prod.get("is_disabled", False) and 
+                            str(prod.get("status", "")).lower() == "online"):
+                            dynamic_pairs.add(product_id)
+                            
+                if dynamic_pairs:
+                    rewritten = sorted(list(dynamic_pairs))
+                    logger.info(f"  ✓ Dynamic pairs generated from assets {sorted(list(allowed_assets))}")
+                    return rewritten
+            except Exception as e:
+                logger.warning(f"  ⚠ Failed to generate dynamic pairs: {e} — falling back")
+
+        # Fallback to standard adaptation (e.g. BTC-USD -> BTC-EUR)
         if native_currency == "USD":
             return list(pairs)
 
-        rewritten: list[str] = []
+        rewritten_fallback: list[str] = []
         for pair in pairs:
             if "-" not in pair:
-                rewritten.append(pair)
+                rewritten_fallback.append(pair)
                 continue
 
             base, quote = pair.rsplit("-", 1)
             if quote != "USD":
-                rewritten.append(pair)  # Already a non-USD quote — keep as-is
+                rewritten_fallback.append(pair)
                 continue
 
             candidate = f"{base}-{native_currency}"
@@ -387,15 +419,15 @@ class CoinbaseClient:
                         and not pdata.get("is_disabled", False)
                     ):
                         logger.info(f"  ✓ Pair adapted: {pair} → {candidate}")
-                        rewritten.append(candidate)
+                        rewritten_fallback.append(candidate)
                         continue
                 except Exception:
                     pass
 
             logger.warning(f"  ⚠ {candidate} not available on Coinbase — keeping {pair}")
-            rewritten.append(pair)
+            rewritten_fallback.append(pair)
 
-        return rewritten
+        return rewritten_fallback
 
     def _currency_to_usd(self, currency: str, amount: float) -> float:
         """
@@ -635,29 +667,29 @@ class CoinbaseClient:
         fill_price = price * (1.0 + self._paper_slippage_pct)
         if quote_size:
             quantity = float(quote_size) / fill_price
-            usd_amount = float(quote_size)
+            quote_amount = float(quote_size)
         elif base_size:
             quantity = float(base_size)
-            usd_amount = quantity * fill_price
+            quote_amount = quantity * fill_price
 
         # Check balance (include estimated fee so post-fee deduction cannot go negative)
-        fee_estimate = usd_amount * self._paper_fee_pct
+        fee_estimate = quote_amount * self._paper_fee_pct
         quote_bal = self._paper_balance.get(quote_currency, 0)
-        if quote_bal < usd_amount + fee_estimate:
+        if quote_bal < quote_amount + fee_estimate:
             return {
                 "success": False,
                 "error": (
                     f"Insufficient balance. "
                     f"Have: {quote_bal:,.2f} {quote_currency}, "
-                    f"Need: {usd_amount + fee_estimate:,.2f} {quote_currency} (incl. fee)"
+                    f"Need: {quote_amount + fee_estimate:,.2f} {quote_currency} (incl. fee)"
                 ),
             }
 
         # Execute paper trade
-        self._paper_balance[quote_currency] = quote_bal - usd_amount
+        self._paper_balance[quote_currency] = quote_bal - quote_amount
         self._paper_balance[base_currency] = self._paper_balance.get(base_currency, 0) + quantity
 
-        fee = usd_amount * self._paper_fee_pct
+        fee = quote_amount * self._paper_fee_pct
         self._paper_balance[quote_currency] -= fee
 
         order_id = str(uuid.uuid4())
@@ -668,7 +700,7 @@ class CoinbaseClient:
             "type": "MARKET",
             "status": "FILLED",
             "filled_size": str(quantity),
-            "filled_value": str(usd_amount),
+            "filled_value": str(quote_amount),
             "average_filled_price": str(fill_price),
             "fee": str(fee),
             "created_time": datetime.now(timezone.utc).isoformat(),
@@ -678,9 +710,9 @@ class CoinbaseClient:
             self._paper_orders = self._paper_orders[-self._max_paper_orders:]
 
         logger.info(
-            f"📝 Paper BUY: {quantity:.6f} {base_currency} @ ${fill_price:,.2f} "
-            f"(mid=${price:,.2f}, slippage={self._paper_slippage_pct:.2%}, "
-            f"${usd_amount:,.2f} + ${fee:.2f} fee)"
+            f"📝 Paper BUY: {quantity:.6f} {base_currency} @ {fill_price:,.2f} {quote_currency} "
+            f"(mid={price:,.2f}, slippage={self._paper_slippage_pct:.2%}, "
+            f"{quote_amount:,.2f} + {fee:.2f} fee {quote_currency})"
         )
         return {"success": True, "order": order}
 
@@ -703,13 +735,13 @@ class CoinbaseClient:
 
         # Apply slippage: sells fill slightly below mid-price
         fill_price = price * (1.0 - self._paper_slippage_pct)
-        usd_amount = quantity * fill_price
+        quote_amount = quantity * fill_price
 
         # Execute paper trade
         self._paper_balance[base_currency] -= quantity
-        self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + usd_amount
+        self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount
 
-        fee = usd_amount * self._paper_fee_pct
+        fee = quote_amount * self._paper_fee_pct
         self._paper_balance[quote_currency] -= fee
 
         order_id = str(uuid.uuid4())
@@ -720,7 +752,7 @@ class CoinbaseClient:
             "type": "MARKET",
             "status": "FILLED",
             "filled_size": str(quantity),
-            "filled_value": str(usd_amount),
+            "filled_value": str(quote_amount),
             "average_filled_price": str(fill_price),
             "fee": str(fee),
             "created_time": datetime.now(timezone.utc).isoformat(),
@@ -730,9 +762,9 @@ class CoinbaseClient:
             self._paper_orders = self._paper_orders[-self._max_paper_orders:]
 
         logger.info(
-            f"📝 Paper SELL: {quantity:.6f} {base_currency} @ ${fill_price:,.2f} "
-            f"(mid=${price:,.2f}, slippage={self._paper_slippage_pct:.2%}, "
-            f"${usd_amount:,.2f} - ${fee:.2f} fee)"
+            f"📝 Paper SELL: {quantity:.6f} {base_currency} @ {fill_price:,.2f} {quote_currency} "
+            f"(mid={price:,.2f}, slippage={self._paper_slippage_pct:.2%}, "
+            f"{quote_amount:,.2f} - {fee:.2f} fee {quote_currency})"
         )
         return {"success": True, "order": order}
 

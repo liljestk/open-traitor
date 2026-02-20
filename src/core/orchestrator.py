@@ -41,6 +41,10 @@ from src.utils.journal import TradeJournal
 from src.utils.audit import AuditLog
 from src.utils.stats import StatsDB
 from src.utils.tracer import get_llm_tracer
+from src.core.managers.pipeline_manager import PipelineManager
+from src.core.managers.state_manager import StateManager
+from src.core.health import check_component_health, update_health
+import asyncio
 
 logger = get_logger("core.orchestrator")
 
@@ -160,9 +164,13 @@ class Orchestrator:
 
         # Tasks
         self.active_tasks: list[Task] = []
+        
+        self.pipeline_manager = PipelineManager(self)
+        self.state_manager = StateManager(self)
+        
         self._pending_approvals: dict[str, dict] = {}
         self._pending_approvals_lock = threading.Lock()
-        self._load_pending_approvals()
+        self.state_manager.load_pending_approvals()
 
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
@@ -338,32 +346,16 @@ class Orchestrator:
             logger.info(f"━━━ Cycle #{cycle_count} ━━━━━━━━━━━━━━━━━━━━━━━━")
 
             try:
-                # Run pipelines — parallelised across pairs so the IO-bound
-                # data-fetch portions (candles, prices, MTF) overlap.
-                # LLM calls serialise at Ollama internally; parallel dispatch
-                # still wins for the fetch overhead.
-                max_workers = min(
-                    len(self.pairs),
-                    self.config.get("trading", {}).get("pipeline_workers", 4),
-                )
-                if max_workers <= 1 or len(self.pairs) == 1:
-                    for pair in self.pairs:
-                        self._run_pipeline(pair)
-                else:
-                    with ThreadPoolExecutor(
-                        max_workers=max_workers,
-                        thread_name_prefix="pipeline",
-                    ) as pool:
-                        pair_futures = [
-                            pool.submit(self._run_pipeline, p) for p in self.pairs
-                        ]
-                        for fut in pair_futures:
-                            try:
-                                fut.result()
-                            except Exception as _pe:
-                                logger.error(
-                                    f"Pipeline worker error: {_pe}", exc_info=True
-                                )
+                # Run pipelines — parallelised across pairs using asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    tasks = [self.pipeline_manager.run_pipeline(p) for p in self.pairs]
+                    loop.run_until_complete(asyncio.gather(*tasks))
+                except Exception as _pe:
+                    logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
+                finally:
+                    loop.close()
 
                 # ─── Portfolio Rotation (autonomous swaps) ───
                 self._run_rotation()
@@ -432,7 +424,7 @@ class Orchestrator:
                         )
 
                 # Take portfolio snapshot
-                snapshot = self.state.take_portfolio_snapshot()
+                self.state.take_portfolio_snapshot()
 
                 # Check circuit breaker
                 if self.state.max_drawdown >= self.config.get("risk", {}).get("max_drawdown_pct", 0.10):
@@ -455,10 +447,10 @@ class Orchestrator:
                         self._reconcile_positions()
 
                 # Sync state to Redis
-                self._sync_to_redis()
+                self.state_manager.sync_to_redis()
 
                 # Prune stale pending approvals (> 1 hour old)
-                self._prune_stale_approvals()
+                self.state_manager.prune_stale_approvals()
 
                 # Update health status
                 components = check_component_health(
@@ -528,14 +520,16 @@ class Orchestrator:
                     f"⚡ Early-trigger pipeline for {sorted(early_pairs)} "
                     f"({elapsed:.0f}s / {self.interval}s into cycle)"
                 )
-                for ep in early_pairs:
-                    try:
-                        self._run_pipeline(ep)
-                    except Exception as _ep_err:
-                        logger.error(
-                            f"Early-trigger pipeline error ({ep}): {_ep_err}",
-                            exc_info=True,
-                        )
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    tasks = [self.pipeline_manager.run_pipeline(ep) for ep in early_pairs]
+                    loop.run_until_complete(asyncio.gather(*tasks))
+                except Exception as _ep_err:
+                    logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
+                finally:
+                    loop.close()
+                    
                 # Reset WS baselines so these pairs don’t immediately re-trigger
                 if self.ws_feed:
                     with self._ws_trigger_lock:
@@ -664,307 +658,7 @@ class Orchestrator:
             # so the next pipeline cycle retries immediately.
             logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
 
-    def _run_pipeline(self, pair: str) -> None:
-        """Run the full analysis → strategy → risk → execute pipeline for a pair."""
-        logger.info(f"🔍 Analyzing {pair}...")
 
-        # Snapshot the current WS price as the baseline for the next WS trigger check.
-        # This means the trigger fires only if price moves *after* this pipeline starts.
-        if self.ws_feed:
-            with self._ws_trigger_lock:
-                ws_now = self.ws_feed.get_price(pair)
-                if ws_now > 0:
-                    self._ws_last_prices[pair] = ws_now
-
-        # Cycle identifier — links all reasoning traces for this run together
-        cycle_id = str(uuid.uuid4())
-        strategic_context = self._get_strategic_context()
-
-        # Refresh live holdings if stale (TTL-cached, live mode only)
-        self._maybe_refresh_holdings()
-
-        # Start a Langfuse trace for this cycle (no-op if tracer not initialised)
-        tracer = get_llm_tracer()
-        trace_ctx = tracer.start_trace(
-            cycle_id=cycle_id,
-            pair=pair,
-            metadata={"strategic_context_preview": strategic_context[:200]},
-        ) if tracer else None
-
-        # Step 1: Fetch market data (rate-limited)
-        self.rate_limiter.wait("coinbase_rest")
-        candles = self.coinbase.get_candles(
-            pair,
-            granularity=self.config.get("analysis", {}).get("technical", {}).get(
-                "candle_granularity", "ONE_HOUR"
-            ),
-        )
-
-        # Use WebSocket price if available (low latency), otherwise REST
-        if self.ws_feed:
-            price = self.ws_feed.get_price(pair)
-            if price <= 0:  # WS not ready yet, fall back to REST
-                self.rate_limiter.wait("coinbase_rest")
-                price = self.coinbase.get_current_price(pair)
-        else:
-            self.rate_limiter.wait("coinbase_rest")
-            price = self.coinbase.get_current_price(pair)
-
-        # Guard: never proceed with a zero/negative price — it would corrupt
-        # stop-loss calculations and position sizing.
-        if price <= 0:
-            logger.warning(
-                f"⚠️ Skipping pipeline for {pair}: price is {price} "
-                "(both WebSocket and REST returned an invalid value)"
-            )
-            return
-
-        self.state.update_price(pair, price)
-
-        # Get latest news headlines
-        news_headlines = "No news available."
-        if self.news:
-            news_headlines = self.news.get_headlines(
-                self.config.get("news", {}).get("articles_for_analysis", 15)
-            )
-        elif self.redis:
-            try:
-                cached = self.redis.get("news:latest")
-                if cached:
-                    articles = json.loads(cached)
-                    news_headlines = "\n".join(
-                        f"- [{a.get('source', '?')}] {a.get('title', '')}"
-                        for a in articles[:15]
-                    )
-            except Exception:
-                pass
-
-        # Get Fear & Greed Index
-        fg_prompt = ""
-        try:
-            fg_prompt = self.fear_greed.get_for_prompt()
-        except Exception as e:
-            logger.debug(f"Fear & Greed unavailable: {e}")
-
-        # Get multi-timeframe confluence
-        mtf_prompt = ""
-        try:
-            mtf_prompt = self.multi_tf.get_for_prompt(pair)
-        except Exception as e:
-            logger.debug(f"Multi-TF unavailable: {e}")
-
-        # Get recent trade outcomes for outcome feedback (strategist prompt)
-        recent_outcomes = ""
-        try:
-            recent_outcomes = self.stats_db.get_recent_outcomes(
-                pair, n=10, currency_symbol=self.state.currency_symbol
-            )
-        except Exception as e:
-            logger.debug(f"Failed to load recent outcomes: {e}")
-
-        # Step 2: Market Analysis (with F&G, multi-TF, strategic context, reasoning persistence)
-        analysis_result = self.market_analyst.execute({
-            "pair": pair,
-            "candles": candles,
-            "news_headlines": news_headlines,
-            "fear_greed": fg_prompt,
-            "multi_timeframe": mtf_prompt,
-            "strategic_context": strategic_context,
-            "currency_symbol": self.state.currency_symbol,
-            "cycle_id": cycle_id,
-            "stats_db": self.stats_db,
-            "trace_ctx": trace_ctx,
-        })
-
-        signal = analysis_result.get("signal", {})
-        if "error" in analysis_result:
-            logger.warning(f"Analysis failed for {pair}: {analysis_result.get('error')}")
-            self.journal.log_decision("analysis_failed", pair, "none", {"error": analysis_result.get('error')})
-            if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "analysis_failed", "error": analysis_result.get("error", "")})
-            return
-
-        # Notify on high-confidence signals
-        confidence = signal.get("confidence", 0)
-        notify_threshold = self.config.get("telegram", {}).get(
-            "notify_on_signal_confidence", 0.8
-        )
-        if confidence >= notify_threshold and self.telegram:
-            signal_obj = self.state.signals[-1] if self.state.signals else None
-            if signal_obj:
-                self.telegram.send_signal_notification(signal_obj.to_summary())
-
-        # Step 3: Strategy Generation
-        strategy_result = self.strategist.execute({
-            "signal": signal,
-            "active_tasks": [t.to_dict() for t in self.active_tasks if not t.completed],
-            "current_balance": self.coinbase.balance,
-            "open_positions": self.state.open_positions,
-            "recent_trades": [t.to_summary() for t in self.state.recent_trades],
-            "recent_outcomes": recent_outcomes,
-            "strategic_context": strategic_context,
-            "live_holdings_summary": self.state.holdings_summary,
-            "native_currency": self.state.native_currency,
-            "currency_symbol": self.state.currency_symbol,
-            "cycle_id": cycle_id,
-            "stats_db": self.stats_db,
-            "trace_ctx": trace_ctx,
-        })
-
-        if strategy_result.get("action") == "hold":
-            logger.info(f"📊 {pair}: HOLD — {strategy_result.get('reason', strategy_result.get('reasoning', 'No action'))}")
-            self.journal.log_decision("hold", pair, "hold", {"signal": signal, "reasoning": strategy_result.get('reason', '')})
-            if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "hold", "reason": strategy_result.get("reason", "")})
-            return
-
-        # Add current price to strategy result for risk manager
-        strategy_result["current_price"] = price
-
-        # Step 4: Risk Validation
-        # Use live portfolio value/cash when available, fallback to internal state
-        risk_portfolio_value = (
-            self.state.live_portfolio_value
-            if self.state.live_portfolio_value > 0
-            else self.state.portfolio_value
-        )
-        risk_cash_balance = (
-            sum(self.state.live_cash_balances.values())
-            if self.state.live_cash_balances
-            else self.state.cash_balance
-        )
-        risk_result = self.risk_manager.execute({
-            "proposal": strategy_result,
-            "portfolio_value": risk_portfolio_value,
-            "cash_balance": risk_cash_balance,
-            "cycle_id": cycle_id,
-            "stats_db": self.stats_db,
-            "trace_ctx": trace_ctx,
-        })
-
-        if not risk_result.get("approved"):
-            logger.info(f"🚫 {pair}: Trade rejected — {risk_result.get('reason', 'Unknown')}")
-            self.journal.log_decision("trade_rejected", pair, strategy_result.get("action", "unknown"), {
-                "reason": risk_result.get("reason", "Unknown"),
-                "proposal": strategy_result,
-            })
-            self.audit.log_rule_check("risk_validation", passed=False, details=risk_result.get('reason', 'Unknown'))
-            if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "rejected", "reason": risk_result.get("reason", "")})
-            return
-
-        # Step 5: Handle approval or execute
-        if risk_result.get("needs_approval"):
-            trade_desc = (
-                f"{risk_result['action'].upper()} {risk_result['pair']}\n"
-                f"Amount: {format_currency(risk_result['usd_amount'])}\n"
-                f"Price: {format_currency(risk_result['price'])}\n"
-                f"Stop-Loss: {format_currency(risk_result.get('stop_loss', 0))}\n"
-                f"Take-Profit: {format_currency(risk_result.get('take_profit', 0))}\n"
-                f"Confidence: {format_percentage(risk_result.get('confidence', 0))}"
-            )
-            trade_id = f"pending_{uuid.uuid4().hex[:8]}"
-            with self._pending_approvals_lock:
-                risk_result["_queued_at"] = datetime.now(timezone.utc).isoformat()
-                self._pending_approvals[trade_id] = risk_result
-
-            if self.telegram:
-                self.telegram.request_approval(trade_desc, trade_id)
-            else:
-                logger.warning("Trade needs approval but Telegram not configured — skipping")
-            if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "pending_approval", "trade_id": trade_id})
-            return
-
-        # Step 6: Execute Trade
-        exec_result = self.executor.execute({
-            "approved_trade": risk_result,
-        })
-
-        if exec_result.get("executed"):
-            # Persist trade to StatsDB (returns the SQLite row id for backfilling)
-            try:
-                stats_trade_id = self.stats_db.record_trade(
-                    pair=risk_result.get('pair', pair),
-                    action=risk_result.get('action', 'unknown'),
-                    price=risk_result.get('price', price),
-                    quantity=(
-                        exec_result.get('trade', {}).get('filled_quantity')
-                        or exec_result.get('trade', {}).get('quantity')
-                        or 0
-                    ),
-                    usd_amount=risk_result.get('usd_amount', 0),
-                    confidence=risk_result.get('confidence', 0),
-                    signal_type=signal.get('signal_type', ''),
-                    stop_loss=risk_result.get('stop_loss', 0),
-                    take_profit=risk_result.get('take_profit', 0),
-                    reasoning=risk_result.get('reasoning', ''),
-                )
-                # Link this cycle's reasoning rows to the trade that resulted from them
-                self.stats_db.backfill_reasoning_trade_id(cycle_id, stats_trade_id)
-            except Exception as e:
-                logger.debug(f"Failed to record trade in StatsDB: {e}")
-
-            # Log to journal and audit
-            self.journal.log_trade(
-                pair=risk_result.get('pair', pair),
-                action=risk_result.get('action', 'unknown'),
-                quantity=(
-                    exec_result.get('trade', {}).get('filled_quantity')
-                    or exec_result.get('trade', {}).get('quantity')
-                    or 0
-                ),
-                price=risk_result.get('price', price),
-                usd_amount=risk_result.get('usd_amount', 0),
-                confidence=risk_result.get('confidence', 0),
-                signal_type=signal.get('signal_type', ''),
-                stop_loss=risk_result.get('stop_loss', 0),
-                take_profit=risk_result.get('take_profit', 0),
-                reasoning=risk_result.get('reasoning', ''),
-                fear_greed=self.fear_greed.last_value or 0,
-                rsi=signal.get('rsi', 0),
-                macd_signal=signal.get('macd_signal', ''),
-            )
-            self.audit.log_trade(
-                pair=risk_result.get('pair', pair),
-                action=risk_result.get('action', 'unknown'),
-                amount=risk_result.get('usd_amount', 0),
-                price=risk_result.get('price', price),
-            )
-
-            # Set up trailing stop for new position
-            if risk_result.get('action') == 'buy':
-                self.trailing_stops.add_stop(
-                    pair=risk_result.get('pair', pair),
-                    entry_price=risk_result.get('price', price),
-                    initial_stop=risk_result.get('stop_loss'),
-                )
-
-            # Notify: trade executed
-            trade_event = (
-                f"{'BUY' if risk_result['action'] == 'buy' else 'SELL'} "
-                f"{risk_result['pair']} — "
-                f"{format_currency(risk_result['usd_amount'])} "
-                f"at {format_currency(risk_result['price'])} "
-                f"(confidence: {format_percentage(risk_result.get('confidence', 0))})"
-            )
-            self.chat_handler.queue_event(f"Trade executed: {trade_event}")
-
-            if self.telegram and self.config.get("telegram", {}).get("notify_on_trade", True):
-                trade_data = exec_result.get("trade", {})
-                self.telegram.send_trade_notification(trade_event)
-
-            # Finish trace with trade outcome metadata
-            if trace_ctx is not None:
-                try:
-                    trace_ctx.finish(metadata={
-                        "trade_executed": True,
-                        "action": risk_result.get("action"),
-                        "usd_amount": risk_result.get("usd_amount"),
-                        "confidence": risk_result.get("confidence"),
-                    })
-                except Exception:
-                    pass
 
     def _reconcile_positions(self) -> None:
         """
@@ -1028,114 +722,7 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Position reconciliation failed: {e}")
 
-    def _sync_to_redis(self) -> None:
-        """Sync current state to Redis for the dashboard / other services."""
-        if not self.redis:
-            return
-        try:
-            self.redis.set(
-                "agent:state",
-                json.dumps(self.state.to_summary(), default=str),
-                ex=300,
-            )
-            self.redis.set(
-                "agent:rules_status",
-                json.dumps(self.rules.get_status(), default=str),
-                ex=300,
-            )
-            # Persist pending approvals so they survive restarts
-            with self._pending_approvals_lock:
-                pending_snapshot = dict(self._pending_approvals) if self._pending_approvals else None
-            if pending_snapshot:
-                self.redis.set(
-                    "agent:pending_approvals",
-                    json.dumps(pending_snapshot, default=str),
-                    ex=86400,  # 24h TTL
-                )
-        except Exception as e:
-            logger.debug(f"Redis sync failed: {e}")
 
-    def _load_pending_approvals(self) -> None:
-        """Load pending approvals from Redis on startup.
-
-        Re-validates each entry so a poisoned/corrupted Redis key cannot inject
-        arbitrary trade payloads that bypass AbsoluteRules on the next /approve.
-        """
-        if not self.redis:
-            return
-        try:
-            data = self.redis.get("agent:pending_approvals")
-            if not data:
-                return
-            loaded: dict = json.loads(data)
-            validated: dict = {}
-            for trade_id, approval in loaded.items():
-                is_swap = approval.get("_is_swap", False)
-                if is_swap:
-                    # Swap proposals are structurally different — keep but log
-                    validated[trade_id] = approval
-                    continue
-                pair = approval.get("pair", "")
-                action = approval.get("action", "")
-                try:
-                    usd_amount = float(approval.get("usd_amount") or 0)
-                except (TypeError, ValueError):
-                    usd_amount = 0.0
-                from src.utils.security import validate_trading_pair
-                if (
-                    not validate_trading_pair(pair)
-                    or action not in ("buy", "sell")
-                    or usd_amount <= 0
-                    or usd_amount > self.rules.max_single_trade_usd * 2
-                ):
-                    logger.warning(
-                        f"⚠️ Discarding invalid pending approval from Redis: "
-                        f"id={trade_id!r} pair={pair!r} action={action!r} "
-                        f"usd={usd_amount}"
-                    )
-                    continue
-                validated[trade_id] = approval
-            discarded = len(loaded) - len(validated)
-            self._pending_approvals = validated
-            logger.info(
-                f"Loaded {len(validated)} pending approvals from Redis"
-                + (f" ({discarded} discarded as invalid)" if discarded else "")
-            )
-        except Exception as e:
-            logger.debug(f"Failed to load pending approvals: {e}")
-
-    _PENDING_APPROVAL_TTL_SECONDS: int = 3600  # 1 hour
-
-    def _prune_stale_approvals(self) -> None:
-        """Remove pending approvals that have been waiting longer than the TTL.
-
-        Prevents the dict from growing indefinitely when approvals are never
-        acted on (e.g. the operator stopped reading Telegram for a long time).
-        A stale pending approval is re-evaluated fresh on the next cycle anyway.
-        """
-        now = datetime.now(timezone.utc)
-        stale_ids = []
-        with self._pending_approvals_lock:
-            for trade_id, approval in self._pending_approvals.items():
-                queued_at_str = approval.get("_queued_at")
-                if not queued_at_str:
-                    # Legacy entry with no timestamp — treat as stale
-                    stale_ids.append(trade_id)
-                    continue
-                try:
-                    queued_at = datetime.fromisoformat(queued_at_str)
-                    age = (now - queued_at).total_seconds()
-                    if age > self._PENDING_APPROVAL_TTL_SECONDS:
-                        stale_ids.append(trade_id)
-                except Exception:
-                    stale_ids.append(trade_id)
-            for trade_id in stale_ids:
-                self._pending_approvals.pop(trade_id, None)
-        if stale_ids:
-            logger.info(
-                f"🧹 Pruned {len(stale_ids)} stale pending approval(s) "
-                f"(TTL={self._PENDING_APPROVAL_TTL_SECONDS}s): {stale_ids}"
-            )
 
     # =========================================================================
     # LLM Chat Handler — Function Registry
@@ -1157,15 +744,17 @@ class Orchestrator:
         from datetime import timezone as _tz
         fetch_ts = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        # Detect the native (quote) currency from the trading pairs
+        # Detect the native (quote) currency from config or fallback to pairs
         # e.g. pairs=["BTC-EUR","ETH-EUR","ATOM-EUR"] → native="EUR"
-        native = "USD"
-        for pair in self.pairs:
-            if "-" in pair:
-                _, quote = pair.rsplit("-", 1)
-                if quote in _KNOWN_FIAT:
-                    native = quote
-                    break
+        native = self.config.get("trading", {}).get("quote_currency", "auto").upper()
+        if native == "AUTO":
+            native = "USD"
+            for pair in self.pairs:
+                if "-" in pair:
+                    _, quote = pair.rsplit("-", 1)
+                    if quote in _KNOWN_FIAT:
+                        native = quote
+                        break
         currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
         symbol = currency_symbols.get(native, native + " ")
 
@@ -1422,7 +1011,7 @@ class Orchestrator:
                 sid: {
                     "sell": sp.sell_pair,
                     "buy": sp.buy_pair,
-                    "usd": sp.usd_amount,
+                    "quote_amount": sp.quote_amount,
                     "net_gain": f"+{sp.net_gain_pct*100:.2f}%",
                     "priority": sp.priority,
                 }
@@ -1631,7 +1220,108 @@ class Orchestrator:
 
         ch.register_function("cancel_swap", _cancel_swap)
 
+        # ─── Simulated Trades ──────────────────────────────────────────────────
+        def _simulate_trade(p: dict) -> dict:
+            pair = str(p.get("pair", "")).upper().strip()
+            from_currency = str(p.get("from_currency", "")).upper().strip()
+            notes = str(p.get("notes", ""))
+            try:
+                from_amount = float(p.get("from_amount", 0))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "from_amount must be a number"}
+
+            if not pair or not from_currency or from_amount <= 0:
+                return {"ok": False, "error": "pair, from_currency, and from_amount are required"}
+
+            # Derive to_currency from pair
+            parts = pair.split("-")
+            if len(parts) != 2:
+                return {"ok": False, "error": f"Invalid pair format: {pair!r}"}
+            base, quote = parts
+            to_currency = base if from_currency == quote else quote
+
+            # Get live entry price
+            try:
+                entry_price = self.coinbase.get_current_price(pair)
+            except Exception as e:
+                return {"ok": False, "error": f"Cannot fetch price for {pair}: {e}"}
+
+            if entry_price <= 0:
+                return {"ok": False, "error": f"No live price available for {pair}"}
+
+            quantity = from_amount / entry_price if from_currency == quote else from_amount * entry_price
+
+            sim_id = self.stats_db.record_simulated_trade(
+                pair=pair,
+                from_currency=from_currency,
+                from_amount=from_amount,
+                entry_price=entry_price,
+                quantity=quantity,
+                to_currency=to_currency,
+                notes=notes,
+            )
+            return {
+                "ok": True,
+                "id": sim_id,
+                "pair": pair,
+                "from_currency": from_currency,
+                "to_currency": to_currency,
+                "from_amount": from_amount,
+                "entry_price": entry_price,
+                "quantity": round(quantity, 8),
+                "notes": notes,
+            }
+
+        ch.register_function("simulate_trade", _simulate_trade)
+
+        def _list_simulations(p: dict) -> dict:
+            include_closed = bool(p.get("include_closed", False))
+            rows = self.stats_db.get_simulated_trades(include_closed=include_closed)
+            # Enrich open rows with live PnL
+            for row in rows:
+                if row["status"] == "open":
+                    try:
+                        current_price = self.coinbase.get_current_price(row["pair"])
+                    except Exception:
+                        current_price = row["entry_price"]
+                    if current_price > 0:
+                        pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
+                        pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
+                    else:
+                        pnl_abs = 0.0
+                        pnl_pct = 0.0
+                    row["current_price"] = current_price
+                    row["pnl_abs"] = round(pnl_abs, 4)
+                    row["pnl_pct"] = round(pnl_pct, 2)
+            return {"simulations": rows, "count": len(rows)}
+
+        ch.register_function("list_simulations", _list_simulations)
+
+        def _close_simulation(p: dict) -> dict:
+            try:
+                sim_id = int(p.get("sim_id", 0))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "sim_id must be an integer"}
+            # Fetch current price for this sim
+            rows = self.stats_db.get_simulated_trades(include_closed=False)
+            target = next((r for r in rows if r["id"] == sim_id), None)
+            if not target:
+                return {"ok": False, "error": f"No open simulation with id={sim_id}"}
+            try:
+                close_price = self.coinbase.get_current_price(target["pair"])
+            except Exception:
+                close_price = target["entry_price"]
+            if close_price <= 0:
+                close_price = target["entry_price"]
+            result = self.stats_db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
+            if not result:
+                return {"ok": False, "error": f"Failed to close simulation {sim_id}"}
+            return {"ok": True, **result}
+
+        ch.register_function("close_simulation", _close_simulation)
+
         logger.info(f"🧠 Registered {len(ch._function_handlers)} chat functions ({len(ch._tool_defs)} with schemas)")
+
 
     # =========================================================================
     # Proactive Updates
@@ -1858,7 +1548,7 @@ class Orchestrator:
             approved = {**approved, "needs_approval": False}
             result = self.executor.execute({"approved_trade": approved})
             if result.get("executed"):
-                return f"✅ Trade executed successfully!"
+                return "✅ Trade executed successfully!"
             return f"❌ Execution failed: {result.get('error', 'Unknown')}"
         return "Trade not found or already processed."
 
@@ -1905,7 +1595,7 @@ class Orchestrator:
                     # Execute autonomously (within allocation, fee-positive)
                     logger.info(
                         f"🔄 Auto-swap: {proposal.sell_pair} → {proposal.buy_pair} "
-                        f"(${proposal.usd_amount:.0f}, net +{proposal.net_gain_pct*100:.2f}%)"
+                        f"({format_currency(proposal.quote_amount)}, net +{proposal.net_gain_pct*100:.2f}%)"
                     )
                     result = self.rotator.execute_swap(proposal)
                     if result.get("executed") and self.telegram:
@@ -1913,9 +1603,9 @@ class Orchestrator:
                             f"🔄 *Auto-Swap Executed*\n\n"
                             f"Sold: {proposal.sell_pair}\n"
                             f"Bought: {proposal.buy_pair}\n"
-                            f"Amount: {format_currency(proposal.usd_amount)}\n"
+                            f"Amount: {format_currency(proposal.quote_amount)}\n"
                             f"Expected net gain: +{proposal.net_gain_pct*100:.2f}%\n"
-                            f"Fees: {format_currency(proposal.fee_estimate.total_fee_usd)}\n"
+                            f"Fees: {format_currency(proposal.fee_estimate.total_fee_quote)}\n"
                             f"Confidence: {format_percentage(proposal.confidence)}"
                         )
 
@@ -1996,7 +1686,7 @@ class Orchestrator:
             lines.append(
                 f"• `{swap_id}`\n"
                 f"  {proposal.sell_pair} → {proposal.buy_pair}\n"
-                f"  ${proposal.usd_amount:.0f} | "
+                f"  {format_currency(proposal.quote_amount)} | "
                 f"net +{proposal.net_gain_pct*100:.2f}%\n"
             )
         lines.append("\nReply /approve <id> or /reject <id>")

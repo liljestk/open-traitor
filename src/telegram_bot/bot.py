@@ -107,6 +107,7 @@ class TelegramBot:
             "highstakes", "fees", "swaps", "rotate",
             "approve", "reject",
             "quiet", "chatty", "silent", "verbose",
+            "simulate", "sims",
         ]
         for cmd in shortcuts:
             self._app.add_handler(CommandHandler(cmd, self._handle_command))
@@ -212,7 +213,7 @@ class TelegramBot:
             # Pass the command as-is — the LLM understands /commands
             message_text = command
 
-        response = self._get_response(message_text, user)
+        response = await self._get_response(message_text, user)
         await self._send_reply(update.message, response)
 
     async def _handle_message(self, update, context) -> None:
@@ -221,7 +222,7 @@ class TelegramBot:
         if not self._is_authorized(user.id, user.username, "message"):
             return  # Silent ignore for free text
 
-        response = self._get_response(update.message.text, user)
+        response = await self._get_response(update.message.text, user)
         await self._send_reply(update.message, response)
 
     async def _handle_callback(self, update, context) -> None:
@@ -245,14 +246,14 @@ class TelegramBot:
         else:
             message = f"Button pressed: {data}"
 
-        response = self._get_response(message, user)
+        response = await self._get_response(message, user)
         await query.edit_message_text(response, parse_mode="Markdown")
 
     # =========================================================================
     # Core Response Logic
     # =========================================================================
 
-    def _get_response(self, text: str, user) -> str:
+    async def _get_response(self, text: str, user) -> str:
         """
         Get a response for a message. Tries LLM chat handler first,
         falls back to legacy command handler.
@@ -263,7 +264,7 @@ class TelegramBot:
         # Primary: LLM chat handler
         if self.chat_handler:
             try:
-                return self.chat_handler.handle_message(
+                return await self.chat_handler.handle_message(
                     text=text,
                     user_name=user_name,
                     user_id=user_id,

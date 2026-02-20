@@ -112,16 +112,16 @@ async def fetch_trade_history(days: int = 7, pair: str | None = None) -> list[di
     with closing(_get_conn()) as conn:
         if pair:
             rows = conn.execute(
-                """SELECT ts, pair, action, price, usd_amount, confidence,
-                          signal_type, pnl, fee_usd, reasoning
+                """SELECT ts, pair, action, price, quote_amount, confidence,
+                          signal_type, pnl, fee_quote, reasoning
                    FROM trades WHERE ts >= ? AND pair = ? AND pnl IS NOT NULL
                    ORDER BY ts DESC LIMIT 500""",
                 (cutoff, pair),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT ts, pair, action, price, usd_amount, confidence,
-                          signal_type, pnl, fee_usd, reasoning
+                """SELECT ts, pair, action, price, quote_amount, confidence,
+                          signal_type, pnl, fee_quote, reasoning
                    FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                    ORDER BY ts DESC LIMIT 500""",
                 (cutoff,),
@@ -145,8 +145,8 @@ async def fetch_portfolio_history(days: int = 7) -> dict:
                 COALESCE(MAX(pnl), 0) as best_pnl,
                 COALESCE(MIN(pnl), 0) as worst_pnl,
                 COALESCE(AVG(confidence), 0) as avg_confidence,
-                COALESCE(SUM(usd_amount), 0) as total_volume,
-                COALESCE(SUM(fee_usd), 0) as total_fees
+                COALESCE(SUM(quote_amount), 0) as total_volume,
+                COALESCE(SUM(fee_quote), 0) as total_fees
                FROM trades WHERE ts >= ? AND pnl IS NOT NULL""",
             (cutoff,),
         ).fetchone()

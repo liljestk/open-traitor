@@ -155,12 +155,12 @@ export default function CyclePlayback() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             {[
               { label: 'Action', value: cycle.trade.action },
-              { label: 'Price', value: `$${cycle.trade.price?.toLocaleString()}` },
-              { label: 'Amount', value: `$${cycle.trade.usd_amount?.toFixed(2)}` },
+              { label: 'Price', value: `€${cycle.trade.price?.toLocaleString()}` },
+              { label: 'Amount', value: `€${cycle.trade.quote_amount?.toFixed(2)}` },
               {
                 label: 'PnL',
                 value: cycle.trade.pnl != null
-                  ? `${cycle.trade.pnl >= 0 ? '+' : ''}$${cycle.trade.pnl.toFixed(2)}`
+                  ? `${cycle.trade.pnl >= 0 ? '+' : ''}€${cycle.trade.pnl.toFixed(2)}`
                   : '—',
               },
             ].map(({ label, value }) => (

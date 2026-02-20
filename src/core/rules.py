@@ -39,17 +39,17 @@ class AbsoluteRules:
     """
 
     def __init__(self, config: dict):
-        self.max_single_trade_usd = config.get("max_single_trade_usd", 500)
-        self.max_daily_spend_usd = config.get("max_daily_spend_usd", 2000)
-        self.max_daily_loss_usd = config.get("max_daily_loss_usd", 300)
+        self.max_single_trade = config.get("max_single_trade", config.get("max_single_trade_usd", 500))
+        self.max_daily_spend = config.get("max_daily_spend", config.get("max_daily_spend_usd", 2000))
+        self.max_daily_loss = config.get("max_daily_loss", config.get("max_daily_loss_usd", 300))
         self.max_portfolio_risk_pct = config.get("max_portfolio_risk_pct", 0.20)
-        self.require_approval_above_usd = config.get("require_approval_above_usd", 200)
+        self.require_approval_above = config.get("require_approval_above", config.get("require_approval_above_usd", 200))
         self.never_trade_pairs = set(config.get("never_trade_pairs", []))
         self.only_trade_pairs = set(config.get("only_trade_pairs", []))
         self.min_trade_interval_seconds = config.get("min_trade_interval_seconds", 60)
         self.max_trades_per_day = config.get("max_trades_per_day", 20)
         self.max_cash_per_trade_pct = config.get("max_cash_per_trade_pct", 0.25)
-        self.emergency_stop_portfolio_usd = config.get("emergency_stop_portfolio_usd", 5000)
+        self.emergency_stop_portfolio = config.get("emergency_stop_portfolio", config.get("emergency_stop_portfolio_usd", 5000))
         self.always_use_stop_loss = config.get("always_use_stop_loss", True)
         self.max_stop_loss_pct = config.get("max_stop_loss_pct", 0.05)
 
@@ -83,12 +83,12 @@ class AbsoluteRules:
             try:
                 # Only sum BUY trades for spend — sell proceeds are not an expense.
                 row = conn.execute(
-                    """SELECT COUNT(*) as cnt, COALESCE(SUM(usd_amount), 0) as spend
+                    """SELECT COUNT(*) as cnt, COALESCE(SUM(quote_amount), 0) as spend
                        FROM trades WHERE ts >= ?""",
                     (today_start,),
                 ).fetchone()
                 spend_row = conn.execute(
-                    """SELECT COALESCE(SUM(usd_amount), 0) as spend
+                    """SELECT COALESCE(SUM(quote_amount), 0) as spend
                        FROM trades WHERE ts >= ? AND action = 'buy'""",
                     (today_start,),
                 ).fetchone()
@@ -108,7 +108,7 @@ class AbsoluteRules:
                 self._last_reset_date = datetime.now(timezone.utc)
                 logger.info(
                     f"📅 Daily counters seeded from DB — "
-                    f"spend=${self._daily_spend:.2f}, loss=${self._daily_loss:.2f}, "
+                    f"spend={self._daily_spend:.2f}, loss={self._daily_loss:.2f}, "
                     f"trades={self._daily_trade_count}"
                 )
             finally:
@@ -120,14 +120,14 @@ class AbsoluteRules:
         """Log all active rules."""
         logger.info("═══════════════════════════════════════════")
         logger.info("🔒 ABSOLUTE RULES (cannot be overridden):")
-        logger.info(f"   Max single trade:     ${self.max_single_trade_usd:,.0f}")
-        logger.info(f"   Max daily spend:      ${self.max_daily_spend_usd:,.0f}")
-        logger.info(f"   Max daily loss:       ${self.max_daily_loss_usd:,.0f}")
+        logger.info(f"   Max single trade:     {self.max_single_trade:,.0f}")
+        logger.info(f"   Max daily spend:      {self.max_daily_spend:,.0f}")
+        logger.info(f"   Max daily loss:       {self.max_daily_loss:,.0f}")
         logger.info(f"   Max portfolio risk:   {self.max_portfolio_risk_pct:.0%}")
-        logger.info(f"   Approval required >   ${self.require_approval_above_usd:,.0f}")
+        logger.info(f"   Approval required >   {self.require_approval_above:,.0f}")
         logger.info(f"   Max trades/day:       {self.max_trades_per_day}")
         logger.info(f"   Min trade interval:   {self.min_trade_interval_seconds}s")
-        logger.info(f"   Emergency stop below: ${self.emergency_stop_portfolio_usd:,.0f}")
+        logger.info(f"   Emergency stop below: {self.emergency_stop_portfolio:,.0f}")
         logger.info(f"   Always stop-loss:     {self.always_use_stop_loss}")
         if self.never_trade_pairs:
             logger.info(f"   Blacklisted pairs:    {self.never_trade_pairs}")
@@ -149,10 +149,12 @@ class AbsoluteRules:
         self,
         pair: str,
         action: TradeAction,
-        usd_value: float,
+        quote_value: float,
         portfolio_value: float,
         cash_balance: float,
         has_stop_loss: bool = False,
+        # Legacy alias
+        usd_value: float | None = None,
     ) -> tuple[bool, list[RuleViolation], bool]:
         """
         Check if a proposed trade violates any absolute rules.
@@ -164,16 +166,19 @@ class AbsoluteRules:
         (main loop + Telegram-approved trade) cannot both pass the same daily
         spend / trade-count limits simultaneously.
         """
+        # Backwards compat: accept usd_value as legacy kwarg
+        if usd_value is not None and quote_value == 0:
+            quote_value = usd_value
         with self._lock:
             return self._check_trade_impl(
-                pair, action, usd_value, portfolio_value, cash_balance, has_stop_loss
+                pair, action, quote_value, portfolio_value, cash_balance, has_stop_loss
             )
 
     def _check_trade_impl(
         self,
         pair: str,
         action: TradeAction,
-        usd_value: float,
+        quote_value: float,
         portfolio_value: float,
         cash_balance: float,
         has_stop_loss: bool = False,
@@ -202,26 +207,26 @@ class AbsoluteRules:
             ))
 
         # --- Rule: Max single trade ---
-        if usd_value > self.max_single_trade_usd:
+        if quote_value > self.max_single_trade:
             violations.append(RuleViolation(
                 "max_single_trade",
-                f"Trade value ${usd_value:,.2f} exceeds max ${self.max_single_trade_usd:,.0f}",
+                f"Trade value {quote_value:,.2f} exceeds max {self.max_single_trade:,.0f}",
                 "Reduce position size",
             ))
 
         # --- Rule: Max daily spend (BUY only — sells are returns, not expenses) ---
-        if action == TradeAction.BUY and self._daily_spend + usd_value > self.max_daily_spend_usd:
+        if action == TradeAction.BUY and self._daily_spend + quote_value > self.max_daily_spend:
             violations.append(RuleViolation(
                 "max_daily_spend",
-                f"Daily spend would be ${self._daily_spend + usd_value:,.2f}, max is ${self.max_daily_spend_usd:,.0f}",
-                f"Already spent today: ${self._daily_spend:,.2f}",
+                f"Daily spend would be {self._daily_spend + quote_value:,.2f}, max is {self.max_daily_spend:,.0f}",
+                f"Already spent today: {self._daily_spend:,.2f}",
             ))
 
         # --- Rule: Max daily loss ---
-        if self._daily_loss >= self.max_daily_loss_usd:
+        if self._daily_loss >= self.max_daily_loss:
             violations.append(RuleViolation(
                 "max_daily_loss",
-                f"Daily loss limit reached: ${self._daily_loss:,.2f}",
+                f"Daily loss limit reached: {self._daily_loss:,.2f}",
                 "Trading suspended until tomorrow",
             ))
 
@@ -245,25 +250,25 @@ class AbsoluteRules:
 
         # --- Rule: Max cash per trade (BUY only — not meaningful when selling an asset) ---
         if action == TradeAction.BUY and cash_balance > 0:
-            cash_pct = usd_value / cash_balance
+            cash_pct = quote_value / cash_balance
             if cash_pct > self.max_cash_per_trade_pct:
                 violations.append(RuleViolation(
                     "max_cash_per_trade",
                     f"Trade uses {cash_pct:.0%} of cash, max is {self.max_cash_per_trade_pct:.0%}",
-                    f"Cash: ${cash_balance:,.2f}, Trade: ${usd_value:,.2f}",
+                    f"Cash: {cash_balance:,.2f}, Trade: {quote_value:,.2f}",
                 ))
 
         # --- Rule: Emergency portfolio stop ---
-        if portfolio_value < self.emergency_stop_portfolio_usd:
+        if portfolio_value < self.emergency_stop_portfolio:
             violations.append(RuleViolation(
                 "emergency_stop",
-                f"Portfolio ${portfolio_value:,.2f} below emergency stop ${self.emergency_stop_portfolio_usd:,.0f}",
+                f"Portfolio {portfolio_value:,.2f} below emergency stop {self.emergency_stop_portfolio:,.0f}",
                 "ALL TRADING HALTED",
             ))
 
         # --- Rule: Portfolio risk ---
         if portfolio_value > 0:
-            risk_pct = usd_value / portfolio_value
+            risk_pct = quote_value / portfolio_value
             if risk_pct > self.max_portfolio_risk_pct:
                 violations.append(RuleViolation(
                     "max_portfolio_risk",
@@ -280,11 +285,11 @@ class AbsoluteRules:
             ))
 
         # --- Check: Needs approval ---
-        if usd_value > self.require_approval_above_usd and not violations:
+        if quote_value > self.require_approval_above and not violations:
             needs_approval = True
             logger.info(
-                f"⚠️ Trade ${usd_value:,.2f} exceeds approval threshold "
-                f"${self.require_approval_above_usd:,.0f} — requesting approval"
+                f"⚠️ Trade {quote_value:,.2f} exceeds approval threshold "
+                f"{self.require_approval_above:,.0f} — requesting approval"
             )
 
         # Log violations
@@ -294,24 +299,27 @@ class AbsoluteRules:
         is_allowed = len(violations) == 0
         return is_allowed, violations, needs_approval
 
-    def record_trade(self, usd_value: float, action: str = "buy") -> None:
+    def record_trade(self, quote_value: float, action: str = "buy", *, usd_value: float | None = None) -> None:
         """Record a trade for daily tracking.
 
         Only BUY trades count against ``_daily_spend``; SELL trades still
         increment the trade-count (rate-limiting) but do not consume spend budget.
         """
+        # Backwards compat: accept usd_value as legacy kwarg
+        if usd_value is not None and quote_value == 0:
+            quote_value = usd_value
         with self._lock:
             self._reset_daily_if_needed()
             if action == "buy":
-                self._daily_spend += usd_value
+                self._daily_spend += quote_value
             self._daily_trade_count += 1
             self._last_trade_time = datetime.now(timezone.utc)
 
-    def record_loss(self, loss_usd: float) -> None:
+    def record_loss(self, loss_amount: float) -> None:
         """Record a loss for daily tracking."""
         with self._lock:
             self._reset_daily_if_needed()
-            self._daily_loss += abs(loss_usd)
+            self._daily_loss += abs(loss_amount)
 
     def get_status(self) -> dict:
         """Get current rules status."""
@@ -319,44 +327,44 @@ class AbsoluteRules:
             self._reset_daily_if_needed()
             return {
                 "daily_spend": self._daily_spend,
-                "daily_spend_remaining": max(0, self.max_daily_spend_usd - self._daily_spend),
+                "daily_spend_remaining": max(0, self.max_daily_spend - self._daily_spend),
                 "daily_loss": self._daily_loss,
-                "daily_loss_remaining": max(0, self.max_daily_loss_usd - self._daily_loss),
+                "daily_loss_remaining": max(0, self.max_daily_loss - self._daily_loss),
                 "trades_today": self._daily_trade_count,
                 "trades_remaining": max(0, self.max_trades_per_day - self._daily_trade_count),
-                "max_single_trade": self.max_single_trade_usd,
-                "approval_threshold": self.require_approval_above_usd,
+                "max_single_trade": self.max_single_trade,
+                "approval_threshold": self.require_approval_above,
             }
 
     def get_rules_text(self) -> str:
         """Get a human-readable summary of all rules."""
         return (
             "🔒 **Absolute Rules**\n"
-            f"• Max single trade: ${self.max_single_trade_usd:,.0f}\n"
-            f"• Max daily spend: ${self.max_daily_spend_usd:,.0f}\n"
-            f"• Max daily loss: ${self.max_daily_loss_usd:,.0f}\n"
+            f"• Max single trade: {self.max_single_trade:,.0f}\n"
+            f"• Max daily spend: {self.max_daily_spend:,.0f}\n"
+            f"• Max daily loss: {self.max_daily_loss:,.0f}\n"
             f"• Max portfolio risk: {self.max_portfolio_risk_pct:.0%}\n"
-            f"• Approval required above: ${self.require_approval_above_usd:,.0f}\n"
+            f"• Approval required above: {self.require_approval_above:,.0f}\n"
             f"• Max trades/day: {self.max_trades_per_day}\n"
             f"• Min trade interval: {self.min_trade_interval_seconds}s\n"
-            f"• Emergency stop below: ${self.emergency_stop_portfolio_usd:,.0f}\n"
+            f"• Emergency stop below: {self.emergency_stop_portfolio:,.0f}\n"
             f"• Stop-loss required: {'Yes' if self.always_use_stop_loss else 'No'}\n"
         )
 
     def get_all_rules(self) -> dict:
         """Return all rule parameters as a flat dict (for LLM context)."""
         return {
-            "max_single_trade_usd": self.max_single_trade_usd,
-            "max_daily_spend_usd": self.max_daily_spend_usd,
-            "max_daily_loss_usd": self.max_daily_loss_usd,
+            "max_single_trade": self.max_single_trade,
+            "max_daily_spend": self.max_daily_spend,
+            "max_daily_loss": self.max_daily_loss,
             "max_portfolio_risk_pct": self.max_portfolio_risk_pct,
-            "require_approval_above_usd": self.require_approval_above_usd,
+            "require_approval_above": self.require_approval_above,
             "never_trade_pairs": sorted(self.never_trade_pairs),
             "only_trade_pairs": sorted(self.only_trade_pairs),
             "min_trade_interval_seconds": self.min_trade_interval_seconds,
             "max_trades_per_day": self.max_trades_per_day,
             "max_cash_per_trade_pct": self.max_cash_per_trade_pct,
-            "emergency_stop_portfolio_usd": self.emergency_stop_portfolio_usd,
+            "emergency_stop_portfolio": self.emergency_stop_portfolio,
             "always_use_stop_loss": self.always_use_stop_loss,
             "max_stop_loss_pct": self.max_stop_loss_pct,
         }
@@ -367,15 +375,15 @@ class AbsoluteRules:
     # ─────────────────────────────────────────────────────────────────────────
 
     _NUMERIC_RULES: frozenset[str] = frozenset({
-        "max_single_trade_usd",
-        "max_daily_spend_usd",
-        "max_daily_loss_usd",
+        "max_single_trade",
+        "max_daily_spend",
+        "max_daily_loss",
         "max_portfolio_risk_pct",
-        "require_approval_above_usd",
+        "require_approval_above",
         "min_trade_interval_seconds",
         "max_trades_per_day",
         "max_cash_per_trade_pct",
-        "emergency_stop_portfolio_usd",
+        "emergency_stop_portfolio",
         "max_stop_loss_pct",
     })
 

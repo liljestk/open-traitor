@@ -233,6 +233,9 @@ def _build_fast_patterns():
          r"|^show.*(holdings|account|portfolio)$"
          r"|^account overview",
          "get_account_holdings", None),
+        # Simulations fast path
+        (r"^/sims?$|^my simulations?\??$|^list simulations?\??$|^open simulations?\??$|^active simulations?\??$",
+         "list_simulations", None),
     ]
     for pattern_str, func_name, template in patterns:
         FAST_PATTERNS.append((
@@ -423,6 +426,23 @@ def _format_account_holdings(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_simulations(data: dict) -> str:
+    sims = data.get("simulations", [])
+    if not sims:
+        return "📭 No active simulations."
+    lines = [f"🧪 *{len(sims)} Active Simulations:*\n"]
+    for s in sims:
+        pnl = s.get("pnl_abs", 0)
+        pct = s.get("pnl_pct", 0)
+        emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        lines.append(
+            f"• `{s['id']}` *{s['pair']}* "
+            f"({s['from_amount']} {s['from_currency']} → {s['quantity']:.4g} {s['to_currency']})\n"
+            f"  {emoji} PnL: {pnl:+.2f} ({pct:+.2f}%) | Entry: {s['entry_price']:.4g} → Now: {s.get('current_price', s['entry_price']):.4g}"
+        )
+    return "\n".join(lines)
+
+
 # Map function names to formatters
 DATA_FORMATTERS = {
     "get_status": _format_status,
@@ -433,6 +453,7 @@ DATA_FORMATTERS = {
     "get_fear_greed": _format_fear_greed,
     "get_recent_signals": _format_signals,
     "get_account_holdings": _format_account_holdings,
+    "list_simulations": _format_simulations,
 }
 
 
@@ -559,22 +580,27 @@ class ProactiveEngine:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread = threading.Thread(target=self._run_loop_thread, daemon=True)
         self._thread.start()
         logger.info("🔄 Proactive engine started (30s tick)")
 
     def stop(self) -> None:
         self._running = False
 
-    def _run_loop(self) -> None:
+    def _run_loop_thread(self) -> None:
+        import asyncio
+        asyncio.run(self._run_loop())
+
+    async def _run_loop(self) -> None:
+        import asyncio
         while self._running:
             try:
-                self._tick()
+                await self._tick()
             except Exception as e:
                 logger.error(f"Proactive tick error: {e}", exc_info=True)
-            time.sleep(30)
+            await asyncio.sleep(30)
 
-    def _tick(self) -> None:
+    async def _tick(self) -> None:
         if not self._get_context:
             return
 
@@ -596,13 +622,13 @@ class ProactiveEngine:
         # ─── 1. Morning Plan (06:00-09:00 UTC, once per day) ───
         if self._last_morning != today and 6 <= hour <= 9:
             if self._personality.detail_level >= 2:
-                self._send_morning_plan(ctx)
+                await self._send_morning_plan(ctx)
             self._last_morning = today
 
         # ─── 2. Evening Summary (20:00-22:00 UTC, once per day) ───
         if self._last_evening != today and 20 <= hour <= 22:
             if self._personality.detail_level >= 1:
-                self._send_evening_summary(ctx)
+                await self._send_evening_summary(ctx)
             self._last_evening = today
 
         # ─── 3. Scheduled Reports ───
@@ -612,7 +638,7 @@ class ProactiveEngine:
         now = time.time()
         interval = self._personality.update_interval
         if interval > 0 and (now - self._last_periodic) >= interval:
-            self._send_periodic_update(ctx)
+            await self._send_periodic_update(ctx)
             self._last_periodic = now
 
         # ─── 5. Record portfolio snapshot ───
@@ -654,7 +680,7 @@ class ProactiveEngine:
             elif price > 0:
                 self._last_prices[pair] = price
 
-    def _send_periodic_update(self, ctx: dict) -> None:
+    async def _send_periodic_update(self, ctx: dict) -> None:
         events = self._drain_events()
 
         if not events and self._personality.detail_level < 3:
@@ -694,7 +720,7 @@ RULES:
 - Use specific numbers. Be opinionated."""
 
         try:
-            r = self._llm.chat(
+            r = await self._llm.chat(
                 system_prompt="Pro crypto trader, quick Telegram update.",
                 user_message=prompt, temperature=0.6, max_tokens=300,
             )
@@ -703,7 +729,7 @@ RULES:
         except Exception as e:
             logger.debug(f"Periodic update failed: {e}")
 
-    def _send_morning_plan(self, ctx: dict) -> None:
+    async def _send_morning_plan(self, ctx: dict) -> None:
         """Morning briefing: overnight recap + plan for the day."""
         overnight_text = ""
         if self._stats_db:
@@ -743,7 +769,7 @@ FORMAT:
 Keep it under 12 lines. Specific prices and levels."""
 
         try:
-            r = self._llm.chat(
+            r = await self._llm.chat(
                 system_prompt="Pro crypto trader, morning briefing.",
                 user_message=prompt, temperature=0.5, max_tokens=600,
             )
@@ -751,7 +777,7 @@ Keep it under 12 lines. Specific prices and levels."""
         except Exception as e:
             logger.debug(f"Morning plan failed: {e}")
 
-    def _send_evening_summary(self, ctx: dict) -> None:
+    async def _send_evening_summary(self, ctx: dict) -> None:
         """Evening recap: how the day went, save to stats DB."""
         day_text = ""
         if self._stats_db:
@@ -804,7 +830,7 @@ FORMAT:
 Keep it under 10 lines. Be honest about losses."""
 
         try:
-            r = self._llm.chat(
+            r = await self._llm.chat(
                 system_prompt="Pro crypto trader, evening recap.",
                 user_message=prompt, temperature=0.5, max_tokens=500,
             )
@@ -955,7 +981,7 @@ class TelegramChatHandler:
     # Main message handler
     # ────────────────────────────────────────────────────────────────────────
 
-    def handle_message(self, text: str, user_name: str = "Owner", user_id: str = "") -> str:
+    async def handle_message(self, text: str, user_name: str = "Owner", user_id: str = "") -> str:
         """
         Handle any incoming message. Tries fast path first, falls back to LLM.
         """
@@ -977,7 +1003,7 @@ class TelegramChatHandler:
             if self.rate_limiter:
                 self.rate_limiter.wait("ollama")
 
-            response = self._smart_response(text, user_name)
+            response = await self._smart_response(text, user_name)
             self.memory.add("assistant", response)
             return response
 
@@ -1162,7 +1188,7 @@ class TelegramChatHandler:
     # Smart Path — native tool calling (preferred) + text fallback
     # ────────────────────────────────────────────────────────────────────────
 
-    def _smart_response(self, text: str, user_name: str) -> str:
+    async def _smart_response(self, text: str, user_name: str) -> str:
         """
         Handle complex messages using native LLM tool calling.
 
@@ -1189,7 +1215,7 @@ class TelegramChatHandler:
         tools = self._build_openai_tools()
         if tools:
             try:
-                return self._smart_response_with_tools(
+                return await self._smart_response_with_tools(
                     text, system_prompt, conv_messages, tools
                 )
             except Exception as e:
@@ -1198,9 +1224,9 @@ class TelegramChatHandler:
                 )
 
         # ── Text fallback (legacy ACTION: parsing) ──────────────────────────
-        return self._smart_response_text(text, system_prompt)
+        return await self._smart_response_text(text, system_prompt)
 
-    def _smart_response_with_tools(
+    async def _smart_response_with_tools(
         self,
         text: str,
         system_prompt: str,
@@ -1215,7 +1241,7 @@ class TelegramChatHandler:
         Step 3 — send results back and get the final trader-voiced response.
         """
         # ── Step 1: initial call ─────────────────────────────────────────────
-        text_content, tool_calls, assistant_msg = self.llm.chat_with_tools(
+        text_content, tool_calls, assistant_msg = await self.llm.chat_with_tools(
             system_prompt=system_prompt,
             user_message=text,
             tools=tools,
@@ -1245,7 +1271,7 @@ class TelegramChatHandler:
                             + json.dumps(fresh, default=str)
                             + "\n━━━ USE ONLY THESE PRICES — NOT TRAINING DATA ━━━"
                         )
-                        final_text, _, _ = self.llm.chat_with_tools(
+                        final_text, _, _ = await self.llm.chat_with_tools(
                             system_prompt=enriched_system,
                             user_message=text,
                             tools=tools,
@@ -1284,7 +1310,7 @@ class TelegramChatHandler:
             + tool_result_messages
         )
 
-        final_text, remaining_calls, _ = self.llm.chat_with_tools(
+        final_text, remaining_calls, _ = await self.llm.chat_with_tools(
             system_prompt=system_prompt,
             user_message="",
             tools=tools,
@@ -1302,7 +1328,7 @@ class TelegramChatHandler:
 
         return final_text or "Done."
 
-    def _smart_response_text(self, text: str, system_prompt: str) -> str:
+    async def _smart_response_text(self, text: str, system_prompt: str) -> str:
         """
         Legacy text-based smart path used as fallback.
         Prompts the LLM to embed ACTION: lines which are then parsed and executed.
@@ -1339,11 +1365,11 @@ class TelegramChatHandler:
             "- To call a tool, put it on its own line: ACTION:tool_name|param=value\n"
             "- Examples:\n"
             "    ACTION:enable_highstakes|duration=4h\n"
-            "    ACTION:update_rule|param=max_single_trade_usd|value=300\n"
+            "    ACTION:update_rule|param=max_single_trade|value=300\n"
             "    ACTION:get_stats|hours=48\n"
         )
 
-        raw = self.llm.chat(
+        raw = await self.llm.chat(
             system_prompt=action_prompt,
             user_message=text,
             temperature=0.5,

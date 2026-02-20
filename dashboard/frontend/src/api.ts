@@ -30,7 +30,7 @@ export interface CycleSummary {
   action: string | null
   trade_id: number | null
   pnl: number | null
-  usd_amount: number | null
+  quote_amount: number | null
   price: number | null
   langfuse_trace_id: string | null
   total_prompt_tokens: number | null
@@ -60,14 +60,14 @@ export interface Trade {
   pair: string
   action: string
   price: number
-  usd_amount: number
+  quote_amount: number
   pnl: number | null
   confidence: number | null
 }
 
 export interface TradeFull extends Trade {
   quantity: number
-  fee_usd: number
+  fee_quote: number
   signal_type: string | null
   stop_loss: number | null
   take_profit: number | null

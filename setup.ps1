@@ -697,7 +697,7 @@ if ($setupTelegram) {
 }
 
 Write-Host "  ⚠️  IMPORTANT: Review config/settings.yaml to fine-tune:" -ForegroundColor Yellow
-Write-Host "     • Trade limits (max_single_trade_usd, etc.)" -ForegroundColor DarkGray
+Write-Host "     • Trade limits (max_single_trade, etc.)" -ForegroundColor DarkGray
 Write-Host "     • Portfolio rotation allocation %" -ForegroundColor DarkGray
 Write-Host "     • Fee safety margins" -ForegroundColor DarkGray
 Write-Host "     • High-stakes mode multipliers" -ForegroundColor DarkGray

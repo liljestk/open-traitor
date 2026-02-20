@@ -32,7 +32,7 @@ class ExecutorAgent(BaseAgent):
         self.coinbase = coinbase
         self.rules = rules
 
-    def run(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Execute an approved trade.
 
@@ -57,7 +57,7 @@ class ExecutorAgent(BaseAgent):
             return {"executed": False, "reason": "Hold — no trade"}
 
         pair = trade_info["pair"]
-        usd_amount = trade_info["usd_amount"]
+        quote_amount = trade_info.get("quote_amount", trade_info.get("usd_amount", 0))
         quantity = trade_info.get("quantity", 0)
         price = trade_info.get("price", 0)
         stop_loss = trade_info.get("stop_loss")
@@ -82,7 +82,7 @@ class ExecutorAgent(BaseAgent):
             if action == "buy":
                 result = self.coinbase.market_order_buy(
                     product_id=pair,
-                    quote_size=str(round(usd_amount, 2)),
+                    quote_size=str(round(quote_amount, 2)),
                 )
             else:
                 result = self.coinbase.market_order_sell(
@@ -121,7 +121,7 @@ class ExecutorAgent(BaseAgent):
 
                 # Record in state and rules
                 self.state.add_trade(trade)
-                self.rules.record_trade(usd_amount, action=action)
+                self.rules.record_trade(quote_amount, action=action)
 
                 self.logger.info(f"✅ Trade executed: {trade.to_summary()}")
 

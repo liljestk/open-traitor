@@ -76,14 +76,14 @@ class StatsDB:
                 action TEXT NOT NULL,
                 quantity REAL NOT NULL DEFAULT 0,
                 price REAL NOT NULL,
-                usd_amount REAL NOT NULL DEFAULT 0,
+                quote_amount REAL NOT NULL DEFAULT 0,
                 confidence REAL DEFAULT 0,
                 signal_type TEXT DEFAULT '',
                 stop_loss REAL DEFAULT 0,
                 take_profit REAL DEFAULT 0,
                 reasoning TEXT DEFAULT '',
                 pnl REAL DEFAULT NULL,
-                fee_usd REAL DEFAULT 0,
+                fee_quote REAL DEFAULT 0,
                 is_rotation INTEGER DEFAULT 0,
                 approved_by TEXT DEFAULT 'auto'
             );
@@ -160,6 +160,23 @@ class StatsDB:
                 temporal_run_id TEXT DEFAULT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS simulated_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                pair TEXT NOT NULL,
+                from_currency TEXT NOT NULL,
+                from_amount REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                to_currency TEXT NOT NULL,
+                notes TEXT DEFAULT '',
+                status TEXT DEFAULT 'open',
+                closed_at TEXT DEFAULT NULL,
+                close_price REAL DEFAULT NULL,
+                close_pnl_abs REAL DEFAULT NULL,
+                close_pnl_pct REAL DEFAULT NULL
+            );
+
             -- Indexes for fast time-range queries
             CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON portfolio_snapshots(ts);
             CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
@@ -186,12 +203,33 @@ class StatsDB:
             "ALTER TABLE strategic_context ADD COLUMN langfuse_trace_id TEXT DEFAULT NULL",
             "ALTER TABLE strategic_context ADD COLUMN temporal_workflow_id TEXT DEFAULT NULL",
             "ALTER TABLE strategic_context ADD COLUMN temporal_run_id TEXT DEFAULT NULL",
+            # simulated_trades table itself is created in _init_db; these handle old DBs that
+            # were created before the simulated_trades table was added.
+            """CREATE TABLE IF NOT EXISTS simulated_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                pair TEXT NOT NULL,
+                from_currency TEXT NOT NULL,
+                from_amount REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                to_currency TEXT NOT NULL,
+                notes TEXT DEFAULT '',
+                status TEXT DEFAULT 'open',
+                closed_at TEXT DEFAULT NULL,
+                close_price REAL DEFAULT NULL,
+                close_pnl_abs REAL DEFAULT NULL,
+                close_pnl_pct REAL DEFAULT NULL
+            )""",
+            # Currency-agnostic rename: usd_amount → quote_amount, fee_usd → fee_quote
+            "ALTER TABLE trades RENAME COLUMN usd_amount TO quote_amount",
+            "ALTER TABLE trades RENAME COLUMN fee_usd TO fee_quote",
         ]
         for sql in migrations:
             try:
                 conn.execute(sql)
             except sqlite3.OperationalError:
-                pass  # column already exists
+                pass  # column already exists or already renamed
         conn.commit()
 
     # ─── Portfolio Snapshots ───────────────────────────────────────────────
@@ -253,28 +291,28 @@ class StatsDB:
         action: str,
         price: float,
         quantity: float = 0,
-        usd_amount: float = 0,
+        quote_amount: float = 0,
         confidence: float = 0,
         signal_type: str = "",
         stop_loss: float = 0,
         take_profit: float = 0,
         reasoning: str = "",
         pnl: Optional[float] = None,
-        fee_usd: float = 0,
+        fee_quote: float = 0,
         is_rotation: bool = False,
         approved_by: str = "auto",
     ) -> int:
         conn = self._get_conn()
         cursor = conn.execute(
             """INSERT INTO trades
-               (pair, action, quantity, price, usd_amount, confidence,
+               (pair, action, quantity, price, quote_amount, confidence,
                 signal_type, stop_loss, take_profit, reasoning, pnl,
-                fee_usd, is_rotation, approved_by)
+                fee_quote, is_rotation, approved_by)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                pair, action, quantity, price, usd_amount, confidence,
+                pair, action, quantity, price, quote_amount, confidence,
                 signal_type, stop_loss, take_profit, reasoning, pnl,
-                fee_usd, 1 if is_rotation else 0, approved_by,
+                fee_quote, 1 if is_rotation else 0, approved_by,
             ),
         )
         conn.commit()
@@ -309,8 +347,8 @@ class StatsDB:
                 COALESCE(MAX(pnl), 0) as best_pnl,
                 COALESCE(MIN(pnl), 0) as worst_pnl,
                 COALESCE(AVG(pnl), 0) as avg_pnl,
-                COALESCE(SUM(usd_amount), 0) as total_volume,
-                COALESCE(SUM(fee_usd), 0) as total_fees,
+                COALESCE(SUM(quote_amount), 0) as total_volume,
+                COALESCE(SUM(fee_quote), 0) as total_fees,
                 COALESCE(AVG(confidence), 0) as avg_confidence
                FROM trades WHERE ts >= ?""",
             (cutoff,),
@@ -328,7 +366,7 @@ class StatsDB:
                 SUM(CASE WHEN action='sell' THEN 1 ELSE 0 END) as sells,
                 COALESCE(SUM(pnl), 0) as total_pnl,
                 COALESCE(AVG(confidence), 0) as avg_confidence,
-                COALESCE(SUM(usd_amount), 0) as total_volume
+                COALESCE(SUM(quote_amount), 0) as total_volume
                FROM trades WHERE ts >= ? AND pair = ?""",
             (cutoff, pair),
         ).fetchone()
@@ -502,13 +540,13 @@ class StatsDB:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         best = conn.execute(
-            """SELECT pair, action, pnl, price, usd_amount, ts
+            """SELECT pair, action, pnl, price, quote_amount, ts
                FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                ORDER BY pnl DESC LIMIT 3""",
             (cutoff,),
         ).fetchall()
         worst = conn.execute(
-            """SELECT pair, action, pnl, price, usd_amount, ts
+            """SELECT pair, action, pnl, price, quote_amount, ts
                FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                ORDER BY pnl ASC LIMIT 3""",
             (cutoff,),
@@ -635,7 +673,7 @@ class StatsDB:
                         json_extract(ar.reasoning_json, '$.action') END) as action,
                     t.id as trade_id,
                     t.pnl,
-                    t.usd_amount,
+                    t.quote_amount,
                     t.price,
                     ar.langfuse_trace_id,
                     SUM(ar.prompt_tokens) as total_prompt_tokens,
@@ -663,7 +701,7 @@ class StatsDB:
                         json_extract(ar.reasoning_json, '$.action') END) as action,
                     t.id as trade_id,
                     t.pnl,
-                    t.usd_amount,
+                    t.quote_amount,
                     t.price,
                     ar.langfuse_trace_id,
                     SUM(ar.prompt_tokens) as total_prompt_tokens,
@@ -820,3 +858,79 @@ class StatsDB:
             (date, plan_text),
         )
         conn.commit()
+
+    # ─── Simulated Trades ──────────────────────────────────────────────────
+
+    def record_simulated_trade(
+        self,
+        pair: str,
+        from_currency: str,
+        from_amount: float,
+        entry_price: float,
+        quantity: float,
+        to_currency: str,
+        notes: str = "",
+    ) -> int:
+        """Record a new simulated (paper) trade and return its id."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            """INSERT INTO simulated_trades
+               (pair, from_currency, from_amount, entry_price, quantity, to_currency, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (pair, from_currency, from_amount, entry_price, quantity, to_currency, notes),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_simulated_trades(self, include_closed: bool = False) -> list[dict]:
+        """Return all (open, or all including closed) simulated trades."""
+        conn = self._get_conn()
+        if include_closed:
+            rows = conn.execute(
+                "SELECT * FROM simulated_trades ORDER BY ts DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM simulated_trades WHERE status = 'open' ORDER BY ts DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def close_simulated_trade(
+        self,
+        sim_id: int,
+        close_price: float,
+    ) -> Optional[dict]:
+        """
+        Mark a simulated trade as closed, compute and store final PnL.
+        Returns the updated row dict, or None if not found.
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM simulated_trades WHERE id = ? AND status = 'open'",
+            (sim_id,),
+        ).fetchone()
+        if not row:
+            return None
+        row = dict(row)
+        quantity = row["quantity"]
+        entry_price = row["entry_price"]
+        pnl_abs = (close_price - entry_price) * quantity
+        pnl_pct = ((close_price / entry_price) - 1) * 100 if entry_price > 0 else 0.0
+        closed_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """UPDATE simulated_trades
+               SET status='closed', closed_at=?, close_price=?,
+                   close_pnl_abs=?, close_pnl_pct=?
+               WHERE id=?""",
+            (closed_at, close_price, round(pnl_abs, 6), round(pnl_pct, 4), sim_id),
+        )
+        conn.commit()
+        row.update(
+            status="closed",
+            closed_at=closed_at,
+            close_price=close_price,
+            close_pnl_abs=round(pnl_abs, 6),
+            close_pnl_pct=round(pnl_pct, 4),
+        )
+        return row
+

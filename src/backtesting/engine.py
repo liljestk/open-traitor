@@ -205,13 +205,13 @@ class BacktestEngine:
                     entry_price = current_price * (1 + self.slippage_pct)
 
                     # Calculate position size
-                    usd_amount = balance * self.position_size_pct
-                    if usd_amount < 10:  # Minimum trade
+                    quote_amount = balance * self.position_size_pct
+                    if quote_amount < 10:  # Minimum trade
                         continue
 
-                    quantity = usd_amount / entry_price
-                    fee = usd_amount * self.fee_pct
-                    balance -= usd_amount + fee
+                    quantity = quote_amount / entry_price
+                    fee = quote_amount * self.fee_pct
+                    balance -= quote_amount + fee
 
                     # Calculate stops
                     stop_loss = entry_price * (1 - entry_signal.get("stop_pct", 0.05))

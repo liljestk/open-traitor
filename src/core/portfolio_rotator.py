@@ -60,7 +60,7 @@ class SwapProposal:
         self,
         sell_pair: str,
         buy_pair: str,
-        usd_amount: float,
+        usd_amount: float,  # kept as param name for backwards compat
         sell_score: float,
         buy_score: float,
         expected_gain_pct: float,
@@ -72,7 +72,7 @@ class SwapProposal:
     ):
         self.sell_pair = sell_pair
         self.buy_pair = buy_pair
-        self.usd_amount = usd_amount
+        self.quote_amount = usd_amount
         self.sell_score = sell_score
         self.buy_score = buy_score
         self.expected_gain_pct = expected_gain_pct
@@ -137,8 +137,8 @@ class PortfolioRotator:
         # Above this confidence, escalate as "high impact" to owner
         self.high_impact_confidence = rotation_cfg.get("high_impact_confidence", 0.80)
 
-        # Above this USD amount, always ask owner
-        self.approval_threshold_usd = rotation_cfg.get("approval_threshold_usd", 200.0)
+        # Above this amount, always ask owner
+        self.approval_threshold = rotation_cfg.get("approval_threshold", rotation_cfg.get("approval_threshold_usd", 200.0))
 
         # Track last swap times to prevent churn
         self._last_swap_times: dict[str, float] = {}
@@ -202,7 +202,7 @@ class PortfolioRotator:
             })
             allocation_pct = limits.get("swap_allocation_pct", self.autonomous_allocation_pct)
 
-        max_swap_usd = portfolio_value * allocation_pct
+        max_swap_quote = portfolio_value * allocation_pct
 
         for held_pair in held_pairs:
             held_ranking = next((r for r in rankings if r.pair == held_pair), None)
@@ -239,16 +239,16 @@ class PortfolioRotator:
                     continue
 
                 # Check if gain exceeds fees
-                swap_usd = min(
-                    max_swap_usd,
+                swap_quote = min(
+                    max_swap_quote,
                     current_prices.get(held_pair, 0) * 1.0,  # Position value
                 )
 
-                if swap_usd < self.fee_manager.min_trade_usd:
+                if swap_quote < self.fee_manager.min_trade_quote:
                     continue
 
                 worthwhile, fee_estimate = self.fee_manager.is_trade_worthwhile(
-                    usd_amount=swap_usd,
+                    quote_amount=swap_quote,
                     expected_gain_pct=expected_gain_pct / 100,  # Convert to decimal
                     is_swap=True,
                 )
@@ -265,13 +265,13 @@ class PortfolioRotator:
                 # Determine priority
                 avg_confidence = (held_ranking.confidence + candidate.confidence) / 2
                 priority = self._determine_priority(
-                    avg_confidence, swap_usd, score_delta
+                    avg_confidence, swap_quote, score_delta
                 )
 
                 proposal = SwapProposal(
                     sell_pair=held_pair,
                     buy_pair=candidate.pair,
-                    usd_amount=swap_usd,
+                    usd_amount=swap_quote,
                     sell_score=held_ranking.score,
                     buy_score=candidate.score,
                     expected_gain_pct=expected_gain_pct,
@@ -292,7 +292,7 @@ class PortfolioRotator:
 
                 logger.info(
                     f"🔄 Swap proposal: {held_pair} → {candidate.pair} | "
-                    f"${swap_usd:.0f} | gain: {expected_gain_pct:.2f}% | "
+                    f"{swap_quote:.0f} | gain: {expected_gain_pct:.2f}% | "
                     f"net: {net_gain_pct*100:.2f}% | priority: {priority}"
                 )
 
@@ -312,7 +312,7 @@ class PortfolioRotator:
         """
         logger.info(
             f"🔄 Executing swap: {proposal.sell_pair} → {proposal.buy_pair} "
-            f"(${proposal.usd_amount:.2f})"
+            f"({proposal.quote_amount:.2f})"
         )
 
         result = {
@@ -330,7 +330,7 @@ class PortfolioRotator:
             if sell_price <= 0:
                 result["error"] = f"Cannot get price for {proposal.sell_pair}"
                 return result
-            sell_quantity = proposal.usd_amount / sell_price
+            sell_quantity = proposal.quote_amount / sell_price
 
             sell_result = self.coinbase.market_order_sell(
                 product_id=proposal.sell_pair,
@@ -346,7 +346,7 @@ class PortfolioRotator:
 
             # Extract actual proceeds from the sell order
             order = sell_result.get("order", sell_result)
-            actual_proceeds = float(order.get("filled_value", proposal.usd_amount))
+            actual_proceeds = float(order.get("filled_value", proposal.quote_amount))
             sell_fee = float(order.get("fee", 0))
             actual_proceeds -= sell_fee
 
@@ -360,7 +360,7 @@ class PortfolioRotator:
                 logger.error(
                     f"⚠️ Swap buy failed after sell! "
                     f"Sold {proposal.sell_pair} but couldn't buy {proposal.buy_pair}. "
-                    f"Proceeds: ${actual_proceeds:.2f}"
+                    f"Proceeds: {actual_proceeds:.2f}"
                 )
                 result["error"] = f"Buy failed (sell succeeded): {buy_result}"
                 result["partial"] = True
@@ -380,8 +380,8 @@ class PortfolioRotator:
                     action="swap",
                     quantity=0,
                     price=0,
-                    usd_amount=proposal.usd_amount,
-                    fee=proposal.fee_estimate.total_fee_usd,
+                    quote_amount=proposal.quote_amount,
+                    fee=proposal.fee_estimate.total_fee_quote,
                     confidence=proposal.confidence,
                     signal_type="rotation",
                     reasoning=proposal.reasoning,
@@ -391,7 +391,7 @@ class PortfolioRotator:
                 self.audit.log("swap_execution", {
                     "sell_pair": proposal.sell_pair,
                     "buy_pair": proposal.buy_pair,
-                    "usd_amount": proposal.usd_amount,
+                    "quote_amount": proposal.quote_amount,
                     "expected_gain_pct": proposal.expected_gain_pct,
                     "fee_pct": proposal.fee_estimate.total_fee_pct,
                     "net_gain_pct": proposal.net_gain_pct,
@@ -401,8 +401,8 @@ class PortfolioRotator:
 
             logger.info(
                 f"✅ Swap completed: {proposal.sell_pair} → {proposal.buy_pair} | "
-                f"${proposal.usd_amount:.2f} | "
-                f"fees: ${proposal.fee_estimate.total_fee_usd:.2f}"
+                f"{proposal.quote_amount:.2f} | "
+                f"fees: {proposal.fee_estimate.total_fee_quote:.2f}"
             )
 
             proposal.executed = True
@@ -476,7 +476,7 @@ class PortfolioRotator:
     def _determine_priority(
         self,
         confidence: float,
-        usd_amount: float,
+        quote_amount: float,
         score_delta: float,
     ) -> str:
         """
@@ -490,19 +490,19 @@ class PortfolioRotator:
         # Check if high-stakes mode lowers the bar for autonomous
         if self.high_stakes.is_active:
             hs_limits = self.high_stakes.get_effective_limits({
-                "require_approval_above_usd": self.approval_threshold_usd,
+                "require_approval_above": self.approval_threshold,
                 "min_confidence": self.min_confidence,
             })
-            approval_threshold = hs_limits.get("require_approval_above_usd", 500)
+            approval_threshold = hs_limits.get("require_approval_above", 500)
         else:
-            approval_threshold = self.approval_threshold_usd
+            approval_threshold = self.approval_threshold
 
         # Critical: very large trades
-        if usd_amount > approval_threshold * 2:
+        if quote_amount > approval_threshold * 2:
             return "critical"
 
         # High-impact: above approval threshold OR very high confidence
-        if usd_amount > approval_threshold:
+        if quote_amount > approval_threshold:
             return "high_impact"
 
         if confidence >= self.high_impact_confidence and score_delta >= 0.5:
@@ -530,7 +530,7 @@ class PortfolioRotator:
             )
             lines.append(
                 f"{emoji} {i}. {p.sell_pair} → {p.buy_pair}\n"
-                f"   Amount: ${p.usd_amount:.0f}\n"
+                f"   Amount: {p.quote_amount:.0f}\n"
                 f"   Expected: +{p.expected_gain_pct:.2f}%\n"
                 f"   Fees: {p.fee_estimate.total_fee_pct*100:.2f}%\n"
                 f"   Net gain: {p.net_gain_pct*100:.2f}%\n"
@@ -550,10 +550,10 @@ class PortfolioRotator:
             f"🔄 *Swap Approval Request*\n\n"
             f"Sell: {proposal.sell_pair} (score: {proposal.sell_score:+.2f})\n"
             f"Buy: {proposal.buy_pair} (score: {proposal.buy_score:+.2f})\n"
-            f"Amount: ${proposal.usd_amount:.2f}\n"
+            f"Amount: {proposal.quote_amount:.2f}\n"
             f"Expected gain: +{proposal.expected_gain_pct:.2f}%\n"
             f"Trading fees: {proposal.fee_estimate.total_fee_pct*100:.2f}% "
-            f"(${proposal.fee_estimate.total_fee_usd:.2f})\n"
+            f"({proposal.fee_estimate.total_fee_quote:.2f})\n"
             f"Net gain: {proposal.net_gain_pct*100:.2f}%\n"
             f"Confidence: {proposal.confidence:.0%}\n\n"
             f"💡 {proposal.reasoning}\n\n"

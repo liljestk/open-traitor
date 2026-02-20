@@ -29,7 +29,7 @@ class RiskManagerAgent(BaseAgent):
         self.stop_loss_pct = self.risk_config.get("stop_loss_pct", 0.03)
         self.take_profit_pct = self.risk_config.get("take_profit_pct", 0.06)
 
-    def run(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Validate and potentially adjust a trade proposal.
 
@@ -53,19 +53,25 @@ class RiskManagerAgent(BaseAgent):
         if action == "hold":
             return {"approved": True, "action": "hold", "reason": "No trade proposed"}
 
-        pair = proposal.get("pair", "BTC-USD")
-        usd_amount = float(proposal.get("usd_amount", 0) or 0)
+        pair = proposal.get("pair", "BTC-EUR")
+        quote_amount = float(proposal.get("quote_amount", proposal.get("usd_amount", 0)) or 0)
         price = float(proposal.get("current_price", 0) or self.state.current_prices.get(pair, 0))
         stop_loss = proposal.get("stop_loss_price")
         take_profit = proposal.get("take_profit_price")
 
-        # If no USD amount specified, use quantity * price
+        # Get ATR if available from the latest signal
+        latest_signal = self.state.latest_signals.get(pair)
+        atr = None
+        if latest_signal and hasattr(latest_signal, "technical") and latest_signal.technical:
+            atr = getattr(latest_signal.technical, "atr", None)
+
+        # If no amount specified, use quantity * price
         quantity = float(proposal.get("quantity", 0) or 0)
-        if usd_amount <= 0 and quantity > 0 and price > 0:
-            usd_amount = quantity * price
+        if quote_amount <= 0 and quantity > 0 and price > 0:
+            quote_amount = quantity * price
 
         # If still no amount, reject
-        if usd_amount <= 0:
+        if quote_amount <= 0:
             return {
                 "approved": False,
                 "action": action,
@@ -85,7 +91,7 @@ class RiskManagerAgent(BaseAgent):
                     "approved": False,
                     "action": action,
                     "pair": pair,
-                    "usd_amount": usd_amount,
+                    "quote_amount": quote_amount,
                     "reason": (
                         f"Max open positions reached ({current_positions}/{max_positions}). "
                         f"Close an existing position before opening a new one."
@@ -95,20 +101,33 @@ class RiskManagerAgent(BaseAgent):
         # Ensure stop-loss
         has_stop_loss = stop_loss is not None
         if not has_stop_loss and action == "buy" and price > 0:
-            stop_loss = price * (1 - self.stop_loss_pct)
+            if atr:
+                # Use 2x ATR for stop loss
+                float_atr = float(atr)
+                stop_loss = price - (2 * float_atr)
+                self.logger.info(f"Added ATR-based stop-loss (2x ATR={float_atr:.2f}): {stop_loss:,.2f}")
+            else:
+                stop_loss = price * (1 - self.stop_loss_pct)
+                self.logger.info(f"Added default percentage stop-loss: {stop_loss:,.2f}")
             has_stop_loss = True
-            self.logger.info(f"Added default stop-loss: ${stop_loss:,.2f}")
 
         # Ensure take-profit
         if take_profit is None and action == "buy" and price > 0:
-            take_profit = price * (1 + self.take_profit_pct)
+            if atr:
+                # Use 3x ATR for take profit (1.5 risk/reward)
+                float_atr = float(atr)
+                take_profit = price + (3 * float_atr)
+                self.logger.info(f"Added ATR-based take-profit (3x ATR={float_atr:.2f}): {take_profit:,.2f}")
+            else:
+                take_profit = price * (1 + self.take_profit_pct)
+                self.logger.info(f"Added default percentage take-profit: {take_profit:,.2f}")
 
         # ===== CHECK ABSOLUTE RULES =====
         trade_action = TradeAction.BUY if action == "buy" else TradeAction.SELL
         is_allowed, violations, needs_approval = self.rules.check_trade(
             pair=pair,
             action=trade_action,
-            usd_value=usd_amount,
+            quote_value=quote_amount,
             portfolio_value=portfolio_value,
             cash_balance=cash_balance,
             has_stop_loss=has_stop_loss,
@@ -121,19 +140,30 @@ class RiskManagerAgent(BaseAgent):
                 "approved": False,
                 "action": action,
                 "pair": pair,
-                "usd_amount": usd_amount,
+                "quote_amount": quote_amount,
                 "reason": f"Absolute rule violation: {violation_text}",
                 "violations": [str(v) for v in violations],
             }
 
         # Adjust position size if too large relative to portfolio
         max_position = portfolio_value * self.risk_config.get("max_position_pct", 0.05)
-        if usd_amount > max_position:
-            original = usd_amount
-            usd_amount = max_position
+        
+        # Volatility-adjusted position sizing
+        if atr and price > 0 and action == "buy":
+            float_atr = float(atr)
+            atr_pct = float_atr / price
+            # If ATR is > 5% of price, reduce position size (high volatility)
+            if atr_pct > 0.05:
+                volatility_reduction = min(0.5, (0.05 / atr_pct))  # Cap reduction at 50%
+                max_position = max_position * volatility_reduction
+                self.logger.info(f"High volatility detected (ATR {atr_pct:.1%}). Reduced max position size by {1-volatility_reduction:.1%}.")
+                
+        if quote_amount > max_position:
+            original = quote_amount
+            quote_amount = max_position
             self.logger.info(
-                f"Adjusted position size: ${original:,.2f} → ${usd_amount:,.2f} "
-                f"(max {self.risk_config.get('max_position_pct', 0.05):.0%} of portfolio)"
+                f"Adjusted position size: {original:,.2f} → {quote_amount:,.2f} "
+                f"(max allowed: {max_position:,.2f})"
             )
 
         # Calculate final quantity
@@ -143,14 +173,14 @@ class RiskManagerAgent(BaseAgent):
             # Strategist specified exact quantity from ACTUAL COINBASE HOLDINGS
             pass  # keep quantity as-is
         elif price > 0:
-            quantity = usd_amount / price
+            quantity = quote_amount / price
 
         result = {
             "approved": True,
             "needs_approval": needs_approval,
             "action": action,
             "pair": pair,
-            "usd_amount": usd_amount,
+            "quote_amount": quote_amount,
             "quantity": quantity,
             "price": price,
             "stop_loss": stop_loss,
@@ -161,8 +191,8 @@ class RiskManagerAgent(BaseAgent):
 
         status = "✅ APPROVED" if not needs_approval else "⚠️ NEEDS TELEGRAM APPROVAL"
         self.logger.info(
-            f"{status}: {action.upper()} ${usd_amount:,.2f} of {pair} | "
-            f"SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}"
+            f"{status}: {action.upper()} {quote_amount:,.2f} of {pair} | "
+            f"SL: {stop_loss:,.2f} | TP: {take_profit:,.2f}"
         )
 
         # Persist risk decision trace (no LLM call — rule-based, so tokens=0)

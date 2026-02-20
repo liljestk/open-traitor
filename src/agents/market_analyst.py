@@ -54,7 +54,7 @@ class MarketAnalystAgent(BaseAgent):
         super().__init__("market_analyst", llm, state, config)
         self.technical = TechnicalAnalyzer(config.get("analysis", {}).get("technical", {}))
 
-    def run(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Analyze market data for a given trading pair.
 
@@ -108,7 +108,7 @@ class MarketAnalystAgent(BaseAgent):
                 model=self.llm.model,
             )
 
-        llm_response = self.llm.chat_json(
+        llm_response = await self.llm.chat_json(
             system_prompt=MARKET_ANALYSIS_SYSTEM_PROMPT,
             user_message=user_message,
             span=span,
@@ -237,6 +237,7 @@ Provide your analysis as JSON."""
                 volume_trend=indicators.get("volume_signal"),
                 support_level=indicators.get("support"),
                 resistance_level=indicators.get("resistance"),
+                atr=indicators.get("atr"),
             ),
             sentiment=SentimentSignals(
                 overall_sentiment=llm_analysis.get("sentiment_overall"),

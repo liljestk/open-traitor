@@ -271,15 +271,15 @@ TOOL_UPDATE_RULE = ToolDef(
             "Rule to update.",
             required=True,
             enum=[
-                "max_single_trade_usd",
-                "max_daily_spend_usd",
-                "max_daily_loss_usd",
+                "max_single_trade",
+                "max_daily_spend",
+                "max_daily_loss",
                 "max_portfolio_risk_pct",
-                "require_approval_above_usd",
+                "require_approval_above",
                 "min_trade_interval_seconds",
                 "max_trades_per_day",
                 "max_cash_per_trade_pct",
-                "emergency_stop_portfolio_usd",
+                "emergency_stop_portfolio",
                 "always_use_stop_loss",
                 "max_stop_loss_pct",
             ],
@@ -481,6 +481,48 @@ TOOL_GET_FEE_INFO = ToolDef(
     category="status",
 )
 
+# ── Simulated Trades ────────────────────────────────────────────────────────────────────
+
+TOOL_SIMULATE_TRADE = ToolDef(
+    name="simulate_trade",
+    description=(
+        "Open a simulated (paper) trade to see how it would perform without real money. "
+        "Supports EUR→Crypto (e.g. spend 1000 EUR to buy BTC) or Crypto→Crypto. "
+        "The entry price is fetched live from Coinbase."
+    ),
+    category="simulation",
+    params=[
+        ParamDef("pair", "string", "Trading pair, e.g. BTC-EUR or ETH-BTC.", required=True),
+        ParamDef("from_currency", "string", "Currency you are spending, e.g. EUR or BTC.", required=True),
+        ParamDef("from_amount", "number", "Amount of from_currency to spend.", required=True),
+        ParamDef("notes", "string", "Optional note / hypothesis for this simulation.", default=""),
+    ],
+)
+
+TOOL_LIST_SIMULATIONS = ToolDef(
+    name="list_simulations",
+    description=(
+        "List all active (or all including closed) simulated trades with their live PnL. "
+        "Use this when the user asks about their simulations, paper trades, or how a simulation is performing."
+    ),
+    category="simulation",
+    params=[
+        ParamDef("include_closed", "boolean", "Include closed simulations in the list.", default=False),
+    ],
+)
+
+TOOL_CLOSE_SIMULATION = ToolDef(
+    name="close_simulation",
+    description=(
+        "Close (archive) an active simulated trade, recording the final PnL at the current live price. "
+        "Use this when the user says 'close simulation X' or 'how did simulation X do'."
+    ),
+    category="simulation",
+    params=[
+        ParamDef("sim_id", "integer", "The simulation ID to close.", required=True),
+    ],
+)
+
 
 # ============================================================================
 # Registry — maps tool name → ToolDef
@@ -501,6 +543,8 @@ _BUILTIN_TOOLS: list[ToolDef] = [
     TOOL_ENABLE_HIGHSTAKES, TOOL_DISABLE_HIGHSTAKES,
     TOOL_APPROVE_ITEM, TOOL_REJECT_ITEM, TOOL_CANCEL_SWAP, TOOL_CREATE_TASK,
     TOOL_SCHEDULE_REPORT, TOOL_DELETE_SCHEDULE,
+    # Simulations
+    TOOL_SIMULATE_TRADE, TOOL_LIST_SIMULATIONS, TOOL_CLOSE_SIMULATION,
 ]
 
 BUILTIN_TOOL_REGISTRY: dict[str, ToolDef] = {t.name: t for t in _BUILTIN_TOOLS}
