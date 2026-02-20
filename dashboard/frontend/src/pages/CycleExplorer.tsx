@@ -67,7 +67,7 @@ export default function CycleExplorer() {
           <StatCard label="24h cycles" value={stats.cycles_24h} accent="blue" />
           <StatCard label="Active pairs" value={stats.active_pairs} />
           {stats.portfolio && (
-            <StatCard label="Portfolio" value={`$${stats.portfolio.total_value_usd.toLocaleString()}`} accent="blue" />
+            <StatCard label="Portfolio" value={`€${stats.portfolio.portfolio_value.toLocaleString()}`} accent="blue" />
           )}
         </div>
       )}

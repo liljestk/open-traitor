@@ -65,6 +65,27 @@ export interface Trade {
   confidence: number | null
 }
 
+export interface TradeFull extends Trade {
+  quantity: number
+  fee_usd: number
+  signal_type: string | null
+  stop_loss: number | null
+  take_profit: number | null
+  reasoning: string | null
+  is_rotation: number
+  approved_by: string
+}
+
+export interface EventLog {
+  id: number
+  ts: string
+  event_type: string
+  severity: string
+  pair: string | null
+  message: string
+  data: Record<string, unknown> | null
+}
+
 export interface CycleFull {
   cycle_id: string
   pair: string
@@ -90,7 +111,7 @@ export interface StatsSummary {
   active_pairs: number
   cycles_24h: number
   win_rate: number | null
-  portfolio?: { total_value_usd: number; total_pnl_usd: number; ts: string }
+  portfolio?: { portfolio_value: number; total_pnl: number; ts: string }
 }
 
 export interface StrategicPlan {
@@ -140,11 +161,43 @@ export interface LiveEvent {
   ts?: string
 }
 
+export interface SimulatedTrade {
+  id: number
+  ts: string
+  pair: string
+  from_currency: string
+  to_currency: string
+  from_amount: number
+  entry_price: number
+  current_price: number
+  quantity: number
+  pnl_abs: number
+  pnl_pct: number
+  status: 'open' | 'closed'
+  closed_at: string | null
+  close_price: number | null
+  close_pnl_abs: number | null
+  close_pnl_pct: number | null
+  notes: string
+}
+
 // ─── API calls ─────────────────────────────────────────────────────────────
 
 export const fetchCycles = (pair?: string, limit = 50, offset = 0) =>
   apiFetch<{ cycles: CycleSummary[]; count: number }>(
     `/cycles?limit=${limit}&offset=${offset}${pair ? `&pair=${pair}` : ''}`
+  )
+
+export const fetchTrades = (pair?: string, limit = 500, hours = 168) =>
+  apiFetch<{ trades: TradeFull[]; count: number }>(
+    `/trades?limit=${limit}&hours=${hours}${pair ? `&pair=${pair}` : ''}`
+  )
+
+export const exportTradesUrl = (hours = 720) => `${BASE}/trades/export?hours=${hours}`
+
+export const fetchEvents = (eventType?: string, limit = 500, hours = 168) =>
+  apiFetch<{ events: EventLog[]; count: number }>(
+    `/events?limit=${limit}&hours=${hours}${eventType ? `&event_type=${eventType}` : ''}`
   )
 
 export const fetchCycleFull = (cycleId: string) =>
@@ -168,6 +221,22 @@ export const fetchTemporalReplay = (workflowId: string, runId: string) =>
 
 export const triggerTemporalRerun = (workflowId: string, runId: string) =>
   apiFetch(`/temporal/rerun/${encodeURIComponent(workflowId)}/${encodeURIComponent(runId)}`, { method: 'POST' })
+
+export const fetchMarketPrice = (pair: string) =>
+  apiFetch<{ pair: string; price: number; ts: string }>(`/market/price?pair=${encodeURIComponent(pair)}`)
+
+export const createSimulatedTrade = (data: { pair: string; from_currency: string; from_amount: number; notes?: string }) =>
+  apiFetch<SimulatedTrade>('/simulated-trades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+
+export const fetchSimulatedTrades = (includeClosed = false) =>
+  apiFetch<{ simulations: SimulatedTrade[]; count: number }>(`/simulated-trades?include_closed=${includeClosed}`)
+
+export const closeSimulatedTrade = (simId: number) =>
+  apiFetch<SimulatedTrade>(`/simulated-trades/${simId}`, { method: 'DELETE' })
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
