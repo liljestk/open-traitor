@@ -144,6 +144,9 @@ services:
     security_opt:
       - no-new-privileges:true
     command: python -m src.news.worker
+    # Override the image-level HEALTHCHECK — news-worker has no HTTP server
+    healthcheck:
+      disable: true
     deploy:
       resources:
         limits:
@@ -291,6 +294,9 @@ services:
     security_opt:
       - no-new-privileges:true
     command: python -m src.planning.worker
+    # Override the image-level HEALTHCHECK — planning-worker has no HTTP server
+    healthcheck:
+      disable: true
     deploy:
       resources:
         limits:
