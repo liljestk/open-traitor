@@ -93,6 +93,8 @@ services:
       - LANGFUSE_HOST=http://langfuse:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
@@ -200,8 +202,10 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@auto-traitor.local}
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_ADMIN_NAME:-admin}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD}
+      # Bind Next.js to all interfaces so the healthcheck can reach localhost
+      HOSTNAME: "0.0.0.0"
     healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:3000/api/public/health" ]
+      test: [ "CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/public/health" ]
       interval: 30s
       timeout: 10s
       retries: 5
