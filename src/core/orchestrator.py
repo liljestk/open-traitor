@@ -19,6 +19,7 @@ from src.agents.market_analyst import MarketAnalystAgent
 from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
+from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
 from src.core.coinbase_client import CoinbaseClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
@@ -133,6 +134,10 @@ class Orchestrator:
         self.strategist = StrategistAgent(llm, self.state, config)
         self.risk_manager = RiskManagerAgent(llm, self.state, config, rules)
         self.executor = ExecutorAgent(llm, self.state, config, coinbase, rules)
+        self.settings_advisor = SettingsAdvisorAgent(
+            llm, self.state, config, rules,
+            review_interval=config.get("trading", {}).get("settings_review_interval", 10),
+        )
 
         # New analysis components
         self.fear_greed = FearGreedIndex()
@@ -447,6 +452,44 @@ class Orchestrator:
                         self._reconcile_counter = 0
                         self._reconcile_positions()
 
+                # ─── Autonomous Settings Advisor ────────────────────
+                if self.settings_advisor.should_run():
+                    try:
+                        advisor_ctx = {
+                            "fear_greed": getattr(self.state, "fear_greed_summary", "unavailable"),
+                            "recent_performance": self._get_performance_summary(),
+                            "market_volatility": getattr(self.state, "volatility_summary", "moderate"),
+                            "current_prices": dict(self.state.current_prices),
+                            "cycle_id": str(cycle_count),
+                            "stats_db": self.stats_db if hasattr(self, "stats_db") else None,
+                            "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
+                        }
+                        advisor_loop = asyncio.new_event_loop()
+                        try:
+                            advisor_result = advisor_loop.run_until_complete(
+                                self.settings_advisor.execute(advisor_ctx)
+                            )
+                        finally:
+                            advisor_loop.close()
+
+                        if advisor_result and advisor_result.get("changes_applied", 0) > 0:
+                            # Push updated sections to runtime config
+                            for ch in advisor_result.get("applied", []):
+                                sm.push_section_to_runtime(ch["section"], self.config)
+                            # Notify via Telegram
+                            notif = format_advisor_notification(advisor_result)
+                            if notif:
+                                self.chat_handler.queue_event(notif)
+                                if self.telegram:
+                                    self.telegram.send_alert(notif)
+                            self.audit.log_event(
+                                "settings_advisor",
+                                f"Applied {advisor_result['changes_applied']} autonomous setting change(s)",
+                                advisor_result,
+                            )
+                    except Exception as _sa_err:
+                        logger.warning(f"Settings advisor error (non-fatal): {_sa_err}")
+
                 # Sync state to Redis
                 self.state_manager.sync_to_redis()
 
@@ -660,6 +703,22 @@ class Orchestrator:
             logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
 
 
+
+    def _get_performance_summary(self) -> str:
+        """Build a short performance summary string for the settings advisor."""
+        try:
+            trades = list(self.state.positions.values())
+            total = len(trades)
+            winners = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
+            total_pnl = sum(t.get("pnl") or 0 for t in trades)
+            win_rate = (winners / total * 100) if total > 0 else 0
+            return (
+                f"{total} open positions, "
+                f"aggregate unrealised PnL: ${total_pnl:+.2f}, "
+                f"win rate (open): {win_rate:.0f}%"
+            )
+        except Exception:
+            return "unavailable"
 
     def _reconcile_positions(self) -> None:
         """

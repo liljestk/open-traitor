@@ -1,6 +1,10 @@
 # Copilot Instructions for auto-traitor
 We are not live yet, refactoring is okay if needed.
 
+NEVER suggest to edit or update files manually, just tell if you cant edit and I will fix.
+
+ALWAYS use git command-line, never GIT MCP
+
 ## Big picture architecture
 - Python trading daemon + React dashboard.
 - Entry point: `src/main.py` initializes services, then runs `Orchestrator.run_forever()` in `src/core/orchestrator.py`.

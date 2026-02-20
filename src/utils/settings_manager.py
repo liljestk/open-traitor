@@ -285,6 +285,180 @@ def is_telegram_allowed(section: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Autonomous LLM Agent Tier
+# ═══════════════════════════════════════════════════════════════════════════
+# The trading LLM can adjust these sections to adapt to market conditions.
+# "on/off trading" is OFF LIMITS — enforced via floor values that prevent
+# the LLM from setting parameters to values that effectively disable trading.
+
+AUTONOMOUS_ALLOWED_SECTIONS = frozenset({
+    "risk", "trading", "rotation", "fees", "high_stakes", "absolute_rules",
+})
+
+# Per-field floor/ceiling overrides for autonomous updates.
+# These OVERRIDE the normal schema min/max to keep trading alive.
+AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
+    "absolute_rules": {
+        "max_single_trade":           {"min": 5},      # can't zero out
+        "max_daily_spend":            {"min": 10},     # can't zero out
+        "max_daily_loss":             {"min": 5},      # can't zero out
+        "max_portfolio_risk_pct":     {"min": 0.01},   # can't zero out
+        "max_trades_per_day":         {"min": 1},      # at least 1 trade/day
+        "max_cash_per_trade_pct":     {"min": 0.01},   # can't zero out
+        "require_approval_above":     {},              # free to adjust
+        "min_trade_interval_seconds": {"max": 7200},   # can't slow to >2h
+        "emergency_stop_portfolio":   {},              # free to adjust
+        "always_use_stop_loss":       {},              # free to adjust
+        "max_stop_loss_pct":          {},              # free to adjust
+    },
+    "trading": {
+        "min_confidence":       {"min": 0.3, "max": 0.95},  # can't set >0.95 (effective disable)
+        "max_open_positions":   {"min": 1},                  # can't zero out
+        "paper_slippage_pct":   {},
+        "interval":             {"min": 30, "max": 3600},
+    },
+    "risk": {
+        "stop_loss_pct":           {"min": 0.005, "max": 0.20},
+        "take_profit_pct":         {"min": 0.01, "max": 0.50},
+        "trailing_stop_pct":       {"min": 0.005, "max": 0.20},
+        "max_position_pct":        {"min": 0.01},
+        "max_total_exposure_pct":  {"min": 0.05},
+        "max_drawdown_pct":        {"min": 0.02},
+        "max_trades_per_hour":     {"min": 1},
+        "loss_cooldown_seconds":   {"max": 7200},
+    },
+    "rotation": {
+        "enabled":                   {},
+        "autonomous_allocation_pct": {"max": 0.5},
+        "min_score_delta":           {},
+        "min_confidence":            {"min": 0.3},
+        "high_impact_confidence":    {"min": 0.5},
+        "approval_threshold":        {},
+        "swap_cooldown_seconds":     {"max": 7200},
+    },
+    "fees": {
+        "safety_margin":           {},
+        "min_gain_after_fees_pct": {},
+        "min_trade_quote":         {},
+    },
+    "high_stakes": {
+        "trade_size_multiplier":      {"max": 5.0},
+        "swap_allocation_multiplier": {"max": 5.0},
+        "min_confidence":             {"min": 0.5},
+        "min_swap_gain_pct":          {},
+        "auto_approve_up_to":         {},
+    },
+}
+
+# Fields the autonomous LLM may NOT touch even within allowed sections
+AUTONOMOUS_BLOCKED_FIELDS = frozenset({
+    ("absolute_rules", "never_trade_pairs"),
+    ("absolute_rules", "only_trade_pairs"),
+    ("trading", "mode"),
+    ("trading", "pairs"),
+    ("trading", "quote_currency"),
+    ("trading", "live_holdings_sync"),
+    ("trading", "holdings_refresh_seconds"),
+    ("trading", "holdings_dust_threshold"),
+    ("trading", "reconcile_every_cycles"),
+    ("trading", "invalidate_strategic_context"),
+    ("fees", "trade_fee_pct"),
+    ("fees", "maker_fee_pct"),
+    ("fees", "swap_cooldown_seconds"),
+})
+
+
+def validate_autonomous_update(
+    section: str,
+    updates: dict[str, Any],
+) -> tuple[bool, list[str], dict[str, Any]]:
+    """
+    Validate a proposed autonomous (LLM-agent) settings change.
+
+    Enforces:
+      1. Section is in AUTONOMOUS_ALLOWED_SECTIONS
+      2. Field is not in AUTONOMOUS_BLOCKED_FIELDS
+      3. Field has an entry in AUTONOMOUS_FIELD_GUARDS
+      4. Value passes normal schema validation
+      5. Value respects autonomous floor/ceiling guards
+
+    Returns (ok, errors, clamped_updates).
+    """
+    if section not in AUTONOMOUS_ALLOWED_SECTIONS:
+        return False, [f"Section '{section}' is not allowed for autonomous updates"], {}
+
+    section_guards = AUTONOMOUS_FIELD_GUARDS.get(section, {})
+    errors: list[str] = []
+    clamped: dict[str, Any] = {}
+
+    for field, raw_value in updates.items():
+        if (section, field) in AUTONOMOUS_BLOCKED_FIELDS:
+            errors.append(f"{section}.{field} is blocked for autonomous updates")
+            continue
+
+        if field not in section_guards:
+            errors.append(f"{section}.{field} is not in the autonomous-allowed field list")
+            continue
+
+        ok, err, cast_val = validate_field(section, field, raw_value)
+        if not ok:
+            errors.append(f"{section}.{field}: {err}")
+            continue
+
+        # Clamp to autonomous guard ranges (don't reject — just cap)
+        guards = section_guards[field]
+        if isinstance(cast_val, (int, float)):
+            guard_min = guards.get("min")
+            guard_max = guards.get("max")
+            if guard_min is not None and cast_val < guard_min:
+                cast_val = type(cast_val)(guard_min)
+                logger.info(f"  ↳ Autonomous guard: clamped {section}.{field} to floor {guard_min}")
+            if guard_max is not None and cast_val > guard_max:
+                cast_val = type(cast_val)(guard_max)
+                logger.info(f"  ↳ Autonomous guard: clamped {section}.{field} to ceiling {guard_max}")
+
+        clamped[field] = cast_val
+
+    if errors:
+        return False, errors, {}
+    if not clamped:
+        return True, [], {}
+    return True, [], clamped
+
+
+def get_autonomous_schema_summary() -> dict[str, dict[str, Any]]:
+    """
+    Return a summary of what the autonomous LLM agent is allowed to change,
+    including field types, effective ranges, and guard values.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for section, fields in AUTONOMOUS_FIELD_GUARDS.items():
+        section_schema = SECTION_SCHEMAS.get(section, {})
+        section_info: dict[str, Any] = {}
+        for field, guards in fields.items():
+            if (section, field) in AUTONOMOUS_BLOCKED_FIELDS:
+                continue
+            field_schema = section_schema.get(field, {})
+            info: dict[str, Any] = {"type": field_schema.get("type", str).__name__}
+            schema_min = field_schema.get("min")
+            schema_max = field_schema.get("max")
+            guard_min = guards.get("min")
+            guard_max = guards.get("max")
+            candidates_min = [x for x in [schema_min, guard_min] if x is not None]
+            candidates_max = [x for x in [schema_max, guard_max] if x is not None]
+            if candidates_min:
+                info["min"] = max(candidates_min)
+            if candidates_max:
+                info["max"] = min(candidates_max)
+            if "enum" in field_schema:
+                info["enum"] = field_schema["enum"]
+            section_info[field] = info
+        if section_info:
+            result[section] = section_info
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Smart Presets
 # ═══════════════════════════════════════════════════════════════════════════
 
