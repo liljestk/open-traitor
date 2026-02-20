@@ -74,7 +74,16 @@ WHAT YOU NEVER DO:
 - Never say "As an AI..." — you're a trader, period.
 - Never give financial advice disclaimers mid-conversation (that's in the README).
 - Never be generic. Always reference SPECIFIC prices, pairs, and data.
-- Never invent, estimate, or recite prices from memory."""
+- Never invent, estimate, or recite prices from memory.
+
+TOOL-CALLING BEHAVIOUR:
+- When the user asks about holdings, portfolio, wallet, balance, what they own,
+  or similar — ALWAYS call get_account_holdings. Do NOT ask follow-up questions.
+- When the user says "yes", "sure", "do it" etc. after you offered to fetch data,
+  call the relevant tool IMMEDIATELY. Don't ask what they want again.
+- PREFER calling a tool over asking clarifying questions. ACT, don't ask.
+- If you're unsure which tool to call, call get_account_holdings for portfolio
+  queries and get_status for general status queries. Those cover most cases."""
 
 
 class PersonalityConfig:
@@ -946,6 +955,7 @@ class TelegramChatHandler:
         # ─── FAST PATH: pattern match → instant response ───
         fast_response = self._try_fast_path(text)
         if fast_response is not None:
+            logger.debug(f"⚡ Fast path hit for: {text[:60]!r}")
             self.memory.add("assistant", fast_response)
             return fast_response
 
@@ -976,6 +986,19 @@ class TelegramChatHandler:
             if pattern.search(text_clean):
                 return self._execute_fast(func_name, template)
 
+        # ── Contextual affirmatives ──────────────────────────────────────────
+        # When the user says "yes" / "sure" / "do it" etc., check what
+        # the bot last offered and execute the implied action directly.
+        if re.match(
+            r"^(yes|yep|yea|yeah|sure|do it|go ahead|please|y|ja|absolutely|"
+            r"show me|fetch it|go for it|let'?s do it|affirmative)\s*[.!?]*\s*$",
+            text_clean,
+            re.IGNORECASE,
+        ):
+            resolved = self._resolve_contextual_yes()
+            if resolved is not None:
+                return resolved
+
         # Quick ack patterns (no data needed)
         ack_patterns = {
             r"^(ok|okay|k|cool|nice|thanks|thx|ty|got it|roger|👍|great|perfect)\s*!?\s*$":
@@ -984,6 +1007,56 @@ class TelegramChatHandler:
         for pat, _ in ack_patterns.items():
             if re.match(pat, text_clean, re.IGNORECASE):
                 return "👍"
+
+        return None
+
+    def _resolve_contextual_yes(self) -> Optional[str]:
+        """
+        Look at the last assistant message to figure out what "yes" means.
+        Returns a fast-path style response, or None to fall through to LLM.
+        """
+        recent = self.memory.get_recent(4)
+        # Find the last assistant message
+        last_bot_msg = ""
+        for msg in reversed(recent):
+            if msg["role"] == "assistant":
+                last_bot_msg = msg["content"].lower()
+                break
+
+        if not last_bot_msg:
+            return None
+
+        # Map keywords in the bot's last message to the tool that fulfills it
+        _CONTEXT_MAP: list[tuple[list[str], str]] = [
+            (["holdings", "portfolio", "what you own", "what you hold",
+              "check your portfolio", "summary of your", "current holdings",
+              "wallet", "account"],
+             "get_account_holdings"),
+            (["balance", "how much", "cash"],
+             "get_balance"),
+            (["positions", "open position"],
+             "get_positions"),
+            (["price", "prices", "how much is"],
+             "get_current_prices"),
+            (["trade history", "recent trades"],
+             "get_recent_trades"),
+            (["fear", "greed", "sentiment"],
+             "get_fear_greed"),
+            (["news"],
+             "get_news_summary"),
+            (["stats", "performance", "how did"],
+             "get_stats"),
+            (["high.?stakes"],
+             "get_highstakes_status"),
+        ]
+
+        for keywords, func_name in _CONTEXT_MAP:
+            for kw in keywords:
+                if kw in last_bot_msg:
+                    handler = self._function_handlers.get(func_name)
+                    if handler:
+                        return self._execute_fast(func_name, None)
+                    break
 
         return None
 
