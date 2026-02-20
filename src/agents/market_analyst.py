@@ -74,6 +74,8 @@ class MarketAnalystAgent(BaseAgent):
         news_headlines = context.get("news_headlines", "No news available.")
         fear_greed = context.get("fear_greed", "")
         multi_timeframe = context.get("multi_timeframe", "")
+        sentiment = context.get("sentiment", "")
+        strategy_signals = context.get("strategy_signals", {})
         strategic_context = context.get("strategic_context", "")
         currency_symbol = context.get("currency_symbol", "$")
         cycle_id = context.get("cycle_id", "")
@@ -95,6 +97,8 @@ class MarketAnalystAgent(BaseAgent):
             pair, current_price, indicators, price_changes, news_headlines,
             fear_greed=fear_greed,
             multi_timeframe=multi_timeframe,
+            sentiment=sentiment,
+            strategy_signals=strategy_signals,
             strategic_context=strategic_context,
             currency_symbol=currency_symbol,
         )
@@ -161,6 +165,8 @@ class MarketAnalystAgent(BaseAgent):
         news: str,
         fear_greed: str = "",
         multi_timeframe: str = "",
+        sentiment: str = "",
+        strategy_signals: dict | None = None,
         strategic_context: str = "",
         currency_symbol: str = "$",
     ) -> str:
@@ -168,6 +174,24 @@ class MarketAnalystAgent(BaseAgent):
         sym = currency_symbol
         fg_section = f"\nFEAR & GREED INDEX:\n{fear_greed}\n" if fear_greed else ""
         mtf_section = f"\nMULTI-TIMEFRAME CONFLUENCE:\n{multi_timeframe}\n" if multi_timeframe else ""
+        sentiment_section = f"\nSENTIMENT ANALYSIS:\n{sentiment}\n" if sentiment else ""
+
+        # Format deterministic strategy signals
+        strat_section = ""
+        if strategy_signals:
+            lines = []
+            for name, sig in strategy_signals.items():
+                if isinstance(sig, dict):
+                    lines.append(
+                        f"- {name}: {sig.get('action', 'hold').upper()} "
+                        f"(confidence={sig.get('confidence', 0):.0%}, "
+                        f"regime={sig.get('market_regime', '?')}) — "
+                        f"{sig.get('reasoning', 'N/A')[:120]}"
+                    )
+                else:
+                    lines.append(f"- {name}: {sig}")
+            strat_section = "\nDETERMINISTIC STRATEGY SIGNALS (rule‑based, no LLM):\n" + "\n".join(lines) + "\n"
+
         strategy_section = (
             f"\nSTRATEGIC CONTEXT (from planning layer — use as background regime info):\n{strategic_context}\n"
             if strategic_context else ""
@@ -188,7 +212,7 @@ TECHNICAL INDICATORS:
 PRICE CHANGES:
 - 1 hour: {price_changes.get('1h', 0):+.2%}
 - 24 hours: {price_changes.get('24h', 0):+.2%}
-{fg_section}{mtf_section}
+{fg_section}{mtf_section}{sentiment_section}{strat_section}
 RECENT CRYPTO NEWS:
 {news}
 {strategy_section}

@@ -113,29 +113,38 @@ class PipelineManager:
                 if cached:
                     news_items = json.loads(cached)
             sentiment_data = orch.sentiment.score_for_pair(pair, news_items)
-            if sentiment_data.get("count", 0) > 0:
+            if sentiment_data.get("total_articles", 0) > 0:
                 sentiment_prompt = (
-                    f"Sentiment ({pair}): {sentiment_data.get('label', 'neutral')} "
-                    f"(score={sentiment_data.get('score', 0):.2f}, "
-                    f"n={sentiment_data.get('count', 0)})"
+                    f"Sentiment ({pair}): {sentiment_data.get('sentiment_label', 'neutral')} "
+                    f"(score={sentiment_data.get('sentiment_score', 0):.2f}, "
+                    f"n={sentiment_data.get('total_articles', 0)})"
                 )
         except Exception as e:
             logger.debug(f"Sentiment analysis unavailable: {e}")
 
         # ─── Deterministic strategy signals ───
+        # Strategies need TechnicalAnalyzer output, not raw candles.
+        # We run the same analyzer the market_analyst uses.
+        tech_analysis = {}
+        try:
+            tech_analysis = orch.market_analyst.technical.analyze(candles)
+        except Exception as e:
+            logger.debug(f"Technical analysis for strategies unavailable: {e}")
+
         strategy_signals = {}
-        try:
-            ema_signal = orch.ema_strategy.generate_signal(pair, candles)
-            if ema_signal:
-                strategy_signals["ema_crossover"] = ema_signal.__dict__ if hasattr(ema_signal, '__dict__') else str(ema_signal)
-        except Exception as e:
-            logger.debug(f"EMA strategy unavailable: {e}")
-        try:
-            boll_signal = orch.bollinger_strategy.generate_signal(pair, candles)
-            if boll_signal:
-                strategy_signals["bollinger_reversion"] = boll_signal.__dict__ if hasattr(boll_signal, '__dict__') else str(boll_signal)
-        except Exception as e:
-            logger.debug(f"Bollinger strategy unavailable: {e}")
+        if tech_analysis and "error" not in tech_analysis:
+            try:
+                ema_signal = orch.ema_strategy.generate_signal(pair, candles, tech_analysis)
+                if ema_signal and ema_signal.is_actionable:
+                    strategy_signals["ema_crossover"] = ema_signal.to_dict()
+            except Exception as e:
+                logger.debug(f"EMA strategy unavailable: {e}")
+            try:
+                boll_signal = orch.bollinger_strategy.generate_signal(pair, candles, tech_analysis)
+                if boll_signal and boll_signal.is_actionable:
+                    strategy_signals["bollinger_reversion"] = boll_signal.to_dict()
+            except Exception as e:
+                logger.debug(f"Bollinger strategy unavailable: {e}")
 
         # ─── Pairs correlation (for risk sizing) ───
         correlation_matrix = {}
@@ -152,9 +161,7 @@ class PipelineManager:
                         ),
                     )
                     all_candles[p] = c
-            report = orch.pairs_monitor.compute_correlations(all_candles)
-            if report:
-                correlation_matrix = report.matrix
+            correlation_matrix = orch.pairs_monitor.get_correlation_matrix(all_candles)
         except Exception as e:
             logger.debug(f"Pairs correlation unavailable: {e}")
 

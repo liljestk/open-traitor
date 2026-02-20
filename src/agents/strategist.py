@@ -85,6 +85,8 @@ class StrategistAgent(BaseAgent):
         live_holdings_summary = context.get("live_holdings_summary", "")
         currency_symbol = context.get("currency_symbol", "$")
         native_currency = context.get("native_currency", "USD")
+        sentiment_data = context.get("sentiment", {})
+        strategy_signals = context.get("strategy_signals", {})
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -110,6 +112,8 @@ class StrategistAgent(BaseAgent):
             live_holdings_summary=live_holdings_summary,
             currency_symbol=currency_symbol,
             native_currency=native_currency,
+            sentiment_data=sentiment_data,
+            strategy_signals=strategy_signals,
         )
 
         # Create a tracing span for this LLM call
@@ -173,6 +177,8 @@ class StrategistAgent(BaseAgent):
         live_holdings_summary: str = "",
         currency_symbol: str = "$",
         native_currency: str = "USD",
+        sentiment_data: dict | None = None,
+        strategy_signals: dict | None = None,
     ) -> str:
         """Build the strategy generation prompt."""
         pair = signal.get("pair", "?")
@@ -235,4 +241,39 @@ ACTIVE USER TASKS:
 RECENT TRADES:
 {recent_text}
 {outcomes_section}{strategy_section}
+{self._format_sentiment_strategy(sentiment_data, strategy_signals)}
 What action should we take? Respond with JSON."""
+
+    @staticmethod
+    def _format_sentiment_strategy(
+        sentiment_data: dict | None,
+        strategy_signals: dict | None,
+    ) -> str:
+        """Format sentiment + deterministic strategy signals for the prompt."""
+        parts: list[str] = []
+
+        if sentiment_data and isinstance(sentiment_data, dict):
+            label = sentiment_data.get("sentiment_label", sentiment_data.get("label", ""))
+            score = sentiment_data.get("sentiment_score", sentiment_data.get("score", 0))
+            n = sentiment_data.get("total_articles", sentiment_data.get("count", 0))
+            if n:
+                parts.append(
+                    f"SENTIMENT ANALYSIS:\n"
+                    f"- Label: {label}  Score: {score:.2f}  Articles: {n}"
+                )
+
+        if strategy_signals:
+            lines = ["DETERMINISTIC STRATEGY SIGNALS (rule-based, no LLM):"]
+            for name, sig in strategy_signals.items():
+                if isinstance(sig, dict):
+                    lines.append(
+                        f"- {name}: {sig.get('action', 'hold').upper()} "
+                        f"(confidence={sig.get('confidence', 0):.0%}, "
+                        f"regime={sig.get('market_regime', '?')}) — "
+                        f"{sig.get('reasoning', 'N/A')[:120]}"
+                    )
+                else:
+                    lines.append(f"- {name}: {sig}")
+            parts.append("\n".join(lines))
+
+        return "\n\n".join(parts)
