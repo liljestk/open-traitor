@@ -42,7 +42,7 @@ function JsonViewer({ data }: { data: unknown }) {
   )
 }
 
-function SpanDetail({ span }: { span: AgentSpan }) {
+function SpanDetail({ span, langfuseUrl }: { span: AgentSpan; langfuseUrl?: string | null }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl">
@@ -84,9 +84,9 @@ function SpanDetail({ span }: { span: AgentSpan }) {
             <p className="text-xs text-gray-500 mb-1 uppercase tracking-wider">LLM Output</p>
             <JsonViewer data={span.reasoning_json} />
           </div>
-          {span.langfuse_span_id && (
+          {span.langfuse_span_id && langfuseUrl && (
             <a
-              href={`http://localhost:3000/trace/${span.langfuse_trace_id}`}
+              href={langfuseUrl}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 text-xs text-brand-400 hover:underline"
@@ -127,9 +127,9 @@ export default function CyclePlayback() {
           </h2>
           <p className="text-xs text-gray-500 mt-0.5 font-mono">{cycle.cycle_id}</p>
         </div>
-        {cycle.langfuse_trace_id && (
+        {cycle.langfuse_url && (
           <a
-            href={`http://localhost:3000/trace/${cycle.langfuse_trace_id}`}
+            href={cycle.langfuse_url}
             target="_blank"
             rel="noreferrer"
             className="ml-auto flex items-center gap-1.5 text-xs text-brand-400 hover:underline"
@@ -171,7 +171,7 @@ export default function CyclePlayback() {
       <div className="space-y-3">
         <h3 className="text-sm font-semibold text-gray-300">Agent Spans</h3>
         {cycle.spans.map((span) => (
-          <SpanDetail key={span.id} span={span} />
+          <SpanDetail key={span.id} span={span} langfuseUrl={cycle.langfuse_url} />
         ))}
       </div>
 

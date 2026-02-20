@@ -53,14 +53,9 @@ function EventCard({ event, index }: { event: LiveEvent; index: number }) {
           <span>{event.prompt_tokens + (event.completion_tokens ?? 0)} tokens</span>
         )}
         {event.langfuse_trace_id && (
-          <a
-            href={`http://localhost:3000/trace/${event.langfuse_trace_id}`}
-            target="_blank"
-            rel="noreferrer"
-            className="text-brand-400 hover:underline"
-          >
-            Trace ↗
-          </a>
+          <span className="text-gray-600 font-mono" title="View trace via Cycle Playback">
+            trace: {event.langfuse_trace_id.slice(0, 8)}…
+          </span>
         )}
       </div>
     </motion.div>

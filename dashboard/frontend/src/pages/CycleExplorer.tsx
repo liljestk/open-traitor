@@ -110,9 +110,9 @@ export default function CycleExplorer() {
                 <td className="px-4 py-2.5 text-gray-400">{c.total_prompt_tokens != null ? (c.total_prompt_tokens + (c.total_completion_tokens ?? 0)) : '—'}</td>
                 <td className="px-4 py-2.5 text-gray-400">{c.total_latency_ms != null ? `${c.total_latency_ms.toFixed(0)} ms` : '—'}</td>
                 <td className="px-4 py-2.5">
-                  {c.langfuse_trace_id ? (
+                  {c.langfuse_url ? (
                     <a
-                      href={`http://localhost:3000/trace/${c.langfuse_trace_id}`}
+                      href={c.langfuse_url}
                       target="_blank"
                       rel="noreferrer"
                       className="text-brand-400 hover:underline text-xs"

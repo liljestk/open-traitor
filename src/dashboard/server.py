@@ -294,6 +294,8 @@ def list_cycles(
     """
     db = _require_db()
     cycles = db.get_cycles(pair=pair, limit=limit, offset=offset)
+    for c in cycles:
+        c["langfuse_url"] = _langfuse_url(c.get("langfuse_trace_id"))
     return {"cycles": cycles, "limit": limit, "offset": offset, "count": len(cycles)}
 
 
@@ -308,6 +310,7 @@ def get_cycle(cycle_id: str):
     cycle = db.get_cycle_full(cycle_id)
     if not cycle:
         raise HTTPException(status_code=404, detail=f"Cycle {cycle_id!r} not found")
+    cycle["langfuse_url"] = _langfuse_url(cycle.get("langfuse_trace_id"))
     return cycle
 
 
@@ -666,6 +669,7 @@ def get_strategic(
                 row["plan_json"] = json.loads(row["plan_json"] or "{}")
             except Exception:
                 pass
+            row["langfuse_url"] = _langfuse_url(row.get("langfuse_trace_id"))
             result.append(row)
         return {"plans": result, "count": len(result)}
     except Exception as exc:
@@ -729,8 +733,9 @@ async def get_temporal_replay(workflow_id: str, run_id: str):
         raise HTTPException(status_code=503, detail="Temporal client not available")
     try:
         handle = _temporal_client.get_workflow_handle(workflow_id, run_id=run_id)
+        history = await handle.fetch_history()
         events = []
-        async for event in await handle.fetch_history():
+        for event in history.events:
             events.append({
                 "event_id": event.event_id,
                 "event_type": str(event.event_type),
@@ -931,6 +936,14 @@ def _utcnow() -> str:
 def _langfuse_url(trace_id: Optional[str]) -> Optional[str]:
     if not trace_id:
         return None
+    # Use the Langfuse SDK to build the correct URL (includes project ID)
+    from src.utils.tracer import get_llm_tracer
+    tracer = get_llm_tracer()
+    if tracer:
+        url = tracer.get_trace_url(trace_id)
+        if url:
+            return url
+    # Fallback: best-effort URL (may not work if project ID is needed)
     host = _config.get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
     return f"{host}/trace/{trace_id}"
 

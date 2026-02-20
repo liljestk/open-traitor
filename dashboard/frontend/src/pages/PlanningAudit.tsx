@@ -44,9 +44,9 @@ function PlanRow({ plan }: { plan: StrategicPlan }) {
         </div>
         <div className="flex items-center gap-3 flex-shrink-0 text-xs text-gray-500 ml-4">
           <span>{dayjs(plan.ts).format('MM-DD HH:mm')}</span>
-          {plan.langfuse_trace_id && (
+          {plan.langfuse_url && (
             <a
-              href={`http://localhost:3000/trace/${plan.langfuse_trace_id}`}
+              href={plan.langfuse_url}
               target="_blank"
               rel="noreferrer"
               onClick={(e) => e.stopPropagation()}

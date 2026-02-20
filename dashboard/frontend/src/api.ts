@@ -33,6 +33,7 @@ export interface CycleSummary {
   quote_amount: number | null
   price: number | null
   langfuse_trace_id: string | null
+  langfuse_url: string | null
   total_prompt_tokens: number | null
   total_completion_tokens: number | null
   total_latency_ms: number | null
@@ -94,6 +95,7 @@ export interface CycleFull {
   total_latency_ms: number
   total_tokens: number
   langfuse_trace_id: string | null
+  langfuse_url: string | null
   spans: AgentSpan[]
   trade: Trade | null
   decision_outcome: 'executed' | 'hold' | 'rejected' | 'pending_approval' | 'execution_failed'
@@ -123,6 +125,7 @@ export interface StrategicPlan {
   summary_text: string
   ts: string
   langfuse_trace_id: string | null
+  langfuse_url: string | null
   temporal_workflow_id: string | null
   temporal_run_id: string | null
 }
