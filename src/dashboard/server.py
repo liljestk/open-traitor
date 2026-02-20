@@ -54,6 +54,8 @@ logger = get_logger("dashboard")
 _stats_db = None          # StatsDB instance
 _redis_client = None      # redis.Redis instance (optional)
 _temporal_client = None   # temporalio.client.Client instance (optional)
+_temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
+_temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
 _config: dict = {}
 
 _ws_connections: list[WebSocket] = []
@@ -88,11 +90,24 @@ def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Start the Redis pub/sub listener task on startup."""
+    """Start background tasks on startup: Redis pub/sub listener + Temporal client."""
+    global _temporal_client
     task = None
     if _redis_client:
         task = asyncio.create_task(_redis_subscriber())
         logger.info("📡 Dashboard Redis subscriber started")
+
+    # Connect Temporal here so we use uvicorn's own event loop
+    if _temporal_client is None:
+        try:
+            import temporalio.client as _tc
+            _temporal_client = await _tc.Client.connect(
+                _temporal_host, namespace=_temporal_namespace
+            )
+            logger.info(f"✅ Dashboard Temporal client connected ({_temporal_host})")
+        except Exception as e:
+            logger.warning(f"⚠️ Temporal not available: {e} — replay/rerun disabled")
+
     yield
     if task:
         task.cancel()
@@ -456,7 +471,7 @@ async def rerun_temporal_workflow(workflow_id: str, run_id: str):
         new_handle = await _temporal_client.start_workflow(
             wf_cls.run,
             id=new_wf_id,
-            task_queue="planning-queue",
+            task_queue="planning",
         )
         return {
             "status": "started",

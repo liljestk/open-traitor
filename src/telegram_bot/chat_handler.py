@@ -1066,15 +1066,19 @@ class TelegramChatHandler:
             })
 
         # ── Step 3: summarise results ────────────────────────────────────────
+        # Build the full multi-turn conversation in the correct OpenAI ordering:
+        #   [...history..., user: text, assistant: {tool_calls}, tool: results]
+        # Pass user_message="" so chat_with_tools does NOT append it again.
         continuation_messages = (
             conv_messages
+            + [{"role": "user", "content": text}]
             + [assistant_msg]
             + tool_result_messages
         )
 
         final_text, remaining_calls, _ = self.llm.chat_with_tools(
             system_prompt=system_prompt,
-            user_message=text,
+            user_message="",
             tools=tools,
             messages=continuation_messages,
             temperature=0.5,

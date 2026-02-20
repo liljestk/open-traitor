@@ -32,7 +32,7 @@ logger = get_logger("planning.activities")
 
 _DB_PATH = os.path.join("data", "stats.db")
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("LLM_MODEL", "llama3.2"))
+_PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("LLM_MODEL", "llama3.1:8b"))
 
 # NOTE: Langfuse credentials are intentionally NOT read at module-import time.
 # The planning worker imports this module before dotenv is loaded, so reading
@@ -71,10 +71,22 @@ def _get_planning_tracer():
         if LLMTracer._instance is None:
             if not langfuse_pk or not langfuse_sk:
                 return None
+            # Build a Redis client so planning spans stream to the live dashboard
+            redis_client = None
+            redis_url = os.environ.get("REDIS_URL", "")
+            if redis_url:
+                try:
+                    import redis as _redis
+                    redis_client = _redis.Redis.from_url(redis_url)
+                    redis_client.ping()
+                except Exception as e:
+                    logger.warning(f"Planning tracer: Redis unavailable ({e}), streaming disabled")
+                    redis_client = None
             LLMTracer.init(
                 public_key=langfuse_pk,
                 secret_key=langfuse_sk,
                 host=langfuse_host,
+                redis_client=redis_client,
                 enabled=True,
             )
         return LLMTracer._instance

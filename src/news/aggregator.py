@@ -271,9 +271,39 @@ class NewsAggregator:
         return unique_articles
 
     def get_latest(self, count: int = 15) -> list[NewsArticle]:
-        """Get the latest N articles."""
+        """Get the latest N articles.
+
+        Prefers in-memory cache. Falls back to Redis ``news:latest`` key when
+        the cache is empty — this lets the agent pick up articles fetched by
+        the separate news-worker process without duplicating the fetching work.
+        """
         with self._lock:
-            return self.articles[-count:]
+            local = self.articles[-count:]
+
+        if local:
+            return local
+
+        # Cache miss — try to hydrate from Redis (written by news-worker)
+        if self.redis:
+            try:
+                raw = self.redis.get("news:latest")
+                if raw:
+                    data = json.loads(raw)
+                    articles = []
+                    for d in data[-count:]:
+                        pub = d.get("published")
+                        if isinstance(pub, str):
+                            try:
+                                d["published"] = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                            except ValueError:
+                                d["published"] = None
+                        articles.append(NewsArticle(**d))
+                    logger.debug(f"📰 Loaded {len(articles)} articles from Redis (news-worker cache)")
+                    return articles
+            except Exception as e:
+                logger.warning(f"Redis news fallback failed: {e}")
+
+        return []
 
     def get_headlines(self, count: int = 10) -> str:
         """Get a formatted string of recent headlines for LLM consumption."""

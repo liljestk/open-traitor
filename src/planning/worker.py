@@ -22,6 +22,12 @@ import asyncio
 import os
 import sys
 
+from dotenv import load_dotenv
+
+# Load .env before reading any environment variables so that local development
+# (outside Docker) picks up TEMPORAL_HOST, LANGFUSE_*, REDIS_URL, etc.
+load_dotenv(os.path.join("config", ".env"))
+
 import temporalio.client
 import temporalio.exceptions
 import temporalio.worker

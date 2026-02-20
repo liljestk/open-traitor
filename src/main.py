@@ -291,7 +291,7 @@ def main():
         dash_app = create_app(
             stats_db=orchestrator.stats_db,
             redis_client=redis_client,
-            temporal_client=None,   # Temporal client wired if available
+            temporal_client=None,  # Connected inside lifespan on uvicorn's event loop
             config=config,
         )
         dash_port = int(dash_config.get("port", 8090))

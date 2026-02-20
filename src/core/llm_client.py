@@ -163,7 +163,10 @@ class LLMClient:
         chat_messages: list[dict] = [{"role": "system", "content": full_system}]
         if messages:
             chat_messages.extend(messages)
-        chat_messages.append({"role": "user", "content": user_message})
+        # Only append user_message if non-empty — step-3 continuation calls
+        # build the full turn order into `messages` directly.
+        if user_message:
+            chat_messages.append({"role": "user", "content": user_message})
 
         kwargs: dict[str, Any] = {
             "model": self.model,
