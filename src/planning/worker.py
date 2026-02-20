@@ -23,6 +23,7 @@ import os
 import sys
 
 import temporalio.client
+import temporalio.exceptions
 import temporalio.worker
 
 from src.planning.activities import (
@@ -81,11 +82,10 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
                 cron_schedule=cfg["cron"],
             )
             logger.info(f"✅ Cron workflow started: {cfg['id']} ({cfg['cron']}) — {cfg['desc']}")
-        except temporalio.service.RPCError as e:
-            if "already exists" in str(e).lower():
-                logger.info(f"⏩ Cron workflow already running: {cfg['id']}")
-            else:
-                logger.warning(f"⚠️  Failed to start cron workflow {cfg['id']}: {e}")
+        except temporalio.exceptions.WorkflowAlreadyStartedError:
+            logger.info(f"⏩ Cron workflow already running: {cfg['id']}")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to start cron workflow {cfg['id']}: {e}")
 
 
 async def main() -> None:

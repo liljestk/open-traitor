@@ -26,10 +26,11 @@ services:
               count: 1
               capabilities: [ gpu ]
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:11434/api/tags" ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+      test: [ "CMD-SHELL", "ollama list > /dev/null 2>&1" ]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 30s
 
   # =========================================================================
   # Ollama Model Puller - Ensures the model is downloaded on first run
@@ -175,7 +176,7 @@ services:
   # API:       http://localhost:3001
   # =========================================================================
   langfuse:
-    image: langfuse/langfuse:latest
+    image: langfuse/langfuse:2
     container_name: auto-traitor-langfuse
     restart: unless-stopped
     depends_on:
@@ -239,11 +240,12 @@ services:
       - POSTGRES_USER=temporal
       - POSTGRES_PWD=temporal
       - POSTGRES_SEEDS=temporal-db
+      - BIND_ON_IP=0.0.0.0
     healthcheck:
-      test: [ "CMD", "temporal", "workflow", "list", "--namespace", "default" ]
-      interval: 30s
+      test: [ "CMD-SHELL", "nc -z 127.0.0.1 7233" ]
+      interval: 15s
       timeout: 10s
-      retries: 10
+      retries: 20
       start_period: 60s
 
   # =========================================================================
