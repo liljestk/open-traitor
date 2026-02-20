@@ -203,7 +203,7 @@ export default function SimulatedTrades() {
                         <label className="text-xs text-gray-500 font-medium flex justify-between">
                             <span>Notes{pair && <span className="ml-2 text-gray-600">({pair})</span>}</span>
                             {priceData && (
-                                <span className="text-brand-400">Live: {priceData.price.toLocaleString()}</span>
+                                <span className="text-brand-400">Live: {priceData.price.toFixed(6)}</span>
                             )}
                         </label>
                         <div className="flex gap-2">
@@ -283,11 +283,11 @@ export default function SimulatedTrades() {
                                 </div>
                                 <div>
                                     <div className="text-xs text-gray-500 mb-0.5">Entry Price</div>
-                                    <div className="text-sm text-gray-300">{sim.entry_price.toLocaleString()}</div>
+                                    <div className="text-sm text-gray-300">{sim.entry_price.toFixed(6)}</div>
                                 </div>
                                 <div>
                                     <div className="text-xs text-gray-500 mb-0.5">Current Price</div>
-                                    <div className="text-sm text-gray-300">{sim.current_price.toLocaleString()}</div>
+                                    <div className="text-sm text-gray-300">{sim.current_price.toFixed(6)}</div>
                                 </div>
                             </div>
 
@@ -350,10 +350,10 @@ export default function SimulatedTrades() {
                                             </td>
                                             <td className="px-5 py-3">
                                                 <div className="text-gray-300">
-                                                    Out: {sim.close_price?.toLocaleString() || '?'}
+                                                    Out: {sim.close_price?.toFixed(6) || '?'}
                                                 </div>
                                                 <div className="text-xs text-gray-500 mt-0.5">
-                                                    In: {sim.entry_price.toLocaleString()}
+                                                    In: {sim.entry_price.toFixed(6)}
                                                 </div>
                                             </td>
                                             <td className={`px-5 py-3 text-right font-bold tracking-wide ${pnlColor(sim.close_pnl_abs ?? 0)}`}>

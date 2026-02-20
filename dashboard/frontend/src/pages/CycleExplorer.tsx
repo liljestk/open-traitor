@@ -19,7 +19,7 @@ function pnlColor(pnl: number | null): string {
 function fmtPnl(pnl: number | null): string {
   if (pnl == null) return '—'
   const sign = pnl >= 0 ? '+' : ''
-  return `${sign}$${pnl.toFixed(2)}`
+  return `${sign}€${pnl.toFixed(2)}`
 }
 
 export default function CycleExplorer() {
@@ -27,7 +27,7 @@ export default function CycleExplorer() {
   const [offset, setOffset] = useState(0)
   const navigate = useNavigate()
 
-  const pairs = ['', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD']
+  const pairs = ['', 'BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'XRP-EUR']
 
   const { data: cyclesData, isLoading: cyclesLoading } = useQuery({
     queryKey: ['cycles', pair, offset],
@@ -67,7 +67,7 @@ export default function CycleExplorer() {
           <StatCard label="24h cycles" value={stats.cycles_24h} accent="blue" />
           <StatCard label="Active pairs" value={stats.active_pairs} />
           {stats.portfolio && (
-            <StatCard label="Portfolio" value={`€${stats.portfolio.portfolio_value.toLocaleString()}`} accent="blue" />
+            <StatCard label="Portfolio" value={`€${stats.portfolio.portfolio_value.toFixed(2)}`} accent="blue" />
           )}
         </div>
       )}
