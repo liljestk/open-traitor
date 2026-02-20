@@ -181,6 +181,17 @@ TOOL_GET_TRAILING_STOPS = ToolDef(
     category="status",
 )
 
+TOOL_GET_ACCOUNT_HOLDINGS = ToolDef(
+    name="get_account_holdings",
+    description=(
+        "Fetch the LIVE account holdings directly from Coinbase API: all currencies held, "
+        "amounts, current prices, and USD-equivalent values. "
+        "Use this whenever the user asks about their portfolio, holdings, what they own, "
+        "their balance, or any crypto they hold."
+    ),
+    category="status",
+)
+
 # ── Analytics ────────────────────────────────────────────────────────────────
 
 TOOL_GET_STATS = ToolDef(
@@ -479,7 +490,7 @@ _BUILTIN_TOOLS: list[ToolDef] = [
     TOOL_GET_STATUS, TOOL_GET_BALANCE, TOOL_GET_POSITIONS, TOOL_GET_CURRENT_PRICES,
     TOOL_GET_RECENT_TRADES, TOOL_GET_RECENT_SIGNALS, TOOL_GET_FEAR_GREED,
     TOOL_GET_NEWS_SUMMARY, TOOL_GET_PENDING_SWAPS, TOOL_GET_HIGHSTAKES_STATUS,
-    TOOL_GET_ROTATION_ANALYSIS, TOOL_GET_TRAILING_STOPS,
+    TOOL_GET_ROTATION_ANALYSIS, TOOL_GET_TRAILING_STOPS, TOOL_GET_ACCOUNT_HOLDINGS,
     TOOL_GET_STATS, TOOL_GET_TRADE_HISTORY, TOOL_GET_PAIR_STATS,
     TOOL_GET_BEST_WORST, TOOL_GET_DAILY_SUMMARIES, TOOL_GET_SCHEDULES,
     TOOL_GET_TRADING_RULES, TOOL_GET_FEE_INFO,

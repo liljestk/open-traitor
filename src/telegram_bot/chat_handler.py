@@ -214,6 +214,9 @@ def _build_fast_patterns():
          "get_schedules", None),
         (r"^best.?worst|^winners?.?losers?",
          "get_best_worst", None),
+        # Account holdings (live Coinbase)
+        (r"^/holdings?$|^holdings?\??$|^what (do I|do we) (own|hold|have)\??$|^show.*(holdings|account|portfolio)$|^account overview",
+         "get_account_holdings", None),
     ]
     for pattern_str, func_name, template in patterns:
         FAST_PATTERNS.append((
@@ -231,31 +234,38 @@ _build_fast_patterns()
 # ============================================================================
 
 def _format_status(data: dict) -> str:
-    """Format portfolio status like a trader would say it."""
-    pv = data.get("portfolio_value", 0)
-    ret = data.get("return_pct", 0)
-    pnl = data.get("total_pnl", 0)
-    dd = data.get("max_drawdown", 0)
-    trades = data.get("total_trades", 0)
+    """Format portfolio status using live Coinbase data."""
+    pv = data.get("portfolio_value_usd", data.get("portfolio_value", 0))
+    pnl = data.get("bot_pnl_usd", data.get("bot_total_pnl", data.get("total_pnl", 0)))
+    trades = data.get("bot_trades_executed", data.get("total_trades", 0))
     wr = data.get("win_rate", 0)
+    dd = data.get("max_drawdown", 0)
     paused = data.get("is_paused", False)
     cb = data.get("circuit_breaker", False)
+    fetched = data.get("data_fetched_at", "")
 
-    emoji = "📈" if ret > 0 else "📉" if ret < 0 else "➡️"
     pnl_emoji = "💰" if pnl > 0 else "🔻" if pnl < 0 else "➖"
 
     lines = [
-        f"{emoji} *Portfolio: ${pv:,.2f}*",
-        f"Return: {ret*100:+.2f}% | PnL: {pnl_emoji} ${pnl:,.2f}",
-        f"Max DD: {dd*100:.1f}% | Trades: {trades} | Win: {wr*100:.0f}%",
+        f"💼 *Portfolio: ${pv:,.2f}* (live)",
+        f"Bot PnL: {pnl_emoji} ${pnl:,.2f} | Trades: {trades} | Win: {wr*100:.0f}%",
+        f"Max DD: {dd*100:.1f}%",
     ]
+    if fetched:
+        lines.append(f"_Data: {fetched}_")
 
-    positions = data.get("open_positions", {})
-    if positions:
-        lines.append(f"\n📊 *{len(positions)} open:*")
-        for pair, qty in positions.items():
-            price = data.get("current_prices", {}).get(pair, 0)
-            lines.append(f"  • {pair}: {qty:.6f} @ ${price:,.2f}")
+    # Show actual Coinbase holdings
+    holdings = data.get("holdings", [])
+    crypto = [h for h in holdings if not h.get("is_fiat", False)][:6]
+    if crypto:
+        lines.append(f"\n📊 *Holdings:*")
+        for h in crypto:
+            val = h.get("native_value", 0)
+            price = h.get("price", 0)
+            lines.append(
+                f"  • *{h['currency']}*: {h['amount']:.6g}"
+                + (f" @ ${price:,.4g} = ${val:,.2f}" if price > 0 else f" = ${val:,.2f}")
+            )
 
     if paused:
         lines.append("\n⏸️ _Trading paused_")
@@ -266,33 +276,66 @@ def _format_status(data: dict) -> str:
 
 
 def _format_balance(data: dict) -> str:
-    return (
-        f"💰 *Portfolio: {data.get('portfolio_value', '?')}*\n"
-        f"💵 Cash: {data.get('cash_balance', '?')}\n"
-        f"📈 Return: {data.get('return_pct', '?')}\n"
-        f"📊 PnL: {data.get('total_pnl', '?')}"
-    )
+    total = data.get("total_portfolio_usd", data.get("portfolio_value", "?"))
+    cash = data.get("fiat_cash_usd", data.get("cash_balance", "?"))
+    pnl = data.get("bot_pnl_usd", data.get("total_pnl", 0))
+    fetched = data.get("fetched_at", data.get("data_fetched_at", ""))
+    pnl_str = f"${pnl:,.2f}" if isinstance(pnl, (int, float)) else str(pnl)
+    total_str = f"${total:,.2f}" if isinstance(total, (int, float)) else str(total)
+    cash_str = f"${cash:,.2f}" if isinstance(cash, (int, float)) else str(cash)
+    lines = [
+        f"💼 *Portfolio (live): {total_str}*",
+        f"💵 Fiat cash: {cash_str}",
+        f"📊 Bot PnL: {pnl_str}",
+    ]
+    # Show fiat accounts if present
+    for fa in data.get("fiat_accounts", []):
+        lines.append(f"   {fa['currency']}: {fa['amount']:,.4g}")
+    if fetched:
+        lines.append(f"_Data fetched: {fetched}_")
+    return "\n".join(lines)
 
 
 def _format_positions(data: dict) -> str:
-    positions = data.get("open_positions", {})
-    if not positions:
-        return "📭 No open positions right now."
-    lines = [f"📊 *{len(positions)} Open Positions:*\n"]
-    prices = data.get("current_prices", {})
-    for pair, qty in positions.items():
-        p = prices.get(pair, 0)
-        lines.append(f"• *{pair}*: {qty:.6f} @ ${p:,.2f} (${qty*p:,.2f})")
+    """Format actual Coinbase holdings."""
+    holdings = data.get("coinbase_holdings", [])
+    fetched = data.get("fetched_at", "")
+    if not holdings:
+        # Fallback: legacy format
+        positions = data.get("open_positions", {})
+        if not positions:
+            return "📭 No crypto holdings found."
+        lines = [f"📊 *{len(positions)} Bot Positions:*\n"]
+        for pair, qty in positions.items():
+            lines.append(f"• *{pair}*: {qty:.6f}")
+        return "\n".join(lines)
+
+    total_usd = data.get("total_crypto_usd", sum(h.get("native_value", 0) for h in holdings))
+    lines = [f"📊 *{len(holdings)} Holdings (live)* — ${total_usd:,.2f} total\n"]
+    for h in holdings:
+        price = h.get("price", 0)
+        val = h.get("native_value", 0)
+        amt = h.get("amount", 0)
+        lines.append(
+            f"• *{h['currency']}*: {amt:.6g}"
+            + (f" @ ${price:,.4g}" if price > 0 else "")
+            + f" = *${val:,.2f}*"
+        )
+    if fetched:
+        lines.append(f"\n_Data: {fetched}_")
     return "\n".join(lines)
 
 
 def _format_prices(data: dict) -> str:
     prices = data.get("prices", {})
+    fetched = data.get("fetched_at", "")
     if not prices:
         return "No price data yet."
-    lines = ["💲 *Current Prices:*\n"]
+    lines = ["💲 *Current Prices (live):*\n"]
     for pair, price in sorted(prices.items()):
         lines.append(f"• *{pair}*: ${price:,.2f}")
+    if fetched:
+        lines.append(f"\n_Fetched: {fetched}_")
     return "\n".join(lines)
 
 
@@ -336,6 +379,29 @@ def _format_signals(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_account_holdings(data: dict) -> str:
+    """Format the raw live Coinbase snapshot."""
+    holdings = data.get("holdings", [])
+    total = data.get("total_portfolio_usd", 0)
+    fetched = data.get("fetch_ts", "")
+    if not holdings:
+        return "📭 No account holdings found."
+    lines = [f"💼 *Account Holdings (live)* — ${total:,.2f} total\n"]
+    for h in holdings:
+        price = h.get("price", 0)
+        val = h.get("native_value", 0)
+        amt = h.get("amount", 0)
+        tag = " 💵" if h.get("is_fiat") else ""
+        lines.append(
+            f"• *{h['currency']}*{tag}: {amt:.6g}"
+            + (f" @ ${price:,.4g}" if price > 0 else "")
+            + f" = *${val:,.2f}*"
+        )
+    if fetched:
+        lines.append(f"\n_Data: {fetched}_")
+    return "\n".join(lines)
+
+
 # Map function names to formatters
 DATA_FORMATTERS = {
     "get_status": _format_status,
@@ -345,6 +411,7 @@ DATA_FORMATTERS = {
     "get_recent_trades": _format_trades,
     "get_fear_greed": _format_fear_greed,
     "get_recent_signals": _format_signals,
+    "get_account_holdings": _format_account_holdings,
 }
 
 
