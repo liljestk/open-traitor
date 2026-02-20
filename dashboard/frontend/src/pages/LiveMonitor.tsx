@@ -5,7 +5,7 @@
 import { useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import dayjs from 'dayjs'
-import { openLiveSocket, type LiveEvent } from '../api'
+import type { LiveEvent } from '../api'
 import { useLiveStore } from '../store'
 
 const AGENT_COLORS: Record<string, string> = {
@@ -68,26 +68,8 @@ function EventCard({ event, index }: { event: LiveEvent; index: number }) {
 }
 
 export default function LiveMonitor() {
-  const { events, connected, setConnected, addEvent, clearEvents } = useLiveStore()
-  const wsRef = useRef<WebSocket | null>(null)
+  const { events, connected, clearEvents } = useLiveStore()
   const bottomRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const ws = openLiveSocket(
-      (e) => {
-        setConnected(true)
-        addEvent(e)
-      },
-      () => setConnected(false),
-    )
-    wsRef.current = ws
-    setConnected(true)
-
-    return () => {
-      ws.close()
-      setConnected(false)
-    }
-  }, [])
 
   // Auto-scroll to latest
   useEffect(() => {

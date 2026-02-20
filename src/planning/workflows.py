@@ -17,7 +17,7 @@ it as soft prompt context for agents — no hard overrides.
 
 from __future__ import annotations
 
-from datetime import timedelta, date as date_type
+from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -80,7 +80,7 @@ class DailyPlanWorkflow:
         )
 
         # Also write to daily_summaries.plan_text
-        today = str(date_type.today())
+        today = str(workflow.now().date())
         plan_text = (
             f"[{today}] DAILY PLAN | Regime: {plan.get('regime', '?')} | "
             f"Risk: {plan.get('risk_posture', '?')} | "

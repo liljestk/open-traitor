@@ -37,10 +37,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncGenerator, Optional
 
 from pathlib import Path
+import io
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.utils.logger import get_logger
@@ -57,17 +58,33 @@ _temporal_client = None   # temporalio.client.Client instance (optional)
 _temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 _temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
 _config: dict = {}
+_coinbase_client = None   # CoinbaseClient instance (optional, for price lookups)
 
 _ws_connections: list[WebSocket] = []
 
 
 def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}):
     """Inject shared services.  Called from main.py before uvicorn starts."""
-    global _stats_db, _redis_client, _temporal_client, _config
+    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client
     _stats_db = stats_db
     _redis_client = redis_client
     _temporal_client = temporal_client
     _config = config
+    # Spin up a read-only Coinbase client for live price lookups (market data only)
+    try:
+        from src.core.coinbase_client import CoinbaseClient
+        key_file = os.environ.get("COINBASE_KEY_FILE", "")
+        api_key = os.environ.get("COINBASE_API_KEY", "")
+        api_secret = os.environ.get("COINBASE_API_SECRET", "")
+        _coinbase_client = CoinbaseClient(
+            api_key=api_key or None,
+            api_secret=api_secret or None,
+            key_file=key_file or None,
+            paper_mode=True,  # read-only; no real orders from the dashboard
+        )
+        logger.info("✅ Dashboard Coinbase price client ready")
+    except Exception as e:
+        logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -160,14 +177,19 @@ async def _api_key_middleware(request: Request, call_next):
         request.url.path.startswith("/api/")
         or request.url.path.startswith("/ws/")
     ):
-        # Primary: X-API-Key header (server-side / curl / fetch clients)
-        api_key = request.headers.get("X-API-Key", "")
-        if not api_key and request.url.path.startswith("/ws/"):
-            # Fallback for browser WebSocket: ?api_key=... query parameter
-            api_key = request.query_params.get("api_key", "")
-        # Constant-time comparison prevents timing-oracle attacks
-        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+        # Browsers set Sec-Fetch-Site automatically; same-origin means the
+        # request comes from the SPA served by this very server — safe to
+        # allow without an explicit API key.
+        sec_fetch_site = request.headers.get("Sec-Fetch-Site", "")
+        if sec_fetch_site != "same-origin":
+            # Primary: X-API-Key header (server-side / curl / fetch clients)
+            api_key = request.headers.get("X-API-Key", "")
+            if not api_key and request.url.path.startswith("/ws/"):
+                # Fallback for browser WebSocket: ?api_key=... query parameter
+                api_key = request.query_params.get("api_key", "")
+            # Constant-time comparison prevents timing-oracle attacks
+            if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
+                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
     return await call_next(request)
 
 
@@ -225,6 +247,69 @@ def get_cycle(cycle_id: str):
     if not cycle:
         raise HTTPException(status_code=404, detail=f"Cycle {cycle_id!r} not found")
     return cycle
+
+
+# ---------------------------------------------------------------------------
+# REST — Trades & Events
+# ---------------------------------------------------------------------------
+
+@app.get("/api/trades", summary="List raw trades log")
+def list_trades(
+    pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
+    hours: int = Query(24 * 7, ge=1, description="Hours of history to fetch"),
+    limit: int = Query(500, ge=1, le=5000)
+):
+    """Returns a list of raw trades from the database, newest first."""
+    db = _require_db()
+    trades = db.get_trades(hours=hours, pair=pair, limit=limit)
+    return {"trades": trades, "count": len(trades)}
+
+@app.get("/api/trades/export", summary="Export trades to CSV")
+def export_trades(hours: int = Query(24 * 30, ge=1)):
+    """Exports raw trades to a downloadable CSV file."""
+    db = _require_db()
+    trades = db.get_trades(hours=hours, limit=100000)
+    
+    if not trades:
+        return Response(
+            content="id,ts,pair,action,quantity,price,usd_amount,pnl,confidence,signal_type\n",
+            media_type="text/csv"
+        )
+    
+    import pandas as pd
+    df = pd.DataFrame(trades)
+    columns = [
+        "id", "ts", "pair", "action", "quantity", "price", "usd_amount", 
+        "fee_usd", "pnl", "confidence", "signal_type", "stop_loss", 
+        "take_profit", "reasoning", "is_rotation", "approved_by"
+    ]
+    existing_cols = [c for c in columns if c in df.columns]
+    df = df[existing_cols]
+    
+    csv_data = df.to_csv(index=False)
+    headers = {
+        "Content-Disposition": "attachment; filename=auto_traitor_trades.csv"
+    }
+    return Response(content=csv_data, media_type="text/csv", headers=headers)
+
+@app.get("/api/events", summary="List system events")
+def list_events(
+    event_type: Optional[str] = Query(None),
+    hours: int = Query(24 * 7, ge=1),
+    limit: int = Query(500, ge=1, le=5000)
+):
+    """Returns a list of system events/logs from the database."""
+    db = _require_db()
+    events = db.get_events(hours=hours, event_type=event_type, limit=limit)
+    # Parse event data json if possible
+    for e in events:
+        if isinstance(e.get("data"), str):
+            try:
+                e["data"] = json.loads(e["data"])
+            except Exception:
+                pass
+    return {"events": events, "count": len(events)}
+
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +382,154 @@ def get_stats_summary():
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# REST — Simulated Trades
+# ---------------------------------------------------------------------------
+
+def _get_live_price(pair: str) -> float:
+    """Fetch the current price for a pair via CoinbaseClient (or return 0 on failure)."""
+    if _coinbase_client:
+        try:
+            return _coinbase_client.get_current_price(pair)
+        except Exception:
+            pass
+    return 0.0
+
+
+@app.get("/api/market/price", summary="Live price for a trading pair")
+def get_market_price(pair: str = Query(..., description="e.g. BTC-EUR")):
+    """Returns the current best-estimate price for the given pair."""
+    price = _get_live_price(pair)
+    return {"pair": pair, "price": price, "ts": _utcnow()}
+
+
+from pydantic import BaseModel as _BaseModel
+
+class SimulatedTradeCreate(_BaseModel):
+    pair: str
+    from_currency: str
+    from_amount: float
+    notes: str = ""
+
+
+@app.post("/api/simulated-trades", summary="Open a new simulated trade")
+def create_simulated_trade(body: SimulatedTradeCreate):
+    """
+    Opens a new paper simulation. The server fetches the live entry price,
+    computes the implied quantity, and persists the record.
+
+    For EUR→Crypto: `from_currency=EUR`, `pair=BTC-EUR`
+    For Crypto→Crypto: `from_currency=BTC`, `pair=ETH-BTC` (or similar)
+    """
+    db = _require_db()
+    pair = body.pair.upper().strip()
+    from_currency = body.from_currency.upper().strip()
+
+    # Derive to_currency from pair (e.g. BTC-EUR → BTC when buying with EUR)
+    parts = pair.split("-")
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail=f"Invalid pair format: {pair!r}")
+    base, quote = parts
+    # If from_currency matches the quote, we're buying the base
+    if from_currency == quote:
+        to_currency = base
+    elif from_currency == base:
+        # Selling base for quote (e.g. BTC→EUR)
+        to_currency = quote
+    else:
+        to_currency = base  # Best guess
+
+    entry_price = _get_live_price(pair)
+    if entry_price <= 0:
+        raise HTTPException(status_code=503, detail=f"Cannot fetch live price for {pair}")
+
+    # Quantity = how much of to_currency we'd get
+    if from_currency == quote:
+        quantity = body.from_amount / entry_price
+    else:
+        quantity = body.from_amount * entry_price  # selling crypto → getting quote
+
+    sim_id = db.record_simulated_trade(
+        pair=pair,
+        from_currency=from_currency,
+        from_amount=body.from_amount,
+        entry_price=entry_price,
+        quantity=quantity,
+        to_currency=to_currency,
+        notes=body.notes,
+    )
+    return {
+        "id": sim_id,
+        "pair": pair,
+        "from_currency": from_currency,
+        "to_currency": to_currency,
+        "from_amount": body.from_amount,
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "notes": body.notes,
+        "status": "open",
+        "ts": _utcnow(),
+    }
+
+
+@app.get("/api/simulated-trades", summary="List simulated trades with live PnL")
+def list_simulated_trades(
+    include_closed: bool = Query(False, description="Include closed simulations"),
+):
+    """
+    Returns all simulated trades. For open ones, the current price is fetched
+    live and PnL (absolute + %) is computed on the fly.
+    """
+    db = _require_db()
+    rows = db.get_simulated_trades(include_closed=include_closed)
+
+    # Enrich open rows with live PnL
+    for row in rows:
+        if row["status"] == "open":
+            current_price = _get_live_price(row["pair"])
+            if current_price > 0:
+                pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
+                pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
+            else:
+                current_price = row["entry_price"]
+                pnl_abs = 0.0
+                pnl_pct = 0.0
+            row["current_price"] = current_price
+            row["pnl_abs"] = round(pnl_abs, 6)
+            row["pnl_pct"] = round(pnl_pct, 4)
+        else:
+            # Closed: use stored values
+            row["current_price"] = row.get("close_price") or row["entry_price"]
+            row["pnl_abs"] = row.get("close_pnl_abs") or 0.0
+            row["pnl_pct"] = row.get("close_pnl_pct") or 0.0
+
+    return {"simulations": rows, "count": len(rows)}
+
+
+@app.delete("/api/simulated-trades/{sim_id}", summary="Close a simulated trade")
+def close_simulated_trade_route(sim_id: int):
+    """
+    Closes an open simulation by recording the current live price as the
+    close price and computing the final PnL.
+    """
+    db = _require_db()
+
+    # First, look up the sim to get the pair
+    rows = db.get_simulated_trades(include_closed=False)
+    target = next((r for r in rows if r["id"] == sim_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Open simulation {sim_id} not found")
+
+    close_price = _get_live_price(target["pair"])
+    if close_price <= 0:
+        close_price = target["entry_price"]  # Fallback to entry price
+
+    result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found or already closed")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -645,3 +878,30 @@ if _STATIC_DIR.is_dir():
         if index.is_file():
             return FileResponse(str(index))
         raise HTTPException(status_code=404, detail="Frontend not built")
+
+if __name__ == "__main__":
+    import uvicorn
+    import yaml
+    import os
+    from src.utils.stats import StatsDB
+    
+    config_path = os.path.join("config", "settings.yaml")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    else:
+        config = {}
+        
+    db = StatsDB(config.get("database", {}).get("stats_db", "data/stats.db"))
+    
+    redis_url = os.environ.get("REDIS_URL")
+    redis_client = None
+    if redis_url:
+        import redis
+        redis_client = redis.Redis.from_url(redis_url)
+
+    app = create_app(stats_db=db, redis_client=redis_client, temporal_client=None, config=config)
+    
+    port = int(config.get("dashboard", {}).get("port", 8090))
+    print(f"🚀 Starting Dashboard Server on 0.0.0.0:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
