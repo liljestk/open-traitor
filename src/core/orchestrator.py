@@ -678,6 +678,8 @@ class Orchestrator:
         if "error" in analysis_result:
             logger.warning(f"Analysis failed for {pair}: {analysis_result.get('error')}")
             self.journal.log_decision("analysis_failed", pair, "none", {"error": analysis_result.get('error')})
+            if trace_ctx is not None:
+                trace_ctx.finish(metadata={"action": "analysis_failed", "error": analysis_result.get("error", "")})
             return
 
         # Notify on high-confidence signals

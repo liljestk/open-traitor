@@ -78,17 +78,18 @@ class SpanContext:
         self.completion_tokens = completion_tokens
         self.latency_ms = latency_ms if latency_ms is not None else (time.time() - self._start_time) * 1000
 
-        # Finish Langfuse generation
+        # Finish Langfuse generation (v3 SDK: update then end)
         if self._generation is not None:
             try:
-                self._generation.end(
-                    output=str(output)[:2000] if not isinstance(output, str) else output[:2000],
-                    usage={
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
+                truncated_output = str(output)[:2000] if not isinstance(output, str) else output[:2000]
+                self._generation.update(
+                    output=truncated_output,
+                    usage_details={
+                        "input": prompt_tokens,
+                        "output": completion_tokens,
                     },
                 )
+                self._generation.end()
                 self.span_id = getattr(self._generation, "id", "") or ""
             except Exception as e:
                 logger.debug(f"Langfuse generation.end failed: {e}")
@@ -127,7 +128,7 @@ class TraceContext:
         self,
         cycle_id: str,
         pair: str,
-        trace: Any,  # Langfuse trace object (or None)
+        trace: Any,  # Langfuse span object (v3 SDK) or None
         redis_client: Any,
         metadata: Optional[dict] = None,
         session_id: Optional[str] = None,
@@ -171,7 +172,8 @@ class TraceContext:
         generation = None
         if self._trace is not None:
             try:
-                generation = self._trace.generation(
+                generation = self._trace.start_observation(
+                    as_type="generation",
                     name=agent_name,
                     model=model,
                     input=[
@@ -203,8 +205,16 @@ class TraceContext:
             try:
                 if metadata:
                     self._trace.update(metadata=metadata)
+                self._trace.end()
             except Exception as e:
-                logger.debug(f"Langfuse trace.update failed: {e}")
+                logger.debug(f"Langfuse trace span finish failed: {e}")
+            # Flush to ensure this trace's events are sent to Langfuse
+            tracer = LLMTracer._instance
+            if tracer and tracer._langfuse is not None:
+                try:
+                    tracer._langfuse.flush()
+                except Exception:
+                    pass
 
         if self._redis is not None:
             try:
@@ -282,7 +292,12 @@ class LLMTracer:
                 secret_key=secret_key,
                 host=host,
             )
-            logger.info(f"✅ LLM Tracer initialized — Langfuse at {host}")
+            # Verify connectivity and credentials
+            if self._langfuse.auth_check():
+                logger.info(f"✅ LLM Tracer initialized — Langfuse at {host}")
+            else:
+                logger.warning(f"⚠️ Langfuse auth_check failed — keys may be wrong or server unreachable at {host}")
+                self._langfuse = None
         except ImportError:
             logger.warning("⚠️ langfuse package not installed — tracing disabled. Run: pip install langfuse")
         except Exception as e:
@@ -331,15 +346,19 @@ class LLMTracer:
 
         resolved_session_id = session_id or f"auto-traitor-{date.today().isoformat()}"
 
-        langfuse_trace = None
+        langfuse_span = None
         if self._langfuse is not None:
             try:
-                langfuse_trace = self._langfuse.trace(
-                    id=cycle_id,
+                # Langfuse SDK v3: create a root span and set trace-level attrs
+                langfuse_span = self._langfuse.start_span(
+                    name=f"trading-cycle-{pair}",
+                    metadata={"pair": pair, "cycle_id": cycle_id, **(metadata or {})},
+                )
+                langfuse_span.update_trace(
                     name=f"trading-cycle-{pair}",
                     session_id=resolved_session_id,
-                    metadata={"pair": pair, **(metadata or {})},
                     tags=[pair, "trading-cycle"],
+                    metadata={"pair": pair, **(metadata or {})},
                 )
             except Exception as e:
                 logger.debug(f"Langfuse trace creation failed: {e}")
@@ -347,7 +366,7 @@ class LLMTracer:
         return TraceContext(
             cycle_id=cycle_id,
             pair=pair,
-            trace=langfuse_trace,
+            trace=langfuse_span,
             redis_client=self._redis,
             metadata=metadata,
             session_id=resolved_session_id,
