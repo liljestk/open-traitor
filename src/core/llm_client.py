@@ -32,8 +32,8 @@ class LLMClient:
         model: str = "llama3.1:8b",
         temperature: float = 0.2,
         max_tokens: int = 2000,
-        max_retries: int = 3,
-        timeout: int = 60,
+        max_retries: int = 1,
+        timeout: int = 45,
         persona: str = "",
     ):
         self.model = model
@@ -94,6 +94,7 @@ class LLMClient:
             elapsed_ms = elapsed * 1000
 
             self._call_count += 1
+            self._retry_count = 0  # reset on success
             prompt_tokens = 0
             completion_tokens = 0
             if response.usage:
@@ -122,7 +123,13 @@ class LLMClient:
             return content
 
         except Exception as e:
-            logger.error(f"❌ LLM call failed: {e}")
+            elapsed = time.time() - start_time
+            self._retry_count = getattr(self, "_retry_count", 0) + 1
+            _agent_label = f" for {agent_name}" if agent_name else ""
+            logger.warning(
+                f"⚠️ LLM call failed{_agent_label} after {elapsed:.1f}s "
+                f"(attempt {self._retry_count}): {type(e).__name__}: {e}"
+            )
             if span is not None:
                 span.finish(
                     output={"error": str(e)},

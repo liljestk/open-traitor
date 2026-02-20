@@ -37,6 +37,7 @@ export interface CycleSummary {
   total_prompt_tokens: number | null
   total_completion_tokens: number | null
   total_latency_ms: number | null
+  cycle_duration_ms: number | null
 }
 
 export interface AgentSpan {

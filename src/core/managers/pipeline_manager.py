@@ -97,6 +97,8 @@ class PipelineManager:
         """Run the full analysis → strategy → risk → execute pipeline for a pair asynchronously."""
         # Unpack dependencies from orchestrator for brevity
         orch = self.orchestrator
+        _t0 = time.monotonic()  # wall-clock start
+        _timings: dict[str, float] = {}  # step → seconds
         
         logger.info(f"🔍 Analyzing {pair}...")
 
@@ -121,6 +123,7 @@ class PipelineManager:
 
         # Data fetching (synchronous -> use asyncio.to_thread if we want true non-blocking,
         # but for now we let it block slightly since Coinbase REST is fast)
+        _step_t = time.monotonic()
         orch.rate_limiter.wait("coinbase_rest")
         candles = await asyncio.to_thread(
             orch.coinbase.get_candles,
@@ -138,6 +141,7 @@ class PipelineManager:
         else:
             orch.rate_limiter.wait("coinbase_rest")
             price = await asyncio.to_thread(orch.coinbase.get_current_price, pair)
+        _timings["data"] = time.monotonic() - _step_t
 
         if price <= 0:
             logger.warning(
@@ -230,23 +234,29 @@ class PipelineManager:
             strategy_signals["_ensemble"] = ensemble
 
         # ─── Pairs correlation (for risk sizing) ───
+        _step_t = time.monotonic()
         correlation_matrix = {}
         try:
-            all_candles = {}
-            for p in orch.pairs:
-                if p == pair:
-                    all_candles[p] = candles
-                else:
-                    c = await asyncio.to_thread(
-                        orch.coinbase.get_candles, p,
-                        granularity=orch.config.get("analysis", {}).get("technical", {}).get(
-                            "candle_granularity", "ONE_HOUR"
-                        ),
-                    )
-                    all_candles[p] = c
+            all_candles = {pair: candles}
+            other_pairs = [p for p in orch.pairs if p != pair]
+            if other_pairs:
+                # Fetch candles for other pairs in parallel
+                granularity = orch.config.get("analysis", {}).get("technical", {}).get(
+                    "candle_granularity", "ONE_HOUR"
+                )
+                other_results = await asyncio.gather(*[
+                    asyncio.to_thread(orch.coinbase.get_candles, p, granularity=granularity)
+                    for p in other_pairs
+                ], return_exceptions=True)
+                for p, result in zip(other_pairs, other_results):
+                    if isinstance(result, Exception):
+                        logger.debug(f"Correlation candle fetch failed for {p}: {result}")
+                    else:
+                        all_candles[p] = result
             correlation_matrix = orch.pairs_monitor.get_correlation_matrix(all_candles)
         except Exception as e:
             logger.debug(f"Pairs correlation unavailable: {e}")
+        _timings["correlation"] = time.monotonic() - _step_t
 
         # ─── Kelly Criterion stats (from StatsDB) ───
         kelly_stats = {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
@@ -265,6 +275,7 @@ class PipelineManager:
             logger.debug(f"Failed to load recent outcomes: {e}")
 
         # Step 2: Market Analysis
+        _step_t = time.monotonic()
         analysis_result = await orch.market_analyst.execute({
             "pair": pair,
             "candles": candles,
@@ -281,6 +292,7 @@ class PipelineManager:
         })
 
         signal = analysis_result.get("signal", {})
+        _timings["analyst"] = time.monotonic() - _step_t
         if "error" in analysis_result:
             logger.warning(f"Analysis failed for {pair}: {analysis_result.get('error')}")
             orch.journal.log_decision("analysis_failed", pair, "none", {"error": analysis_result.get('error')})
@@ -296,6 +308,7 @@ class PipelineManager:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
 
         # Step 3: Strategy Generation
+        _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context
         pair_confidence_adj = orch.get_pair_confidence_adjustment(pair)
 
@@ -319,6 +332,10 @@ class PipelineManager:
         })
 
         if strategy_result.get("action") == "hold":
+            _timings["strategist"] = time.monotonic() - _step_t
+            _total = time.monotonic() - _t0
+            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [hold]")
             logger.info(f"📊 {pair}: HOLD — {strategy_result.get('reason', strategy_result.get('reasoning', 'No action'))}")
             orch.journal.log_decision("hold", pair, "hold", {"signal": signal, "reasoning": strategy_result.get('reason', '')})
             if trace_ctx is not None:
@@ -326,8 +343,10 @@ class PipelineManager:
             return
 
         strategy_result["current_price"] = price
+        _timings["strategist"] = time.monotonic() - _step_t
 
         # Step 4: Risk Validation
+        _step_t = time.monotonic()
         risk_portfolio_value = (
             orch.state.live_portfolio_value if orch.state.live_portfolio_value > 0 else orch.state.portfolio_value
         )
@@ -348,6 +367,10 @@ class PipelineManager:
         })
 
         if not risk_result.get("approved"):
+            _timings["risk"] = time.monotonic() - _step_t
+            _total = time.monotonic() - _t0
+            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [rejected]")
             logger.info(f"🚫 {pair}: Trade rejected — {risk_result.get('reason', 'Unknown')}")
             orch.journal.log_decision("trade_rejected", pair, strategy_result.get("action", "unknown"), {
                 "reason": risk_result.get("reason", "Unknown"),
@@ -359,6 +382,7 @@ class PipelineManager:
             return
 
         # Step 5: Handle approval or execute
+        _timings["risk"] = time.monotonic() - _step_t
         if risk_result.get("needs_approval"):
             trade_desc = (
                 f"{risk_result['action'].upper()} {risk_result['pair']}\n"
@@ -380,6 +404,7 @@ class PipelineManager:
             return
 
         # Step 6: Execute Trade
+        _step_t = time.monotonic()
         exec_result = await orch.executor.execute({
             "approved_trade": risk_result,
         })
@@ -486,6 +511,11 @@ class PipelineManager:
 
             if orch.telegram and orch.config.get("telegram", {}).get("notify_on_trade", True):
                 orch.telegram.send_trade_notification(trade_event)
+
+            _timings["exec"] = time.monotonic() - _step_t
+            _total = time.monotonic() - _t0
+            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [executed]")
 
             if trace_ctx is not None:
                 try:

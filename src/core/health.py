@@ -25,6 +25,7 @@ _health_state: dict[str, Any] = {
     "last_cycle": None,
     "cycle_count": 0,
     "components": {},
+    "cycle_duration_s": None,
 }
 _lock = threading.Lock()
 
@@ -33,6 +34,7 @@ def update_health(
     status: str = "ok",
     cycle_count: int = 0,
     components: Optional[dict] = None,
+    cycle_duration_s: Optional[float] = None,
 ) -> None:
     """Update health state (called by orchestrator each cycle)."""
     global _health_state
@@ -42,6 +44,8 @@ def update_health(
         _health_state["cycle_count"] = cycle_count
         if components:
             _health_state["components"] = components
+        if cycle_duration_s is not None:
+            _health_state["cycle_duration_s"] = cycle_duration_s
 
 
 def check_component_health(
@@ -133,6 +137,16 @@ def metrics():
     for name, comp in components.items():
         healthy = 1 if comp.get("status") == "healthy" else 0
         lines.append(f"autotraitor_component_healthy{{component=\"{name}\"}} {healthy}")
+
+    # Cycle duration gauge
+    cd = state.get("cycle_duration_s")
+    if cd is not None:
+        lines.extend([
+            "",
+            "# HELP autotraitor_cycle_duration_seconds Wall-clock duration of the last trading cycle",
+            "# TYPE autotraitor_cycle_duration_seconds gauge",
+            f"autotraitor_cycle_duration_seconds {cd}",
+        ])
 
     return "\n".join(lines) + "\n", 200, {"Content-Type": "text/plain"}
 

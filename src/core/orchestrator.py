@@ -273,10 +273,7 @@ class Orchestrator:
         self._STRATEGIC_CONTEXT_TTL: float = 60.0
         self._pair_priority_map: dict[str, float] = {}  # pair → confidence adjustment
 
-        # ─── Persistent asyncio event loop ─────────────────────────────────
-        # Reuse a single event loop for all async work instead of creating/
-        # destroying one per cycle.  This avoids fd exhaustion on 24/7 runs.
-        self._async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        # ─── Asyncio helper ───────────────────────────────────────────────
 
         # ─── Position reconciliation (live mode only) ───
         # Reconcile TradingState.positions against real Coinbase balances every N cycles
@@ -375,8 +372,28 @@ class Orchestrator:
 
             cycle_count += 1
             logger.info(f"━━━ Cycle #{cycle_count} ━━━━━━━━━━━━━━━━━━━━━━━━")
+            _cycle_t0 = time.monotonic()
 
             try:
+                # ─── Ollama pre-check ─────────────────────────────────
+                # Avoid burning minutes on retries if Ollama is down.
+                if not self.llm.is_available():
+                    _ollama_skip_count = getattr(self, "_ollama_skip_count", 0) + 1
+                    self._ollama_skip_count = _ollama_skip_count
+                    logger.warning(f"⚠️ Ollama unreachable — skipping cycle (consecutive: {_ollama_skip_count})")
+                    if _ollama_skip_count >= 2 and self.telegram:
+                        try:
+                            self.telegram.send_alert(
+                                f"⚠️ Ollama unreachable for {_ollama_skip_count} consecutive cycles — "
+                                "LLM pipelines skipped."
+                            )
+                        except Exception:
+                            pass
+                    # Still update health so the endpoint stays fresh
+                    update_health(status="degraded", cycle_count=cycle_count)
+                    continue
+                self._ollama_skip_count = 0
+
                 # Run pipelines — parallelised across pairs using asyncio
                 # Sort pairs: planning-preferred first, then normal, avoid last
                 priority_map = getattr(self, "_pair_priority_map", {})
@@ -387,7 +404,11 @@ class Orchestrator:
 
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
-                    self._async_loop.run_until_complete(asyncio.gather(*tasks))
+
+                    async def _run_pipelines():
+                        await asyncio.gather(*tasks)
+
+                    asyncio.run(_run_pipelines())
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
 
@@ -541,8 +562,7 @@ class Orchestrator:
                             "stats_db": self.stats_db if hasattr(self, "stats_db") else None,
                             "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
                         }
-                        advisor_loop = self._async_loop
-                        advisor_result = advisor_loop.run_until_complete(
+                        advisor_result = asyncio.run(
                             self.settings_advisor.execute(advisor_ctx)
                         )
 
@@ -571,6 +591,7 @@ class Orchestrator:
                 self.state_manager.prune_stale_approvals()
 
                 # Update health status
+                _cycle_duration_s = time.monotonic() - _cycle_t0
                 components = check_component_health(
                     ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
                     redis_client=self.redis,
@@ -579,7 +600,20 @@ class Orchestrator:
                     status="ok",
                     cycle_count=cycle_count,
                     components=components,
+                    cycle_duration_s=round(_cycle_duration_s, 2),
                 )
+                logger.info(f"⏱️ Cycle #{cycle_count} completed in {_cycle_duration_s:.1f}s")
+
+                # ─── Slow-cycle Telegram alert ────────────────────────
+                _slow_threshold = self.interval * 2
+                if _cycle_duration_s > _slow_threshold and self.telegram:
+                    try:
+                        self.telegram.send_alert(
+                            f"⚠️ Slow cycle #{cycle_count}: {_cycle_duration_s:.0f}s "
+                            f"(threshold: {_slow_threshold:.0f}s)"
+                        )
+                    except Exception:
+                        pass
 
             except Exception as e:
                 consecutive_errors += 1
@@ -640,7 +674,11 @@ class Orchestrator:
                 )
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(ep) for ep in early_pairs]
-                    self._async_loop.run_until_complete(asyncio.gather(*tasks))
+
+                    async def _run_early():
+                        await asyncio.gather(*tasks)
+
+                    asyncio.run(_run_early())
                 except Exception as _ep_err:
                     logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
                     

@@ -296,6 +296,17 @@ def list_cycles(
     cycles = db.get_cycles(pair=pair, limit=limit, offset=offset)
     for c in cycles:
         c["langfuse_url"] = _langfuse_url(c.get("langfuse_trace_id"))
+        # Compute wall-clock duration from first→last agent span timestamps
+        try:
+            if c.get("started_at") and c.get("finished_at"):
+                from datetime import datetime
+                _s = datetime.fromisoformat(c["started_at"])
+                _f = datetime.fromisoformat(c["finished_at"])
+                c["cycle_duration_ms"] = round((_f - _s).total_seconds() * 1000, 1)
+            else:
+                c["cycle_duration_ms"] = None
+        except Exception:
+            c["cycle_duration_ms"] = None
     return {"cycles": cycles, "limit": limit, "offset": offset, "count": len(cycles)}
 
 

@@ -77,17 +77,17 @@ export default function CycleExplorer() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase">
-              {['Time', 'Pair', 'Signal', 'Action', 'Confidence', 'PnL', 'Tokens', 'Latency', 'Trace'].map((h) => (
+              {['Time', 'Pair', 'Signal', 'Action', 'Confidence', 'PnL', 'Tokens', 'LLM Time', 'Wall Clock', 'Trace'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {cyclesLoading && (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             )}
             {!cyclesLoading && cycles.length === 0 && (
-              <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-500">No cycles found</td></tr>
+              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">No cycles found</td></tr>
             )}
             {cycles.map((c: CycleSummary) => (
               <tr
@@ -109,6 +109,7 @@ export default function CycleExplorer() {
                 <td className={`px-4 py-2.5 font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</td>
                 <td className="px-4 py-2.5 text-gray-400">{c.total_prompt_tokens != null ? (c.total_prompt_tokens + (c.total_completion_tokens ?? 0)) : '—'}</td>
                 <td className="px-4 py-2.5 text-gray-400">{c.total_latency_ms != null ? `${c.total_latency_ms.toFixed(0)} ms` : '—'}</td>
+                <td className={`px-4 py-2.5 ${c.cycle_duration_ms != null && c.cycle_duration_ms > 120000 ? 'text-yellow-400 font-medium' : 'text-gray-400'}`}>{c.cycle_duration_ms != null ? `${(c.cycle_duration_ms / 1000).toFixed(1)}s` : '—'}</td>
                 <td className="px-4 py-2.5">
                   {c.langfuse_url ? (
                     <a
