@@ -24,6 +24,7 @@ import os
 import time
 import threading
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Optional
 
 from src.utils.logger import get_logger
@@ -129,12 +130,14 @@ class TraceContext:
         trace: Any,  # Langfuse trace object (or None)
         redis_client: Any,
         metadata: Optional[dict] = None,
+        session_id: Optional[str] = None,
     ):
         self._cycle_id = cycle_id
         self._pair = pair
         self._trace = trace
         self._redis = redis_client
         self._metadata = metadata or {}
+        self._session_id = session_id
         self._spans: list[SpanContext] = []
 
         # Publish trace-started event
@@ -314,13 +317,19 @@ class LLMTracer:
         cycle_id: str,
         pair: str,
         metadata: Optional[dict] = None,
+        session_id: Optional[str] = None,
     ) -> TraceContext:
         """
         Start a new trace for one complete trading cycle.
         Returns a TraceContext used to create per-agent spans.
+
+        session_id groups related traces in Langfuse (e.g. all cycles for a day).
+        Defaults to ``auto-traitor-{today}`` so every daily run is one session.
         """
         if not self._enabled:
             return _NullTraceContext()  # type: ignore[return-value]
+
+        resolved_session_id = session_id or f"auto-traitor-{date.today().isoformat()}"
 
         langfuse_trace = None
         if self._langfuse is not None:
@@ -328,6 +337,7 @@ class LLMTracer:
                 langfuse_trace = self._langfuse.trace(
                     id=cycle_id,
                     name=f"trading-cycle-{pair}",
+                    session_id=resolved_session_id,
                     metadata={"pair": pair, **(metadata or {})},
                     tags=[pair, "trading-cycle"],
                 )
@@ -340,6 +350,7 @@ class LLMTracer:
             trace=langfuse_trace,
             redis_client=self._redis,
             metadata=metadata,
+            session_id=resolved_session_id,
         )
 
     def flush(self) -> None:
