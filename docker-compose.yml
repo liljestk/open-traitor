@@ -206,11 +206,10 @@ services:
   # MinIO — S3-compatible blob store for Langfuse v3 event/media storage
   # =========================================================================
   minio:
-    image: cgr.dev/chainguard/minio
+    image: minio/minio:latest
     container_name: auto-traitor-minio
     restart: unless-stopped
-    entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
