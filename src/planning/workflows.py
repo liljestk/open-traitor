@@ -24,6 +24,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.planning.activities import (
+        evaluate_previous_plan,
         fetch_trade_history,
         fetch_portfolio_history,
         call_planning_llm,
@@ -53,6 +54,14 @@ class DailyPlanWorkflow:
         workflow_id = workflow.info().workflow_id
         run_id = workflow.info().run_id
 
+        # Evaluate how well yesterday's plan performed
+        evaluation = await workflow.execute_activity(
+            evaluate_previous_plan,
+            args=["daily"],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+
         # Fetch last 7 days of trade + portfolio data
         portfolio_data = await workflow.execute_activity(
             fetch_portfolio_history,
@@ -60,6 +69,9 @@ class DailyPlanWorkflow:
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
+
+        # Inject evaluation into portfolio data so the LLM can learn from it
+        portfolio_data["previous_plan_evaluation"] = evaluation
 
         # Call LLM for daily plan
         plan = await workflow.execute_activity(
@@ -113,6 +125,14 @@ class WeeklyReviewWorkflow:
         workflow_id = workflow.info().workflow_id
         run_id = workflow.info().run_id
 
+        # Evaluate how well last week's plan performed
+        evaluation = await workflow.execute_activity(
+            evaluate_previous_plan,
+            args=["weekly"],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+
         # Fetch last 30 days of data
         portfolio_data = await workflow.execute_activity(
             fetch_portfolio_history,
@@ -128,8 +148,12 @@ class WeeklyReviewWorkflow:
             retry_policy=_RETRY,
         )
 
-        # Merge reasoning sample from portfolio data with trade list
-        review_data = {**portfolio_data, "recent_trades": trade_history[:50]}
+        # Merge reasoning sample from portfolio data with trade list + evaluation
+        review_data = {
+            **portfolio_data,
+            "recent_trades": trade_history[:50],
+            "previous_plan_evaluation": evaluation,
+        }
 
         plan = await workflow.execute_activity(
             call_planning_llm,

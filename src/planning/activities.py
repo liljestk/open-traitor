@@ -319,8 +319,27 @@ IMPORTANT: The bot's portfolio tracking was recently corrected to reflect
 actual live Coinbase holdings. Earlier data may reflect stale or incorrect
 portfolio assumptions. Weight recent data and current holdings more heavily.\n"""
 
+    # ── Previous plan evaluation feedback ──────────────────────────────
+    eval_data = review_data.get("previous_plan_evaluation", {})
+    if eval_data.get("has_previous_plan") and eval_data.get("accuracy_score") is not None:
+        eval_block = f"""
+PREVIOUS PLAN EVALUATION:
+  {eval_data.get('summary', '')}
+  Accuracy: {eval_data['accuracy_score']:.0%}
+  Component scores: {', '.join(f'{k}={v:.0%}' for k, v in eval_data.get('component_scores', {}).items())}
+  {f"Preferred pairs PnL: {eval_data.get('actual_pair_pnl', {})}" if eval_data.get('actual_pair_pnl') else ""}
+
+Use this evaluation to improve your current plan. If accuracy was low,
+adjust your approach. If certain pair predictions were wrong, reconsider."""
+    elif eval_data.get("has_previous_plan"):
+        eval_block = f"""
+PREVIOUS PLAN EVALUATION:
+  {eval_data.get('summary', 'No trades since last plan — no accuracy data.')}"""
+    else:
+        eval_block = ""
+
     user_message = f"""PERFORMANCE REVIEW ({horizon.upper()})
-{correction_note}
+{correction_note}{eval_block}
 TRADE STATISTICS:
   Total trades: {total}
   Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing', 0)} losses)
@@ -389,6 +408,138 @@ Generate the {horizon} plan as JSON."""
             "regime": "neutral",
             "_langfuse_trace_id": trace_id,
         }
+
+
+@activity.defn
+async def evaluate_previous_plan(horizon: str) -> dict:
+    """
+    Evaluate how well the previous plan's predictions matched reality.
+
+    Reads the latest strategic_context for *horizon*, compares predicted
+    regime / pair preferences / risk posture against actual trade outcomes
+    since that plan was written, and returns an accuracy breakdown that
+    the next planning LLM call can learn from.
+    """
+    with closing(_get_conn()) as conn:
+        row = conn.execute(
+            """SELECT * FROM strategic_context WHERE horizon = ?
+               ORDER BY ts DESC LIMIT 1""",
+            (horizon,),
+        ).fetchone()
+
+        if not row:
+            return {"has_previous_plan": False, "summary": "No previous plan to evaluate."}
+
+        prev_plan: dict = json.loads(row["plan_json"])
+        plan_ts: str = row["ts"]
+
+        # Actual trade outcomes since (and including) the plan timestamp
+        trades = conn.execute(
+            """SELECT pair, action, pnl, confidence, signal_type
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
+               ORDER BY ts DESC LIMIT 500""",
+            (plan_ts,),
+        ).fetchall()
+        trades = [dict(t) for t in trades]
+
+    if not trades:
+        return {
+            "has_previous_plan": True,
+            "plan_ts": plan_ts,
+            "horizon": horizon,
+            "previous_plan_summary": prev_plan.get("summary", ""),
+            "trades_since": 0,
+            "accuracy_score": None,
+            "summary": f"No trades executed since last {horizon} plan — cannot evaluate.",
+        }
+
+    # ── aggregate actuals ──────────────────────────────────────────────
+    total_trades = len(trades)
+    winning = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
+    total_pnl = sum(t.get("pnl") or 0 for t in trades)
+    win_rate = winning / total_trades if total_trades else 0
+
+    pair_pnl: dict[str, float] = {}
+    for t in trades:
+        p = t.get("pair", "UNKNOWN")
+        pair_pnl[p] = pair_pnl.get(p, 0) + (t.get("pnl") or 0)
+
+    scores: dict[str, float] = {}
+    abs_total = max(abs(total_pnl), 0.01)
+
+    # 1. Pair-selection accuracy
+    preferred = prev_plan.get("preferred_pairs", prev_plan.get("pairs_to_focus", []))
+    avoid = prev_plan.get("avoid_pairs", prev_plan.get("pairs_to_reduce", []))
+
+    if preferred:
+        preferred_pnl = sum(pair_pnl.get(p, 0) for p in preferred)
+        other_pnl = sum(v for k, v in pair_pnl.items() if k not in preferred)
+        if preferred_pnl > 0 and preferred_pnl >= other_pnl:
+            scores["pair_selection"] = min(1.0, 0.5 + preferred_pnl / abs_total * 0.5)
+        elif preferred_pnl > 0:
+            scores["pair_selection"] = 0.5
+        else:
+            scores["pair_selection"] = max(0.0, 0.5 - abs(preferred_pnl) / abs_total * 0.5)
+
+    if avoid:
+        avoid_pnl = sum(pair_pnl.get(p, 0) for p in avoid)
+        scores["avoid_accuracy"] = 1.0 if avoid_pnl <= 0 else max(0.0, 0.5 - avoid_pnl / abs_total)
+
+    # 2. Risk-posture alignment
+    risk_posture = prev_plan.get("risk_posture", "normal")
+    if risk_posture == "conservative":
+        scores["risk_posture"] = 0.7 if total_pnl >= 0 else 0.3
+    elif risk_posture == "aggressive":
+        scores["risk_posture"] = 1.0 if total_pnl > 0 else 0.2
+    else:
+        scores["risk_posture"] = 0.5 + (0.3 if total_pnl > 0 else -0.1)
+
+    # 3. Regime prediction
+    regime = prev_plan.get(
+        "regime",
+        prev_plan.get("market_regime", prev_plan.get("macro_regime", "neutral")),
+    )
+    bull_signal = regime in ("bullish", "bull_market", "risk_on")
+    bear_signal = regime in ("bearish", "bear_market", "risk_off")
+
+    if bull_signal and total_pnl > 0:
+        scores["regime_prediction"] = min(1.0, 0.6 + win_rate * 0.4)
+    elif bear_signal and total_pnl < 0:
+        scores["regime_prediction"] = 0.6
+    elif bull_signal and total_pnl < 0:
+        scores["regime_prediction"] = 0.2
+    elif bear_signal and total_pnl > 0:
+        scores["regime_prediction"] = 0.3
+    else:
+        scores["regime_prediction"] = 0.5
+
+    accuracy = sum(scores.values()) / len(scores) if scores else 0.5
+
+    evaluation = {
+        "has_previous_plan": True,
+        "plan_ts": plan_ts,
+        "horizon": horizon,
+        "previous_plan_summary": prev_plan.get("summary", ""),
+        "predicted_regime": regime,
+        "predicted_risk_posture": risk_posture,
+        "predicted_preferred_pairs": preferred,
+        "predicted_avoid_pairs": avoid,
+        "actual_trades": total_trades,
+        "actual_win_rate": round(win_rate, 3),
+        "actual_total_pnl": round(total_pnl, 4),
+        "actual_pair_pnl": {k: round(v, 4) for k, v in pair_pnl.items()},
+        "component_scores": {k: round(v, 3) for k, v in scores.items()},
+        "accuracy_score": round(accuracy, 3),
+        "summary": (
+            f"Previous {horizon} plan accuracy: {accuracy:.0%}. "
+            f"Predicted {regime} regime with {risk_posture} posture. "
+            f"Actual: {total_trades} trades, {win_rate:.0%} win rate, PnL {total_pnl:.2f}. "
+            f"Component scores: {', '.join(f'{k}={v:.0%}' for k, v in scores.items())}."
+        ),
+    }
+
+    logger.info(f"Plan evaluation ({horizon}): accuracy={accuracy:.2f}, trades={total_trades}")
+    return evaluation
 
 
 @activity.defn

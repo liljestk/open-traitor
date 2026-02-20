@@ -142,6 +142,52 @@ class SettingsAdvisorAgent(BaseAgent):
 
     # ── Main execution ───────────────────────────────────────────────────
 
+    def _compute_confidence_recommendation(self, stats_db) -> str:
+        """Pre-compute a min_confidence adjustment suggestion based on win rate.
+
+        Returns a string to inject into the LLM prompt.  The LLM is free
+        to override this recommendation — it's guidance, not a hard rule.
+        """
+        if stats_db is None:
+            return ""
+        try:
+            wl = stats_db.get_win_loss_stats()
+            sample = wl.get("sample_size", 0)
+            if sample < 10:
+                return (
+                    f"\nCONFIDENCE THRESHOLD NOTE: Only {sample} trades recorded "
+                    f"— not enough data to recommend min_confidence changes yet."
+                )
+            win_rate = wl.get("win_rate", 0)
+            current_conf = self.config.get("trading", {}).get("min_confidence", 0.7)
+
+            if win_rate >= 0.60 and current_conf > 0.50:
+                suggestion = max(0.50, current_conf - 0.05)
+                return (
+                    f"\nCONFIDENCE THRESHOLD RECOMMENDATION:\n"
+                    f"  Win rate is strong at {win_rate:.0%} over {sample} trades.\n"
+                    f"  Current min_confidence = {current_conf}.\n"
+                    f"  Consider lowering to ~{suggestion:.2f} to capture more opportunities.\n"
+                    f"  (Allowed range: 0.30 - 0.95)"
+                )
+            elif win_rate <= 0.40 and current_conf < 0.95:
+                suggestion = min(0.95, current_conf + 0.10)
+                return (
+                    f"\nCONFIDENCE THRESHOLD RECOMMENDATION:\n"
+                    f"  Win rate is poor at {win_rate:.0%} over {sample} trades.\n"
+                    f"  Current min_confidence = {current_conf}.\n"
+                    f"  Consider raising to ~{suggestion:.2f} to filter weak signals.\n"
+                    f"  (Allowed range: 0.30 - 0.95)"
+                )
+            else:
+                return (
+                    f"\nCONFIDENCE THRESHOLD NOTE:\n"
+                    f"  Win rate {win_rate:.0%} over {sample} trades — "
+                    f"current min_confidence={current_conf} seems appropriate."
+                )
+        except Exception:
+            return ""
+
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Analyze market conditions and propose settings adjustments.
@@ -173,7 +219,8 @@ class SettingsAdvisorAgent(BaseAgent):
             f"- Fear & Greed: {fear_greed}\n"
             f"- Recent Performance (24h): {recent_perf}\n"
             f"- Market Volatility: {market_vol}\n"
-            f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n\n"
+            f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n"
+            f"{self._compute_confidence_recommendation(stats_db)}\n\n"
             f"Based on these conditions, should we adjust any trading parameters?\n"
             f"If everything is working well, return an empty changes array.\n"
             f"Respond with JSON only."

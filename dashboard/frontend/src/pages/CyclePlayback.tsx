@@ -6,9 +6,33 @@ import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { ChevronLeft, ExternalLink } from 'lucide-react'
-import { fetchCycleFull, type AgentSpan } from '../api'
+import { ChevronLeft, ExternalLink, CheckCircle2, XCircle, PauseCircle, Clock, AlertTriangle } from 'lucide-react'
+import { fetchCycleFull, type AgentSpan, type CycleFull } from '../api'
 import SpanWaterfall from '../components/SpanWaterfall'
+
+const OUTCOME_CONFIG = {
+  executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
+  hold: { label: 'Hold', icon: PauseCircle, color: 'text-yellow-400', bg: 'bg-yellow-900/30 border-yellow-800/50' },
+  rejected: { label: 'Rejected', icon: XCircle, color: 'text-red-400', bg: 'bg-red-900/30 border-red-800/50' },
+  pending_approval: { label: 'Pending Approval', icon: Clock, color: 'text-blue-400', bg: 'bg-blue-900/30 border-blue-800/50' },
+  execution_failed: { label: 'Execution Failed', icon: AlertTriangle, color: 'text-orange-400', bg: 'bg-orange-900/30 border-orange-800/50' },
+} as const
+
+function DecisionSummary({ cycle }: { cycle: CycleFull }) {
+  const config = OUTCOME_CONFIG[cycle.decision_outcome] ?? OUTCOME_CONFIG.hold
+  const Icon = config.icon
+  return (
+    <div className={`border rounded-xl px-5 py-4 ${config.bg}`}>
+      <div className="flex items-center gap-3 mb-2">
+        <Icon size={20} className={config.color} />
+        <h3 className={`text-sm font-semibold ${config.color}`}>Decision: {config.label}</h3>
+      </div>
+      {cycle.decision_reason && (
+        <p className="text-sm text-gray-300 leading-relaxed">{cycle.decision_reason}</p>
+      )}
+    </div>
+  )
+}
 
 function JsonViewer({ data }: { data: unknown }) {
   return (
@@ -129,6 +153,9 @@ export default function CyclePlayback() {
           </div>
         ))}
       </div>
+
+      {/* Decision summary */}
+      <DecisionSummary cycle={cycle} />
 
       {/* Waterfall */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">

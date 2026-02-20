@@ -400,3 +400,172 @@ class ExecutorAgent(BaseAgent):
             "reason": reason,
             "success": success,
         }
+
+    # =========================================================================
+    # Limit Order Lifecycle Management
+    # =========================================================================
+
+    # Default TTL for resting limit orders before they are cancelled (seconds)
+    _LIMIT_ORDER_TTL: float = 900.0  # 15 minutes
+
+    def check_pending_orders(self) -> list[dict]:
+        """Check all PENDING trades and manage their lifecycle.
+
+        For each PENDING trade with a ``coinbase_order_id``:
+          - FILLED  → update trade status, record in state + rules
+          - CANCELLED / EXPIRED / FAILED → mark trade accordingly, clean up state
+          - OPEN and older than ``_LIMIT_ORDER_TTL`` → cancel the order
+
+        Called once per orchestrator cycle.
+
+        Returns a list of dicts describing what happened to each pending order.
+        """
+        results: list[dict] = []
+        pending_trades = [
+            t for t in self.state.get_open_trades()
+            if t.status == TradeStatus.PENDING and t.coinbase_order_id
+        ]
+
+        if not pending_trades:
+            return results
+
+        self.logger.info(f"📋 Checking {len(pending_trades)} pending limit order(s)...")
+
+        for trade in pending_trades:
+            try:
+                order = self.coinbase.get_order(trade.coinbase_order_id)
+                if not order:
+                    self.logger.warning(
+                        f"⚠️ Order {trade.coinbase_order_id} for {trade.pair} "
+                        "not found — marking as FAILED"
+                    )
+                    trade.status = TradeStatus.FAILED
+                    results.append({
+                        "trade_id": trade.id,
+                        "pair": trade.pair,
+                        "order_id": trade.coinbase_order_id,
+                        "action": "marked_failed",
+                        "reason": "order_not_found",
+                    })
+                    continue
+
+                status = order.get("status", "")
+
+                if status == "FILLED":
+                    # Order filled — update trade and record
+                    trade.status = TradeStatus.FILLED
+                    trade.filled_price = float(order.get("average_filled_price", trade.price))
+                    trade.filled_quantity = float(order.get("filled_size", trade.quantity))
+                    trade.fees = float(order.get("fee", 0))
+
+                    # Record spend in rules (for daily limit tracking)
+                    quote_amount = trade.filled_price * trade.filled_quantity
+                    self.rules.record_trade(quote_amount, action=trade.action.value)
+
+                    self.logger.info(
+                        f"✅ Limit order FILLED: {trade.pair} @ "
+                        f"{trade.filled_price:,.2f} (qty: {trade.filled_quantity:.6f})"
+                    )
+                    results.append({
+                        "trade_id": trade.id,
+                        "pair": trade.pair,
+                        "order_id": trade.coinbase_order_id,
+                        "action": "filled",
+                        "filled_price": trade.filled_price,
+                        "filled_quantity": trade.filled_quantity,
+                    })
+
+                elif status in ("CANCELLED", "FAILED", "EXPIRED"):
+                    trade.status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
+                    # Reverse the position/cash booking from add_trade
+                    with self.state._lock:
+                        if trade.action == TradeAction.BUY:
+                            self.state.positions[trade.pair] = (
+                                self.state.positions.get(trade.pair, 0) - trade.quantity
+                            )
+                            self.state.cash_balance += trade.value
+                        elif trade.action == TradeAction.SELL:
+                            self.state.positions[trade.pair] = (
+                                self.state.positions.get(trade.pair, 0) + trade.quantity
+                            )
+                            self.state.cash_balance -= trade.value
+                    self.logger.info(
+                        f"📋 Pending order {status}: {trade.pair} — "
+                        "state booking reversed"
+                    )
+                    results.append({
+                        "trade_id": trade.id,
+                        "pair": trade.pair,
+                        "order_id": trade.coinbase_order_id,
+                        "action": f"marked_{status.lower()}",
+                    })
+
+                elif status == "OPEN":
+                    # Check if the order has been resting too long
+                    age_seconds = (
+                        time.time()
+                        - trade.timestamp.timestamp()
+                    )
+                    if age_seconds > self._LIMIT_ORDER_TTL:
+                        cancel_result = self._cancel_stale_order(trade)
+                        results.append(cancel_result)
+                    else:
+                        remaining = self._LIMIT_ORDER_TTL - age_seconds
+                        self.logger.debug(
+                            f"📋 Limit order still resting: {trade.pair} — "
+                            f"{remaining:.0f}s until auto-cancel"
+                        )
+
+                # Partially filled — let it ride but log
+                elif status == "PENDING" or "PARTIAL" in status.upper():
+                    self.logger.debug(
+                        f"📋 Order {trade.coinbase_order_id} for {trade.pair} "
+                        f"still {status} — will recheck next cycle"
+                    )
+
+            except Exception as e:
+                self.logger.warning(
+                    f"⚠️ Failed to check pending order {trade.coinbase_order_id} "
+                    f"for {trade.pair}: {e}"
+                )
+
+        return results
+
+    def _cancel_stale_order(self, trade: Trade) -> dict:
+        """Cancel a resting limit order that has exceeded its TTL."""
+        self.logger.info(
+            f"⏰ Cancelling stale limit order for {trade.pair} "
+            f"(age: {time.time() - trade.timestamp.timestamp():.0f}s > "
+            f"TTL: {self._LIMIT_ORDER_TTL:.0f}s)"
+        )
+        cancel_result = self.coinbase.cancel_order(trade.coinbase_order_id)
+
+        if cancel_result.get("success"):
+            trade.status = TradeStatus.CANCELLED
+            # Reverse the position/cash booking
+            with self.state._lock:
+                if trade.action == TradeAction.BUY:
+                    self.state.positions[trade.pair] = (
+                        self.state.positions.get(trade.pair, 0) - trade.quantity
+                    )
+                    self.state.cash_balance += trade.value
+                elif trade.action == TradeAction.SELL:
+                    self.state.positions[trade.pair] = (
+                        self.state.positions.get(trade.pair, 0) + trade.quantity
+                    )
+                    self.state.cash_balance -= trade.value
+            self.logger.info(
+                f"✅ Stale limit order cancelled: {trade.pair} — state reversed"
+            )
+        else:
+            self.logger.warning(
+                f"⚠️ Failed to cancel stale order for {trade.pair}: "
+                f"{cancel_result.get('error', 'unknown')}"
+            )
+
+        return {
+            "trade_id": trade.id,
+            "pair": trade.pair,
+            "order_id": trade.coinbase_order_id,
+            "action": "cancelled_stale" if cancel_result.get("success") else "cancel_failed",
+        }

@@ -792,6 +792,38 @@ class StatsDB:
         total_latency = sum(s["latency_ms"] or 0 for s in spans_list)
         total_tokens = sum((s["prompt_tokens"] or 0) + (s["completion_tokens"] or 0) for s in spans_list)
 
+        # Derive decision outcome + reason from the spans
+        decision_outcome = "executed" if trade_row else "hold"
+        decision_reason = ""
+
+        # Check agent spans for more specific outcomes
+        risk_span = next((s for s in spans_list if s["agent_name"] == "risk_manager"), None)
+        strategist_span = next((s for s in spans_list if s["agent_name"] == "strategist"), None)
+
+        if trade_row:
+            decision_outcome = "executed"
+            decision_reason = "Trade passed all checks and was executed."
+        elif risk_span:
+            rj = risk_span.get("reasoning_json") or {}
+            if not rj.get("approved", True):
+                decision_outcome = "rejected"
+                decision_reason = rj.get("reason", "Rejected by risk manager.")
+            elif rj.get("needs_approval"):
+                decision_outcome = "pending_approval"
+                decision_reason = "Trade queued for Telegram approval."
+            else:
+                # Risk approved but no trade recorded — execution may have failed
+                decision_outcome = "execution_failed"
+                decision_reason = "Risk manager approved but trade was not recorded."
+        elif strategist_span:
+            rj = strategist_span.get("reasoning_json") or {}
+            if rj.get("action") == "hold":
+                decision_outcome = "hold"
+                decision_reason = rj.get("reasoning") or rj.get("reason") or "Strategist recommended hold."
+        else:
+            decision_outcome = "hold"
+            decision_reason = "No strategy generated."
+
         return {
             "cycle_id": cycle_id,
             "pair": first["pair"],
@@ -802,6 +834,8 @@ class StatsDB:
             "langfuse_trace_id": first.get("langfuse_trace_id"),
             "spans": spans_list,
             "trade": dict(trade_row) if trade_row else None,
+            "decision_outcome": decision_outcome,
+            "decision_reason": decision_reason,
         }
 
     def get_reasoning_for_review(self, days: int = 7, pair: Optional[str] = None) -> list[dict]:

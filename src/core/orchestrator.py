@@ -271,6 +271,12 @@ class Orchestrator:
         self._strategic_context_str: str = ""
         self._strategic_context_ts: float = 0.0
         self._STRATEGIC_CONTEXT_TTL: float = 60.0
+        self._pair_priority_map: dict[str, float] = {}  # pair → confidence adjustment
+
+        # ─── Persistent asyncio event loop ─────────────────────────────────
+        # Reuse a single event loop for all async work instead of creating/
+        # destroying one per cycle.  This avoids fd exhaustion on 24/7 runs.
+        self._async_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 
         # ─── Position reconciliation (live mode only) ───
         # Reconcile TradingState.positions against real Coinbase balances every N cycles
@@ -372,15 +378,24 @@ class Orchestrator:
 
             try:
                 # Run pipelines — parallelised across pairs using asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                # Sort pairs: planning-preferred first, then normal, avoid last
+                priority_map = getattr(self, "_pair_priority_map", {})
+                sorted_pairs = sorted(
+                    self.pairs,
+                    key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
+                )
+
                 try:
-                    tasks = [self.pipeline_manager.run_pipeline(p) for p in self.pairs]
-                    loop.run_until_complete(asyncio.gather(*tasks))
+                    tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
+                    self._async_loop.run_until_complete(asyncio.gather(*tasks))
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
-                finally:
-                    loop.close()
+
+                # ─── Check pending limit orders ───
+                try:
+                    self.executor.check_pending_orders()
+                except Exception as _po_err:
+                    logger.debug(f"Pending order check error: {_po_err}")
 
                 # ─── Portfolio Rotation (autonomous swaps) ───
                 self._run_rotation()
@@ -500,6 +515,9 @@ class Orchestrator:
                     self.chat_handler.queue_event(f"CRITICAL: {msg}")
                     if self.telegram:
                         self.telegram.send_alert(msg)
+                    self._trigger_emergency_replan(
+                        f"Circuit breaker: drawdown {format_percentage(self.state.max_drawdown)}"
+                    )
 
                 # Save state periodically
                 self.state.save_state()
@@ -523,13 +541,10 @@ class Orchestrator:
                             "stats_db": self.stats_db if hasattr(self, "stats_db") else None,
                             "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
                         }
-                        advisor_loop = asyncio.new_event_loop()
-                        try:
-                            advisor_result = advisor_loop.run_until_complete(
-                                self.settings_advisor.execute(advisor_ctx)
-                            )
-                        finally:
-                            advisor_loop.close()
+                        advisor_loop = self._async_loop
+                        advisor_result = advisor_loop.run_until_complete(
+                            self.settings_advisor.execute(advisor_ctx)
+                        )
 
                         if advisor_result and advisor_result.get("changes_applied", 0) > 0:
                             # Push updated sections to runtime config
@@ -623,15 +638,11 @@ class Orchestrator:
                     f"⚡ Early-trigger pipeline for {sorted(early_pairs)} "
                     f"({elapsed:.0f}s / {self.interval}s into cycle)"
                 )
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(ep) for ep in early_pairs]
-                    loop.run_until_complete(asyncio.gather(*tasks))
+                    self._async_loop.run_until_complete(asyncio.gather(*tasks))
                 except Exception as _ep_err:
                     logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
-                finally:
-                    loop.close()
                     
                 # Reset WS baselines so these pairs don’t immediately re-trigger
                 if self.ws_feed:
@@ -643,6 +654,98 @@ class Orchestrator:
                 break  # restart the full interval after an early trigger
 
         logger.info("Orchestrator stopped.")
+
+    # =========================================================================
+    # Reactive Emergency Re-Planning
+    # =========================================================================
+
+    _REPLAN_COOLDOWN_S: float = 1800.0  # min 30 min between emergency replans
+    _replan_last_ts: float = 0.0
+
+    def _trigger_emergency_replan(self, reason: str) -> None:
+        """Write an emergency conservative strategic context and attempt a Temporal replan.
+
+        Called when the circuit breaker fires or an extreme WS price move (≥3%)
+        is detected.  Works even if Temporal is down — the local DB write is
+        immediate and the orchestrator picks it up on the next cache refresh.
+        """
+        now = time.time()
+        if now - self._replan_last_ts < self._REPLAN_COOLDOWN_S:
+            logger.debug("Emergency replan skipped — cooldown active")
+            return
+        self._replan_last_ts = now
+
+        logger.warning(f"🚨 Emergency replan triggered: {reason}")
+
+        # 1. Write a conservative emergency context to StatsDB immediately
+        try:
+            emergency_plan = {
+                "regime": "volatile",
+                "confidence": 0.3,
+                "risk_posture": "conservative",
+                "preferred_pairs": [],
+                "avoid_pairs": list(self.pairs),  # avoid all pairs until next plan
+                "key_observations": [
+                    f"EMERGENCY: {reason}",
+                    "All pairs set to avoid — waiting for next scheduled plan evaluation",
+                ],
+                "today_focus": "Capital preservation — emergency mode active",
+                "summary": (
+                    f"Emergency replan: {reason}. "
+                    "Switched to conservative posture, all pairs on avoid. "
+                    "Next scheduled plan will re-evaluate."
+                ),
+            }
+            self.stats_db.save_strategic_context(
+                horizon="daily",
+                plan_json=emergency_plan,
+                summary_text=emergency_plan["summary"],
+            )
+            # Invalidate the cache so the next cycle picks up the emergency plan
+            self._strategic_context_ts = 0.0
+
+            if self.telegram:
+                self.telegram.send_alert(
+                    f"🚨 *Emergency Replan*\n\n"
+                    f"Reason: {reason}\n"
+                    f"Action: Switched to conservative posture, all pairs on avoid.\n"
+                    f"Next scheduled plan will re-evaluate."
+                )
+        except Exception as e:
+            logger.error(f"Failed to write emergency context: {e}")
+
+        # 2. Optionally trigger a Temporal DailyPlanWorkflow
+        def _try_temporal_replan() -> None:
+            try:
+                import temporalio.client as _tc
+
+                temporal_host = os.environ.get("TEMPORAL_HOST", "localhost:7233")
+                temporal_ns = os.environ.get("TEMPORAL_NAMESPACE", "default")
+
+                async def _start_workflow():
+                    client = await _tc.Client.connect(temporal_host, namespace=temporal_ns)
+                    from src.planning.workflows import DailyPlanWorkflow
+                    await client.start_workflow(
+                        DailyPlanWorkflow.run,
+                        id=f"emergency-replan-{uuid.uuid4().hex[:8]}",
+                        task_queue="planning-queue",
+                    )
+                    logger.info("📋 Emergency Temporal replan workflow started")
+
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(_start_workflow())
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.debug(
+                    f"Temporal emergency replan unavailable (local context already written): {e}"
+                )
+
+        # Run Temporal attempt in background thread to avoid blocking
+        threading.Thread(
+            target=_try_temporal_replan, daemon=True, name="emergency-replan"
+        ).start()
 
     # =========================================================================
     # Event-Driven Helpers — WS Trigger + News Pub/Sub
@@ -670,6 +773,14 @@ class Orchestrator:
                         f"📡 WS trigger: {pair} moved {change_pct:+.2%} "
                         f"(${last:,.2f} → ${price:,.2f}) — early pipeline queued"
                     )
+                # Extreme move (≥3%) → trigger emergency replan
+                if change_pct >= 0.03:
+                    threading.Thread(
+                        target=self._trigger_emergency_replan,
+                        args=(f"{pair} moved {change_pct:+.2%} in a single tick",),
+                        daemon=True,
+                        name="ws-emergency-replan",
+                    ).start()
             # Always keep the running WS price current so the next check is fresh
             self._ws_last_prices[pair] = price
 
@@ -713,6 +824,7 @@ class Orchestrator:
             rows = self.stats_db.get_latest_strategic_context()
             if not rows:
                 self._strategic_context_str = ""
+                self._pair_priority_map = {}
             else:
                 parts = []
                 for row in rows:
@@ -721,6 +833,10 @@ class Orchestrator:
                     if text:
                         parts.append(f"[{horizon} PLAN] {text}")
                 self._strategic_context_str = "\n".join(parts)
+
+                # ── Parse pair priority from latest daily plan ──────────
+                self._pair_priority_map = self._parse_pair_priorities(rows)
+
                 # Warn when the newest plan is older than 48 h (planning worker down?)
                 try:
                     latest_ts_str = max(row["ts"] for row in rows)
@@ -737,6 +853,50 @@ class Orchestrator:
         except Exception as e:
             logger.debug(f"Failed to load strategic context: {e}")
         return self._strategic_context_str
+
+    def _parse_pair_priorities(self, context_rows: list[dict]) -> dict[str, float]:
+        """Extract per-pair confidence adjustments from the latest daily/weekly plans.
+
+        Returns a dict mapping pair -> confidence_adjustment:
+          * preferred pairs get -0.05 (slightly more lenient)
+          * avoid pairs get +0.10 (need stronger signal to trade)
+          * other pairs get 0.0 (no adjustment)
+        """
+        preferred: set[str] = set()
+        avoid: set[str] = set()
+
+        for row in context_rows:
+            try:
+                plan = json.loads(row.get("plan_json", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            horizon = row.get("horizon", "")
+            if horizon in ("daily", "weekly"):
+                for p in plan.get("preferred_pairs", plan.get("pairs_to_focus", [])):
+                    preferred.add(p)
+                for p in plan.get("avoid_pairs", plan.get("pairs_to_reduce", [])):
+                    avoid.add(p)
+
+        priority_map: dict[str, float] = {}
+        for pair in self.pairs:
+            if pair in avoid:
+                priority_map[pair] = 0.10   # raise min_confidence by 10pp
+            elif pair in preferred:
+                priority_map[pair] = -0.05   # lower min_confidence by 5pp
+            # else: 0.0 (default, not stored to keep map sparse)
+
+        if priority_map:
+            logger.info(
+                f"📋 Pair priority from planning: "
+                f"focus={[p for p, v in priority_map.items() if v < 0]}, "
+                f"avoid={[p for p, v in priority_map.items() if v > 0]}"
+            )
+        return priority_map
+
+    def get_pair_confidence_adjustment(self, pair: str) -> float:
+        """Return the confidence threshold adjustment for a pair (from planning context)."""
+        return getattr(self, "_pair_priority_map", {}).get(pair, 0.0)
 
     def _maybe_refresh_holdings(self) -> None:
         """Refresh live Coinbase holdings if the TTL has elapsed.
@@ -764,20 +924,65 @@ class Orchestrator:
 
 
     def _get_performance_summary(self) -> str:
-        """Build a short performance summary string for the settings advisor."""
+        """Build a short performance summary string for the settings advisor.
+
+        Uses StatsDB for accurate historical metrics (24h window) and
+        TradingState for live portfolio/position data.
+        """
         try:
-            trades = list(self.state.positions.values())
-            total = len(trades)
-            winners = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
-            total_pnl = sum(t.get("pnl") or 0 for t in trades)
-            win_rate = (winners / total * 100) if total > 0 else 0
-            return (
-                f"{total} open positions, "
-                f"aggregate unrealised PnL: ${total_pnl:+.2f}, "
-                f"win rate (open): {win_rate:.0f}%"
-            )
-        except Exception:
-            return "unavailable"
+            sym = self.state.currency_symbol
+            parts: list[str] = []
+
+            # Historical trade performance from StatsDB (24h)
+            perf = self.stats_db.get_performance_summary(hours=24)
+            stats = perf.get("trade_stats", {})
+            total_trades = stats.get("total_trades", 0)
+            winning = stats.get("winning", 0)
+            total_pnl = stats.get("total_pnl", 0)
+            win_rate = (winning / total_trades * 100) if total_trades > 0 else 0
+            avg_confidence = stats.get("avg_confidence", 0)
+
+            parts.append(f"24h trades: {total_trades}")
+            if total_trades > 0:
+                parts.append(f"win rate: {win_rate:.0f}%")
+                parts.append(f"PnL: {sym}{total_pnl:+.2f}")
+                parts.append(f"avg confidence: {avg_confidence:.0%}")
+
+            # Current portfolio state
+            n_positions = len(self.state.open_positions)
+            pv = self.state.portfolio_value
+            ret = self.state.return_pct
+            dd = self.state.max_drawdown
+            parts.append(f"open positions: {n_positions}")
+            parts.append(f"portfolio: {sym}{pv:,.2f} ({ret:+.1%})")
+            parts.append(f"max drawdown: {dd:.1%}")
+
+            # Win/loss streak from recent trades
+            recent = list(self.state.trades[-20:])
+            closed = [t for t in recent if t.pnl is not None]
+            if closed:
+                streak = 0
+                streak_type = "win" if (closed[-1].pnl or 0) > 0 else "loss"
+                for t in reversed(closed):
+                    if (streak_type == "win" and (t.pnl or 0) > 0) or \
+                       (streak_type == "loss" and (t.pnl or 0) <= 0):
+                        streak += 1
+                    else:
+                        break
+                parts.append(f"current streak: {streak} {streak_type}{'es' if streak_type == 'loss' else 's'}")
+
+            return " | ".join(parts)
+        except Exception as e:
+            logger.debug(f"Performance summary fallback: {e}")
+            # Minimal fallback from TradingState only
+            try:
+                return (
+                    f"trades: {self.state.total_trades}, "
+                    f"win rate: {self.state.win_rate:.0%}, "
+                    f"PnL: {self.state.total_pnl:+.2f}"
+                )
+            except Exception:
+                return "unavailable"
 
     def _reconcile_positions(self) -> None:
         """

@@ -96,6 +96,8 @@ export interface CycleFull {
   langfuse_trace_id: string | null
   spans: AgentSpan[]
   trade: Trade | null
+  decision_outcome: 'executed' | 'hold' | 'rejected' | 'pending_approval' | 'execution_failed'
+  decision_reason: string
 }
 
 export interface StatsSummary {

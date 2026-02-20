@@ -96,12 +96,24 @@ class StrategistAgent(BaseAgent):
         confidence = signal.get("confidence", 0)
         price = signal.get("current_price", 0)
 
+        # Per-pair confidence adjustment from planning context
+        # Positive = harder to trade (avoid pair), negative = easier (focus pair)
+        confidence_adj = context.get("confidence_adjustment", 0.0)
+        effective_min_confidence = max(0.1, min(0.98, self.min_confidence + confidence_adj))
+
         # Quick filter: if signal is too weak, don't bother the LLM
-        if confidence < self.min_confidence and signal_type == "neutral":
-            self.logger.debug(f"Signal too weak ({confidence:.2f}), holding")
+        if confidence < effective_min_confidence and signal_type == "neutral":
+            self.logger.debug(
+                f"Signal too weak ({confidence:.2f}), holding "
+                f"(threshold={effective_min_confidence:.2f}, adj={confidence_adj:+.2f})"
+            )
             return {
                 "action": "hold",
-                "reason": f"Signal confidence {confidence:.2f} below threshold {self.min_confidence}",
+                "reason": (
+                    f"Signal confidence {confidence:.2f} below threshold "
+                    f"{effective_min_confidence:.2f}"
+                    + (f" (plan adj: {confidence_adj:+.2f})" if confidence_adj else "")
+                ),
             }
 
         # Build context for LLM

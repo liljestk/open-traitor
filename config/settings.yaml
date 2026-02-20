@@ -6,8 +6,8 @@ trading:
   - ETH-EUR
   quote_currency: EUR
   interval: 120
-  min_confidence: 0.65
-  max_open_positions: 5
+  min_confidence: 0.55
+  max_open_positions: 8
   reconcile_every_cycles: 10
   paper_slippage_pct: 0.0005
   live_holdings_sync: true
@@ -15,16 +15,16 @@ trading:
   holdings_dust_threshold: 0.01
   invalidate_strategic_context: false
 absolute_rules:
-  max_single_trade: 150
-  max_daily_spend: 500
-  max_daily_loss: 250
-  max_portfolio_risk_pct: 0.1
-  require_approval_above: 75
+  max_single_trade: 500
+  max_daily_spend: 2000
+  max_daily_loss: 500
+  max_portfolio_risk_pct: 0.2
+  require_approval_above: 200
   never_trade_pairs: []
   only_trade_pairs: []
   min_trade_interval_seconds: 60
-  max_trades_per_day: 20
-  max_cash_per_trade_pct: 0.1
+  max_trades_per_day: 50
+  max_cash_per_trade_pct: 0.25
   emergency_stop_portfolio: 8000
   always_use_stop_loss: true
   max_stop_loss_pct: 0.05

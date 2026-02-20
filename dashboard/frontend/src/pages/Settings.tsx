@@ -1,13 +1,13 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
-  type SectionSchema, type FieldSchema,
+  type SectionSchema, type FieldSchema, type PresetInfo,
 } from '../api'
 import {
   Shield, ShieldAlert, ShieldOff, ToggleLeft, ToggleRight,
   ChevronDown, ChevronRight, Save, X, AlertTriangle, Check,
-  Info,
+  Info, ArrowRight,
 } from 'lucide-react'
 
 // ── Preset button config ────────────────────────────────────────────────────
@@ -29,6 +29,79 @@ const TIER_LABELS: Record<string, string> = {
   safe: 'Telegram Safe',
   semi_safe: 'Semi-Safe',
   blocked: 'Dashboard Only',
+}
+
+// ── Preset detection ────────────────────────────────────────────────────────
+
+/** Human-friendly labels for preset fields */
+const FIELD_LABELS: Record<string, string> = {
+  max_single_trade: 'Max Single Trade',
+  max_daily_spend: 'Max Daily Spend',
+  max_daily_loss: 'Max Daily Loss',
+  max_portfolio_risk_pct: 'Portfolio Risk %',
+  require_approval_above: 'Approval Above',
+  max_trades_per_day: 'Max Trades/Day',
+  max_cash_per_trade_pct: 'Cash/Trade %',
+  min_confidence: 'Min Confidence',
+  max_open_positions: 'Max Open Positions',
+}
+
+function formatFieldValue(key: string, val: any): string {
+  if (val === null || val === undefined) return '—'
+  if (key.endsWith('_pct')) return `${(val * 100).toFixed(1)}%`
+  if (typeof val === 'number') return val.toLocaleString()
+  return String(val)
+}
+
+/**
+ * Check if current settings match a preset's values exactly.
+ * Returns the name of the matching preset or null.
+ */
+function detectActivePreset(
+  settings: Record<string, any>,
+  presets: Record<string, PresetInfo>,
+): string | null {
+  for (const [name, preset] of Object.entries(presets)) {
+    let matches = true
+    for (const [section, fields] of Object.entries(preset.values)) {
+      const current = settings[section]
+      if (!current) { matches = false; break }
+      for (const [field, expected] of Object.entries(fields)) {
+        if (JSON.stringify(current[field]) !== JSON.stringify(expected)) {
+          matches = false
+          break
+        }
+      }
+      if (!matches) break
+    }
+    if (matches) return name
+  }
+  return null
+}
+
+/**
+ * Build a flat diff of current values vs a preset's target values.
+ * Returns entries: { field, section, label, current, target, changed }.
+ */
+function buildPresetDiff(
+  settings: Record<string, any>,
+  preset: PresetInfo,
+): Array<{ key: string; section: string; label: string; current: any; target: any; changed: boolean }> {
+  const rows: Array<{ key: string; section: string; label: string; current: any; target: any; changed: boolean }> = []
+  for (const [section, fields] of Object.entries(preset.values)) {
+    for (const [field, target] of Object.entries(fields)) {
+      const current = settings[section]?.[field]
+      rows.push({
+        key: `${section}.${field}`,
+        section,
+        label: FIELD_LABELS[field] ?? formatKey(field),
+        current,
+        target,
+        changed: JSON.stringify(current) !== JSON.stringify(target),
+      })
+    }
+  }
+  return rows
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -347,7 +420,7 @@ const SECTION_ORDER = [
 export default function Settings() {
   const queryClient = useQueryClient()
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
-  useQuery({ queryKey: ['presets'], queryFn: fetchPresets })
+  const { data: presetsData } = useQuery({ queryKey: ['presets'], queryFn: fetchPresets })
 
   const mutation = useMutation({
     mutationFn: updateSettings,
@@ -355,6 +428,7 @@ export default function Settings() {
   })
 
   const [presetMsg, setPresetMsg] = useState<string | null>(null)
+  const [hoveredPreset, setHoveredPreset] = useState<string | null>(null)
 
   const handlePreset = async (preset: string) => {
     try {
@@ -395,12 +469,22 @@ export default function Settings() {
     await mutation.mutateAsync({ section, updates })
   }
 
+  const settings = data?.settings ?? {}
+  const presets = presetsData?.presets ?? {}
+  const activePreset = useMemo(() => detectActivePreset(settings, presets), [settings, presets])
+
   if (isLoading) return <div style={{ padding: 24, color: '#8b949e' }}>Loading settings…</div>
   if (error) return <div style={{ padding: 24, color: '#ef4444' }}>Failed to load settings: {(error as Error).message}</div>
   if (!data) return null
 
-  const { settings, trading_enabled, section_labels, schema } = data
+  const { trading_enabled, section_labels, schema } = data
   const sortedSections = SECTION_ORDER.filter(s => settings[s] !== undefined)
+
+  // Determine which preset to show in the impact panel: hovered (if different) or active
+  const panelPresetKey = hoveredPreset && hoveredPreset !== activePreset ? hoveredPreset : activePreset
+  const panelPreset = panelPresetKey ? presets[panelPresetKey] : null
+  const panelDiff = panelPreset ? buildPresetDiff(settings, panelPreset) : []
+  const isShowingComparison = hoveredPreset !== null && hoveredPreset !== activePreset
 
   return (
     <div style={{ padding: '20px 24px', maxWidth: 900 }}>
@@ -432,34 +516,125 @@ export default function Settings() {
 
       {/* Presets */}
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-          Quick Presets
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Quick Presets
+          </span>
+          {activePreset ? (
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 10,
+              background: PRESET_CONFIG[activePreset].color + '22',
+              color: PRESET_CONFIG[activePreset].color,
+              fontWeight: 600,
+            }}>
+              {PRESET_CONFIG[activePreset].label} active
+            </span>
+          ) : (
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 10,
+              background: '#8b949e22', color: '#8b949e', fontWeight: 600,
+            }}>
+              Custom
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {Object.entries(PRESET_CONFIG).map(([key, cfg]) => (
-            <button
-              key={key}
-              onClick={() => handlePreset(key)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                background: '#161b22', border: `1px solid ${cfg.color}44`,
-                borderRadius: 8, padding: '10px 16px', cursor: 'pointer',
-                color: '#e6edf3', minWidth: 140, transition: 'all 0.15s',
-              }}
-              onMouseOver={(e) => (e.currentTarget.style.borderColor = cfg.color)}
-              onMouseOut={(e) => (e.currentTarget.style.borderColor = cfg.color + '44')}
-            >
-              <span style={{ color: cfg.color }}>{cfg.icon}</span>
-              <div style={{ textAlign: 'left' }}>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>{cfg.label}</div>
-                <div style={{ fontSize: 11, color: '#8b949e' }}>{cfg.desc}</div>
-              </div>
-            </button>
-          ))}
+          {Object.entries(PRESET_CONFIG).map(([key, cfg]) => {
+            const isActive = key === activePreset
+            return (
+              <button
+                key={key}
+                onClick={() => handlePreset(key)}
+                onMouseEnter={() => setHoveredPreset(key)}
+                onMouseLeave={() => setHoveredPreset(null)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, position: 'relative',
+                  background: isActive ? cfg.color + '18' : '#161b22',
+                  border: isActive ? `2px solid ${cfg.color}` : `1px solid ${cfg.color}44`,
+                  borderRadius: 8,
+                  padding: isActive ? '9px 15px' : '10px 16px',
+                  cursor: isActive ? 'default' : 'pointer',
+                  color: '#e6edf3', minWidth: 140, transition: 'all 0.15s',
+                  boxShadow: isActive ? `0 0 12px ${cfg.color}30` : 'none',
+                }}
+              >
+                <span style={{ color: cfg.color }}>{cfg.icon}</span>
+                <div style={{ textAlign: 'left' }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{cfg.label}</div>
+                  <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#8b949e' }}>{cfg.desc}</div>
+                </div>
+                {isActive && (
+                  <span style={{
+                    position: 'absolute', top: -6, right: -6,
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: cfg.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Check size={11} color="#fff" strokeWidth={3} />
+                  </span>
+                )}
+              </button>
+            )
+          })}
         </div>
         {presetMsg && (
           <div style={{ marginTop: 8, fontSize: 12, color: presetMsg.startsWith('Error') ? '#ef4444' : '#22c55e', display: 'flex', alignItems: 'center', gap: 4 }}>
             <Check size={12} /> {presetMsg}
+          </div>
+        )}
+
+        {/* Preset Impact Panel */}
+        {panelPresetKey && panelDiff.length > 0 && (
+          <div style={{
+            marginTop: 10, padding: '10px 14px',
+            background: '#0d1117', border: `1px solid ${PRESET_CONFIG[panelPresetKey]?.color ?? '#30363d'}33`,
+            borderRadius: 8, transition: 'all 0.15s',
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: PRESET_CONFIG[panelPresetKey]?.color ?? '#8b949e',
+              }} />
+              {isShowingComparison
+                ? `Switching to ${PRESET_CONFIG[panelPresetKey]?.label} would change:`
+                : `${PRESET_CONFIG[panelPresetKey]?.label} preset values:`
+              }
+            </div>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+              gap: '4px 16px',
+            }}>
+              {panelDiff.map(row => (
+                <div key={row.key} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '3px 0', fontSize: 12,
+                  borderBottom: '1px solid #161b22',
+                }}>
+                  <span style={{ color: '#8b949e' }}>{row.label}</span>
+                  {isShowingComparison && row.changed ? (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span style={{ color: '#6e7681', textDecoration: 'line-through', fontSize: 11 }}>
+                        {formatFieldValue(row.key, row.current)}
+                      </span>
+                      <ArrowRight size={10} style={{ color: PRESET_CONFIG[panelPresetKey]?.color ?? '#8b949e' }} />
+                      <span style={{ color: PRESET_CONFIG[panelPresetKey]?.color ?? '#e6edf3', fontWeight: 600 }}>
+                        {formatFieldValue(row.key, row.target)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span style={{
+                      color: row.changed ? '#f59e0b' : '#e6edf3',
+                      fontWeight: row.changed ? 600 : 400,
+                    }}>
+                      {formatFieldValue(row.key, row.target)}
+                      {!isShowingComparison && row.changed && (
+                        <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 4 }} title="Differs from current">*</span>
+                      )}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

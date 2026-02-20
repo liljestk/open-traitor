@@ -17,10 +17,13 @@ logger = get_logger("analysis.multi_tf")
 
 
 # Timeframes in order of increasing significance
+# NOTE: Coinbase Advanced Trade API does not support FOUR_HOUR granularity.
+# We fetch TWO_HOUR candles (2x the requested count) and aggregate pairs
+# into 4h candles inside _fetch_timeframe().
 TIMEFRAMES = [
     {"name": "15m", "granularity": "FIFTEEN_MINUTE", "weight": 0.15, "candles": 100},
     {"name": "1h", "granularity": "ONE_HOUR", "weight": 0.35, "candles": 200},
-    {"name": "4h", "granularity": "SIX_HOUR", "weight": 0.30, "candles": 100},
+    {"name": "4h", "granularity": "TWO_HOUR", "weight": 0.30, "candles": 200, "aggregate": 2},
     {"name": "1d", "granularity": "ONE_DAY", "weight": 0.20, "candles": 60},
 ]
 
@@ -35,6 +38,7 @@ class MultiTimeframeAnalyzer:
     _CACHE_TTL = {
         "FIFTEEN_MINUTE": 120,
         "ONE_HOUR": 300,
+        "TWO_HOUR": 600,
         "SIX_HOUR": 900,
         "ONE_DAY": 1800,
     }
@@ -54,6 +58,10 @@ class MultiTimeframeAnalyzer:
 
         Returns (tf_name, result_dict, weighted_score_contribution).
         Thread-safe: rate-limiter and cache access are both protected internally.
+
+        When the timeframe definition includes an ``aggregate`` key (e.g.
+        ``"aggregate": 2``), the raw candles are merged in groups of N to
+        synthesise a higher timeframe (e.g. 2×TWO_HOUR → 4h candles).
         """
         self.rate_limiter.wait("coinbase_rest")
         cache_key = f"{pair}:{tf['granularity']}"
@@ -73,6 +81,11 @@ class MultiTimeframeAnalyzer:
             )
             with self._cache_lock:
                 self._candle_cache[cache_key] = (now, candles)
+
+        # Aggregate smaller candles into larger bars when requested
+        agg_factor = tf.get("aggregate", 1)
+        if agg_factor > 1 and candles:
+            candles = self._aggregate_candles(candles, agg_factor)
 
         analysis = self.technical.analyze(candles)
 
@@ -167,6 +180,45 @@ class MultiTimeframeAnalyzer:
             "aligned": aligned,
             "summary": summary,
         }
+
+    @staticmethod
+    def _aggregate_candles(candles: list[dict], factor: int) -> list[dict]:
+        """Merge *factor* consecutive candles into one higher-TF bar.
+
+        Expects candles sorted oldest-first (ascending timestamp).  Each
+        output bar has the open of the first sub-bar, close of the last,
+        high = max(highs), low = min(lows), volume = sum(volumes).
+        """
+        if factor <= 1 or not candles:
+            return candles
+
+        # Ensure oldest-first ordering (Coinbase returns newest-first)
+        # Detect by comparing first and last timestamps
+        try:
+            first_ts = float(candles[0].get("start", 0))
+            last_ts = float(candles[-1].get("start", 0))
+            if first_ts > last_ts:
+                candles = list(reversed(candles))
+        except (ValueError, TypeError):
+            pass
+
+        aggregated: list[dict] = []
+        for i in range(0, len(candles) - factor + 1, factor):
+            group = candles[i : i + factor]
+            try:
+                agg = {
+                    "start": group[0].get("start", ""),
+                    "open": group[0].get("open", "0"),
+                    "close": group[-1].get("close", "0"),
+                    "high": str(max(float(c.get("high", 0)) for c in group)),
+                    "low": str(min(float(c.get("low", 0)) for c in group if float(c.get("low", 0)) > 0) or 0),
+                    "volume": str(sum(float(c.get("volume", 0)) for c in group)),
+                }
+                aggregated.append(agg)
+            except (ValueError, TypeError):
+                continue
+
+        return aggregated
 
     def _score_timeframe(self, analysis: dict) -> float:
         """

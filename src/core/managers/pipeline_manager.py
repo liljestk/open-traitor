@@ -14,9 +14,84 @@ logger = get_logger("core.pipeline")
 
 class PipelineManager:
     """Manages the execution of the main trading pipeline across all pairs."""
+
+    # Weights for each strategy in ensemble scoring
+    _STRATEGY_WEIGHTS: dict[str, float] = {
+        "ema_crossover": 0.55,        # trend-following weight
+        "bollinger_reversion": 0.45,   # mean-reversion weight
+    }
     
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
+
+    def _compute_ensemble(self, strategy_signals: dict) -> dict | None:
+        """Compute a weighted ensemble from individual strategy signals.
+
+        Returns a dict with:
+          action: majority action (buy/sell/hold)
+          confidence: weighted average confidence
+          agreement: fraction of strategies that agree on the action
+          n_strategies: how many strategies contributed
+          breakdown: per-strategy summary
+        """
+        if not strategy_signals:
+            return None
+
+        # Filter out internal keys (like _ensemble itself)
+        signals = {
+            k: v for k, v in strategy_signals.items()
+            if not k.startswith("_") and isinstance(v, dict)
+        }
+        if not signals:
+            return None
+
+        action_scores: dict[str, float] = {}  # action → total weighted confidence
+        total_weight = 0.0
+        breakdown: list[dict] = []
+
+        for name, sig in signals.items():
+            action = sig.get("action", "hold")
+            conf = sig.get("confidence", 0.0)
+            weight = self._STRATEGY_WEIGHTS.get(name, 0.3)
+
+            weighted_conf = conf * weight
+            action_scores[action] = action_scores.get(action, 0) + weighted_conf
+            total_weight += weight
+
+            breakdown.append({
+                "strategy": name,
+                "action": action,
+                "confidence": round(conf, 3),
+                "weight": weight,
+            })
+
+        if total_weight == 0:
+            return None
+
+        # Majority action = highest weighted confidence
+        majority_action = max(action_scores, key=action_scores.get)
+        raw_confidence = action_scores[majority_action] / total_weight
+
+        # Agreement bonus: if all strategies agree, boost confidence slightly
+        n_strategies = len(signals)
+        agreeing = sum(1 for s in signals.values() if s.get("action") == majority_action)
+        agreement = agreeing / n_strategies if n_strategies else 0.0
+
+        # Conflicting strategies (buy vs sell) penalize confidence
+        has_buy = any(s.get("action") == "buy" for s in signals.values())
+        has_sell = any(s.get("action") == "sell" for s in signals.values())
+        conflict_penalty = 0.15 if (has_buy and has_sell) else 0.0
+
+        ensemble_confidence = max(0.0, min(1.0, raw_confidence + (0.05 if agreement == 1.0 else 0.0) - conflict_penalty))
+
+        return {
+            "action": majority_action,
+            "confidence": round(ensemble_confidence, 3),
+            "agreement": round(agreement, 3),
+            "conflict": has_buy and has_sell,
+            "n_strategies": n_strategies,
+            "breakdown": breakdown,
+        }
 
     async def run_pipeline(self, pair: str) -> None:
         """Run the full analysis → strategy → risk → execute pipeline for a pair asynchronously."""
@@ -146,6 +221,14 @@ class PipelineManager:
             except Exception as e:
                 logger.debug(f"Bollinger strategy unavailable: {e}")
 
+        # ─── Strategy ensemble scoring ───
+        # Combine individual strategy signals into a weighted consensus.
+        # The ensemble score gives the LLM a clear aggregate to work with,
+        # while individual signals are still passed for detailed reasoning.
+        ensemble = self._compute_ensemble(strategy_signals)
+        if ensemble:
+            strategy_signals["_ensemble"] = ensemble
+
         # ─── Pairs correlation (for risk sizing) ───
         correlation_matrix = {}
         try:
@@ -213,6 +296,9 @@ class PipelineManager:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
 
         # Step 3: Strategy Generation
+        # Apply per-pair confidence adjustment from planning context
+        pair_confidence_adj = orch.get_pair_confidence_adjustment(pair)
+
         strategy_result = await orch.strategist.execute({
             "signal": signal,
             "active_tasks": [t.to_dict() for t in orch.active_tasks if not t.completed],
@@ -226,6 +312,7 @@ class PipelineManager:
             "currency_symbol": orch.state.currency_symbol,
             "sentiment": sentiment_data,
             "strategy_signals": strategy_signals,
+            "confidence_adjustment": pair_confidence_adj,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
