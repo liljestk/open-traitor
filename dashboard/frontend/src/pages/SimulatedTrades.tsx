@@ -1,20 +1,26 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { Plus, X, Activity, History } from 'lucide-react'
+import { Plus, X, Activity, History, ArrowRight } from 'lucide-react'
 import {
     fetchSimulatedTrades,
     createSimulatedTrade,
     closeSimulatedTrade,
     fetchMarketPrice,
+    fetchProducts,
 } from '../api'
+import type { CoinbaseProduct } from '../api'
 
-const PAIR_OPTIONS = [
-    { value: 'BTC-EUR', label: 'BTC-EUR (Spend EUR, Buy BTC)' },
-    { value: 'ETH-EUR', label: 'ETH-EUR (Spend EUR, Buy ETH)' },
-    { value: 'SOL-EUR', label: 'SOL-EUR (Spend EUR, Buy SOL)' },
-    { value: 'ETH-BTC', label: 'ETH-BTC (Spend BTC, Buy ETH)' },
-    { value: 'SOL-BTC', label: 'SOL-BTC (Spend BTC, Buy SOL)' },
+// Sensible fallback pairs when Coinbase API is unavailable
+const FALLBACK_PRODUCTS: CoinbaseProduct[] = [
+    { id: 'BTC-EUR', base: 'BTC', quote: 'EUR' },
+    { id: 'ETH-EUR', base: 'ETH', quote: 'EUR' },
+    { id: 'SOL-EUR', base: 'SOL', quote: 'EUR' },
+    { id: 'BTC-USD', base: 'BTC', quote: 'USD' },
+    { id: 'ETH-USD', base: 'ETH', quote: 'USD' },
+    { id: 'SOL-USD', base: 'SOL', quote: 'USD' },
+    { id: 'ETH-BTC', base: 'ETH', quote: 'BTC' },
+    { id: 'SOL-BTC', base: 'SOL', quote: 'BTC' },
 ]
 
 function pnlColor(pnl: number): string {
@@ -31,10 +37,61 @@ function pnlBg(pnl: number): string {
 
 export default function SimulatedTrades() {
     const qc = useQueryClient()
-    const [pair, setPair] = useState(PAIR_OPTIONS[0].value)
+    const [buyAsset, setBuyAsset] = useState('BTC')
+    const [quoteCurrency, setQuoteCurrency] = useState('EUR')
     const [amount, setAmount] = useState('1000')
     const [notes, setNotes] = useState('')
     const [showClosed, setShowClosed] = useState(false)
+
+    // Fetch all tradable products from Coinbase
+    const { data: productsData } = useQuery({
+        queryKey: ['coinbase-products'],
+        queryFn: fetchProducts,
+        staleTime: 5 * 60_000, // cache for 5 min
+    })
+
+    const products = productsData?.products?.length ? productsData.products : FALLBACK_PRODUCTS
+
+    // Derive available assets and quote currencies from product list
+    const { baseAssets, quotesForBase, pairId } = useMemo(() => {
+        // All unique base assets, sorted alphabetically
+        const allBases = [...new Set(products.map(p => p.base))].sort()
+
+        // Quote currencies available for the selected buy asset
+        const quotesForSelected = products
+            .filter(p => p.base === buyAsset)
+            .map(p => p.quote)
+        const uniqueQuotes = [...new Set(quotesForSelected)].sort((a, b) => {
+            // Prioritise common fiats first
+            const priority = ['EUR', 'USD', 'USDT', 'USDC', 'GBP', 'BTC', 'ETH']
+            const ai = priority.indexOf(a), bi = priority.indexOf(b)
+            if (ai !== -1 && bi !== -1) return ai - bi
+            if (ai !== -1) return -1
+            if (bi !== -1) return 1
+            return a.localeCompare(b)
+        })
+
+        // The resolved pair id
+        const resolvedPair = `${buyAsset}-${quoteCurrency}`
+        const validPair = products.some(p => p.id === resolvedPair) ? resolvedPair : ''
+
+        return { baseAssets: allBases, quotesForBase: uniqueQuotes, pairId: validPair }
+    }, [products, buyAsset, quoteCurrency])
+
+    // Auto-correct quote currency when switching buy asset
+    const handleBuyAssetChange = (newBase: string) => {
+        setBuyAsset(newBase)
+        const quotesForNew = products.filter(p => p.base === newBase).map(p => p.quote)
+        if (!quotesForNew.includes(quoteCurrency)) {
+            // Pick best available quote
+            const preferred = ['EUR', 'USD', 'USDT', 'USDC', 'GBP', 'BTC']
+            const best = preferred.find(q => quotesForNew.includes(q)) ?? quotesForNew[0] ?? ''
+            setQuoteCurrency(best)
+        }
+    }
+
+    const pair = pairId
+    const fromCurrency = quoteCurrency
 
     // Auto-refreshing query for all simulations
     const { data, isLoading } = useQuery({
@@ -67,9 +124,6 @@ export default function SimulatedTrades() {
     const openSims = sims.filter(s => s.status === 'open')
     const closedSims = sims.filter(s => s.status === 'closed')
 
-    // Derive from_currency for the form
-    const fromCurrency = pair.split('-')[1] || 'EUR' // naive guess, backend handles logic
-
     const handleCreate = (e: React.FormEvent) => {
         e.preventDefault()
         if (!amount || isNaN(Number(amount))) return
@@ -96,22 +150,43 @@ export default function SimulatedTrades() {
                 <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-4 border-b border-gray-800 pb-2">
                     Open New Simulation
                 </h3>
-                <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+                <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
+                    {/* Buy Asset */}
                     <div className="md:col-span-2 space-y-1.5">
-                        <label className="text-xs text-gray-500 font-medium">Trading Pair</label>
+                        <label className="text-xs text-gray-500 font-medium">Buy Asset</label>
                         <select
                             className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-brand-500 transition-colors"
-                            value={pair}
-                            onChange={(e) => setPair(e.target.value)}
+                            value={buyAsset}
+                            onChange={(e) => handleBuyAssetChange(e.target.value)}
                         >
-                            {PAIR_OPTIONS.map(opt => (
-                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                            {baseAssets.map(b => (
+                                <option key={b} value={b}>{b}</option>
                             ))}
                         </select>
                     </div>
 
+                    {/* Pay With (quote currency) */}
                     <div className="space-y-1.5">
-                        <label className="text-xs text-gray-500 font-medium">Spend Amount ({fromCurrency})</label>
+                        <label className="text-xs text-gray-500 font-medium flex items-center gap-1">
+                            <ArrowRight size={12} className="text-gray-600" />
+                            Pay With
+                        </label>
+                        <select
+                            className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-brand-500 transition-colors"
+                            value={quoteCurrency}
+                            onChange={(e) => setQuoteCurrency(e.target.value)}
+                        >
+                            {quotesForBase.map(q => (
+                                <option key={q} value={q}>{q}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* Spend Amount */}
+                    <div className="space-y-1.5">
+                        <label className="text-xs text-gray-500 font-medium">
+                            Amount ({fromCurrency})
+                        </label>
                         <input
                             type="number"
                             step="any"
@@ -123,9 +198,10 @@ export default function SimulatedTrades() {
                         />
                     </div>
 
+                    {/* Notes + Submit */}
                     <div className="md:col-span-2 space-y-1.5">
                         <label className="text-xs text-gray-500 font-medium flex justify-between">
-                            Notes
+                            <span>Notes{pair && <span className="ml-2 text-gray-600">({pair})</span>}</span>
                             {priceData && (
                                 <span className="text-brand-400">Live: {priceData.price.toLocaleString()}</span>
                             )}
@@ -140,7 +216,7 @@ export default function SimulatedTrades() {
                             />
                             <button
                                 type="submit"
-                                disabled={createMut.isPending || !amount}
+                                disabled={createMut.isPending || !amount || !pair}
                                 className="bg-brand-600 hover:bg-brand-500 text-white font-medium rounded-lg px-4 py-2 text-sm flex items-center justify-center transition-colors disabled:opacity-50"
                             >
                                 {createMut.isPending ? '...' : <><Plus size={16} className="mr-1" /> Open</>}

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import math
 import os
 import sqlite3
 import time
@@ -248,6 +249,17 @@ def _require_db():
     return _stats_db
 
 
+def _sanitize_floats(obj):
+    """Recursively replace inf/nan floats with None so JSON serialisation succeeds."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
+        return None
+    return obj
+
+
 def _fresh_conn() -> sqlite3.Connection:
     """Open a fresh SQLite connection for this request.
 
@@ -353,7 +365,7 @@ def list_events(
                 e["data"] = json.loads(e["data"])
             except Exception:
                 pass
-    return {"events": events, "count": len(events)}
+    return _sanitize_floats({"events": events, "count": len(events)})
 
 
 
@@ -441,6 +453,39 @@ def _get_live_price(pair: str) -> float:
         except Exception:
             pass
     return 0.0
+
+
+@app.get("/api/products", summary="List tradable Coinbase products")
+def list_products():
+    """Return all online, tradable products from Coinbase Advanced Trade.
+
+    Response: ``{"products": [{"id": "BTC-EUR", "base": "BTC", "quote": "EUR"}, ...]}``
+    Each entry is a product that is *online* and not disabled on the exchange.
+    """
+    if not _coinbase_client or not _coinbase_client._rest_client:
+        return {"products": []}
+
+    try:
+        resp = _coinbase_client._rest_client.get_products()
+        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+        items = raw.get("products", [])
+        products = []
+        for p in items:
+            if (
+                not p.get("trading_disabled", True)
+                and not p.get("is_disabled", False)
+                and str(p.get("status", "")).lower() == "online"
+            ):
+                products.append({
+                    "id": p.get("product_id", ""),
+                    "base": p.get("base_currency_id", ""),
+                    "quote": p.get("quote_currency_id", ""),
+                })
+        products.sort(key=lambda x: x["id"])
+        return {"products": products}
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to list products: {e}")
+        return {"products": []}
 
 
 @app.get("/api/market/price", summary="Live price for a trading pair")

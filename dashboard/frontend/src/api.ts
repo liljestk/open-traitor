@@ -225,6 +225,11 @@ export const triggerTemporalRerun = (workflowId: string, runId: string) =>
 export const fetchMarketPrice = (pair: string) =>
   apiFetch<{ pair: string; price: number; ts: string }>(`/market/price?pair=${encodeURIComponent(pair)}`)
 
+export interface CoinbaseProduct { id: string; base: string; quote: string }
+
+export const fetchProducts = () =>
+  apiFetch<{ products: CoinbaseProduct[] }>('/products')
+
 export const createSimulatedTrade = (data: { pair: string; from_currency: string; from_amount: number; notes?: string }) =>
   apiFetch<SimulatedTrade>('/simulated-trades', {
     method: 'POST',
