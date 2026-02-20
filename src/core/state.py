@@ -155,9 +155,13 @@ class TradingState:
                 self.initial_balance = self.live_portfolio_value
                 self.peak_portfolio_value = self.live_portfolio_value
                 self._initial_balance_synced = True
+                # Clear any phantom drawdown accumulated before live data was available
+                self.max_drawdown = 0.0
+                self.circuit_breaker_triggered = False
                 logger.info(
                     f"📊 Initial balance corrected to live portfolio: "
-                    f"{self.currency_symbol}{self.live_portfolio_value:,.2f}"
+                    f"{self.currency_symbol}{self.live_portfolio_value:,.2f} "
+                    f"(drawdown reset)"
                 )
 
             # Additive merge: only add crypto holdings NOT already in positions
@@ -178,9 +182,9 @@ class TradingState:
                         "synced_at": ts_now,
                     }
                     synced_count += 1
-                # Ensure price is tracked even for already-known positions
+                # Always refresh price from Coinbase — not just on first sync
                 price = h.get("price", 0)
-                if price > 0 and pair not in self.current_prices:
+                if price > 0:
                     self.current_prices[pair] = price
 
             asset_count = len([h for h in self.live_holdings if not h.get("is_fiat")])
@@ -303,16 +307,38 @@ class TradingState:
                     return trade
             return None
 
+    # ── Live-snapshot staleness threshold (seconds) ──
+    _LIVE_STALENESS_THRESHOLD: float = 300.0  # 5 minutes
+
+    def _get_portfolio_value_unlocked(self) -> float:
+        """Return best-available portfolio value (caller must hold _lock).
+
+        Prefers the authoritative Coinbase `live_portfolio_value` when it is
+        fresh (updated within `_LIVE_STALENESS_THRESHOLD` seconds).  Falls back
+        to the local computation (cash + positions * current_prices) for paper
+        mode or when live data is stale.
+        """
+        live_fresh = (
+            self.live_portfolio_value > 0
+            and self._live_snapshot_ts > 0
+            and (time.time() - self._live_snapshot_ts) < self._LIVE_STALENESS_THRESHOLD
+        )
+        if live_fresh:
+            return self.live_portfolio_value
+
+        # Fallback: local computation (paper mode or stale live data)
+        total = self.cash_balance
+        for pair, qty in self.positions.items():
+            if qty > 0:
+                price = self.current_prices.get(pair, 0)
+                total += qty * price
+        return total
+
     def take_portfolio_snapshot(self) -> PortfolioSnapshot:
         """Take a snapshot of the current portfolio state."""
         with self._lock:
-            total_value = self.cash_balance
+            total_value = self._get_portfolio_value_unlocked()
             unrealized_pnl = 0.0
-
-            for pair, qty in self.positions.items():
-                if qty > 0:
-                    price = self.current_prices.get(pair, 0)
-                    total_value += qty * price
 
             snapshot = PortfolioSnapshot(
                 total_value=total_value,
@@ -340,14 +366,9 @@ class TradingState:
 
     @property
     def portfolio_value(self) -> float:
-        """Get current total portfolio value."""
+        """Get current total portfolio value (prefers live Coinbase data)."""
         with self._lock:
-            total = self.cash_balance
-            for pair, qty in self.positions.items():
-                if qty > 0:
-                    price = self.current_prices.get(pair, 0)
-                    total += qty * price
-            return total
+            return self._get_portfolio_value_unlocked()
 
     @property
     def win_rate(self) -> float:
@@ -364,11 +385,7 @@ class TradingState:
         with self._lock:
             if self.initial_balance == 0:
                 return 0.0
-            pv = self.cash_balance
-            for pair, qty in self.positions.items():
-                if qty > 0:
-                    price = self.current_prices.get(pair, 0)
-                    pv += qty * price
+            pv = self._get_portfolio_value_unlocked()
             return (pv - self.initial_balance) / self.initial_balance
 
     @property
