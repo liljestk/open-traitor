@@ -329,15 +329,15 @@ def export_trades(hours: int = Query(24 * 30, ge=1)):
     
     if not trades:
         return Response(
-            content="id,ts,pair,action,quantity,price,usd_amount,pnl,confidence,signal_type\n",
+            content="id,ts,pair,action,quantity,price,quote_amount,pnl,confidence,signal_type\n",
             media_type="text/csv"
         )
     
     import pandas as pd
     df = pd.DataFrame(trades)
     columns = [
-        "id", "ts", "pair", "action", "quantity", "price", "usd_amount", 
-        "fee_usd", "pnl", "confidence", "signal_type", "stop_loss", 
+        "id", "ts", "pair", "action", "quantity", "price", "quote_amount", 
+        "fee_quote", "pnl", "confidence", "signal_type", "stop_loss", 
         "take_profit", "reasoning", "is_rotation", "approved_by"
     ]
     existing_cols = [c for c in columns if c in df.columns]
