@@ -103,6 +103,68 @@ class PipelineManager:
         except Exception as e:
             logger.debug(f"Multi-TF unavailable: {e}")
 
+        # ─── Sentiment scoring (keyword-based) ───
+        sentiment_prompt = ""
+        sentiment_data = {}
+        try:
+            news_items = []
+            if orch.redis:
+                cached = orch.redis.get("news:latest")
+                if cached:
+                    news_items = json.loads(cached)
+            sentiment_data = orch.sentiment.score_for_pair(pair, news_items)
+            if sentiment_data.get("count", 0) > 0:
+                sentiment_prompt = (
+                    f"Sentiment ({pair}): {sentiment_data.get('label', 'neutral')} "
+                    f"(score={sentiment_data.get('score', 0):.2f}, "
+                    f"n={sentiment_data.get('count', 0)})"
+                )
+        except Exception as e:
+            logger.debug(f"Sentiment analysis unavailable: {e}")
+
+        # ─── Deterministic strategy signals ───
+        strategy_signals = {}
+        try:
+            ema_signal = orch.ema_strategy.generate_signal(pair, candles)
+            if ema_signal:
+                strategy_signals["ema_crossover"] = ema_signal.__dict__ if hasattr(ema_signal, '__dict__') else str(ema_signal)
+        except Exception as e:
+            logger.debug(f"EMA strategy unavailable: {e}")
+        try:
+            boll_signal = orch.bollinger_strategy.generate_signal(pair, candles)
+            if boll_signal:
+                strategy_signals["bollinger_reversion"] = boll_signal.__dict__ if hasattr(boll_signal, '__dict__') else str(boll_signal)
+        except Exception as e:
+            logger.debug(f"Bollinger strategy unavailable: {e}")
+
+        # ─── Pairs correlation (for risk sizing) ───
+        correlation_matrix = {}
+        try:
+            all_candles = {}
+            for p in orch.pairs:
+                if p == pair:
+                    all_candles[p] = candles
+                else:
+                    c = await asyncio.to_thread(
+                        orch.coinbase.get_candles, p,
+                        granularity=orch.config.get("analysis", {}).get("technical", {}).get(
+                            "candle_granularity", "ONE_HOUR"
+                        ),
+                    )
+                    all_candles[p] = c
+            report = orch.pairs_monitor.compute_correlations(all_candles)
+            if report:
+                correlation_matrix = report.matrix
+        except Exception as e:
+            logger.debug(f"Pairs correlation unavailable: {e}")
+
+        # ─── Kelly Criterion stats (from StatsDB) ───
+        kelly_stats = {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
+        try:
+            kelly_stats = await asyncio.to_thread(orch.stats_db.get_win_loss_stats)
+        except Exception as e:
+            logger.debug(f"Kelly stats unavailable: {e}")
+
         recent_outcomes = ""
         try:
             recent_outcomes = await asyncio.to_thread(
@@ -119,6 +181,8 @@ class PipelineManager:
             "news_headlines": news_headlines,
             "fear_greed": fg_prompt,
             "multi_timeframe": mtf_prompt,
+            "sentiment": sentiment_prompt,
+            "strategy_signals": strategy_signals,
             "strategic_context": strategic_context,
             "currency_symbol": orch.state.currency_symbol,
             "cycle_id": cycle_id,
@@ -153,6 +217,8 @@ class PipelineManager:
             "live_holdings_summary": orch.state.holdings_summary,
             "native_currency": orch.state.native_currency,
             "currency_symbol": orch.state.currency_symbol,
+            "sentiment": sentiment_data,
+            "strategy_signals": strategy_signals,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
@@ -181,6 +247,10 @@ class PipelineManager:
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
+            "win_rate": kelly_stats.get("win_rate", 0),
+            "avg_win": kelly_stats.get("avg_win", 0),
+            "avg_loss": kelly_stats.get("avg_loss", 0),
+            "correlation_matrix": correlation_matrix,
         })
 
         if not risk_result.get("approved"):
@@ -270,11 +340,46 @@ class PipelineManager:
             )
 
             if risk_result.get('action') == 'buy':
+                filled_qty = (
+                    exec_result.get('trade', {}).get('filled_quantity')
+                    or exec_result.get('trade', {}).get('quantity')
+                    or risk_result.get('quantity', 0)
+                )
                 orch.trailing_stops.add_stop(
                     pair=risk_result.get('pair', pair),
                     entry_price=risk_result.get('price', price),
                     initial_stop=risk_result.get('stop_loss'),
+                    total_quantity=float(filled_qty) if filled_qty else 0.0,
                 )
+
+            # ─── FIFO tax tracking ───
+            try:
+                filled_qty = (
+                    exec_result.get('trade', {}).get('filled_quantity')
+                    or exec_result.get('trade', {}).get('quantity')
+                    or risk_result.get('quantity', 0)
+                )
+                fill_price = risk_result.get('price', price)
+                trade_pair = risk_result.get('pair', pair)
+                base_asset = trade_pair.split("-")[0] if "-" in trade_pair else trade_pair
+                fee_amount = exec_result.get('trade', {}).get('fee', 0) or 0
+
+                if risk_result.get('action') == 'buy' and float(filled_qty or 0) > 0:
+                    orch.fifo_tracker.record_buy(
+                        asset=base_asset,
+                        quantity=float(filled_qty),
+                        cost_per_unit=float(fill_price),
+                        fees=float(fee_amount),
+                    )
+                elif risk_result.get('action') == 'sell' and float(filled_qty or 0) > 0:
+                    orch.fifo_tracker.record_sell(
+                        asset=base_asset,
+                        quantity=float(filled_qty),
+                        sale_price_per_unit=float(fill_price),
+                        fees=float(fee_amount),
+                    )
+            except Exception as e:
+                logger.debug(f"FIFO tracking failed (non-fatal): {e}")
 
             trade_event = (
                 f"{'BUY' if risk_result['action'] == 'buy' else 'SELL'} "

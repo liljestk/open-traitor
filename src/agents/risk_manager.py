@@ -1,10 +1,12 @@
 """
 Risk Manager Agent — Validates and adjusts trade proposals.
-Applies position sizing, enforces rules, and manages stop-losses.
+Applies position sizing (Kelly Criterion), enforces rules,
+manages stop-losses, and accounts for portfolio correlation.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
@@ -19,6 +21,12 @@ class RiskManagerAgent(BaseAgent):
     """
     Validates trade proposals against absolute rules and risk parameters.
     This agent has the final say before a trade reaches the executor.
+
+    Position sizing hierarchy:
+      1. Kelly Criterion (half-Kelly) based on historical win rate
+      2. ATR volatility adjustment
+      3. Correlation penalty for correlated positions
+      4. Cap by max_position_pct config
     """
 
     def __init__(self, llm, state, config, rules: AbsoluteRules):
@@ -28,6 +36,115 @@ class RiskManagerAgent(BaseAgent):
         self.trading_config = config.get("trading", {})
         self.stop_loss_pct = self.risk_config.get("stop_loss_pct", 0.03)
         self.take_profit_pct = self.risk_config.get("take_profit_pct", 0.06)
+        self.use_kelly = self.risk_config.get("use_kelly_criterion", True)
+        self.kelly_fraction = self.risk_config.get("kelly_fraction", 0.5)  # Half-Kelly
+        self.use_correlation_penalty = self.risk_config.get("use_correlation_penalty", True)
+        self.correlation_threshold = self.risk_config.get("correlation_threshold", 0.7)
+
+    def _compute_kelly_size(
+        self,
+        portfolio_value: float,
+        win_rate: float = 0.0,
+        avg_win: float = 0.0,
+        avg_loss: float = 0.0,
+    ) -> float:
+        """
+        Compute Half-Kelly position size.
+
+        Kelly formula: f* = (p * b - q) / b
+          where p = win probability, q = 1-p, b = avg_win / avg_loss
+
+        We use half-Kelly (0.5 * f*) for safety — reduces variance significantly
+        while retaining ~75% of full-Kelly growth rate.
+
+        Returns maximum position size as a fraction of portfolio.
+        """
+        if win_rate <= 0 or avg_win <= 0 or avg_loss <= 0:
+            # Insufficient data → fallback to config max
+            return self.risk_config.get("max_position_pct", 0.05)
+
+        p = min(max(win_rate, 0.01), 0.99)
+        q = 1 - p
+        b = avg_win / avg_loss  # Win/loss ratio
+
+        kelly_f = (p * b - q) / b
+
+        if kelly_f <= 0:
+            # Kelly says don't bet (negative edge)
+            self.logger.info(
+                f"Kelly: negative edge (f*={kelly_f:.4f}, win_rate={p:.2f}, "
+                f"W/L ratio={b:.2f}) — minimum position"
+            )
+            return 0.01  # Minimum 1% if we still proceed
+
+        # Apply fraction (half-Kelly by default)
+        position_frac = kelly_f * self.kelly_fraction
+
+        # Cap at config max
+        max_pct = self.risk_config.get("max_position_pct", 0.05)
+        position_frac = min(position_frac, max_pct)
+
+        self.logger.info(
+            f"Kelly: f*={kelly_f:.4f}, half-Kelly={kelly_f * self.kelly_fraction:.4f}, "
+            f"capped={position_frac:.4f} | "
+            f"win_rate={p:.2f}, W/L={b:.2f}"
+        )
+
+        return position_frac
+
+    def _compute_correlation_penalty(
+        self,
+        pair: str,
+        correlation_matrix: dict[str, dict[str, float]] | None = None,
+    ) -> float:
+        """
+        Reduce position size if the new asset is highly correlated with
+        existing open positions.
+
+        Returns a multiplier between 0.5 and 1.0.
+        """
+        if not self.use_correlation_penalty or not correlation_matrix:
+            return 1.0
+
+        base_currency = pair.split("-")[0] if "-" in pair else pair
+        open_bases = set()
+        for trade in self.state.get_open_trades():
+            if trade.action == TradeAction.BUY:
+                open_base = trade.pair.split("-")[0] if "-" in trade.pair else trade.pair
+                open_bases.add(open_base)
+
+        if not open_bases:
+            return 1.0
+
+        max_corr = 0.0
+        for open_base in open_bases:
+            # Check correlation between new asset and each existing position
+            corr = 0.0
+            if base_currency in correlation_matrix:
+                for existing_pair_key in correlation_matrix[base_currency]:
+                    if open_base in existing_pair_key:
+                        corr = abs(correlation_matrix[base_currency].get(existing_pair_key, 0))
+                        break
+            # Also check reverse direction
+            for existing_pair_key in correlation_matrix:
+                if open_base in existing_pair_key:
+                    corr = max(corr, abs(
+                        correlation_matrix.get(existing_pair_key, {}).get(base_currency, 0)
+                    ))
+
+            max_corr = max(max_corr, corr)
+
+        if max_corr >= self.correlation_threshold:
+            # High correlation: reduce position by up to 50%
+            penalty = 1.0 - (max_corr - self.correlation_threshold) / (1.0 - self.correlation_threshold) * 0.5
+            penalty = max(0.5, min(1.0, penalty))
+            self.logger.info(
+                f"Correlation penalty: {pair} has {max_corr:.2f} corr with open positions → "
+                f"size multiplier={penalty:.2f}"
+            )
+            return penalty
+
+        return 1.0
 
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
@@ -40,12 +157,20 @@ class RiskManagerAgent(BaseAgent):
             - cycle_id: str (optional, for reasoning persistence)
             - stats_db: StatsDB instance (optional)
             - trace_ctx: TraceContext (optional, for Langfuse tracing)
+            - win_rate: float (optional, from StatsDB for Kelly sizing)
+            - avg_win: float (optional, average winning trade %)
+            - avg_loss: float (optional, average losing trade %)
+            - correlation_matrix: dict (optional, from PairsCorrelationMonitor)
         """
         proposal = context.get("proposal", {})
         portfolio_value = context.get("portfolio_value", 0)
         cash_balance = context.get("cash_balance", 0)
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
+        win_rate = context.get("win_rate", 0)
+        avg_win = context.get("avg_win", 0)
+        avg_loss = context.get("avg_loss", 0)
+        correlation_matrix = context.get("correlation_matrix")
 
         action = proposal.get("action", "hold")
 
@@ -145,10 +270,17 @@ class RiskManagerAgent(BaseAgent):
                 "violations": [str(v) for v in violations],
             }
 
-        # Adjust position size if too large relative to portfolio
-        max_position = portfolio_value * self.risk_config.get("max_position_pct", 0.05)
-        
-        # Volatility-adjusted position sizing
+        # ===== POSITION SIZING =====
+        # Step 1: Start with Kelly Criterion or config max
+        if self.use_kelly and action == "buy" and portfolio_value > 0:
+            kelly_frac = self._compute_kelly_size(
+                portfolio_value, win_rate, avg_win, avg_loss
+            )
+            max_position = portfolio_value * kelly_frac
+        else:
+            max_position = portfolio_value * self.risk_config.get("max_position_pct", 0.05)
+
+        # Step 2: ATR volatility adjustment
         if atr and price > 0 and action == "buy":
             float_atr = float(atr)
             atr_pct = float_atr / price
@@ -157,7 +289,13 @@ class RiskManagerAgent(BaseAgent):
                 volatility_reduction = min(0.5, (0.05 / atr_pct))  # Cap reduction at 50%
                 max_position = max_position * volatility_reduction
                 self.logger.info(f"High volatility detected (ATR {atr_pct:.1%}). Reduced max position size by {1-volatility_reduction:.1%}.")
-                
+
+        # Step 3: Correlation penalty
+        if action == "buy":
+            corr_mult = self._compute_correlation_penalty(pair, correlation_matrix)
+            if corr_mult < 1.0:
+                max_position *= corr_mult
+
         if quote_amount > max_position:
             original = quote_amount
             quote_amount = max_position

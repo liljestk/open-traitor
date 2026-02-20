@@ -107,6 +107,90 @@ class TechnicalAnalyzer:
         atr = tr.rolling(window=period).mean()
         return atr
 
+    def compute_adx(self, df: pd.DataFrame, period: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+        """
+        Compute Average Directional Index (ADX) with +DI and -DI.
+
+        ADX > 25 → trending market (trend-following strategies)
+        ADX < 20 → ranging market (mean-reversion strategies)
+        """
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        # Directional Movement
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        # True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Smoothed averages
+        atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
+
+        # ADX = smoothed average of DX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+        adx = dx.ewm(alpha=1 / period, min_periods=period).mean()
+
+        return adx, plus_di, minus_di
+
+    def compute_stochastic_rsi(
+        self, df: pd.DataFrame, rsi_period: int = 14, stoch_period: int = 14, k_smooth: int = 3, d_smooth: int = 3
+    ) -> tuple[pd.Series, pd.Series]:
+        """
+        Compute Stochastic RSI (%K and %D lines).
+
+        Better at detecting overbought/oversold in ranging markets vs plain RSI.
+        %K < 20 → oversold, %K > 80 → overbought
+        """
+        rsi = self.compute_rsi(df, rsi_period)
+
+        # Stochastic of RSI
+        rsi_low = rsi.rolling(window=stoch_period).min()
+        rsi_high = rsi.rolling(window=stoch_period).max()
+
+        stoch_rsi = ((rsi - rsi_low) / (rsi_high - rsi_low).replace(0, np.nan)) * 100
+        k_line = stoch_rsi.rolling(window=k_smooth).mean()
+        d_line = k_line.rolling(window=d_smooth).mean()
+
+        return k_line, d_line
+
+    def compute_obv(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute On-Balance Volume (OBV).
+
+        Measures cumulative buying/selling pressure via volume flow.
+        Divergence between OBV and price signals potential reversals.
+        """
+        close = df["close"]
+        volume = df["volume"]
+
+        direction = np.sign(close.diff())
+        direction.iloc[0] = 0
+        obv = (direction * volume).cumsum()
+        return obv
+
+    def compute_vwap(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute Volume-Weighted Average Price (VWAP).
+
+        Institutional fair-value reference for intraday trading.
+        Price > VWAP → bullish bias, Price < VWAP → bearish bias
+        """
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        cumulative_tp_vol = (typical_price * df["volume"]).cumsum()
+        cumulative_vol = df["volume"].cumsum().replace(0, np.nan)
+        vwap = cumulative_tp_vol / cumulative_vol
+        return vwap
+
     def compute_volume_sma(self, df: pd.DataFrame, period: int = 20) -> pd.Series:
         """Compute volume Simple Moving Average."""
         return df["volume"].rolling(window=period).mean()
@@ -142,6 +226,10 @@ class TechnicalAnalyzer:
         macd, macd_signal, macd_hist = self.compute_macd(df)
         bb_upper, bb_middle, bb_lower = self.compute_bollinger_bands(df)
         atr = self.compute_atr(df)
+        adx, plus_di, minus_di = self.compute_adx(df)
+        stoch_k, stoch_d = self.compute_stochastic_rsi(df)
+        obv = self.compute_obv(df)
+        vwap = self.compute_vwap(df)
         volume_sma = self.compute_volume_sma(df)
         support, resistance = self.compute_support_resistance(df)
 
@@ -162,6 +250,16 @@ class TechnicalAnalyzer:
         current_bb_lower = float(bb_lower.iloc[-1]) if not np.isnan(bb_lower.iloc[-1]) else None
         current_atr = float(atr.iloc[-1]) if not np.isnan(atr.iloc[-1]) else None
 
+        # New indicators
+        current_adx = float(adx.iloc[-1]) if not np.isnan(adx.iloc[-1]) else None
+        current_plus_di = float(plus_di.iloc[-1]) if not np.isnan(plus_di.iloc[-1]) else None
+        current_minus_di = float(minus_di.iloc[-1]) if not np.isnan(minus_di.iloc[-1]) else None
+        current_stoch_k = float(stoch_k.iloc[-1]) if not np.isnan(stoch_k.iloc[-1]) else None
+        current_stoch_d = float(stoch_d.iloc[-1]) if not np.isnan(stoch_d.iloc[-1]) else None
+        current_obv = float(obv.iloc[-1]) if not np.isnan(obv.iloc[-1]) else None
+        prev_obv = float(obv.iloc[-2]) if len(obv) >= 2 and not np.isnan(obv.iloc[-2]) else None
+        current_vwap = float(vwap.iloc[-1]) if not np.isnan(vwap.iloc[-1]) else None
+
         # Current volume analysis
         current_volume = float(df["volume"].iloc[-1])
         avg_volume = float(volume_sma.iloc[-1]) if not np.isnan(volume_sma.iloc[-1]) else current_volume
@@ -173,6 +271,10 @@ class TechnicalAnalyzer:
         bb_signal = self._interpret_bollinger(current_price, current_bb_upper, current_bb_lower, current_bb_middle)
         ema_signal = self._interpret_ema(current_price, emas)
         volume_signal = self._interpret_volume(volume_ratio)
+        adx_signal = self._interpret_adx(current_adx, current_plus_di, current_minus_di)
+        stoch_rsi_signal = self._interpret_stochastic_rsi(current_stoch_k, current_stoch_d)
+        obv_signal = self._interpret_obv(current_obv, prev_obv, current_price, prev_price)
+        vwap_signal = self._interpret_vwap(current_price, current_vwap)
 
         # Price changes
         price_change_1 = ((current_price - prev_price) / prev_price) if prev_price else 0
@@ -197,6 +299,17 @@ class TechnicalAnalyzer:
                 "bb_lower": current_bb_lower,
                 "bb_signal": bb_signal,
                 "atr": current_atr,
+                "adx": current_adx,
+                "plus_di": current_plus_di,
+                "minus_di": current_minus_di,
+                "adx_signal": adx_signal,
+                "stoch_rsi_k": current_stoch_k,
+                "stoch_rsi_d": current_stoch_d,
+                "stoch_rsi_signal": stoch_rsi_signal,
+                "obv": current_obv,
+                "obv_signal": obv_signal,
+                "vwap": current_vwap,
+                "vwap_signal": vwap_signal,
                 **emas,
                 "ema_signal": ema_signal,
                 "volume": current_volume,
@@ -301,3 +414,96 @@ class TechnicalAnalyzer:
         if volume_ratio > 0.5:
             return "low"
         return "very_low"
+
+    def _interpret_adx(
+        self,
+        adx: Optional[float],
+        plus_di: Optional[float],
+        minus_di: Optional[float],
+    ) -> str:
+        """
+        Interpret ADX for trend strength and direction.
+        ADX > 25 with +DI > -DI → strong uptrend
+        ADX > 25 with -DI > +DI → strong downtrend
+        ADX < 20 → no trend (range-bound, favor mean-reversion)
+        """
+        if adx is None:
+            return "unknown"
+        if adx >= 40:
+            if plus_di and minus_di and plus_di > minus_di:
+                return "strong_uptrend"
+            return "strong_downtrend"
+        if adx >= 25:
+            if plus_di and minus_di and plus_di > minus_di:
+                return "uptrend"
+            return "downtrend"
+        if adx >= 20:
+            return "weak_trend"
+        return "no_trend"
+
+    def _interpret_stochastic_rsi(
+        self,
+        k: Optional[float],
+        d: Optional[float],
+    ) -> str:
+        """
+        Interpret Stochastic RSI.
+        %K < 20 → oversold (buy signal in range)
+        %K > 80 → overbought (sell signal in range)
+        %K crossing above %D → bullish crossover
+        """
+        if k is None:
+            return "unknown"
+        if k > 80:
+            return "overbought"
+        if k < 20:
+            return "oversold"
+        if d is not None:
+            if k > d:
+                return "bullish_crossover"
+            if k < d:
+                return "bearish_crossover"
+        return "neutral"
+
+    def _interpret_obv(
+        self,
+        current_obv: Optional[float],
+        prev_obv: Optional[float],
+        current_price: float,
+        prev_price: float,
+    ) -> str:
+        """
+        Interpret OBV for volume-price divergence.
+        OBV rising + price rising → confirmed uptrend
+        OBV falling + price rising → bearish divergence (potential reversal)
+        OBV rising + price falling → bullish divergence (potential reversal)
+        """
+        if current_obv is None or prev_obv is None:
+            return "unknown"
+        obv_rising = current_obv > prev_obv
+        price_rising = current_price > prev_price
+
+        if obv_rising and price_rising:
+            return "confirmed_uptrend"
+        if not obv_rising and not price_rising:
+            return "confirmed_downtrend"
+        if obv_rising and not price_rising:
+            return "bullish_divergence"
+        if not obv_rising and price_rising:
+            return "bearish_divergence"
+        return "neutral"
+
+    def _interpret_vwap(self, price: float, vwap: Optional[float]) -> str:
+        """
+        Interpret VWAP.
+        Price significantly above VWAP → expensive (overbought bias)
+        Price significantly below VWAP → cheap (oversold bias)
+        """
+        if vwap is None or vwap <= 0:
+            return "unknown"
+        deviation = (price - vwap) / vwap
+        if deviation > 0.02:
+            return "above_vwap"
+        if deviation < -0.02:
+            return "below_vwap"
+        return "at_vwap"

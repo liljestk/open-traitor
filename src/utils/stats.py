@@ -372,6 +372,37 @@ class StatsDB:
         ).fetchone()
         return dict(row) if row else {}
 
+    def get_win_loss_stats(self, hours: int = 720) -> dict:
+        """
+        Get win rate and average win/loss for Kelly Criterion position sizing.
+        Default look-back: 30 days (720 hours).
+
+        Returns:
+            win_rate: fraction of profitable trades (0-1)
+            avg_win: average profit on winning trades (absolute)
+            avg_loss: average loss on losing trades (absolute, positive number)
+            sample_size: number of closed trades used
+        """
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        row = conn.execute(
+            """SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
+                COALESCE(AVG(CASE WHEN pnl < 0 THEN ABS(pnl) END), 0) as avg_loss
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL AND pnl != 0""",
+            (cutoff,),
+        ).fetchone()
+        if not row or row["total"] == 0:
+            return {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
+        return {
+            "win_rate": row["wins"] / row["total"],
+            "avg_win": row["avg_win"],
+            "avg_loss": row["avg_loss"],
+            "sample_size": row["total"],
+        }
+
     # ─── Events ────────────────────────────────────────────────────────────
 
     def record_event(

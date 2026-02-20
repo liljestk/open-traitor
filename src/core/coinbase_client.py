@@ -567,6 +567,116 @@ class CoinbaseClient:
 
         return {"success": False, "error": "No client available"}
 
+    def limit_order_buy(
+        self,
+        product_id: str,
+        base_size: str,
+        limit_price: str,
+        post_only: bool = True,
+    ) -> dict:
+        """
+        Place a limit buy order (maker order for lower fees).
+
+        Args:
+            product_id: Trading pair (e.g. BTC-USD)
+            base_size: Amount of base currency to buy
+            limit_price: Maximum price willing to pay
+            post_only: If True, order is rejected if it would fill immediately
+                       (ensures maker fee). Default True.
+        """
+        if self.paper_mode:
+            return self._paper_limit_buy(product_id, base_size, limit_price)
+
+        if self._rest_client:
+            try:
+                import uuid
+
+                order = self._rest_client.limit_order_gtc_buy(
+                    client_order_id=str(uuid.uuid4()),
+                    product_id=product_id,
+                    base_size=base_size,
+                    limit_price=limit_price,
+                    post_only=post_only,
+                )
+                result = order.to_dict() if hasattr(order, "to_dict") else dict(order)
+                logger.info(
+                    f"✅ Limit BUY order placed: {product_id} @ {limit_price} | "
+                    f"order_id={result.get('order_id', '?')}"
+                )
+                logger.debug(f"Limit BUY detail: {result}")
+                return result
+            except Exception as e:
+                logger.error(f"❌ Failed to place limit buy order: {e}")
+                return {"success": False, "error": str(e)}
+
+        return {"success": False, "error": "No client available"}
+
+    def limit_order_sell(
+        self,
+        product_id: str,
+        base_size: str,
+        limit_price: str,
+        post_only: bool = True,
+    ) -> dict:
+        """
+        Place a limit sell order (maker order for lower fees).
+
+        Args:
+            product_id: Trading pair (e.g. BTC-USD)
+            base_size: Amount of base currency to sell
+            limit_price: Minimum price willing to accept
+            post_only: If True, order is rejected if it would fill immediately
+                       (ensures maker fee). Default True.
+        """
+        if self.paper_mode:
+            return self._paper_limit_sell(product_id, base_size, limit_price)
+
+        if self._rest_client:
+            try:
+                import uuid
+
+                order = self._rest_client.limit_order_gtc_sell(
+                    client_order_id=str(uuid.uuid4()),
+                    product_id=product_id,
+                    base_size=base_size,
+                    limit_price=limit_price,
+                    post_only=post_only,
+                )
+                result = order.to_dict() if hasattr(order, "to_dict") else dict(order)
+                logger.info(
+                    f"✅ Limit SELL order placed: {product_id} @ {limit_price} | "
+                    f"order_id={result.get('order_id', '?')}"
+                )
+                logger.debug(f"Limit SELL detail: {result}")
+                return result
+            except Exception as e:
+                logger.error(f"❌ Failed to place limit sell order: {e}")
+                return {"success": False, "error": str(e)}
+
+        return {"success": False, "error": "No client available"}
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel an open order."""
+        if self.paper_mode:
+            for order in self._paper_orders:
+                if order.get("order_id") == order_id and order.get("status") == "OPEN":
+                    order["status"] = "CANCELLED"
+                    logger.info(f"📝 Paper order cancelled: {order_id}")
+                    return {"success": True, "order_id": order_id}
+            return {"success": False, "error": "Order not found or not open"}
+
+        if self._rest_client:
+            try:
+                result = self._rest_client.cancel_orders([order_id])
+                res = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+                logger.info(f"✅ Order cancelled: {order_id}")
+                return {"success": True, "result": res}
+            except Exception as e:
+                logger.error(f"❌ Failed to cancel order {order_id}: {e}")
+                return {"success": False, "error": str(e)}
+
+        return {"success": False, "error": "No client available"}
+
     def market_order_sell(
         self,
         product_id: str,
@@ -765,6 +875,159 @@ class CoinbaseClient:
             f"📝 Paper SELL: {quantity:.6f} {base_currency} @ {fill_price:,.2f} {quote_currency} "
             f"(mid={price:,.2f}, slippage={self._paper_slippage_pct:.2%}, "
             f"{quote_amount:,.2f} - {fee:.2f} fee {quote_currency})"
+        )
+        return {"success": True, "order": order}
+
+    def _paper_limit_buy(
+        self,
+        product_id: str,
+        base_size: str,
+        limit_price: str,
+    ) -> dict:
+        """Simulate a paper limit buy (fills immediately at limit or better)."""
+        import uuid
+
+        price = self.get_current_price(product_id)
+        parts = product_id.split("-")
+        base_currency = parts[0]
+        quote_currency = parts[1] if len(parts) > 1 else "USD"
+
+        lim_price = float(limit_price)
+        quantity = float(base_size)
+
+        # Limit buy only fills if market price <= limit price
+        if price > lim_price:
+            # Place as resting order (OPEN) — will need to be checked later
+            order_id = str(uuid.uuid4())
+            order = {
+                "order_id": order_id,
+                "product_id": product_id,
+                "side": "BUY",
+                "type": "LIMIT",
+                "status": "OPEN",
+                "limit_price": limit_price,
+                "base_size": base_size,
+                "created_time": datetime.now(timezone.utc).isoformat(),
+            }
+            self._paper_orders.append(order)
+            logger.info(
+                f"📝 Paper Limit BUY resting: {quantity:.6f} {base_currency} "
+                f"@ {lim_price:,.2f} {quote_currency} (market={price:,.2f})"
+            )
+            return {"success": True, "order": order}
+
+        # Fills at limit price (or market if better)
+        fill_price = min(price, lim_price)
+        quote_amount = quantity * fill_price
+
+        # Use lower maker fee for limit orders
+        maker_fee_pct = self._paper_fee_pct * 0.5  # ~50% of taker fee
+        fee = quote_amount * maker_fee_pct
+
+        quote_bal = self._paper_balance.get(quote_currency, 0)
+        if quote_bal < quote_amount + fee:
+            return {
+                "success": False,
+                "error": f"Insufficient {quote_currency} balance for limit buy",
+            }
+
+        self._paper_balance[quote_currency] = quote_bal - quote_amount - fee
+        self._paper_balance[base_currency] = self._paper_balance.get(base_currency, 0) + quantity
+
+        order_id = str(uuid.uuid4())
+        order = {
+            "order_id": order_id,
+            "product_id": product_id,
+            "side": "BUY",
+            "type": "LIMIT",
+            "status": "FILLED",
+            "filled_size": str(quantity),
+            "filled_value": str(quote_amount),
+            "average_filled_price": str(fill_price),
+            "fee": str(fee),
+            "created_time": datetime.now(timezone.utc).isoformat(),
+        }
+        self._paper_orders.append(order)
+        if len(self._paper_orders) > self._max_paper_orders:
+            self._paper_orders = self._paper_orders[-self._max_paper_orders:]
+
+        logger.info(
+            f"📝 Paper Limit BUY filled: {quantity:.6f} {base_currency} "
+            f"@ {fill_price:,.2f} {quote_currency} (maker fee={fee:.2f})"
+        )
+        return {"success": True, "order": order}
+
+    def _paper_limit_sell(
+        self,
+        product_id: str,
+        base_size: str,
+        limit_price: str,
+    ) -> dict:
+        """Simulate a paper limit sell (fills immediately at limit or better)."""
+        import uuid
+
+        price = self.get_current_price(product_id)
+        parts = product_id.split("-")
+        base_currency = parts[0]
+        quote_currency = parts[1] if len(parts) > 1 else "USD"
+
+        lim_price = float(limit_price)
+        quantity = float(base_size)
+
+        if self._paper_balance.get(base_currency, 0) < quantity:
+            return {
+                "success": False,
+                "error": f"Insufficient {base_currency} balance for limit sell",
+            }
+
+        # Limit sell only fills if market price >= limit price
+        if price < lim_price:
+            order_id = str(uuid.uuid4())
+            order = {
+                "order_id": order_id,
+                "product_id": product_id,
+                "side": "SELL",
+                "type": "LIMIT",
+                "status": "OPEN",
+                "limit_price": limit_price,
+                "base_size": base_size,
+                "created_time": datetime.now(timezone.utc).isoformat(),
+            }
+            self._paper_orders.append(order)
+            logger.info(
+                f"📝 Paper Limit SELL resting: {quantity:.6f} {base_currency} "
+                f"@ {lim_price:,.2f} {quote_currency} (market={price:,.2f})"
+            )
+            return {"success": True, "order": order}
+
+        fill_price = max(price, lim_price)
+        quote_amount = quantity * fill_price
+        maker_fee_pct = self._paper_fee_pct * 0.5
+        fee = quote_amount * maker_fee_pct
+
+        self._paper_balance[base_currency] -= quantity
+        self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount - fee
+
+        order_id = str(uuid.uuid4())
+        order = {
+            "order_id": order_id,
+            "product_id": product_id,
+            "side": "SELL",
+            "type": "LIMIT",
+            "status": "FILLED",
+            "filled_size": str(quantity),
+            "filled_value": str(quote_amount),
+            "average_filled_price": str(fill_price),
+            "fee": str(fee),
+            "created_time": datetime.now(timezone.utc).isoformat(),
+        }
+        self._paper_orders.append(order)
+        if len(self._paper_orders) > self._max_paper_orders:
+            self._paper_orders = self._paper_orders[-self._max_paper_orders:]
+
+        logger.info(
+            f"📝 Paper Limit SELL filled: {quantity:.6f} {base_currency} "
+            f"@ {fill_price:,.2f} {quote_currency} (maker fee={fee:.2f})"
         )
         return {"success": True, "order": order}
 

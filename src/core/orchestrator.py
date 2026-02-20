@@ -32,6 +32,9 @@ from src.core.high_stakes import HighStakesManager
 from src.core.portfolio_rotator import PortfolioRotator
 from src.analysis.fear_greed import FearGreedIndex
 from src.analysis.multi_timeframe import MultiTimeframeAnalyzer
+from src.analysis.sentiment import SentimentAnalyzer
+from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy, PairsCorrelationMonitor
+from src.utils.tax import FIFOTracker
 from src.news.aggregator import NewsAggregator
 from src.telegram_bot.chat_handler import TelegramChatHandler
 from src.utils.logger import get_logger
@@ -143,8 +146,20 @@ class Orchestrator:
         self.fear_greed = FearGreedIndex()
         self.multi_tf = MultiTimeframeAnalyzer(config, coinbase)
         self.trailing_stops = TrailingStopManager(
-            default_trail_pct=config.get("risk", {}).get("trailing_stop_pct", 0.03)
+            default_trail_pct=config.get("risk", {}).get("trailing_stop_pct", 0.03),
+            enable_tiers=config.get("risk", {}).get("enable_tiered_stops", False),
         )
+
+        # Sentiment analysis (keyword-based, no external deps)
+        self.sentiment = SentimentAnalyzer(config)
+
+        # Deterministic strategy modules (run alongside LLM strategist)
+        self.ema_strategy = EMACrossoverStrategy(config)
+        self.bollinger_strategy = BollingerReversionStrategy(config)
+        self.pairs_monitor = PairsCorrelationMonitor(config)
+
+        # FIFO cost-basis tracking for tax reporting
+        self.fifo_tracker = FIFOTracker()
 
         # Fee management and high-stakes mode
         self.fee_manager = FeeManager(config)
@@ -309,11 +324,15 @@ class Orchestrator:
         logger.info(f"  LLM Chat: ✅ Conversational mode")
         logger.info(f"  Fear & Greed: ✅ Enabled")
         logger.info(f"  Multi-Timeframe: ✅ Enabled")
-        logger.info(f"  Trailing Stops: ✅ Enabled")
+        logger.info(f"  Trailing Stops: ✅ Enabled (tiers: {'ON' if self.trailing_stops.enable_tiers else 'OFF'})")
         logger.info(f"  Portfolio Rotation: ✅ Enabled")
         logger.info(f"  Fee-Aware Trading: ✅ Enabled")
         logger.info(f"  High-Stakes Mode: ✅ Ready")
         logger.info(f"  Audit Log: ✅ Enabled")
+        logger.info(f"  Sentiment Analysis: ✅ Enabled")
+        logger.info(f"  Strategy Modules: ✅ EMA + Bollinger + Pairs")
+        logger.info(f"  Kelly Criterion: ✅ Enabled")
+        logger.info(f"  FIFO Tax Tracking: ✅ Enabled")
         logger.info(f"  Mode: {'📝 PAPER' if coinbase.paper_mode else '💰 LIVE'}")
         logger.info("═══════════════════════════════════════════")
 
@@ -413,6 +432,46 @@ class Orchestrator:
                             f"🎯 {event_msg}\n"
                             f"Entry: {format_currency(entry_price)}"
                         )
+
+                # ─── Tiered partial exits (profit-locking) ───
+                tier_exits = self.trailing_stops.get_pending_tier_exits()
+                for te in tier_exits:
+                    te_pair = te["pair"]
+                    te_qty = te["exit_quantity"]
+                    te_price = te["trigger_price"]
+                    te_pct = te.get("tier_pct", 0) * 100
+                    try:
+                        sell_result = self.executor.close_position_by_pair(
+                            te_pair, te_price, f"tier_exit_{te_pct:.0f}pct",
+                            quantity=te_qty,
+                        )
+                        if sell_result:
+                            self.audit.log_trade(
+                                pair=te_pair, action=f"tier_exit_{te_pct:.0f}pct",
+                                amount=te_qty * te_price,
+                                price=te_price,
+                            )
+                            # FIFO tracking for tier exit sell
+                            try:
+                                base_asset = te_pair.split("-")[0] if "-" in te_pair else te_pair
+                                self.fifo_tracker.record_sell(
+                                    asset=base_asset,
+                                    quantity=te_qty,
+                                    sale_price_per_unit=te_price,
+                                )
+                            except Exception:
+                                pass
+
+                            tier_msg = (
+                                f"Tier exit +{te_pct:.0f}% on {te_pair}: "
+                                f"sold {te_qty:.6f} at {format_currency(te_price)} "
+                                f"(PnL: +{te.get('pnl_pct', 0):.1f}%)"
+                            )
+                            self.chat_handler.queue_event(tier_msg)
+                            if self.telegram:
+                                self.telegram.send_trade_notification(f"📊 {tier_msg}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Tier exit failed for {te_pair}: {e}")
 
                 # Check stop-losses on all positions
                 closed = self.executor.check_stop_losses()

@@ -56,12 +56,19 @@ class BacktestResult:
     avg_loss: float = 0.0
     max_drawdown_pct: float = 0.0
     sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
     profit_factor: float = 0.0
     largest_win: float = 0.0
     largest_loss: float = 0.0
     avg_hold_time_hours: float = 0.0
+    # Buy-and-hold benchmark
+    benchmark_return_pct: float = 0.0
+    alpha: float = 0.0  # strategy return - benchmark return
     trades: list = field(default_factory=list)
     equity_curve: list = field(default_factory=list)
+    # Cost sensitivity (populated by cost_sensitivity_analysis)
+    cost_sensitivity: list = field(default_factory=list)
 
 
 class BacktestEngine:
@@ -298,19 +305,68 @@ class BacktestEngine:
         max_drawdown: float,
         candles: list[dict],
     ) -> BacktestResult:
-        """Compile all backtest metrics."""
+        """Compile all backtest metrics including risk-adjusted returns."""
+        import math
+
         winners = [t for t in trades if t.pnl > 0]
         losers = [t for t in trades if t.pnl <= 0]
 
         total_wins = sum(t.pnl for t in winners) if winners else 0
         total_losses = abs(sum(t.pnl for t in losers)) if losers else 0
 
+        total_return = (final_balance - self.initial_balance) / self.initial_balance
+
+        # ── Sharpe & Sortino from equity curve ──
+        sharpe = 0.0
+        sortino = 0.0
+        calmar = 0.0
+        if len(equity_curve) >= 2:
+            equities = [e["equity"] for e in equity_curve]
+            # Per-period returns
+            returns = [
+                (equities[i] - equities[i - 1]) / equities[i - 1]
+                for i in range(1, len(equities))
+                if equities[i - 1] > 0
+            ]
+            if returns:
+                mean_ret = sum(returns) / len(returns)
+                # Std dev of all returns (Sharpe)
+                variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
+                std_ret = math.sqrt(variance) if variance > 0 else 0
+                # Downside deviation (Sortino) — only negative returns
+                downside = [r for r in returns if r < 0]
+                down_var = sum(r ** 2 for r in downside) / len(returns) if downside else 0
+                down_std = math.sqrt(down_var) if down_var > 0 else 0
+
+                # Annualize: assume ~8760 candle-periods per year for hourly data
+                # (365 × 24). Adjust by sqrt for volatility.
+                annualization = math.sqrt(len(returns))  # simple: total periods
+                sharpe = (mean_ret / std_ret * annualization) if std_ret > 0 else 0
+                sortino = (mean_ret / down_std * annualization) if down_std > 0 else 0
+
+        # Calmar = annualized return / max drawdown
+        if max_drawdown > 0 and len(equity_curve) >= 2:
+            # Rough annualization based on candle count
+            n_periods = len(equity_curve)
+            annualized_return = total_return * (8760 / max(n_periods, 1))
+            calmar = annualized_return / max_drawdown
+
+        # ── Buy-and-hold benchmark ──
+        benchmark_return = 0.0
+        if candles and len(candles) >= 2:
+            first_price = float(candles[0].get("close", 0))
+            last_price = float(candles[-1].get("close", 0))
+            if first_price > 0:
+                benchmark_return = (last_price - first_price) / first_price
+
+        alpha = total_return - benchmark_return
+
         result = BacktestResult(
             start_date=candles[0].get("start", "") if candles else "",
             end_date=candles[-1].get("start", "") if candles else "",
             initial_balance=self.initial_balance,
             final_balance=final_balance,
-            total_return_pct=(final_balance - self.initial_balance) / self.initial_balance,
+            total_return_pct=total_return,
             total_trades=len(trades),
             winning_trades=len(winners),
             losing_trades=len(losers),
@@ -318,9 +374,14 @@ class BacktestEngine:
             avg_win=total_wins / len(winners) if winners else 0,
             avg_loss=total_losses / len(losers) if losers else 0,
             max_drawdown_pct=max_drawdown,
+            sharpe_ratio=round(sharpe, 3),
+            sortino_ratio=round(sortino, 3),
+            calmar_ratio=round(calmar, 3),
             profit_factor=total_wins / total_losses if total_losses > 0 else float("inf"),
             largest_win=max((t.pnl for t in winners), default=0),
             largest_loss=min((t.pnl for t in losers), default=0),
+            benchmark_return_pct=round(benchmark_return, 6),
+            alpha=round(alpha, 6),
             trades=[self._pos_to_dict(t) for t in trades],
             equity_curve=equity_curve,
         )
@@ -362,8 +423,16 @@ class BacktestEngine:
   Largest Win:   {format_currency(result.largest_win)}
   Largest Loss:  {format_currency(result.largest_loss)}
 
+  ── Risk-Adjusted Metrics ──
   Max Drawdown:  {format_percentage(result.max_drawdown_pct)}
   Profit Factor: {result.profit_factor:.2f}
+  Sharpe Ratio:  {result.sharpe_ratio:.3f}
+  Sortino Ratio: {result.sortino_ratio:.3f}
+  Calmar Ratio:  {result.calmar_ratio:.3f}
+
+  ── Benchmark ──
+  Buy & Hold:    {format_percentage(result.benchmark_return_pct)}
+  Strategy α:    {format_percentage(result.alpha)}
 
 {'='*60}
 """
@@ -384,7 +453,62 @@ class BacktestEngine:
                 "total_trades": result.total_trades,
                 "win_rate": result.win_rate,
                 "max_drawdown_pct": result.max_drawdown_pct,
+                "sharpe_ratio": result.sharpe_ratio,
+                "sortino_ratio": result.sortino_ratio,
+                "calmar_ratio": result.calmar_ratio,
                 "profit_factor": result.profit_factor,
+                "benchmark_return_pct": result.benchmark_return_pct,
+                "alpha": result.alpha,
+                "cost_sensitivity": result.cost_sensitivity,
                 "trades": result.trades,
             }, f, indent=2, default=str)
         logger.info(f"Results saved to {filepath}")
+
+    # =========================================================================
+    # Cost Sensitivity Analysis (Phase 1.3)
+    # =========================================================================
+
+    def cost_sensitivity_analysis(
+        self,
+        candles: list[dict],
+        pair: str = "BTC-USD",
+        fee_range: tuple[float, ...] = (0.001, 0.002, 0.004, 0.006, 0.008, 0.010),
+        slippage_range: tuple[float, ...] = (0.0005, 0.001, 0.002, 0.005),
+    ) -> list[dict]:
+        """
+        Sweep fee and slippage parameters to find the break-even point.
+
+        Returns a list of {fee_pct, slippage_pct, return_pct, profitable} dicts.
+        """
+        results = []
+        original_fee = self.fee_pct
+        original_slip = self.slippage_pct
+
+        for fee in fee_range:
+            for slip in slippage_range:
+                self.fee_pct = fee
+                self.slippage_pct = slip
+                try:
+                    r = self.run(candles, pair=pair)
+                    results.append({
+                        "fee_pct": fee,
+                        "slippage_pct": slip,
+                        "return_pct": round(r.total_return_pct, 6),
+                        "sharpe": r.sharpe_ratio,
+                        "trades": r.total_trades,
+                        "profitable": r.total_return_pct > 0,
+                    })
+                except Exception as e:
+                    logger.warning(f"Cost sensitivity run failed (fee={fee}, slip={slip}): {e}")
+
+        # Restore original values
+        self.fee_pct = original_fee
+        self.slippage_pct = original_slip
+
+        # Find break-even fee threshold
+        for r in sorted(results, key=lambda x: x["fee_pct"]):
+            if not r["profitable"]:
+                logger.info(f"⚠️ Break-even fee threshold: ~{r['fee_pct']*100:.2f}%")
+                break
+
+        return results

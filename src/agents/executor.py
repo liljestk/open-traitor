@@ -1,6 +1,7 @@
 """
 Executor Agent — Executes approved trades on Coinbase.
 Handles order placement, tracking, and position management.
+Supports both market and limit orders based on urgency and confidence.
 """
 
 from __future__ import annotations
@@ -31,6 +32,49 @@ class ExecutorAgent(BaseAgent):
         super().__init__("executor", llm, state, config)
         self.coinbase = coinbase
         self.rules = rules
+        exec_cfg = config.get("execution", {})
+        self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
+        self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
+        self.urgency_threshold = exec_cfg.get("urgency_confidence_threshold", 0.8)
+
+    def _should_use_limit(self, trade_info: dict) -> bool:
+        """
+        Decide whether to use a limit order vs. market order.
+
+        Use MARKET when:
+          - Stop-loss triggered (urgent)
+          - Confidence >= urgency threshold (strong immediate signal)
+          - Sell orders from stop-loss/take-profit (need immediate fill)
+          - Explicitly requested via order_type
+
+        Use LIMIT when:
+          - Normal buy entries (non-urgent, saves on fees)
+          - Lower confidence entries (patient accumulation)
+        """
+        if not self.use_limit_orders:
+            return False
+
+        order_type = trade_info.get("order_type", "auto")
+        if order_type == "market":
+            return False
+        if order_type == "limit":
+            return True
+
+        # Auto-decide
+        action = trade_info.get("action", "hold")
+        reason = trade_info.get("reasoning", "").lower()
+        confidence = trade_info.get("confidence", 0)
+
+        # Urgent situations → market
+        if any(kw in reason for kw in ["stop_loss", "stop loss", "trailing stop", "take_profit", "take profit"]):
+            return False
+        if action == "sell":
+            return False  # Sells should be immediate
+        if confidence >= self.urgency_threshold:
+            return False  # High confidence → get in NOW
+
+        # Normal buy → limit order to save on fees
+        return action == "buy"
 
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
@@ -65,6 +109,8 @@ class ExecutorAgent(BaseAgent):
         confidence = trade_info.get("confidence", 0)
         reasoning = trade_info.get("reasoning", "")
 
+        use_limit = self._should_use_limit(trade_info)
+
         # Create Trade record
         trade = Trade(
             pair=pair,
@@ -79,7 +125,22 @@ class ExecutorAgent(BaseAgent):
 
         # Execute on Coinbase
         try:
-            if action == "buy":
+            expected_price = price  # For slippage measurement
+
+            if use_limit and action == "buy":
+                # Limit buy: place slightly below current price to ensure maker fee
+                limit_price = price * (1 - self.limit_price_offset_pct)
+                base_size = str(round(quote_amount / limit_price, 8))
+                result = self.coinbase.limit_order_buy(
+                    product_id=pair,
+                    base_size=base_size,
+                    limit_price=str(round(limit_price, 2)),
+                )
+                self.logger.info(
+                    f"📋 Limit BUY placed for {pair} @ {limit_price:,.2f} "
+                    f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
+                )
+            elif action == "buy":
                 result = self.coinbase.market_order_buy(
                     product_id=pair,
                     quote_size=str(round(quote_amount, 2)),
@@ -93,6 +154,25 @@ class ExecutorAgent(BaseAgent):
             if result.get("success", True) and "error" not in result:
                 order = result.get("order", result)
                 order_id = order.get("order_id", "")
+
+                # For limit orders, check if it's resting (OPEN) vs filled
+                order_status = order.get("status", "FILLED")
+                if order_status == "OPEN":
+                    # Limit order resting — record as PENDING
+                    trade.status = TradeStatus.PENDING
+                    trade.coinbase_order_id = order_id
+                    self.state.add_trade(trade)
+                    self.logger.info(
+                        f"📋 Limit order resting: {trade.to_summary()} — "
+                        "will check fill on next cycle"
+                    )
+                    return {
+                        "executed": True,
+                        "trade": trade.model_dump(mode="json"),
+                        "order": order,
+                        "order_type": "limit",
+                        "resting": True,
+                    }
 
                 # Verify fill status for live orders
                 if order_id and not self.coinbase.paper_mode:
@@ -108,7 +188,6 @@ class ExecutorAgent(BaseAgent):
                     )
                     return {"executed": False, "error": f"Order {fill_status}", "trade_id": trade.id}
                 else:
-                    # Status unknown or still pending after polling — record conservatively
                     trade.status = TradeStatus.PENDING
                     self.logger.warning(
                         f"⚠️ Order {order_id} fill unconfirmed (status={fill_status!r}) — "
@@ -118,6 +197,18 @@ class ExecutorAgent(BaseAgent):
                 trade.filled_price = float(order.get("average_filled_price", price))
                 trade.filled_quantity = float(order.get("filled_size", quantity))
                 trade.fees = float(order.get("fee", 0))
+
+                # Slippage measurement
+                if expected_price > 0 and trade.filled_price > 0:
+                    slippage_pct = (trade.filled_price - expected_price) / expected_price * 100
+                    if action == "sell":
+                        slippage_pct = -slippage_pct  # For sells, lower fill = negative slippage
+                    trade_type = "limit" if use_limit else "market"
+                    self.logger.info(
+                        f"📊 Slippage: {slippage_pct:+.4f}% "
+                        f"(expected={expected_price:,.2f}, filled={trade.filled_price:,.2f}, "
+                        f"type={trade_type})"
+                    )
 
                 # Record in state and rules
                 self.state.add_trade(trade)
@@ -129,6 +220,11 @@ class ExecutorAgent(BaseAgent):
                     "executed": True,
                     "trade": trade.model_dump(mode="json"),
                     "order": order,
+                    "order_type": "limit" if use_limit else "market",
+                    "slippage_pct": (
+                        (trade.filled_price - expected_price) / expected_price * 100
+                        if expected_price > 0 else 0
+                    ),
                 }
             else:
                 trade.status = TradeStatus.FAILED
@@ -165,18 +261,66 @@ class ExecutorAgent(BaseAgent):
         )
         return initial_order
 
-    def close_position_by_pair(self, pair: str, price: float, reason: str) -> dict | None:
+    def close_position_by_pair(self, pair: str, price: float, reason: str, quantity: float = 0) -> dict | None:
         """Find the open BUY trade for *pair* and close it at *price*.
 
         Called by the orchestrator when a trailing stop fires so that the
         actual sell order is placed — returns the close result dict or None
         if no matching open trade was found.
+
+        If *quantity* > 0, perform a partial sell of that amount instead of
+        closing the full position.
         """
         for trade in self.state.get_open_trades():
             if trade.pair == pair and trade.action == TradeAction.BUY:
+                if quantity > 0:
+                    return self._partial_sell(trade, quantity, price, reason)
                 return self._close_position(trade, price, reason)
         self.logger.warning(f"close_position_by_pair: no open BUY trade found for {pair}")
         return None
+
+    def _partial_sell(self, trade: Trade, quantity: float, price: float, reason: str) -> dict:
+        """Sell a portion of a position (used for tiered exits)."""
+        result = self.coinbase.market_order_sell(
+            product_id=trade.pair,
+            base_size=str(quantity),
+        )
+
+        success = result.get("success", True) and "error" not in result
+        close_price = price
+        fees = 0.0
+
+        if success:
+            order = result.get("order", result)
+            close_price = float(order.get("average_filled_price", price))
+            fees = float(order.get("fee", 0))
+
+            # Reduce the trade's remaining quantity (don't close it)
+            remaining = (trade.filled_quantity or trade.quantity) - quantity
+            if remaining > 0:
+                trade.filled_quantity = remaining
+            else:
+                # Position fully exited by tiers
+                self.state.close_trade(trade.id, close_price, fees)
+
+            pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
+            self.logger.info(
+                f"Partial sell ({reason}): {trade.pair} — "
+                f"sold {quantity:.6f} at ${close_price:,.2f}, "
+                f"PnL: ${pnl:,.2f}, remaining: {remaining:.6f}"
+            )
+        else:
+            pnl = 0
+            self.logger.error(f"❌ Partial sell FAILED for {trade.pair}: {result}")
+
+        return {
+            "pair": trade.pair,
+            "reason": reason,
+            "quantity_sold": quantity,
+            "close_price": close_price,
+            "pnl": pnl,
+            "success": success,
+        }
 
     def check_stop_losses(self) -> list[dict]:
         """Check all open positions against their stop-losses."""

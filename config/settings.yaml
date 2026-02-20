@@ -1,102 +1,59 @@
-# ===========================================
-# Auto-Traitor Settings
-# ===========================================
-
 trading:
   mode: live
   pairs:
-    - ATOM-EUR
-    - BTC-EUR
-    - ETH-EUR
-  # Native quote currency — 'auto' = detect from Coinbase account on startup.
-  # Override with e.g. 'EUR' or 'USD' to force a specific currency.
-  # When 'auto' (or any non-USD currency is detected), pairs listed above are
-  # automatically rewritten: BTC-USD → BTC-EUR, etc. if that product exists.
+  - ATOM-EUR
+  - BTC-EUR
+  - ETH-EUR
   quote_currency: EUR
-  # Main analysis/trade loop interval in seconds
   interval: 120
-  # Minimum confidence to execute a trade (0.0 - 1.0)
-  min_confidence: 1.1  # SETUP MODE: impossible threshold — no trades will execute
-  # Max concurrent open positions
-  max_open_positions: 0
-  # How many trading cycles between live position reconciliation checks
-  # (live mode only — set higher to reduce Coinbase API calls)
+  min_confidence: 0.65
+  max_open_positions: 5
   reconcile_every_cycles: 10
-  # Simulated slippage for paper trading fills (0.0005 = 0.05%)
-  # Buys fill slightly above mid, sells slightly below mid
   paper_slippage_pct: 0.0005
-  # ── Live Holdings Sync ──
-  # Master toggle for live holdings sync (false = legacy behavior, positions start empty)
   live_holdings_sync: true
-  # How often to refresh live Coinbase holdings (seconds).
-  # Lower = more accurate during rapid trading, higher = fewer API calls.
   holdings_refresh_seconds: 60
-  # Minimum native-currency value to include a holding in the LLM prompt.
-  # Filters out dust to keep prompts concise and within token budgets.
   holdings_dust_threshold: 0.01
-  # One-time flag: set to true when a major system change means old strategic
-  # plans are based on wrong assumptions and need to be superseded.
-  # Auto-resets to false after the first startup so learned context is preserved.
-  invalidate_strategic_context: true
-
-# ===========================================
-# 🔒 ABSOLUTE RULES — NEVER BROKEN
-# ===========================================
-# These are hard limits the agent will NEVER exceed,
-# regardless of any LLM reasoning or market conditions.
+  invalidate_strategic_context: false
 absolute_rules:
-  # Maximum amount (in quote currency) to spend on a single trade
-  max_single_trade: 0  # SETUP MODE: locked — no trades
-  # Maximum total daily spending
-  max_daily_spend: 0   # SETUP MODE: locked — no trades
-  # Maximum daily loss before all trading stops
-  max_daily_loss: 0    # SETUP MODE: locked — no trades
-  # Maximum portfolio percentage at risk at any time
-  max_portfolio_risk_pct: 0.00  # SETUP MODE: locked
-  # Require Telegram approval for trades above this amount
-  require_approval_above: 0  # SETUP MODE: everything requires approval
-  # Never trade these pairs (blacklist)
+  max_single_trade: 150
+  max_daily_spend: 500
+  max_daily_loss: 250
+  max_portfolio_risk_pct: 0.1
+  require_approval_above: 75
   never_trade_pairs: []
-  # Only trade these pairs if set (whitelist, empty = allow all)
   only_trade_pairs: []
-  # Minimum time between trades in seconds (prevent rapid fire)
   min_trade_interval_seconds: 60
-  # Maximum number of trades per day
-  max_trades_per_day: 0  # SETUP MODE: locked
-  # Never use more than this % of available cash in a single trade
-  max_cash_per_trade_pct: 0.00  # SETUP MODE: locked
-  # Emergency stop: if portfolio drops below this value, stop everything
-  emergency_stop_portfolio: 8000  # Stop all trading if portfolio drops below this (protects ~80% of capital)
-  # Always use stop-loss (true = never open a position without stop-loss)
+  max_trades_per_day: 20
+  max_cash_per_trade_pct: 0.1
+  emergency_stop_portfolio: 8000
   always_use_stop_loss: true
-  # Maximum stop-loss distance percentage
   max_stop_loss_pct: 0.05
-
 risk:
   max_position_pct: 0.05
-  max_total_exposure_pct: 0.20
-  max_drawdown_pct: 0.10
+  max_total_exposure_pct: 0.2
+  max_drawdown_pct: 0.1
   stop_loss_pct: 0.03
   take_profit_pct: 0.06
   trailing_stop_pct: 0.03
   max_trades_per_hour: 10
   loss_cooldown_seconds: 300
-
 llm:
-  # Using Ollama locally
   model: llama3.1:8b
   temperature: 0.2
   max_tokens: 2000
   max_retries: 3
   timeout: 60
-  # System prompt personality for the trading agent
-  persona: |
-    You are a cautious, analytical cryptocurrency trading assistant.
+  persona: 'You are a cautious, analytical cryptocurrency trading assistant.
+
     You prioritize capital preservation over aggressive gains.
+
     You always consider risk-reward ratios before suggesting trades.
-    You never recommend trading with more than the user's specified limits.
+
+    You never recommend trading with more than the user''s specified limits.
+
     When uncertain, you recommend holding or waiting for better setups.
 
+    '
 analysis:
   technical:
     rsi_period: 14
@@ -107,156 +64,80 @@ analysis:
     macd_signal: 9
     bb_period: 20
     bb_std: 2
-    ema_periods: [9, 21, 50, 200]
+    ema_periods:
+    - 9
+    - 21
+    - 50
+    - 200
     candle_count: 200
     candle_granularity: ONE_HOUR
-
   sentiment:
     enabled: true
     sample_size: 20
-
 news:
-  # How often to fetch news (seconds)
   fetch_interval: 300
-  # Reddit subreddits to monitor
   reddit_subreddits:
-    - cryptocurrency
-    - bitcoin
-    - ethereum
-    - CryptoMarkets
-    - CryptoMoonShots
-  # RSS feeds for crypto news
+  - cryptocurrency
+  - bitcoin
+  - ethereum
+  - CryptoMarkets
+  - CryptoMoonShots
   rss_feeds:
-    - https://cointelegraph.com/rss
-    - https://cryptonews.com/news/feed/
-    - https://decrypt.co/feed
-    - https://www.coindesk.com/arc/outboundfeeds/rss/
-  # Number of articles to keep in memory
+  - https://cointelegraph.com/rss
+  - https://cryptonews.com/news/feed/
+  - https://decrypt.co/feed
+  - https://www.coindesk.com/arc/outboundfeeds/rss/
   max_articles: 100
-  # How many latest articles to send to LLM for analysis
   articles_for_analysis: 15
-
 telegram:
-  # How often to send status updates (seconds, 0 = disabled)
   status_update_interval: 3600
-  # Send notification on every trade
   notify_on_trade: true
-  # Send notification on signals above this confidence
   notify_on_signal_confidence: 0.8
-  # Send daily summary
   daily_summary: true
   daily_summary_hour: 8
-
 logging:
   level: INFO
   file_enabled: true
   directory: logs
   max_file_size: 50
   backup_count: 5
-
-# ===========================================
-# Health Check & Metrics
-# ===========================================
 health:
   port: 8080
-
-# ===========================================
-# LLM Traceability Dashboard
-# ===========================================
 dashboard:
   enabled: true
   port: 8090
-  # Langfuse self-hosted settings
   langfuse_host: http://localhost:3000
-  # Keys are set via LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY env vars
-  # Set to false to keep all traces local (Redis + SQLite only)
   langfuse_enabled: true
-
-# ===========================================
-# Fear & Greed Index
-# ===========================================
 fear_greed:
   enabled: true
-  # Cache duration in seconds
   cache_ttl: 600
-
-# ===========================================
-# Multi-Timeframe Analysis
-# ===========================================
 multi_timeframe:
   enabled: true
-  # Only trade when this many timeframes agree
   min_alignment: 3
-
-# ===========================================
-# Journal & Audit
-# ===========================================
 journal:
   enabled: true
   data_dir: data
-
 audit:
   enabled: true
   data_dir: data
-
-# ===========================================
-# 🔄 Portfolio Rotation (Crypto-to-Crypto Swaps)
-# ===========================================
-# Autonomously swaps between cryptos based on
-# relative strength analysis. Fee-aware — only swaps
-# when expected gain exceeds trading fees.
 rotation:
   enabled: true
-  # % of portfolio available for autonomous swaps (no approval needed)
-  autonomous_allocation_pct: 0.10
-  # Minimum score difference between assets to trigger a swap
-  # Higher = fewer swaps = less fees = more conservative
-  min_score_delta: 0.30
-  # Minimum confidence for autonomous swap execution
+  autonomous_allocation_pct: 0.1
+  min_score_delta: 0.3
   min_confidence: 0.65
-  # Above this confidence, escalate to owner as "high impact"
-  high_impact_confidence: 0.80
-  # Above this amount, always ask owner for approval
+  high_impact_confidence: 0.8
   approval_threshold: 200
-  # Cooldown between swaps for the same pair (seconds)
-  # Prevents churn that eats fees
   swap_cooldown_seconds: 3600
-
-# ===========================================
-# 💰 Fee Management
-# ===========================================
-# Coinbase Advanced Trade fee tiers.
-# A swap = 2 trades = 2x fees.
-# Agent will NOT trade if expected gain < fees × safety_margin.
 fees:
-  # Taker fee % (market orders). Coinbase default for <$1K volume
   trade_fee_pct: 0.006
-  # Maker fee % (limit orders — not currently used)
   maker_fee_pct: 0.004
-  # Require expected gains to be this multiple of total fees
-  # 1.5 = need 1.5x fees in expected gain to justify trade
   safety_margin: 1.5
-  # Minimum gain % after fees for a trade to be worthwhile
   min_gain_after_fees_pct: 0.005
-  # Below this amount, don't bother trading (fees eat everything)
   min_trade_quote: 50
-  # Cooldown after a swap before the same pair can swap again
   swap_cooldown_seconds: 3600
-
-# ===========================================
-# ⚡ High-Stakes Mode
-# ===========================================
-# Time-limited mode activated via Telegram (/highstakes 4h)
-# Elevates trading limits for a defined duration.
-# STILL respects absolute rules — safety net never disabled.
 high_stakes:
-  # Multiplier for max_single_trade during high-stakes
   trade_size_multiplier: 2.5
-  # Multiplier for swap allocation during high-stakes
   swap_allocation_multiplier: 2.0
-  # Reduced confidence threshold during high-stakes
-  min_confidence: 0.50
-  # Lower minimum swap gain threshold during high-stakes
+  min_confidence: 0.5
   min_swap_gain_pct: 0.01
-  # Auto-approve trades up to this amount during high-stakes
   auto_approve_up_to: 500
