@@ -502,7 +502,137 @@ class CoinbaseClient:
             logger.warning(f"⚠️ discover_all_pairs failed: {e}")
             return []
 
-    def _currency_to_usd(self, currency: str, amount: float) -> float:
+    # ─── Universe Discovery (detailed metadata) ───────────────────────────
+
+    # Cached product list for find_direct_pair and universe discovery
+    _product_cache: list[dict] = []
+    _product_cache_ts: float = 0.0
+    _PRODUCT_CACHE_TTL: float = 600.0  # 10 min
+
+    def _refresh_product_cache(self) -> list[dict]:
+        """Refresh the full product list from Coinbase (cached 10 min)."""
+        import time as _time
+        now = _time.time()
+        if self._product_cache and (now - self._product_cache_ts) < self._PRODUCT_CACHE_TTL:
+            return self._product_cache
+        if not self._rest_client:
+            return self._product_cache or []
+        try:
+            resp = self._rest_client.get_products()
+            pdata = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+            self._product_cache = pdata.get("products", [])
+            self._product_cache_ts = now
+        except Exception as e:
+            logger.warning(f"⚠️ Product cache refresh failed: {e}")
+        return self._product_cache
+
+    def discover_all_pairs_detailed(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: set[str] | None = None,
+        only_trade: set[str] | None = None,
+        include_crypto_quotes: bool = False,
+    ) -> list[dict]:
+        """
+        Discover ALL tradable pairs on Coinbase with detailed metadata.
+
+        Returns list[dict] with: product_id, base_currency_id, quote_currency_id,
+        price, volume_24h, price_percentage_change_24h.
+        When include_crypto_quotes=True, also returns crypto-to-crypto pairs (e.g. ETH-BTC).
+        """
+        all_products = self._refresh_product_cache()
+        if not all_products:
+            return []
+
+        if quote_currencies is None:
+            quote_currencies = ["EUR"]
+        quote_set = {q.upper() for q in quote_currencies}
+        never_trade = never_trade or set()
+        only_trade = only_trade or set()
+
+        discovered: list[dict] = []
+        for prod in all_products:
+            product_id = prod.get("product_id", "")
+            base = prod.get("base_currency_id", "")
+            quote = prod.get("quote_currency_id", "")
+
+            # Must be online and tradable
+            if prod.get("trading_disabled", True):
+                continue
+            if prod.get("is_disabled", False):
+                continue
+            if str(prod.get("status", "")).lower() != "online":
+                continue
+
+            # Quote currency filter
+            is_target_quote = quote in quote_set
+            is_crypto_quote = include_crypto_quotes and quote not in _KNOWN_QUOTES
+            if not is_target_quote and not is_crypto_quote:
+                continue
+
+            # Apply AbsoluteRules filters
+            if product_id in never_trade or base in never_trade:
+                continue
+            if only_trade and product_id not in only_trade and base not in only_trade:
+                continue
+
+            # Extract price/volume metadata
+            try:
+                price = float(prod.get("price", 0))
+            except (ValueError, TypeError):
+                price = 0.0
+            try:
+                volume_24h = float(prod.get("volume_24h", 0))
+            except (ValueError, TypeError):
+                volume_24h = 0.0
+            try:
+                pct_change = float(prod.get("price_percentage_change_24h", 0))
+            except (ValueError, TypeError):
+                pct_change = 0.0
+
+            discovered.append({
+                "product_id": product_id,
+                "base_currency_id": base,
+                "quote_currency_id": quote,
+                "price": price,
+                "volume_24h": volume_24h,
+                "price_percentage_change_24h": pct_change,
+            })
+
+        crypto_count = sum(1 for d in discovered if d["quote_currency_id"] not in _KNOWN_QUOTES)
+        logger.info(
+            f"🔍 Universe discovery: {len(discovered)} pairs "
+            f"({crypto_count} crypto-to-crypto)"
+        )
+        return discovered
+
+    def find_direct_pair(self, base: str, quote: str) -> tuple[str, str] | None:
+        """
+        Check if a direct trading pair exists between two assets.
+
+        Returns (product_id, "buy"/"sell") or None.
+        Example: find_direct_pair("ETH", "BTC") → ("ETH-BTC", "sell") if selling ETH for BTC
+                 or ("BTC-ETH", "buy") if buying ETH with BTC
+        """
+        all_products = self._refresh_product_cache()
+        product_map = {
+            p.get("product_id", ""): p for p in all_products
+            if not p.get("trading_disabled", True)
+            and not p.get("is_disabled", False)
+            and str(p.get("status", "")).lower() == "online"
+        }
+
+        # Check base-quote directly (e.g. ETH-BTC)
+        direct = f"{base}-{quote}"
+        if direct in product_map:
+            return (direct, "sell")  # sell base for quote
+
+        # Check reverse (e.g. BTC-ETH → buy base using quote)
+        reverse = f"{quote}-{base}"
+        if reverse in product_map:
+            return (reverse, "buy")  # buy base from quote side
+
+        return None
         """
         Convert a currency amount to its approximate USD value.
         Order of preference:

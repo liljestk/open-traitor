@@ -45,23 +45,31 @@ CRITICAL CONSTRAINTS:
 - Do NOT chase losses by dramatically loosening risk parameters.
 
 PAIR MANAGEMENT:
-You CAN manage which trading pairs are actively traded. The system uses full pair
-discovery from Coinbase — all tradable pairs for the configured quote currencies
-(e.g. EUR, EURC) are available.
-- "trading.pairs" — The active list of pairs being traded. You can add or remove
-  pairs based on market conditions and analysis. Format: ["BTC-EUR", "ETH-EUR", ...].
-  Both EUR and EURC pairs are valid (e.g. "BTC-EURC"). Add promising pairs, remove
-  underperforming ones.
-- "trading.quote_currencies" — Quote currencies to discover pairs for (e.g. ["EUR", "EURC"]).
-  EURC is the EUR stablecoin on Coinbase. Include it to trade EURC-denominated pairs.
-- "trading.pair_discovery" — Set to "all" to discover every tradable pair on Coinbase
-  for the configured quote currencies, or "configured" to only use the explicit pairs list.
+The system autonomously discovers and screens ALL tradeable pairs on Coinbase
+using a multi-stage funnel:
+  Stage 1 — Universe Discovery: fetches every product (refreshed every 30min).
+  Stage 2 — Technical Screen: pure-math scoring (RSI, ADX, MACD, EMA, BB, volume).
+  Stage 3 — LLM Screener: single LLM call picks top-N pairs from scan results.
+  Stage 4 — Active Pipeline: only the selected pairs run full 4-agent analysis.
+
+YOUR ROLE with pairs:
+- The seed pair list ("trading.pairs") is a fallback ONLY if the screener hasn't run yet.
+- You may still add/remove seed pairs, but the screener will override them once active.
+- "trading.max_active_pairs" — how many pairs the screener picks (3-30). Increase
+  if you see many strong opportunities; decrease to concentrate capital.
+- "trading.scan_volume_threshold" — minimum 24h volume for a pair to enter the technical screen.
+- "trading.scan_movement_threshold_pct" — minimum absolute 24h % move to enter the screen.
+- "trading.screener_interval_cycles" — how often the LLM screener re-picks (2-50 cycles).
+- "trading.include_crypto_quotes" — whether to include crypto-to-crypto pairs (e.g. ETH-BTC).
 - "absolute_rules.never_trade_pairs" — Blacklist specific pairs permanently.
 - "absolute_rules.only_trade_pairs" — If non-empty, ONLY these pairs can be traded.
-  Use with care — this overrides pair discovery.
-When adjusting pairs, consider: liquidity, volatility, recent trends, and portfolio
-diversification. Prefer pairs with good volume. Remove pairs that have been
-consistently underperforming or have low liquidity.
+
+SCAN DATA (latest universe scan results):
+{scan_summary}
+
+When adjusting pair-related settings, consider the scan data above. If many strong
+candidates appear, you might increase max_active_pairs. If scan quality is low,
+tighten volume/movement thresholds instead of adding pairs manually.
 
 AVAILABLE PARAMETERS (with allowed ranges):
 {schema_summary}
@@ -227,10 +235,13 @@ class SettingsAdvisorAgent(BaseAgent):
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
 
+        scan_summary = context.get("scan_results_summary", "No scan data available yet.")
+
         system_prompt = SETTINGS_ADVISOR_SYSTEM_PROMPT.format(
             schema_summary=self._get_schema_summary(),
             current_settings=self._get_current_settings_summary(),
             max_changes=MAX_CHANGES_PER_REVIEW,
+            scan_summary=scan_summary,
         )
 
         user_message = (
@@ -239,7 +250,9 @@ class SettingsAdvisorAgent(BaseAgent):
             f"- Recent Performance (24h): {recent_perf}\n"
             f"- Market Volatility: {market_vol}\n"
             f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n"
+            f"- Universe Size: {context.get('universe_size', 'unknown')}\n"
             f"{self._compute_confidence_recommendation(stats_db)}\n\n"
+            f"LATEST SCAN RESULTS:\n{scan_summary}\n\n"
             f"Based on these conditions, should we adjust any trading parameters?\n"
             f"If everything is working well, return an empty changes array.\n"
             f"Respond with JSON only."

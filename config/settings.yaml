@@ -18,6 +18,12 @@ trading:
   holdings_refresh_seconds: 60
   holdings_dust_threshold: 0.01
   invalidate_strategic_context: false
+  include_crypto_quotes: true
+  pair_universe_refresh_seconds: 1800
+  max_active_pairs: 5
+  scan_volume_threshold: 1000
+  scan_movement_threshold_pct: 1.0
+  screener_interval_cycles: 5
 absolute_rules:
   max_single_trade: 500
   max_daily_spend: 2000

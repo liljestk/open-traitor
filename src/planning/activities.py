@@ -573,3 +573,62 @@ async def write_daily_plan(date: str, plan_text: str) -> None:
     db = StatsDB()
     db.write_daily_plan(date=date, plan_text=plan_text)
     logger.info(f"Wrote daily plan for {date}: {plan_text[:80]}")
+
+
+@activity.defn
+async def fetch_pair_universe() -> dict:
+    """Fetch the current pair universe size and product summary.
+
+    Returns a dict with universe_size and a sample of products.
+    This queries the Coinbase product catalog directly.
+    """
+    try:
+        from src.core.coinbase_client import CoinbaseClient
+        coinbase = CoinbaseClient()
+        products = coinbase.discover_all_pairs_detailed(
+            include_crypto_quotes=True,
+        )
+        # Summarise — don't send full list to LLM
+        by_quote: dict[str, int] = {}
+        for p in products:
+            q = p.get("quote_currency", "?")
+            by_quote[q] = by_quote.get(q, 0) + 1
+        top_by_volume = sorted(
+            products, key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True
+        )[:20]
+        return {
+            "universe_size": len(products),
+            "by_quote_currency": by_quote,
+            "top_20_by_volume": [
+                {
+                    "product_id": p["product_id"],
+                    "volume_24h": float(p.get("volume_24h", 0) or 0),
+                    "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
+                }
+                for p in top_by_volume
+            ],
+        }
+    except Exception as e:
+        logger.warning(f"fetch_pair_universe activity failed: {e}")
+        return {"universe_size": 0, "error": str(e)}
+
+
+@activity.defn
+async def fetch_universe_scan_summary() -> dict:
+    """Fetch the latest universe scan results from StatsDB."""
+    try:
+        from src.utils.stats import StatsDB
+        db = StatsDB()
+        scan = db.get_latest_scan_results()
+        if scan:
+            return {
+                "universe_size": scan.get("universe_size", 0),
+                "scanned_pairs": scan.get("scanned_pairs", 0),
+                "top_movers": scan.get("top_movers", ""),
+                "summary_text": scan.get("summary_text", ""),
+                "ts": scan.get("ts", ""),
+            }
+        return {"summary_text": "No scan results available yet."}
+    except Exception as e:
+        logger.warning(f"fetch_universe_scan_summary activity failed: {e}")
+        return {"summary_text": f"Error: {e}"}

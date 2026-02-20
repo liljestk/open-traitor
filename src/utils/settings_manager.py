@@ -64,6 +64,13 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "holdings_refresh_seconds":     {"type": int,   "min": 5, "max": 3600},
     "holdings_dust_threshold":      {"type": float, "min": 0.0, "max": 100.0},
     "invalidate_strategic_context": {"type": bool},
+    "watchlist":                     {"type": list},
+    "pair_universe_refresh_seconds": {"type": int,   "min": 300, "max": 86400},
+    "max_active_pairs":              {"type": int,   "min": 1, "max": 50},
+    "include_crypto_quotes":         {"type": bool},
+    "scan_volume_threshold":         {"type": float, "min": 0, "max": 1_000_000_000},
+    "scan_movement_threshold_pct":   {"type": float, "min": 0.0, "max": 100.0},
+    "screener_interval_cycles":      {"type": int,   "min": 1, "max": 100},
 }
 
 _RISK_SCHEMA: dict[str, dict[str, Any]] = {
@@ -316,13 +323,18 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_stop_loss_pct":          {},              # free to adjust
     },
     "trading": {
-        "min_confidence":       {"min": 0.3, "max": 0.95},  # can't set >0.95 (effective disable)
-        "max_open_positions":   {"min": 1},                  # can't zero out
-        "paper_slippage_pct":   {},
-        "interval":             {"min": 30, "max": 3600},
-        "pairs":                {},                            # LLM can add/remove pairs
-        "pair_discovery":       {},                            # LLM can switch discovery mode
-        "quote_currencies":     {},                            # LLM can adjust quote currencies
+        "min_confidence":              {"min": 0.3, "max": 0.95},  # can't set >0.95 (effective disable)
+        "max_open_positions":          {"min": 1},                  # can't zero out
+        "paper_slippage_pct":          {},
+        "interval":                    {"min": 30, "max": 3600},
+        "pairs":                       {},                            # LLM can add/remove pairs
+        "pair_discovery":              {},                            # LLM can switch discovery mode
+        "quote_currencies":            {},                            # LLM can adjust quote currencies
+        "max_active_pairs":            {"min": 3, "max": 30},
+        "include_crypto_quotes":       {},
+        "scan_volume_threshold":       {},
+        "scan_movement_threshold_pct": {},
+        "screener_interval_cycles":    {"min": 2, "max": 50},
     },
     "risk": {
         "stop_loss_pct":           {"min": 0.005, "max": 0.20},
@@ -366,6 +378,7 @@ AUTONOMOUS_BLOCKED_FIELDS = frozenset({
     ("trading", "holdings_dust_threshold"),
     ("trading", "reconcile_every_cycles"),
     ("trading", "invalidate_strategic_context"),
+    ("trading", "pair_universe_refresh_seconds"),
     ("fees", "trade_fee_pct"),
     ("fees", "maker_fee_pct"),
     ("fees", "swap_cooldown_seconds"),

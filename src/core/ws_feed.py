@@ -291,3 +291,71 @@ class CoinbaseWebSocketFeed:
             "products": self.product_ids,
             "current_prices": self.get_all_prices(),
         }
+
+    def update_subscriptions(self, new_product_ids: list[str]) -> None:
+        """Dynamically update WebSocket subscriptions when active pairs change.
+
+        Sends unsubscribe for removed products and subscribe for new ones.
+        Thread-safe — can be called from any thread.
+        """
+        old_set = set(self.product_ids)
+        new_set = set(new_product_ids)
+
+        to_remove = old_set - new_set
+        to_add = new_set - old_set
+
+        if not to_remove and not to_add:
+            return
+
+        self.product_ids = list(new_set)
+
+        ws = self._ws
+        if not ws or not self._running:
+            logger.debug("WS not connected — subscriptions updated for next reconnect")
+            return
+
+        try:
+            if to_remove:
+                timestamp = str(int(time.time()))
+                unsub = {
+                    "type": "unsubscribe",
+                    "product_ids": list(to_remove),
+                    "channel": "ticker",
+                }
+                if self.api_key:
+                    products_str = ",".join(sorted(to_remove))
+                    message = f"{timestamp}ticker{products_str}"
+                    signature = hmac.new(
+                        self.api_secret.encode("utf-8"),
+                        message.encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
+                    unsub["api_key"] = self.api_key
+                    unsub["timestamp"] = timestamp
+                    unsub["signature"] = signature
+                ws.send(json.dumps(unsub))
+                logger.info(f"📡 WS unsubscribed from {sorted(to_remove)}")
+
+            if to_add:
+                timestamp = str(int(time.time()))
+                sub = {
+                    "type": "subscribe",
+                    "product_ids": list(to_add),
+                    "channel": "ticker",
+                }
+                if self.api_key:
+                    products_str = ",".join(sorted(to_add))
+                    message = f"{timestamp}ticker{products_str}"
+                    signature = hmac.new(
+                        self.api_secret.encode("utf-8"),
+                        message.encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
+                    sub["api_key"] = self.api_key
+                    sub["timestamp"] = timestamp
+                    sub["signature"] = signature
+                ws.send(json.dumps(sub))
+                logger.info(f"📡 WS subscribed to {sorted(to_add)}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ WS subscription update failed: {e}")

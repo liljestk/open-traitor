@@ -33,6 +33,7 @@ from src.core.portfolio_rotator import PortfolioRotator
 from src.analysis.fear_greed import FearGreedIndex
 from src.analysis.multi_timeframe import MultiTimeframeAnalyzer
 from src.analysis.sentiment import SentimentAnalyzer
+from src.analysis.technical import TechnicalAnalyzer
 from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy, PairsCorrelationMonitor
 from src.utils.tax import FIFOTracker
 from src.news.aggregator import NewsAggregator
@@ -273,6 +274,31 @@ class Orchestrator:
         self._STRATEGIC_CONTEXT_TTL: float = 60.0
         self._pair_priority_map: dict[str, float] = {}  # pair → confidence adjustment
 
+        # ─── Universe Tracking (funnel system) ────────────────────────────
+        self._pair_universe: list[dict] = []           # full product metadata
+        self._pair_universe_ts: float = 0.0
+        self._PAIR_UNIVERSE_TTL: float = float(
+            trading_cfg.get("pair_universe_refresh_seconds", 1800)
+        )
+        self._scan_results: dict[str, dict] = {}       # pair → {technicals, strategies, score}
+        self._screener_active_pairs: list[str] = []    # pairs selected by LLM screener
+        self._screener_cycle_counter: int = 0
+        self._SCREENER_INTERVAL: int = int(
+            trading_cfg.get("screener_interval_cycles", 5)
+        )
+        self._max_active_pairs: int = int(
+            trading_cfg.get("max_active_pairs", 5)
+        )
+        self._scan_volume_threshold: float = float(
+            trading_cfg.get("scan_volume_threshold", 1000)
+        )
+        self._scan_movement_threshold_pct: float = float(
+            trading_cfg.get("scan_movement_threshold_pct", 1.0)
+        )
+        self._include_crypto_quotes: bool = bool(
+            trading_cfg.get("include_crypto_quotes", True)
+        )
+
         # ─── Asyncio helper ───────────────────────────────────────────────
 
         # ─── Position reconciliation (live mode only) ───
@@ -336,6 +362,7 @@ class Orchestrator:
         logger.info(f"  Strategy Modules: ✅ EMA + Bollinger + Pairs")
         logger.info(f"  Kelly Criterion: ✅ Enabled")
         logger.info(f"  FIFO Tax Tracking: ✅ Enabled")
+        logger.info(f"  Universe Scanner: ✅ Enabled (screener every {self._SCREENER_INTERVAL} cycles)")
         logger.info(f"  Mode: {'📝 PAPER' if coinbase.paper_mode else '💰 LIVE'}")
         logger.info("═══════════════════════════════════════════")
 
@@ -397,8 +424,24 @@ class Orchestrator:
                 # Run pipelines — parallelised across pairs using asyncio
                 # Sort pairs: planning-preferred first, then normal, avoid last
                 priority_map = getattr(self, "_pair_priority_map", {})
+
+                # ─── Universe Scan + LLM Screener (funnel system) ─────
+                try:
+                    self._refresh_pair_universe()
+                    self._run_universe_scan()
+
+                    self._screener_cycle_counter += 1
+                    if self._screener_cycle_counter >= self._SCREENER_INTERVAL:
+                        self._screener_cycle_counter = 0
+                        self._run_llm_screener()
+                except Exception as _uf_err:
+                    logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
+
+                # Effective pairs: screener-selected (if any) or configured seed list
+                effective_pairs = self._screener_active_pairs or self.pairs[:self._max_active_pairs]
+
                 sorted_pairs = sorted(
-                    self.pairs,
+                    effective_pairs,
                     key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
                 )
 
@@ -561,6 +604,8 @@ class Orchestrator:
                             "cycle_id": str(cycle_count),
                             "stats_db": self.stats_db if hasattr(self, "stats_db") else None,
                             "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
+                            "scan_results_summary": self._get_scan_summary(),
+                            "universe_size": len(self._pair_universe),
                         }
                         advisor_result = asyncio.run(
                             self.settings_advisor.execute(advisor_ctx)
@@ -2025,6 +2070,300 @@ class Orchestrator:
         return f"📝 Noted: {text}\nI'll factor this into my decisions."
 
     # =========================================================================
+    # Universe Scanning & LLM Screener (Funnel System)
+    # =========================================================================
+
+    def _refresh_pair_universe(self) -> None:
+        """Stage 1: Refresh full product universe from Coinbase (cached)."""
+        now = time.time()
+        if self._pair_universe and (now - self._pair_universe_ts) < self._PAIR_UNIVERSE_TTL:
+            return  # cache still fresh
+
+        try:
+            never_trade = self.config.get("trading", {}).get("never_trade", [])
+            only_trade = self.config.get("trading", {}).get("only_trade", [])
+            products = self.coinbase.discover_all_pairs_detailed(
+                quote_currencies=None,  # use default
+                never_trade=never_trade,
+                only_trade=only_trade if only_trade else None,
+                include_crypto_quotes=self._include_crypto_quotes,
+            )
+            old_ids = {p["product_id"] for p in self._pair_universe}
+            new_ids = {p["product_id"] for p in products}
+            added = new_ids - old_ids
+            if added and self._pair_universe:  # skip first load
+                logger.info(f"🌍 Universe refresh: {len(added)} new listings: {sorted(added)[:10]}")
+            self._pair_universe = products
+            self._pair_universe_ts = now
+            logger.debug(f"Universe: {len(products)} tradeable products")
+        except Exception as e:
+            logger.warning(f"Universe refresh failed: {e}")
+
+    def _run_universe_scan(self) -> None:
+        """Stage 2: Technical screen — pure math, zero LLM calls.
+
+        Filters universe by volume/movement thresholds, fetches candles,
+        runs TechnicalAnalyzer + strategies, computes composite score.
+        """
+        if not self._pair_universe:
+            return
+
+        # Pre-filter by 24h volume and price movement
+        candidates = []
+        for p in self._pair_universe:
+            vol = float(p.get("volume_24h", 0) or 0)
+            pct = abs(float(p.get("price_percentage_change_24h", 0) or 0))
+            if vol >= self._scan_volume_threshold and pct >= self._scan_movement_threshold_pct:
+                candidates.append(p)
+
+        if not candidates:
+            logger.debug("Universe scan: no candidates passed volume/movement filter")
+            return
+
+        # Sort by volume descending, cap at 50 to limit API calls
+        candidates.sort(key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True)
+        candidates = candidates[:50]
+
+        analyzer = TechnicalAnalyzer(
+            self.config.get("analysis", {}).get("technical", {})
+        )
+        ema_strategy = EMACrossoverStrategy(self.config)
+        bb_strategy = BollingerReversionStrategy(self.config)
+
+        scan_results: dict[str, dict] = {}
+        rate_limiter = get_rate_limiter()
+
+        for product in candidates:
+            pair = product["product_id"]
+            try:
+                rate_limiter.wait("coinbase_rest")
+                candles = self.coinbase.get_candles(pair, granularity="ONE_HOUR", limit=200)
+                if not candles or len(candles) < 30:
+                    continue
+
+                analysis = analyzer.analyze(candles)
+                if "error" in analysis:
+                    continue
+
+                # Run strategy signals (pure math)
+                ema_sig = ema_strategy.generate_signal(pair, candles, analysis)
+                bb_sig = bb_strategy.generate_signal(pair, candles, analysis)
+
+                # Composite score: combine indicators
+                indicators = analysis.get("indicators", {})
+                rsi = indicators.get("rsi")
+                adx = indicators.get("adx")
+                volume_ratio = indicators.get("volume_ratio", 1.0)
+                macd_hist = indicators.get("macd_histogram")
+
+                score = 0.0
+                # RSI momentum (not overbought, not oversold — sweet spot 30-65 for buys)
+                if rsi is not None:
+                    if 30 <= rsi <= 45:
+                        score += 0.25  # oversold bounce potential
+                    elif 45 < rsi <= 65:
+                        score += 0.15  # healthy momentum
+                    elif rsi > 80:
+                        score -= 0.2  # overbought
+
+                # ADX trend strength
+                if adx is not None and adx > 25:
+                    score += 0.2
+
+                # Volume confirmation
+                if volume_ratio > 1.5:
+                    score += 0.15
+                elif volume_ratio > 1.2:
+                    score += 0.1
+
+                # MACD histogram positive
+                if macd_hist is not None and macd_hist > 0:
+                    score += 0.1
+
+                # Strategy confidence boost
+                for sig in [ema_sig, bb_sig]:
+                    if sig.action == "buy" and sig.confidence > 0.5:
+                        score += 0.2 * sig.confidence
+
+                # Movement bonus (higher absolute % change = more opportunity)
+                pct_change = abs(float(product.get("price_percentage_change_24h", 0) or 0))
+                score += min(pct_change / 20.0, 0.15)  # cap at 15%
+
+                scan_results[pair] = {
+                    "product": product,
+                    "current_price": analysis.get("current_price"),
+                    "rsi": rsi,
+                    "adx": adx,
+                    "volume_ratio": volume_ratio,
+                    "macd_histogram": macd_hist,
+                    "ema_signal": ema_sig.action,
+                    "ema_confidence": ema_sig.confidence,
+                    "bb_signal": bb_sig.action,
+                    "bb_confidence": bb_sig.confidence,
+                    "composite_score": round(score, 3),
+                    "price_change_24h_pct": float(product.get("price_percentage_change_24h", 0) or 0),
+                    "volume_24h": float(product.get("volume_24h", 0) or 0),
+                }
+            except Exception as e:
+                logger.debug(f"Scan skip {pair}: {e}")
+                continue
+
+        self._scan_results = scan_results
+
+        # Persist to StatsDB
+        if scan_results:
+            top_movers = sorted(
+                scan_results.items(),
+                key=lambda kv: kv[1]["composite_score"],
+                reverse=True,
+            )[:10]
+            top_movers_str = ", ".join(
+                f"{p}={d['composite_score']}" for p, d in top_movers
+            )
+            try:
+                self.stats_db.save_scan_results(
+                    universe_size=len(self._pair_universe),
+                    scanned_pairs=len(scan_results),
+                    results_json=scan_results,
+                    top_movers=top_movers_str,
+                    summary_text=self._get_scan_summary(),
+                )
+            except Exception as e:
+                logger.debug(f"Failed to persist scan results: {e}")
+
+            logger.info(
+                f"📊 Universe scan: {len(candidates)} candidates → "
+                f"{len(scan_results)} scored | top: {top_movers_str[:120]}"
+            )
+
+    def _run_llm_screener(self) -> None:
+        """Stage 3: Single LLM call to pick top-N active pairs from scan results.
+
+        Uses ONE compact prompt with a summary table — not per-pair analysis.
+        """
+        if not self._scan_results:
+            return
+
+        # Build top candidates sorted by composite score
+        ranked = sorted(
+            self._scan_results.items(),
+            key=lambda kv: kv[1]["composite_score"],
+            reverse=True,
+        )[:20]  # top 20 for LLM consideration
+
+        if not ranked:
+            return
+
+        # Build compact table for LLM
+        table_lines = ["Pair | Price | RSI | ADX | Vol24h | MACDh | EMA | BB | Score | Chg24h%"]
+        table_lines.append("-" * 90)
+        for pair, d in ranked:
+            table_lines.append(
+                f"{pair} | {d.get('current_price', '?'):.6g} | "
+                f"{d.get('rsi', '?'):.1f} | "
+                f"{d.get('adx', '?'):.1f} | "
+                f"{d.get('volume_24h', 0):.0f} | "
+                f"{d.get('macd_histogram', '?'):.4f} | "
+                f"{d.get('ema_signal', '?')}({d.get('ema_confidence', 0):.2f}) | "
+                f"{d.get('bb_signal', '?')}({d.get('bb_confidence', 0):.2f}) | "
+                f"{d.get('composite_score', 0):.3f} | "
+                f"{d.get('price_change_24h_pct', 0):+.2f}%"
+            )
+
+        table_str = "\n".join(table_lines)
+
+        # Currently held positions (must keep awareness)
+        held_pairs = list(self.state.open_positions.keys())
+        held_note = f"Currently holding positions in: {', '.join(held_pairs)}" if held_pairs else "No open positions."
+
+        prompt = (
+            f"You are a crypto pair screener. Pick the best {self._max_active_pairs} "
+            f"pairs to actively trade from the scan results below.\n\n"
+            f"SCAN RESULTS (sorted by composite score):\n{table_str}\n\n"
+            f"{held_note}\n\n"
+            f"RULES:\n"
+            f"- Pick {self._max_active_pairs} pairs total (can include held pairs if still strong)\n"
+            f"- Prioritize: high composite score, buy signals, strong momentum, adequate volume\n"
+            f"- Avoid: overbought (RSI>80), low volume, sell signals unless reversal expected\n"
+            f"- If a held pair is weakening, it's OK to drop it (rotation will handle exit)\n\n"
+            f"Reply with ONLY a JSON array of pair names, e.g. [\"BTC-USD\",\"ETH-USD\",\"SOL-USD\"]\n"
+            f"No explanation needed."
+        )
+
+        try:
+            response = self.llm.generate(
+                prompt=prompt,
+                system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
+                temperature=0.2,
+                max_tokens=200,
+            )
+
+            # Parse JSON array from response
+            text = response.strip()
+            # Extract JSON array from possible markdown wrapping
+            import re as _re
+            json_match = _re.search(r'\[.*?\]', text, _re.DOTALL)
+            if json_match:
+                selected = json.loads(json_match.group())
+                if isinstance(selected, list) and all(isinstance(s, str) for s in selected):
+                    # Validate pairs exist in scan results
+                    valid = [p for p in selected if p in self._scan_results]
+                    if valid:
+                        old_pairs = set(self._screener_active_pairs)
+                        self._screener_active_pairs = valid[:self._max_active_pairs]
+                        new_pairs = set(self._screener_active_pairs)
+
+                        if old_pairs != new_pairs:
+                            added = new_pairs - old_pairs
+                            removed = old_pairs - new_pairs
+                            changes = []
+                            if added:
+                                changes.append(f"+{','.join(added)}")
+                            if removed:
+                                changes.append(f"-{','.join(removed)}")
+                            logger.info(
+                                f"🎯 LLM Screener selected {len(valid)} pairs: "
+                                f"{valid} | changes: {' '.join(changes)}"
+                            )
+
+                            # Update WebSocket subscriptions
+                            try:
+                                if self.ws_feed:
+                                    self.ws_feed.update_subscriptions(valid)
+                            except Exception as ws_err:
+                                logger.debug(f"WS subscription update failed: {ws_err}")
+                        return
+
+            logger.warning(f"LLM screener returned unparseable response: {text[:200]}")
+        except Exception as e:
+            logger.warning(f"LLM screener failed (non-fatal): {e}")
+
+    def _get_scan_summary(self) -> str:
+        """Build human-readable summary of latest scan results for injection."""
+        if not self._scan_results:
+            return "No scan results available yet."
+
+        ranked = sorted(
+            self._scan_results.items(),
+            key=lambda kv: kv[1]["composite_score"],
+            reverse=True,
+        )
+
+        lines = [f"Universe: {len(self._pair_universe)} products | Scanned: {len(self._scan_results)}"]
+        if self._screener_active_pairs:
+            lines.append(f"Active (LLM-selected): {', '.join(self._screener_active_pairs)}")
+
+        lines.append("Top 10 by composite score:")
+        for pair, d in ranked[:10]:
+            lines.append(
+                f"  {pair}: score={d['composite_score']:.3f} "
+                f"RSI={d.get('rsi', '?'):.1f} ADX={d.get('adx', '?'):.1f} "
+                f"EMA={d.get('ema_signal', '?')} BB={d.get('bb_signal', '?')} "
+                f"vol24h={d.get('volume_24h', 0):.0f} chg={d.get('price_change_24h_pct', 0):+.2f}%"
+            )
+        return "\n".join(lines)
+
+    # =========================================================================
     # Portfolio Rotation
     # =========================================================================
 
@@ -2037,11 +2376,16 @@ class Orchestrator:
                 logger.debug("No open positions — skipping rotation check")
                 return
 
+            # Build broader candidate list from scan results (not just active pairs)
+            scan_pairs = list(self._scan_results.keys()) if self._scan_results else []
+            all_candidate_pairs = list(set(self.pairs + scan_pairs))
+
             proposals = self.rotator.evaluate_rotation(
                 held_pairs=held_pairs,
-                all_pairs=self.pairs,
+                all_pairs=all_candidate_pairs,
                 current_prices=self.state.current_prices,
                 portfolio_value=self.state.portfolio_value,
+                scan_results=self._scan_results,
             )
 
             if not proposals:

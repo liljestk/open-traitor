@@ -187,6 +187,18 @@ class StatsDB:
             CREATE INDEX IF NOT EXISTS idx_reasoning_cycle ON agent_reasoning(cycle_id);
             CREATE INDEX IF NOT EXISTS idx_reasoning_pair ON agent_reasoning(pair);
             CREATE INDEX IF NOT EXISTS idx_strategic_horizon ON strategic_context(horizon);
+
+            -- Universe scan results (persisted for planning + dashboard)
+            CREATE TABLE IF NOT EXISTS scan_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                universe_size INTEGER NOT NULL DEFAULT 0,
+                scanned_pairs INTEGER NOT NULL DEFAULT 0,
+                results_json TEXT NOT NULL DEFAULT '{}',
+                top_movers TEXT DEFAULT '[]',
+                summary_text TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_ts ON scan_results(ts);
         """)
         conn.commit()
         self._migrate_db(conn)
@@ -998,4 +1010,50 @@ class StatsDB:
             close_pnl_pct=round(pnl_pct, 4),
         )
         return row
+
+    # ─── Universe Scan Results ─────────────────────────────────────────────
+
+    def save_scan_results(
+        self,
+        universe_size: int,
+        scanned_pairs: int,
+        results_json: dict,
+        top_movers: list[dict] | None = None,
+        summary_text: str = "",
+    ) -> int:
+        """Persist a universe scan snapshot (technicals per pair)."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            """INSERT INTO scan_results
+               (universe_size, scanned_pairs, results_json, top_movers, summary_text)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                universe_size,
+                scanned_pairs,
+                json.dumps(results_json, default=str),
+                json.dumps(top_movers or [], default=str),
+                summary_text,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_latest_scan_results(self) -> Optional[dict]:
+        """Get the most recent universe scan results."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM scan_results ORDER BY ts DESC LIMIT 1",
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["results_json"] = json.loads(result.get("results_json", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            result["results_json"] = {}
+        try:
+            result["top_movers"] = json.loads(result.get("top_movers", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            result["top_movers"] = []
+        return result
 

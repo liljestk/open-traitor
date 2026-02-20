@@ -30,6 +30,8 @@ with workflow.unsafe.imports_passed_through():
         call_planning_llm,
         write_strategic_context,
         write_daily_plan,
+        fetch_pair_universe,
+        fetch_universe_scan_summary,
     )
 
 
@@ -72,6 +74,14 @@ class DailyPlanWorkflow:
 
         # Inject evaluation into portfolio data so the LLM can learn from it
         portfolio_data["previous_plan_evaluation"] = evaluation
+
+        # Inject universe scan summary for pair-awareness
+        scan_summary = await workflow.execute_activity(
+            fetch_universe_scan_summary,
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        portfolio_data["universe_scan"] = scan_summary
 
         # Call LLM for daily plan
         plan = await workflow.execute_activity(
@@ -154,6 +164,20 @@ class WeeklyReviewWorkflow:
             "recent_trades": trade_history[:50],
             "previous_plan_evaluation": evaluation,
         }
+
+        # Inject universe data for strategic pair recommendations
+        universe_data = await workflow.execute_activity(
+            fetch_pair_universe,
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        scan_summary = await workflow.execute_activity(
+            fetch_universe_scan_summary,
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        review_data["universe"] = universe_data
+        review_data["universe_scan"] = scan_summary
 
         plan = await workflow.execute_activity(
             call_planning_llm,

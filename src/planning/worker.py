@@ -38,6 +38,8 @@ from src.planning.activities import (
     call_planning_llm,
     write_strategic_context,
     write_daily_plan,
+    fetch_pair_universe,
+    fetch_universe_scan_summary,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
@@ -115,6 +117,8 @@ async def main() -> None:
             call_planning_llm,
             write_strategic_context,
             write_daily_plan,
+            fetch_pair_universe,
+            fetch_universe_scan_summary,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

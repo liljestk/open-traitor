@@ -159,6 +159,7 @@ class PortfolioRotator:
         all_pairs: list[str],
         current_prices: dict[str, float],
         portfolio_value: float,
+        scan_results: dict[str, dict] | None = None,
     ) -> list[SwapProposal]:
         """
         Evaluate whether any portfolio rotations are beneficial.
@@ -168,6 +169,7 @@ class PortfolioRotator:
             all_pairs: All tracked/tradeable pairs
             current_prices: Current prices for all pairs
             portfolio_value: Total portfolio value in USD
+            scan_results: Optional universe scan data (pair → score dict) for ranking boost
 
         Returns:
             List of SwapProposals (ranked by expected net gain)
@@ -179,6 +181,16 @@ class PortfolioRotator:
 
         # Step 1: Rank all assets
         rankings = self._rank_assets(all_pairs, current_prices)
+
+        # Boost rankings with universe scan data (if available)
+        if scan_results:
+            for ranking in rankings:
+                scan = scan_results.get(ranking.pair)
+                if scan:
+                    composite = scan.get("composite_score", 0)
+                    # Blend scan score into ranking (20% weight)
+                    ranking.score = ranking.score * 0.8 + composite * 0.2
+                    ranking.predicted_move_pct += composite * 1.5  # scan boost
         if len(rankings) < 2:
             logger.debug("Not enough assets ranked for rotation")
             return []
@@ -324,6 +336,81 @@ class PortfolioRotator:
         }
 
         try:
+            # ── Check for direct crypto-to-crypto pair ────────────
+            # If a direct pair exists (e.g. ETH-BTC), we can swap in one order
+            # instead of sell→fiat→buy (saves one leg of fees).
+            direct = None
+            if hasattr(self.coinbase, 'find_direct_pair'):
+                sell_base = proposal.sell_pair.split('-')[0]
+                buy_base = proposal.buy_pair.split('-')[0]
+                direct = self.coinbase.find_direct_pair(sell_base, buy_base)
+
+            if direct:
+                direct_pair, direction = direct
+                logger.info(
+                    f"🔄 Direct pair found: {direct_pair} ({direction}) — "
+                    f"single-order swap instead of fiat routing"
+                )
+                try:
+                    if direction == "sell":
+                        # Direct pair is SELL_BASE-BUY_BASE → we sell
+                        sell_price = self.coinbase.get_current_price(direct_pair)
+                        if sell_price > 0:
+                            sell_qty = proposal.quote_amount / self.coinbase.get_current_price(proposal.sell_pair)
+                            direct_result = self.coinbase.market_order_sell(
+                                product_id=direct_pair,
+                                base_size=str(round(sell_qty, 8)),
+                            )
+                        else:
+                            direct_result = None
+                    else:
+                        # Direct pair is BUY_BASE-SELL_BASE → we buy
+                        buy_price = self.coinbase.get_current_price(direct_pair)
+                        if buy_price > 0:
+                            quote_for_buy = proposal.quote_amount / self.coinbase.get_current_price(proposal.sell_pair) * buy_price
+                            direct_result = self.coinbase.market_order_buy(
+                                product_id=direct_pair,
+                                quote_size=str(round(quote_for_buy, 2)),
+                            )
+                        else:
+                            direct_result = None
+
+                    if direct_result and not direct_result.get("error"):
+                        result["sell_result"] = direct_result
+                        result["buy_result"] = direct_result
+                        result["executed"] = True
+                        result["direct_pair"] = direct_pair
+                        self._last_swap_times[proposal.sell_pair] = time.time()
+                        self._last_swap_times[proposal.buy_pair] = time.time()
+                        if self.journal:
+                            self.journal.log_trade(
+                                pair=f"{proposal.sell_pair}→{proposal.buy_pair}",
+                                action="swap_direct",
+                                quantity=0, price=0,
+                                quote_amount=proposal.quote_amount,
+                                fee=proposal.fee_estimate.total_fee_quote * 0.5,
+                                confidence=proposal.confidence,
+                                signal_type="rotation_direct",
+                                reasoning=f"Direct pair {direct_pair}: {proposal.reasoning}",
+                            )
+                        if self.audit:
+                            self.audit.log("swap_execution_direct", {
+                                "sell_pair": proposal.sell_pair,
+                                "buy_pair": proposal.buy_pair,
+                                "direct_pair": direct_pair,
+                                "direction": direction,
+                                "quote_amount": proposal.quote_amount,
+                            })
+                        logger.info(
+                            f"✅ Direct swap completed: {proposal.sell_pair} → {proposal.buy_pair} "
+                            f"via {direct_pair}"
+                        )
+                        proposal.executed = True
+                        return result
+                except Exception as de:
+                    logger.warning(f"Direct swap failed, falling back to fiat routing: {de}")
+
+            # ── Fiat-routed swap (sell → fiat → buy) ────────────
             # Step 1: Sell the weak asset
             # Calculate base_size from USD amount and current price
             sell_price = self.coinbase.get_current_price(proposal.sell_pair)
