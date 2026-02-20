@@ -195,6 +195,53 @@ def main():
         paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
     )
 
+    # -------------------------------------------------------------------------
+    # Coinbase API health-check & dynamic currency / pair adaption
+    # -------------------------------------------------------------------------
+    conn = coinbase.check_connection()
+    if conn["ok"]:
+        logger.info(f"✅ Coinbase API: {conn['message']}")
+        if conn.get("non_zero_accounts") is not None:
+            logger.info(
+                f"   Accounts with balance: {conn['non_zero_accounts']} / "
+                f"{conn.get('total_accounts', '?')}"
+            )
+    else:
+        err = conn.get("error", "unknown error")
+        logger.error(f"❌ Coinbase API connection failed: {err}")
+        if not paper_mode:
+            logger.error(
+                "Cannot run in LIVE mode without Coinbase API access. "
+                "Check COINBASE_API_KEY / COINBASE_API_SECRET."
+            )
+            sys.exit(1)
+        else:
+            logger.warning("Continuing in paper mode — using mock market data.")
+
+    # Auto-detect the account's native fiat currency (e.g. EUR for EU accounts)
+    # and rewrite the configured trading pairs accordingly so the bot actually
+    # trades against the currency sitting in the wallet (EUR, GBP, …).
+    native_currency: str = "USD"
+    if coinbase._rest_client:
+        native_currency = coinbase.detect_native_currency()
+        raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
+        adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
+        if adapted_pairs != raw_pairs:
+            logger.info(
+                f"🌍 Pairs adapted for {native_currency} account: "
+                f"{raw_pairs} → {adapted_pairs}"
+            )
+            config.setdefault("trading", {})["pairs"] = adapted_pairs
+        else:
+            logger.info(f"✓ Trading pairs unchanged (native currency: {native_currency})")
+
+    # Paper mode: initialise paper balance in the account's native currency
+    # so P&L figures are denominated correctly (e.g. EUR not USD).
+    if paper_mode and native_currency != "USD":
+        initial_paper = coinbase._paper_balance.pop("USD", 10_000.0)
+        coinbase._paper_balance[native_currency] = initial_paper
+        logger.info(f"📝 Paper balance: {initial_paper:,.2f} {native_currency}")
+
     # Absolute Rules
     rules = AbsoluteRules(config.get("absolute_rules", {}))
     rules.seed_daily_counters()  # Seed today's counters from DB (survives restarts)

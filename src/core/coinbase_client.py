@@ -19,6 +19,12 @@ logger = get_logger("core.coinbase")
 # Currencies that are pegged ~1:1 to USD and should be counted at face value
 _USD_EQUIVALENTS = {"USD", "USDC", "USDT", "FDUSD", "PYUSD", "DAI", "EURC", "USDS"}
 
+# Known fiat currencies (used for native-currency detection)
+_KNOWN_FIAT = {
+    "USD", "EUR", "GBP", "CHF", "CAD", "AUD", "JPY",
+    "SGD", "BRL", "MXN", "HKD", "NOK", "SEK", "DKK",
+}
+
 # Live fiat-to-USD rate cache {currency: (rate, fetched_at_epoch)}
 _FIAT_RATE_CACHE: dict[str, tuple[float, float]] = {}
 _FIAT_RATE_TTL = 6 * 3600  # 6 hours — fiat rates are stable intraday
@@ -238,6 +244,153 @@ class CoinbaseClient:
             logger.warning("⚠️ get_accounts: No Coinbase REST client available")
 
         return []
+
+    # =========================================================================
+    # Account Diagnostics & Currency Discovery
+    # =========================================================================
+
+    def check_connection(self) -> dict[str, Any]:
+        """
+        Verify the Coinbase API connection and key permissions.
+
+        Returns a dict with keys:
+          ok          – bool, True if the API is reachable
+          mode        – 'live' | 'paper'
+          message     – human-readable status line
+          total_accounts / non_zero_accounts / currencies  (on success)
+          error       – error string (on failure)
+        """
+        if not self._rest_client:
+            if self.paper_mode:
+                return {
+                    "ok": True,
+                    "mode": "paper",
+                    "message": "Paper mode — Coinbase API not required",
+                }
+            return {
+                "ok": False,
+                "mode": "live",
+                "error": "REST client not initialized (missing API credentials)",
+            }
+
+        try:
+            accounts = self._rest_client.get_accounts()
+            result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
+            account_list = result.get("accounts", [])
+            currencies = [
+                a.get("available_balance", {}).get("currency", a.get("currency", "?"))
+                for a in account_list
+            ]
+            non_zero = [
+                a for a in account_list
+                if float(a.get("available_balance", {}).get("value", 0)) > 0
+            ]
+            return {
+                "ok": True,
+                "mode": "live" if not self.paper_mode else "paper",
+                "total_accounts": len(account_list),
+                "non_zero_accounts": len(non_zero),
+                "currencies": currencies,
+                "message": (
+                    f"Connected — {len(account_list)} accounts, "
+                    f"{len(non_zero)} with balance"
+                ),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "mode": "live" if not self.paper_mode else "paper",
+                "error": str(e),
+            }
+
+    def detect_native_currency(self) -> str:
+        """
+        Detect the account's native fiat currency.
+
+        Logic: find the fiat account with the largest USD-equivalent balance.
+        If no non-USD fiat balance is found but a non-USD fiat account exists,
+        that currency is still preferred over the USD default so pair adaption
+        fires correctly for EUR/GBP accounts.
+        Falls back to 'USD' if no API client or detection fails.
+        """
+        if not self._rest_client:
+            return "USD"
+
+        try:
+            accounts = self._rest_client.get_accounts()
+            result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
+            account_list = result.get("accounts", [])
+
+            best_currency = "USD"
+            best_value_usd = -1.0  # -1 so even a zero EUR balance beats the USD default
+
+            for account in account_list:
+                balance = account.get("available_balance", {})
+                currency = balance.get("currency", "")
+                value = float(balance.get("value", 0))
+
+                if currency not in _KNOWN_FIAT or currency == "USD":
+                    continue
+
+                # USD-equivalent value of this fiat pocket
+                value_usd = self._currency_to_usd(currency, value) if value > 0 else 0.0
+
+                if value_usd >= best_value_usd:
+                    best_value_usd = value_usd
+                    best_currency = currency
+
+            logger.info(f"\U0001f30d Detected native account currency: {best_currency}")
+            return best_currency
+
+        except Exception as e:
+            logger.warning(f"\u26a0\ufe0f Could not detect native currency: {e} — defaulting to USD")
+            return "USD"
+
+    def adapt_pairs_to_account(self, pairs: list[str], native_currency: str) -> list[str]:
+        """
+        Rewrite trading pairs so their quote matches the account's native currency.
+
+        Example: 'BTC-USD' → 'BTC-EUR' for a EUR account.
+
+        For each *-USD pair the method asks Coinbase whether a *-<native> product
+        exists and is not disabled.  If it does, the pair is rewritten; otherwise
+        the original USD pair is kept with a warning.
+        Non-USD pairs are returned unchanged.
+        """
+        if native_currency == "USD":
+            return list(pairs)
+
+        rewritten: list[str] = []
+        for pair in pairs:
+            if "-" not in pair:
+                rewritten.append(pair)
+                continue
+
+            base, quote = pair.rsplit("-", 1)
+            if quote != "USD":
+                rewritten.append(pair)  # Already a non-USD quote — keep as-is
+                continue
+
+            candidate = f"{base}-{native_currency}"
+            if self._rest_client:
+                try:
+                    product = self._rest_client.get_product(candidate)
+                    pdata = product.to_dict() if hasattr(product, "to_dict") else dict(product)
+                    if (
+                        pdata.get("product_id") == candidate
+                        and not pdata.get("trading_disabled", True)
+                        and not pdata.get("is_disabled", False)
+                    ):
+                        logger.info(f"  ✓ Pair adapted: {pair} → {candidate}")
+                        rewritten.append(candidate)
+                        continue
+                except Exception:
+                    pass
+
+            logger.warning(f"  ⚠ {candidate} not available on Coinbase — keeping {pair}")
+            rewritten.append(pair)
+
+        return rewritten
 
     def _currency_to_usd(self, currency: str, amount: float) -> float:
         """

@@ -8,6 +8,11 @@ trading:
     - ATOM-USD
     - BTC-USD
     - ETH-USD
+  # Native quote currency — 'auto' = detect from Coinbase account on startup.
+  # Override with e.g. 'EUR' or 'USD' to force a specific currency.
+  # When 'auto' (or any non-USD currency is detected), pairs listed above are
+  # automatically rewritten: BTC-USD → BTC-EUR, etc. if that product exists.
+  quote_currency: auto
   # Main analysis/trade loop interval in seconds
   interval: 120
   # Minimum confidence to execute a trade (0.0 - 1.0)
