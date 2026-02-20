@@ -52,7 +52,9 @@ _RULE_SCHEMA: dict[str, dict[str, Any]] = {
 _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "mode":                         {"type": str, "enum": ["paper", "live"]},
     "pairs":                        {"type": list},
+    "pair_discovery":               {"type": str, "enum": ["all", "configured"]},
     "quote_currency":               {"type": str},
+    "quote_currencies":             {"type": list},
     "interval":                     {"type": int,   "min": 10, "max": 86_400},
     "min_confidence":               {"type": float, "min": 0.0, "max": 2.0},
     "max_open_positions":           {"type": int,   "min": 0, "max": 100},
@@ -306,6 +308,8 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_trades_per_day":         {"min": 1},      # at least 1 trade/day
         "max_cash_per_trade_pct":     {"min": 0.01},   # can't zero out
         "require_approval_above":     {},              # free to adjust
+        "never_trade_pairs":          {},              # LLM can manage exclusion list
+        "only_trade_pairs":           {},              # LLM can manage inclusion list
         "min_trade_interval_seconds": {"max": 7200},   # can't slow to >2h
         "emergency_stop_portfolio":   {},              # free to adjust
         "always_use_stop_loss":       {},              # free to adjust
@@ -316,6 +320,9 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_open_positions":   {"min": 1},                  # can't zero out
         "paper_slippage_pct":   {},
         "interval":             {"min": 30, "max": 3600},
+        "pairs":                {},                            # LLM can add/remove pairs
+        "pair_discovery":       {},                            # LLM can switch discovery mode
+        "quote_currencies":     {},                            # LLM can adjust quote currencies
     },
     "risk": {
         "stop_loss_pct":           {"min": 0.005, "max": 0.20},
@@ -352,10 +359,7 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
 
 # Fields the autonomous LLM may NOT touch even within allowed sections
 AUTONOMOUS_BLOCKED_FIELDS = frozenset({
-    ("absolute_rules", "never_trade_pairs"),
-    ("absolute_rules", "only_trade_pairs"),
     ("trading", "mode"),
-    ("trading", "pairs"),
     ("trading", "quote_currency"),
     ("trading", "live_holdings_sync"),
     ("trading", "holdings_refresh_seconds"),

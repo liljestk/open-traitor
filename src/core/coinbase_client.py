@@ -17,13 +17,22 @@ from src.utils.logger import get_logger
 logger = get_logger("core.coinbase")
 
 # Currencies that are pegged ~1:1 to USD and should be counted at face value
-_USD_EQUIVALENTS = {"USD", "USDC", "USDT", "FDUSD", "PYUSD", "DAI", "EURC", "USDS"}
+_USD_EQUIVALENTS = {"USD", "USDC", "USDT", "FDUSD", "PYUSD", "DAI", "USDS"}
+
+# Currencies that are pegged ~1:1 to EUR
+_EUR_EQUIVALENTS = {"EURC"}
+
+# All stablecoins / fiat-like currencies (for is_fiat checks)
+_ALL_STABLECOINS = _USD_EQUIVALENTS | _EUR_EQUIVALENTS
 
 # Known fiat currencies (used for native-currency detection)
 _KNOWN_FIAT = {
     "USD", "EUR", "GBP", "CHF", "CAD", "AUD", "JPY",
     "SGD", "BRL", "MXN", "HKD", "NOK", "SEK", "DKK",
 }
+
+# Known quote currencies — fiat + stablecoins that can be the "right side" of a pair
+_KNOWN_QUOTES = _KNOWN_FIAT | _ALL_STABLECOINS
 
 # Live fiat-to-USD rate cache {currency: (rate, fetched_at_epoch)}
 _FIAT_RATE_CACHE: dict[str, tuple[float, float]] = {}
@@ -429,20 +438,89 @@ class CoinbaseClient:
 
         return rewritten_fallback
 
+    def discover_all_pairs(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: set[str] | None = None,
+        only_trade: set[str] | None = None,
+    ) -> list[str]:
+        """
+        Discover ALL tradable pairs on Coinbase for the given quote currencies.
+
+        Returns a sorted list of product IDs like ["ATOM-EUR", "BTC-EUR", "BTC-EURC", ...].
+        Respects never_trade / only_trade filters from AbsoluteRules.
+        """
+        if not self._rest_client:
+            logger.warning("discover_all_pairs: no REST client — returning empty list")
+            return []
+
+        if quote_currencies is None:
+            quote_currencies = ["EUR"]
+        quote_set = {q.upper() for q in quote_currencies}
+        never_trade = never_trade or set()
+        only_trade = only_trade or set()
+
+        try:
+            products_resp = self._rest_client.get_products()
+            pdata = products_resp.to_dict() if hasattr(products_resp, "to_dict") else dict(products_resp)
+            all_products = pdata.get("products", [])
+
+            discovered: set[str] = set()
+            for prod in all_products:
+                product_id = prod.get("product_id", "")
+                base = prod.get("base_currency_id", "")
+                quote = prod.get("quote_currency_id", "")
+
+                # Must be one of our target quote currencies
+                if quote not in quote_set:
+                    continue
+
+                # Must be online and tradable
+                if prod.get("trading_disabled", True):
+                    continue
+                if prod.get("is_disabled", False):
+                    continue
+                if str(prod.get("status", "")).lower() != "online":
+                    continue
+
+                # Apply AbsoluteRules filters
+                if product_id in never_trade or base in never_trade:
+                    continue
+                if only_trade and product_id not in only_trade and base not in only_trade:
+                    continue
+
+                discovered.add(product_id)
+
+            result = sorted(discovered)
+            logger.info(
+                f"🔍 Discovered {len(result)} tradable pairs for "
+                f"quote currencies {sorted(quote_set)}"
+            )
+            return result
+
+        except Exception as e:
+            logger.warning(f"⚠️ discover_all_pairs failed: {e}")
+            return []
+
     def _currency_to_usd(self, currency: str, amount: float) -> float:
         """
         Convert a currency amount to its approximate USD value.
         Order of preference:
           1. USD / known stablecoins → 1:1
-          2. Cached price for {currency}-USD or {currency}-EUR→USD
-          3. Live fetch from Coinbase (try -USD then -EUR→USD)
-          4. Live fiat exchange rate from Frankfurter (ECB)
-          5. Return 0
+          2. EUR-pegged stablecoins (EURC) → via EUR→USD rate
+          3. Cached price for {currency}-USD or {currency}-EUR→USD
+          4. Live fetch from Coinbase (try -USD then -EUR→USD)
+          5. Live fiat exchange rate from Frankfurter (ECB)
+          6. Return 0
         """
         if amount <= 0:
             return 0.0
         if currency in _USD_EQUIVALENTS:
             return amount
+        # EURC and other EUR-pegged stablecoins: convert via EUR→USD rate
+        if currency in _EUR_EQUIVALENTS:
+            eur_to_usd = _get_fiat_rate_usd("EUR")
+            return amount * eur_to_usd if eur_to_usd > 0 else amount
 
         # Try {currency}-USD directly
         pair_usd = f"{currency}-USD"
@@ -485,6 +563,15 @@ class CoinbaseClient:
             return amount
         if currency in _USD_EQUIVALENTS and native == "USD":
             return amount
+        # EUR-pegged stablecoins (EURC) → treat as ~1:1 EUR
+        if currency in _EUR_EQUIVALENTS and native == "EUR":
+            return amount
+        # EURC → other native: go through EUR→native fiat conversion
+        if currency in _EUR_EQUIVALENTS:
+            rate_eur = _get_fiat_rate_usd("EUR")
+            rate_nat = _get_fiat_rate_usd(native)
+            if rate_eur > 0 and rate_nat > 0:
+                return amount * (rate_eur / rate_nat)
 
         # Try direct pair: {currency}-{native}  (e.g. ATOM-EUR)
         pair = f"{currency}-{native}"

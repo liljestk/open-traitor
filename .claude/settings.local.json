@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git show:*)"
+      "Bash(git show:*)",
+      "WebFetch(domain:langfuse.com)",
+      "Bash(docker-compose ps:*)"
     ]
   }
 }

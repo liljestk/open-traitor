@@ -20,7 +20,7 @@ from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
 from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
-from src.core.coinbase_client import CoinbaseClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _get_fiat_rate_usd
+from src.core.coinbase_client import CoinbaseClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
@@ -569,7 +569,25 @@ class Orchestrator:
                         if advisor_result and advisor_result.get("changes_applied", 0) > 0:
                             # Push updated sections to runtime config
                             for ch in advisor_result.get("applied", []):
-                                sm.push_section_to_runtime(ch["section"], self.config)
+                                sec = ch["section"]
+                                sm.push_section_to_runtime(
+                                    sec, {ch["field"]: ch["value"]},
+                                    self.rules, self.config,
+                                )
+                            # If pairs were changed, refresh self.pairs
+                            changed_fields = {
+                                (ch["section"], ch["field"])
+                                for ch in advisor_result.get("applied", [])
+                            }
+                            if ("trading", "pairs") in changed_fields:
+                                new_pairs = self.config.get("trading", {}).get("pairs", self.pairs)
+                                if isinstance(new_pairs, list) and new_pairs:
+                                    old_count = len(self.pairs)
+                                    self.pairs = new_pairs
+                                    logger.info(
+                                        f"🔄 Active pairs updated by settings advisor: "
+                                        f"{old_count} → {len(self.pairs)} pairs"
+                                    )
                             # Notify via Telegram
                             notif = format_advisor_notification(advisor_result)
                             if notif:
@@ -1039,7 +1057,7 @@ class Orchestrator:
                 if qty <= 0 or "-" not in pair:
                     continue
                 base, quote = pair.split("-", 1)
-                if quote in _KNOWN_FIAT or quote in _USD_EQUIVALENTS:
+                if quote in _KNOWN_QUOTES:
                     expected[base] = qty
                     base_to_pair[base] = pair
             result = self.coinbase.reconcile_positions(expected)
@@ -1117,6 +1135,10 @@ class Orchestrator:
                     if quote in _KNOWN_FIAT:
                         native = quote
                         break
+                    # EURC → treat as EUR for display
+                    if quote in _EUR_EQUIVALENTS:
+                        native = "EUR"
+                        break
         currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
         symbol = currency_symbols.get(native, native + " ")
 
@@ -1153,7 +1175,7 @@ class Orchestrator:
                 if amount <= 0 or not currency:
                     continue
 
-                is_fiat = currency in _KNOWN_FIAT or currency in _USD_EQUIVALENTS
+                is_fiat = currency in _KNOWN_FIAT or currency in _ALL_STABLECOINS
 
                 # Convert to native account currency (e.g. EUR)
                 native_val = self.coinbase._currency_to_native(currency, amount, native)

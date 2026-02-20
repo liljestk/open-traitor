@@ -229,17 +229,46 @@ def main():
     elif coinbase._rest_client:
         native_currency = coinbase.detect_native_currency()
 
+    # Pair discovery: "all" = discover every tradable pair on Coinbase for the
+    # configured quote currencies; "configured" = use only settings.yaml pairs
+    pair_discovery = config.get("trading", {}).get("pair_discovery", "configured").lower()
+    quote_currencies = config.get("trading", {}).get(
+        "quote_currencies", [native_currency]
+    )
+
     if coinbase._rest_client:
-        raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
-        adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
-        if set(adapted_pairs) != set(raw_pairs):
-            logger.info(
-                f"🌍 Trading pairs dynamically expanded: "
-                f"{raw_pairs} → {adapted_pairs}"
+        if pair_discovery == "all":
+            # Discover ALL tradable pairs on Coinbase for our quote currencies
+            abs_rules_cfg = config.get("absolute_rules", {})
+            never_trade = set(abs_rules_cfg.get("never_trade_pairs", []))
+            only_trade = set(abs_rules_cfg.get("only_trade_pairs", []))
+            discovered = coinbase.discover_all_pairs(
+                quote_currencies=quote_currencies,
+                never_trade=never_trade if never_trade else None,
+                only_trade=only_trade if only_trade else None,
             )
-            config.setdefault("trading", {})["pairs"] = adapted_pairs
+            if discovered:
+                logger.info(
+                    f"🔍 Full pair discovery: found {len(discovered)} tradable pairs "
+                    f"for quote currencies {quote_currencies}"
+                )
+                config.setdefault("trading", {})["pairs"] = discovered
+            else:
+                logger.warning(
+                    "⚠️ Full pair discovery returned 0 pairs — falling back to configured pairs"
+                )
         else:
-            logger.info(f"✓ Trading pairs unchanged: {adapted_pairs}")
+            # Legacy mode: expand configured pairs via asset-based discovery
+            raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
+            adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
+            if set(adapted_pairs) != set(raw_pairs):
+                logger.info(
+                    f"🌍 Trading pairs dynamically expanded: "
+                    f"{raw_pairs} → {adapted_pairs}"
+                )
+                config.setdefault("trading", {})["pairs"] = adapted_pairs
+            else:
+                logger.info(f"✓ Trading pairs unchanged: {adapted_pairs}")
 
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).

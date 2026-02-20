@@ -23,7 +23,7 @@ logger = get_logger("agent.settings_advisor")
 
 # Defaults
 DEFAULT_REVIEW_INTERVAL = 10   # every 10 pipeline cycles
-MAX_CHANGES_PER_REVIEW = 6    # limit fields the LLM can touch per review
+MAX_CHANGES_PER_REVIEW = 8    # limit fields the LLM can touch per review
 MIN_CONFIDENCE_TO_ACT = 0.5   # below this, proposals are logged but skipped
 
 
@@ -37,12 +37,31 @@ improving or worsening performance).
 
 CRITICAL CONSTRAINTS:
 - You CANNOT enable or disable trading. The on/off decision belongs to the human operator only.
-- You CANNOT change which pairs are traded, the trading mode (paper/live), or fee rates.
+- You CANNOT change the trading mode (paper/live) or fee rates.
 - All numeric values will be clamped to safe ranges automatically. You don't need to worry about breaking things.
 - ONLY propose changes when there is a clear reason. If things are working well, respond with NO changes.
 - Be conservative. Small, incremental adjustments are better than large swings.
 - Capital preservation is always the top priority.
 - Do NOT chase losses by dramatically loosening risk parameters.
+
+PAIR MANAGEMENT:
+You CAN manage which trading pairs are actively traded. The system uses full pair
+discovery from Coinbase — all tradable pairs for the configured quote currencies
+(e.g. EUR, EURC) are available.
+- "trading.pairs" — The active list of pairs being traded. You can add or remove
+  pairs based on market conditions and analysis. Format: ["BTC-EUR", "ETH-EUR", ...].
+  Both EUR and EURC pairs are valid (e.g. "BTC-EURC"). Add promising pairs, remove
+  underperforming ones.
+- "trading.quote_currencies" — Quote currencies to discover pairs for (e.g. ["EUR", "EURC"]).
+  EURC is the EUR stablecoin on Coinbase. Include it to trade EURC-denominated pairs.
+- "trading.pair_discovery" — Set to "all" to discover every tradable pair on Coinbase
+  for the configured quote currencies, or "configured" to only use the explicit pairs list.
+- "absolute_rules.never_trade_pairs" — Blacklist specific pairs permanently.
+- "absolute_rules.only_trade_pairs" — If non-empty, ONLY these pairs can be traded.
+  Use with care — this overrides pair discovery.
+When adjusting pairs, consider: liquidity, volatility, recent trends, and portfolio
+diversification. Prefer pairs with good volume. Remove pairs that have been
+consistently underperforming or have low liquidity.
 
 AVAILABLE PARAMETERS (with allowed ranges):
 {schema_summary}
