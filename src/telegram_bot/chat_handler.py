@@ -28,6 +28,7 @@ from typing import Any, Callable, Optional
 
 from src.utils.logger import get_logger
 from src.utils.security import sanitize_input
+from src.telegram_bot.tools import ToolDef, BUILTIN_TOOL_REGISTRY
 
 logger = get_logger("telegram.chat")
 
@@ -803,15 +804,26 @@ class TelegramChatHandler:
 
         # Function handlers — connected by the orchestrator
         self._function_handlers: dict[str, Callable] = {}
+        # Tool schemas (ToolDef) — used for native tool calling + rich prompt docs
+        self._tool_defs: dict[str, ToolDef] = {}
 
         # Proactive engine (started after send_callback is set)
         self._proactive: Optional[ProactiveEngine] = None
         self._send_callback: Optional[Callable] = None
 
-        logger.info("🧠 Chat handler initialized (fast-path enabled)")
+        logger.info("🧠 Chat handler initialized (fast-path + native tool-calling enabled)")
 
-    def register_function(self, name: str, handler: Callable) -> None:
+    def register_function(self, name: str, handler: Callable, tool_def: Optional[ToolDef] = None) -> None:
+        """Register a callable function + optional schema for tool calling.
+
+        If tool_def is not provided, the built-in registry is checked automatically
+        so callers don't need to import ToolDefs explicitly for standard tools.
+        """
         self._function_handlers[name] = handler
+        if tool_def is not None:
+            self._tool_defs[name] = tool_def
+        elif name in BUILTIN_TOOL_REGISTRY:
+            self._tool_defs[name] = BUILTIN_TOOL_REGISTRY[name]
 
     def set_send_callback(self, callback: Callable) -> None:
         self._send_callback = callback
@@ -936,64 +948,196 @@ class TelegramChatHandler:
     # Smart Path — single LLM call for complex messages
     # ────────────────────────────────────────────────────────────────────────
 
+    # ────────────────────────────────────────────────────────────────────────
+    # Tool-calling helpers
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _build_openai_tools(self) -> list[dict]:
+        """Return OpenAI-format tool schemas for all registered functions that have a ToolDef."""
+        return [
+            td.to_openai_schema()
+            for name, td in self._tool_defs.items()
+            if name in self._function_handlers
+        ]
+
+    def _execute_tool_call(self, name: str, arguments: dict) -> Any:
+        """Execute a single named tool call and return its result."""
+        handler = self._function_handlers.get(name)
+        if not handler:
+            return {"error": f"Unknown tool: {name}"}
+        try:
+            return handler(arguments)
+        except Exception as e:
+            logger.error(f"Tool execution error [{name}]: {e}", exc_info=True)
+            return {"error": str(e)}
+
+    def _build_system_prompt(self, user_name: str, quick_data: str, conv: str) -> str:
+        """Build the base system prompt for the smart path."""
+        return (
+            f"{PRO_TRADER_PERSONA}\n\n"
+            f"{self.personality.to_prompt_fragment()}\n\n"
+            f"You're chatting with {user_name} on Telegram.\n\n"
+            f"CURRENT STATE:\n{quick_data}\n\n"
+            f"{'Recent conversation:' + chr(10) + conv + chr(10) + chr(10) if conv else ''}"
+            f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+        )
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Smart Path — native tool calling (preferred) + text fallback
+    # ────────────────────────────────────────────────────────────────────────
+
     def _smart_response(self, text: str, user_name: str) -> str:
         """
-        Handle complex messages with a SINGLE LLM call.
-        The LLM both interprets intent AND generates the response.
+        Handle complex messages using native LLM tool calling.
+
+        Flow:
+          1. Build OpenAI-format tool schemas from all registered ToolDefs.
+          2. Call Ollama with tool_choice=auto — model decides which tools to invoke.
+          3. Execute any requested tool calls and feed results back for summarisation.
+          4. Fallback: if tool calling raises (model unsupported), use the legacy
+             ACTION: text-parsing path instead.
         """
-        # Build available functions list
-        func_list = "\n".join(
-            f"  - {name}" for name in sorted(self._function_handlers.keys())
-        )
-
-        # Get current data snapshot for context
         quick_data = self._get_quick_snapshot()
-
-        # Recent conversation
         recent = self.memory.get_recent(6)
         conv = "\n".join(
-            f"{'You' if m['role']=='user' else 'Me'}: {m['content'][:150]}"
-            for m in recent[:-1]  # exclude current message
+            f"{'You' if m['role'] == 'user' else 'Me'}: {m['content'][:150]}"
+            for m in recent[:-1]
         )
+        system_prompt = self._build_system_prompt(user_name, quick_data, conv)
+        conv_messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in recent[:-1]
+        ]
 
-        system_prompt = f"""{PRO_TRADER_PERSONA}
+        # ── Native tool calling ──────────────────────────────────────────────
+        tools = self._build_openai_tools()
+        if tools:
+            try:
+                return self._smart_response_with_tools(
+                    text, system_prompt, conv_messages, tools
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Native tool calling failed ({e!r}), falling back to text path"
+                )
 
-{self.personality.to_prompt_fragment()}
+        # ── Text fallback (legacy ACTION: parsing) ──────────────────────────
+        return self._smart_response_text(text, system_prompt)
 
-You're chatting with {user_name} on Telegram.
+    def _smart_response_with_tools(
+        self,
+        text: str,
+        system_prompt: str,
+        conv_messages: list[dict],
+        tools: list[dict],
+    ) -> str:
+        """
+        Tool-calling smart path.
 
-CURRENT STATE:
-{quick_data}
-
-AVAILABLE ACTIONS (call by including ACTION:function_name in your response):
-{func_list}
-
-RESPONSE FORMAT:
-- Just respond naturally as a trader.
-- If you need to TAKE AN ACTION, include it on a separate line:
-  ACTION:function_name|param_key=param_value
-  Examples:
-    ACTION:enable_highstakes|duration=4h
-    ACTION:create_task|description=Buy BTC if it drops below 90k max $500
-    ACTION:disable_highstakes
-    ACTION:pause_trading
-- You can include ONE action per response.
-- After the action line, include your response text.
-- If no action needed, just respond conversationally.
-
-{'Recent conversation:' + chr(10) + conv if conv else ''}
-Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}"""
-
-        raw = self.llm.chat(
+        Step 1 — let the model decide what to call.
+        Step 2 — execute all tool calls in order.
+        Step 3 — send results back and get the final trader-voiced response.
+        """
+        # ── Step 1: initial call ─────────────────────────────────────────────
+        text_content, tool_calls, assistant_msg = self.llm.chat_with_tools(
             system_prompt=system_prompt,
             user_message=text,
+            tools=tools,
+            messages=conv_messages,
             temperature=0.5,
             max_tokens=600,
         )
 
-        # Parse and execute any embedded actions
-        response = self._parse_and_execute_actions(raw)
-        return response
+        # Model responded with no tool calls — just return the text
+        if not tool_calls:
+            # Still run ACTION: parser in case the model used the old format
+            response = self._parse_and_execute_actions(text_content or "")
+            return response or "👍"
+
+        # ── Step 2: execute tool calls ───────────────────────────────────────
+        tool_result_messages: list[dict] = []
+        for tc in tool_calls:
+            result = self._execute_tool_call(tc["name"], tc["arguments"])
+            logger.info(f"🔧 Tool called: {tc['name']}({tc['arguments']}) → {str(result)[:120]}")
+            tool_result_messages.append({
+                "role": "tool",
+                "content": json.dumps(result, default=str),
+                "tool_call_id": tc.get("id", tc["name"]),
+            })
+
+        # ── Step 3: summarise results ────────────────────────────────────────
+        continuation_messages = (
+            conv_messages
+            + [assistant_msg]
+            + tool_result_messages
+        )
+
+        final_text, remaining_calls, _ = self.llm.chat_with_tools(
+            system_prompt=system_prompt,
+            user_message=text,
+            tools=tools,
+            messages=continuation_messages,
+            temperature=0.5,
+            max_tokens=600,
+        )
+
+        # If the model wants to call MORE tools after the first batch (rare), execute
+        # them silently and just use any text it returns.
+        if remaining_calls:
+            for tc in remaining_calls:
+                result = self._execute_tool_call(tc["name"], tc["arguments"])
+                logger.info(f"🔧 (chained) Tool called: {tc['name']} → {str(result)[:80]}")
+
+        return final_text or "Done."
+
+    def _smart_response_text(self, text: str, system_prompt: str) -> str:
+        """
+        Legacy text-based smart path used as fallback.
+        Prompts the LLM to embed ACTION: lines which are then parsed and executed.
+        """
+        # Enrich system prompt with tool catalogue for text-based calling
+        tool_docs_lines = ["AVAILABLE TOOLS (use ACTION: syntax below to call them):"]
+        categories: dict[str, list[str]] = {}
+        for name, td in sorted(self._tool_defs.items()):
+            if name in self._function_handlers:
+                cat = td.category
+                categories.setdefault(cat, [])
+                categories[cat].extend(td.to_prompt_lines())
+        for cat, lines in categories.items():
+            tool_docs_lines.append(f"\n[{cat.upper()}]")
+            tool_docs_lines.extend(lines)
+
+        # Append tools that have no ToolDef (bare names only)
+        bare = sorted(
+            n for n in self._function_handlers
+            if n not in self._tool_defs
+        )
+        if bare:
+            tool_docs_lines.append("\n[OTHER]")
+            for n in bare:
+                tool_docs_lines.append(f"• {n}")
+
+        tool_docs = "\n".join(tool_docs_lines)
+
+        action_prompt = (
+            f"{system_prompt}\n\n"
+            f"{tool_docs}\n\n"
+            "RESPONSE FORMAT:\n"
+            "- Respond naturally as a trader.\n"
+            "- To call a tool, put it on its own line: ACTION:tool_name|param=value\n"
+            "- Examples:\n"
+            "    ACTION:enable_highstakes|duration=4h\n"
+            "    ACTION:update_rule|param=max_single_trade_usd|value=300\n"
+            "    ACTION:get_stats|hours=48\n"
+        )
+
+        raw = self.llm.chat(
+            system_prompt=action_prompt,
+            user_message=text,
+            temperature=0.5,
+            max_tokens=600,
+        )
+        return self._parse_and_execute_actions(raw)
 
     def _parse_and_execute_actions(self, raw_response: str) -> str:
         """Extract ACTION: lines, execute them, and return clean response."""

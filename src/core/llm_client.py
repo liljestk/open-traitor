@@ -130,6 +130,100 @@ class LLMClient:
                 )
             raise
 
+    def chat_with_tools(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict],
+        messages: Optional[list[dict]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> tuple[Optional[str], list[dict], Optional[dict]]:
+        """
+        Send a chat completion with OpenAI-format tool definitions.
+
+        Ollama/llama3.1 supports native tool calling — the model returns
+        structured tool_calls instead of free-text ACTION: lines when it
+        wants to invoke a function.
+
+        Returns:
+            (text_content, tool_calls, assistant_raw_msg)
+            - text_content:       The model's text response (None if it only called tools)
+            - tool_calls:         List of {name, arguments, id} dicts for invoked tools
+            - assistant_raw_msg:  Raw message dict ready to re-append for multi-turn continuation
+
+        Raises on network/model errors — let the caller handle gracefully.
+        """
+        start_time = time.time()
+
+        full_system = system_prompt
+        if self.persona:
+            full_system = f"{self.persona}\n\n{system_prompt}"
+
+        chat_messages: list[dict] = [{"role": "system", "content": full_system}]
+        if messages:
+            chat_messages.extend(messages)
+        chat_messages.append({"role": "user", "content": user_message})
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": chat_messages,
+            "temperature": temperature or self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+
+        response = self.client.chat.completions.create(**kwargs)
+        elapsed_ms = (time.time() - start_time) * 1000
+        self._call_count += 1
+
+        if response.usage:
+            self._total_tokens += response.usage.total_tokens
+
+        msg = response.choices[0].message
+        text_content: Optional[str] = (msg.content or "").strip() or None
+
+        # Parse tool calls from the structured response
+        parsed_calls: list[dict] = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    args = tc.function.arguments
+                    if isinstance(args, str):
+                        args = json.loads(args) if args else {}
+                except (json.JSONDecodeError, AttributeError):
+                    args = {}
+                parsed_calls.append({
+                    "name": tc.function.name,
+                    "arguments": args,
+                    "id": tc.id,
+                })
+
+        logger.debug(
+            f"chat_with_tools | {elapsed_ms:.0f}ms | "
+            f"tool_calls={len(parsed_calls)} | text={'yes' if text_content else 'no'}"
+        )
+
+        # Build the raw assistant message needed for multi-turn continuation
+        assistant_raw: dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            assistant_raw["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                        if isinstance(tc.function.arguments, str)
+                        else json.dumps(tc.function.arguments),
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+
+        return text_content, parsed_calls, assistant_raw
+
     def chat_json(
         self,
         system_prompt: str,

@@ -1060,7 +1060,10 @@ class Orchestrator:
             "fear_greed": self.fear_greed.get_current()
         })
 
-        ch.register_function("get_trading_rules", lambda p: self.rules.get_status())
+        ch.register_function("get_trading_rules", lambda p: {
+            **self.rules.get_all_rules(),
+            **self.rules.get_status(),
+        })
 
         ch.register_function("get_fee_info", lambda p: self.fee_manager.get_fee_summary())
 
@@ -1156,7 +1159,129 @@ class Orchestrator:
             "deleted": self.stats_db.delete_schedule(int(p.get("id", 0)))
         })
 
-        logger.info(f"🧠 Registered {len(ch._function_handlers)} chat functions")
+        # ─── Config / settings read ────────────────────────────────────
+        ch.register_function("get_config", lambda p: {
+            "absolute_rules": self.rules.get_all_rules(),
+            "trading": {
+                "mode": self.config.get("trading", {}).get("mode", "paper"),
+                "pairs": list(self.pairs),
+                "interval_seconds": self.interval,
+                "min_confidence": self.config.get("trading", {}).get("min_confidence", 1.0),
+                "max_open_positions": self.config.get("trading", {}).get("max_open_positions", 3),
+            },
+            "risk": dict(self.config.get("risk", {})),
+            "fees": dict(self.config.get("fees", {})),
+            "high_stakes": self.high_stakes.get_status(),
+            "rotation": dict(self.config.get("rotation", {})),
+        })
+
+        # ─── Config / settings write ───────────────────────────────────
+        ch.register_function("update_rule", lambda p: self.rules.update_param(
+            param=p.get("param", ""),
+            value=str(p.get("value", "")),
+        ))
+
+        def _update_trading_param(p: dict) -> dict:
+            param = p.get("param", "")
+            value_str = str(p.get("value", ""))
+            trading_cfg = self.config.setdefault("trading", {})
+            _float_params = {"min_confidence", "paper_slippage_pct"}
+            _int_params = {"max_open_positions", "interval"}
+            try:
+                if param in _float_params:
+                    new_val: Any = float(value_str)
+                elif param in _int_params:
+                    new_val = int(float(value_str))
+                else:
+                    return {"ok": False, "error": f"Unknown trading param: {param!r}"}
+            except (ValueError, TypeError) as e:
+                return {"ok": False, "error": str(e)}
+            old_val = trading_cfg.get(param)
+            trading_cfg[param] = new_val
+            if param == "interval":
+                self.interval = new_val
+            logger.warning(f"🔧 TRADING PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
+            return {"ok": True, "param": param, "old": old_val, "new": new_val}
+
+        ch.register_function("update_trading_param", _update_trading_param)
+
+        def _update_risk_param(p: dict) -> dict:
+            param = p.get("param", "")
+            value_str = str(p.get("value", ""))
+            risk_cfg = self.config.setdefault("risk", {})
+            _risk_params = {
+                "stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
+                "max_position_pct", "max_total_exposure_pct", "max_drawdown_pct",
+            }
+            _risk_int_params = {"max_trades_per_hour", "loss_cooldown_seconds"}
+            try:
+                if param in _risk_params:
+                    new_val: Any = float(value_str)
+                elif param in _risk_int_params:
+                    new_val = int(float(value_str))
+                else:
+                    return {"ok": False, "error": f"Unknown risk param: {param!r}"}
+            except (ValueError, TypeError) as e:
+                return {"ok": False, "error": str(e)}
+            old_val = risk_cfg.get(param)
+            risk_cfg[param] = new_val
+            # Propagate trailing_stop_pct to the TrailingStopManager
+            if param == "trailing_stop_pct":
+                self.trailing_stops.default_trail_pct = new_val
+            logger.warning(f"🔧 RISK PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
+            return {"ok": True, "param": param, "old": old_val, "new": new_val}
+
+        ch.register_function("update_risk_param", _update_risk_param)
+
+        # ─── Pair management ───────────────────────────────────────────
+        def _add_pair(p: dict) -> dict:
+            pair = str(p.get("pair", "")).upper().strip()
+            if not pair:
+                return {"ok": False, "error": "pair is required"}
+            if pair not in self.pairs:
+                self.pairs.append(pair)
+                self.config.setdefault("trading", {}).setdefault("pairs", []).append(pair)
+                logger.info(f"📌 Pair added (runtime): {pair}. Active pairs: {self.pairs}")
+            return {"ok": True, "pair": pair, "all_pairs": list(self.pairs)}
+
+        ch.register_function("add_pair", _add_pair)
+
+        def _remove_pair(p: dict) -> dict:
+            pair = str(p.get("pair", "")).upper().strip()
+            if pair in self.pairs:
+                self.pairs.remove(pair)
+                cfg_pairs = self.config.get("trading", {}).get("pairs", [])
+                if pair in cfg_pairs:
+                    cfg_pairs.remove(pair)
+                logger.info(f"🗑️ Pair removed (runtime): {pair}. Active pairs: {self.pairs}")
+            return {"ok": True, "pair": pair, "all_pairs": list(self.pairs)}
+
+        ch.register_function("remove_pair", _remove_pair)
+
+        ch.register_function("blacklist_pair", lambda p: self.rules.add_never_trade_pair(
+            str(p.get("pair", ""))
+        ))
+
+        ch.register_function("unblacklist_pair", lambda p: self.rules.remove_never_trade_pair(
+            str(p.get("pair", ""))
+        ))
+
+        # ─── Trailing stops ────────────────────────────────────────────
+        ch.register_function("get_trailing_stops", lambda p: {
+            "trailing_stops": self.trailing_stops.get_all_stops()  # already serialized dicts
+        })
+
+        # ─── Pending swap management ───────────────────────────────────
+        def _cancel_swap(p: dict) -> dict:
+            swap_id = str(p.get("swap_id", ""))
+            if swap_id in self.rotator.pending_swaps:
+                del self.rotator.pending_swaps[swap_id]
+                return {"ok": True, "cancelled": swap_id}
+            return {"ok": False, "error": f"Swap {swap_id!r} not found"}
+
+        ch.register_function("cancel_swap", _cancel_swap)
+
+        logger.info(f"🧠 Registered {len(ch._function_handlers)} chat functions ({len(ch._tool_defs)} with schemas)")
 
     # =========================================================================
     # Proactive Updates

@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from src.models.trade import Trade, TradeAction
 from src.utils.logger import get_logger
@@ -342,3 +342,93 @@ class AbsoluteRules:
             f"• Emergency stop below: ${self.emergency_stop_portfolio_usd:,.0f}\n"
             f"• Stop-loss required: {'Yes' if self.always_use_stop_loss else 'No'}\n"
         )
+
+    def get_all_rules(self) -> dict:
+        """Return all rule parameters as a flat dict (for LLM context)."""
+        return {
+            "max_single_trade_usd": self.max_single_trade_usd,
+            "max_daily_spend_usd": self.max_daily_spend_usd,
+            "max_daily_loss_usd": self.max_daily_loss_usd,
+            "max_portfolio_risk_pct": self.max_portfolio_risk_pct,
+            "require_approval_above_usd": self.require_approval_above_usd,
+            "never_trade_pairs": sorted(self.never_trade_pairs),
+            "only_trade_pairs": sorted(self.only_trade_pairs),
+            "min_trade_interval_seconds": self.min_trade_interval_seconds,
+            "max_trades_per_day": self.max_trades_per_day,
+            "max_cash_per_trade_pct": self.max_cash_per_trade_pct,
+            "emergency_stop_portfolio_usd": self.emergency_stop_portfolio_usd,
+            "always_use_stop_loss": self.always_use_stop_loss,
+            "max_stop_loss_pct": self.max_stop_loss_pct,
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Runtime rule updates — callable by the Telegram LLM
+    # Changes are in-memory only; restart resets to settings.yaml values.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _NUMERIC_RULES: frozenset[str] = frozenset({
+        "max_single_trade_usd",
+        "max_daily_spend_usd",
+        "max_daily_loss_usd",
+        "max_portfolio_risk_pct",
+        "require_approval_above_usd",
+        "min_trade_interval_seconds",
+        "max_trades_per_day",
+        "max_cash_per_trade_pct",
+        "emergency_stop_portfolio_usd",
+        "max_stop_loss_pct",
+    })
+
+    _BOOL_RULES: frozenset[str] = frozenset({
+        "always_use_stop_loss",
+    })
+
+    def update_param(self, param: str, value: str) -> dict:
+        """
+        Update a single rule parameter at runtime.
+
+        Args:
+            param: Attribute name (must be in _NUMERIC_RULES or _BOOL_RULES).
+            value: String representation of the new value.
+
+        Returns:
+            {"ok": True, "param": param, "old": old, "new": new} on success.
+            {"ok": False, "error": ...} on failure.
+        """
+        if param in self._NUMERIC_RULES:
+            try:
+                new_val: Any = float(value)
+                # Integer fields
+                if param in {"min_trade_interval_seconds", "max_trades_per_day"}:
+                    new_val = int(new_val)
+            except (ValueError, TypeError) as e:
+                return {"ok": False, "error": f"Invalid numeric value: {value!r} — {e}"}
+        elif param in self._BOOL_RULES:
+            new_val = str(value).lower() in {"true", "1", "yes", "on"}
+        else:
+            return {"ok": False, "error": f"Unknown or non-updatable rule: {param!r}"}
+
+        with self._lock:
+            old_val = getattr(self, param)
+            setattr(self, param, new_val)
+
+        logger.warning(
+            f"🔧 RULE UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}"
+        )
+        return {"ok": True, "param": param, "old": old_val, "new": new_val}
+
+    def add_never_trade_pair(self, pair: str) -> dict:
+        """Add a pair to the never-trade blacklist."""
+        pair = pair.upper().strip()
+        with self._lock:
+            self.never_trade_pairs.add(pair)
+        logger.warning(f"🚫 Pair blacklisted (runtime): {pair}")
+        return {"ok": True, "blacklisted": pair, "all": sorted(self.never_trade_pairs)}
+
+    def remove_never_trade_pair(self, pair: str) -> dict:
+        """Remove a pair from the never-trade blacklist."""
+        pair = pair.upper().strip()
+        with self._lock:
+            self.never_trade_pairs.discard(pair)
+        logger.warning(f"✅ Pair un-blacklisted (runtime): {pair}")
+        return {"ok": True, "unblacklisted": pair, "all": sorted(self.never_trade_pairs)}
