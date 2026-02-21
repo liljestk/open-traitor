@@ -337,7 +337,11 @@ class CoinbaseWebSocketFeed:
                         unsub["api_key"] = self.api_key
                         unsub["timestamp"] = timestamp
                         unsub["signature"] = signature
-                    ws.send(json.dumps(unsub))
+                    try:
+                        ws.send(json.dumps(unsub))
+                    except Exception:
+                        logger.debug("WS closed during unsubscribe — will apply on reconnect")
+                        return
 
                 if to_add:
                     timestamp = str(int(time.time()))
@@ -357,7 +361,11 @@ class CoinbaseWebSocketFeed:
                         sub["api_key"] = self.api_key
                         sub["timestamp"] = timestamp
                         sub["signature"] = signature
-                    ws.send(json.dumps(sub))
+                    try:
+                        ws.send(json.dumps(sub))
+                    except Exception:
+                        logger.debug("WS closed during subscribe — will apply on reconnect")
+                        return
 
             if to_remove:
                 logger.info(f"📡 WS unsubscribed from {sorted(to_remove)}")

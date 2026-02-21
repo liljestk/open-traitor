@@ -294,17 +294,12 @@ class Orchestrator:
 
                         # Auto-reset the flag so it doesn't fire on every restart
                         try:
-                            import yaml
-                            settings_path = os.path.join("config", "settings.yaml")
-                            with open(settings_path, "r", encoding="utf-8") as f:
-                                raw = f.read()
-                            raw = raw.replace(
-                                "invalidate_strategic_context: true",
-                                "invalidate_strategic_context: false",
-                            )
-                            with open(settings_path, "w", encoding="utf-8") as f:
-                                f.write(raw)
-                            logger.info("🔄 Auto-reset invalidate_strategic_context → false")
+                            from src.utils.settings_manager import update_section
+                            ok, err, _applied = update_section("trading", {"invalidate_strategic_context": False})
+                            if ok:
+                                logger.info("🔄 Auto-reset invalidate_strategic_context → false")
+                            else:
+                                logger.warning(f"⚠️ Could not auto-reset config flag: {err}")
                         except Exception as e:
                             logger.warning(f"⚠️ Could not auto-reset config flag: {e}")
 
@@ -812,6 +807,11 @@ class Orchestrator:
                 break  # restart the full interval after an early trigger
 
         logger.info("Orchestrator stopped.")
+        # H2 fix: close the asyncio event loop to release resources
+        try:
+            self._loop.close()
+        except Exception:
+            pass
 
     # =========================================================================
     # Portfolio Rotation

@@ -245,7 +245,7 @@ class TelegramManager:
             value = p.get("value", "")
             if not section or not param:
                 return {"ok": False, "error": "section and param are required"}
-            if not sm.is_telegram_allowed(section):
+            if sm.is_telegram_allowed(section) == "blocked":
                 return {"ok": False, "error": f"Section '{section}' is blocked for Telegram updates. Use the Dashboard instead."}
             ok, err, applied = sm.update_section(section, {param: value})
             if ok:

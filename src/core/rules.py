@@ -463,13 +463,15 @@ class AbsoluteRules:
         pair = pair.upper().strip()
         with self._lock:
             self.never_trade_pairs.add(pair)
+            all_pairs = sorted(self.never_trade_pairs)
         logger.warning(f"🚫 Pair blacklisted (runtime): {pair}")
-        return {"ok": True, "blacklisted": pair, "all": sorted(self.never_trade_pairs)}
+        return {"ok": True, "blacklisted": pair, "all": all_pairs}
 
     def remove_never_trade_pair(self, pair: str) -> dict:
         """Remove a pair from the never-trade blacklist."""
         pair = pair.upper().strip()
         with self._lock:
             self.never_trade_pairs.discard(pair)
+            all_pairs = sorted(self.never_trade_pairs)
         logger.warning(f"✅ Pair un-blacklisted (runtime): {pair}")
-        return {"ok": True, "unblacklisted": pair, "all": sorted(self.never_trade_pairs)}
+        return {"ok": True, "unblacklisted": pair, "all": all_pairs}

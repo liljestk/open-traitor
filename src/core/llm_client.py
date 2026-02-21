@@ -44,6 +44,8 @@ class LLMProvider:
     daily_tokens: int = 0
     daily_date: str = ""
     rpm_timestamps: list[float] = field(default_factory=list)
+    # Per-provider lock for thread-safe rate/quota tracking (H1 fix)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 def build_providers(
@@ -210,24 +212,25 @@ class LLMClient:
 
         now = time.monotonic()
 
-        # Cooldown check
-        if now < p.cooldown_until:
-            return False
-
-        # Daily token budget
-        today = dt_date.today().isoformat()
-        if p.daily_date != today:
-            p.daily_tokens = 0
-            p.daily_date = today
-        if p.daily_token_limit > 0 and p.daily_tokens >= p.daily_token_limit:
-            return False
-
-        # RPM check
-        if p.rpm_limit > 0:
-            cutoff = time.time() - 60.0
-            p.rpm_timestamps = [t for t in p.rpm_timestamps if t > cutoff]
-            if len(p.rpm_timestamps) >= p.rpm_limit:
+        with p._lock:
+            # Cooldown check
+            if now < p.cooldown_until:
                 return False
+
+            # Daily token budget
+            today = dt_date.today().isoformat()
+            if p.daily_date != today:
+                p.daily_tokens = 0
+                p.daily_date = today
+            if p.daily_token_limit > 0 and p.daily_tokens >= p.daily_token_limit:
+                return False
+
+            # RPM check
+            if p.rpm_limit > 0:
+                cutoff = time.time() - 60.0
+                p.rpm_timestamps = [t for t in p.rpm_timestamps if t > cutoff]
+                if len(p.rpm_timestamps) >= p.rpm_limit:
+                    return False
 
         return True
 
@@ -235,16 +238,18 @@ class LLMClient:
         """Record a successful call for rate/quota tracking."""
         if p.is_local:
             return
-        p.rpm_timestamps.append(time.time())
-        today = dt_date.today().isoformat()
-        if p.daily_date != today:
-            p.daily_tokens = 0
-            p.daily_date = today
-        p.daily_tokens += total_tokens
+        with p._lock:
+            p.rpm_timestamps.append(time.time())
+            today = dt_date.today().isoformat()
+            if p.daily_date != today:
+                p.daily_tokens = 0
+                p.daily_date = today
+            p.daily_tokens += total_tokens
 
     def _activate_cooldown(self, p: LLMProvider, reason: str) -> None:
         """Put a provider on cooldown after a rate-limit or quota error."""
-        p.cooldown_until = time.monotonic() + p.cooldown_seconds
+        with p._lock:
+            p.cooldown_until = time.monotonic() + p.cooldown_seconds
         logger.warning(
             f"⏸️ Provider '{p.name}' cooldown ({p.cooldown_seconds}s): {reason}"
         )
