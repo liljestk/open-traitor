@@ -454,7 +454,7 @@ def get_stats_summary():
             stats["win_rate"] = None
         if snapshot:
             stats["portfolio"] = dict(snapshot)
-        stats["currency"] = _config.get("trading", {}).get("quote_currency", "EUR")
+        stats["currency"] = _get_config().get("trading", {}).get("quote_currency", "EUR")
         return stats
     except Exception as exc:
         logger.exception("stats/summary error")
@@ -638,10 +638,64 @@ def close_simulated_trade_route(sim_id: int):
     if close_price <= 0:
         close_price = target["entry_price"]  # Fallback to entry price
 
-    result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
+        result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
     if not result:
         raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found or already closed")
     return result
+
+@app.get("/api/executive_summary", summary="Combined analytics across all profiles")
+def get_executive_summary():
+    """Returns aggregated high-level stats across all configuration profiles found in 'data/'."""
+    profiles = []
+    total_pnl = 0.0
+    total_trades = 0
+    active_pairs = set()
+
+    data_dir = os.path.join(os.getcwd(), "data")
+    if os.path.exists(data_dir):
+        from src.utils.stats import StatsDB
+        for file in os.listdir(data_dir):
+            if file.startswith("stats") and file.endswith(".db"):
+                # Extract profile name from stats_profile.db or stats.db
+                pname = file.replace("stats_", "").replace(".db", "")
+                if pname == "stats":
+                    pname = "default"
+                
+                db_path = os.path.join(data_dir, file)
+                try:
+                    conn = sqlite3.connect(db_path, check_same_thread=False)
+                    conn.row_factory = sqlite3.Row
+                    
+                    row = conn.execute("SELECT COUNT(*) as t, SUM(pnl) as p FROM trades WHERE pnl IS NOT NULL").fetchone()
+                    if row and row["t"] > 0:
+                        t = row["t"]
+                        p = row["p"] or 0.0
+                        total_trades += t
+                        total_pnl += p
+                        
+                        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                        pairs = conn.execute("SELECT DISTINCT pair FROM agent_reasoning WHERE ts >= ?", (cutoff,)).fetchall()
+                        active_pairs.update(pr["pair"] for pr in pairs)
+                        
+                        profiles.append({
+                            "profile": pname,
+                            "trades": t,
+                            "pnl": round(p, 2),
+                            "active_pairs_24h": len(pairs)
+                        })
+                except Exception as e:
+                    logger.warning(f"Error reading DB {file}: {e}")
+                finally:
+                    conn.close()
+
+    return {
+        "profiles": profiles,
+        "combined": {
+            "total_trades": total_trades,
+            "total_pnl": round(total_pnl, 2),
+            "total_active_pairs_24h": len(active_pairs)
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +1011,7 @@ def _langfuse_url(trace_id: Optional[str]) -> Optional[str]:
         if url:
             return url
     # Fallback: best-effort URL (may not work if project ID is needed)
-    host = _config.get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
+    host = _get_config().get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
     return f"{host}/trace/{trace_id}"
 
 
@@ -1036,7 +1090,7 @@ def update_settings(body: _SettingsUpdateBody):
             ok, err, changes = _sm_apply_preset(body.preset)
             if not ok:
                 raise HTTPException(status_code=400, detail=err)
-            _sm_push_runtime(_rules_instance, _config, changes)
+            _sm_push_runtime(_rules_instance, _get_config(), changes)
             return {
                 "ok": True,
                 "preset": body.preset,
@@ -1055,7 +1109,7 @@ def update_settings(body: _SettingsUpdateBody):
         if not ok:
             raise HTTPException(status_code=400, detail=err)
 
-        _sm_push_section(body.section, changes, _rules_instance, _config)
+        _sm_push_section(body.section, changes, _rules_instance, _get_config())
         return {
             "ok": True,
             "section": body.section,
@@ -1145,15 +1199,15 @@ def update_llm_providers(body: _ProvidersUpdateBody):
         # Hot-reload the LLMClient if available
         if _llm_client:
             from src.core.llm_client import build_providers
-            llm_config = _config.get("llm", {})
+            llm_config = _get_config().get("llm", {})
             ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_get_config().get("model", "llama3.1:8b"))
             new_providers = build_providers(
                 saved,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
-                fallback_max_retries=llm_config.get("max_retries", 3),
+                fallback_timeout=llm_get_config().get("timeout", 60),
+                fallback_max_retries=llm_get_config().get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
 
@@ -1207,15 +1261,15 @@ def update_api_keys(body: _ApiKeysUpdateBody):
         if _llm_client:
             from src.core.llm_client import build_providers
             saved_providers = _sm_get_providers()
-            llm_config = _config.get("llm", {})
+            llm_config = _get_config().get("llm", {})
             ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_get_config().get("model", "llama3.1:8b"))
             new_providers = build_providers(
                 saved_providers,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
-                fallback_max_retries=llm_config.get("max_retries", 3),
+                fallback_timeout=llm_get_config().get("timeout", 60),
+                fallback_max_retries=llm_get_config().get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
 

@@ -29,13 +29,19 @@ from src.utils.logger import get_logger
 
 logger = get_logger("stats")
 
-DB_PATH = os.path.join("data", "stats.db")
+def get_db_path() -> str:
+    """Return the active SQLite DB path, based on profile."""
+    profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+    filename = f"stats_{profile}.db" if profile else "stats.db"
+    return os.environ.get("AUTO_TRAITOR_STATS_DB", os.path.join("data", filename))
 
 
 class StatsDB:
     """Thread-safe SQLite statistics database."""
 
-    def __init__(self, db_path: str = DB_PATH):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = get_db_path()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._db_path = db_path
         self._local = threading.local()

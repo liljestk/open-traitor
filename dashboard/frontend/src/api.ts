@@ -4,12 +4,18 @@
  * works seamlessly; in Docker the frontend is served from the same port.
  */
 
+import { useLiveStore } from './store'
+
 const BASE = '/api'
 
 // ─── Generic fetch wrapper ─────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, options)
+  const profile = useLiveStore.getState().profile
+  const sep = path.includes('?') ? '&' : '?'
+  const finalPath = profile ? `${path}${sep}profile=${encodeURIComponent(profile)}` : path
+
+  const res = await fetch(`${BASE}${finalPath}`, options)
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
@@ -355,7 +361,9 @@ export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: 
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = window.location.hostname
   const port = window.location.port || (proto === 'wss' ? '443' : '80')
-  const ws = new WebSocket(`${proto}://${host}:${port}/ws/live`)
+  const profile = useLiveStore.getState().profile
+  const qs = profile ? `?profile=${encodeURIComponent(profile)}` : ''
+  const ws = new WebSocket(`${proto}://${host}:${port}/ws/live${qs}`)
   ws.onmessage = (e) => {
     try {
       onMessage(JSON.parse(e.data))

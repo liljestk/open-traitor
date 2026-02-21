@@ -25,7 +25,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger("utils.settings_manager")
 
-_SETTINGS_PATH = os.path.join("config", "settings.yaml")
+def get_settings_path() -> str:
+    """Return the active settings path, overridden by AUTO_TRAITOR_CONFIG env var if set."""
+    return os.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
 _lock = threading.RLock()
 
 
@@ -51,6 +53,7 @@ _RULE_SCHEMA: dict[str, dict[str, Any]] = {
 
 _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "mode":                         {"type": str, "enum": ["paper", "live"]},
+    "exchange":                     {"type": str, "enum": ["coinbase", "nordnet"]},
     "pairs":                        {"type": list},
     "pair_discovery":               {"type": str, "enum": ["all", "configured"]},
     "quote_currency":               {"type": str},
@@ -112,6 +115,10 @@ _HIGH_STAKES_SCHEMA: dict[str, dict[str, Any]] = {
 }
 
 _TELEGRAM_SCHEMA: dict[str, dict[str, Any]] = {
+    "mode":                        {"type": str, "enum": ["controller", "reporting"]},
+    "bot_token":                   {"type": str},
+    "chat_id":                     {"type": str},
+    "authorized_users":            {"type": list},
     "status_update_interval":      {"type": int,   "min": 0, "max": 86_400},
     "notify_on_trade":             {"type": bool},
     "notify_on_signal_confidence": {"type": float, "min": 0.0, "max": 1.0},
@@ -555,15 +562,17 @@ PRESETS = {
 # Core I/O
 # ═══════════════════════════════════════════════════════════════════════════
 
-def load_settings(path: str = _SETTINGS_PATH) -> dict:
+def load_settings(path: str = None) -> dict:
     """Load the full settings.yaml as a dict."""
+    path = path or get_settings_path()
     with _lock:
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
 
-def save_settings(settings: dict, path: str = _SETTINGS_PATH) -> None:
+def save_settings(settings: dict, path: str = None) -> None:
     """Atomically write settings to YAML (write to temp, then rename)."""
+    path = path or get_settings_path()
     with _lock:
         dir_path = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".yaml", dir=dir_path)
@@ -588,8 +597,9 @@ def save_settings(settings: dict, path: str = _SETTINGS_PATH) -> None:
             raise
 
 
-def get_full_settings(path: str = _SETTINGS_PATH) -> dict:
+def get_full_settings(path: str = None) -> dict:
     """Return the full settings dict plus metadata for the API."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     return {
         "settings": cfg,
@@ -600,8 +610,9 @@ def get_full_settings(path: str = _SETTINGS_PATH) -> dict:
     }
 
 
-def get_section(section: str, path: str = _SETTINGS_PATH) -> dict:
+def get_section(section: str, path: str = None) -> dict:
     """Return a single section from settings.yaml."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     if "." in section:
         parts = section.split(".", 1)
@@ -690,7 +701,7 @@ def validate_section(section: str, updates: dict[str, Any]) -> tuple[bool, list[
 def update_section(
     section: str,
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     """
     Update one or more fields in any settings section.
@@ -701,6 +712,7 @@ def update_section(
 
     Returns (ok, error_message, applied_changes).
     """
+    path = path or get_settings_path()
     ok, errors, cast_updates = validate_section(section, updates)
     if not ok:
         return False, "; ".join(errors), {}
@@ -729,11 +741,11 @@ def update_section(
 # Convenience wrappers (backwards-compatible)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_absolute_rules(path: str = _SETTINGS_PATH) -> dict:
+def get_absolute_rules(path: str = None) -> dict:
     return get_section("absolute_rules", path)
 
 
-def get_trading_section(path: str = _SETTINGS_PATH) -> dict:
+def get_trading_section(path: str = None) -> dict:
     return get_section("trading", path)
 
 
@@ -744,14 +756,14 @@ def validate_rule(key: str, value: Any) -> tuple[bool, str]:
 
 def update_absolute_rules(
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     return update_section("absolute_rules", updates, path)
 
 
 def update_trading_params(
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     return update_section("trading", updates, path)
 
@@ -762,12 +774,13 @@ def update_trading_params(
 
 def apply_preset(
     preset_name: str,
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     """
     Apply a named preset (disabled, conservative, moderate, aggressive).
     Returns (ok, error, applied_changes).
     """
+    path = path or get_settings_path()
     preset = PRESETS.get(preset_name)
     if preset is None:
         return (
@@ -838,8 +851,9 @@ def push_section_to_runtime(
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-def is_trading_enabled(path: str = _SETTINGS_PATH) -> bool:
+def is_trading_enabled(path: str = None) -> bool:
     """Quick check: is trading effectively enabled (non-zero limits)?"""
+    path = path or get_settings_path()
     rules = get_absolute_rules(path)
     return (
         rules.get("max_single_trade", 0) > 0
@@ -1010,12 +1024,13 @@ def validate_providers_list(providers: list[dict]) -> tuple[bool, str]:
 
 def update_llm_providers(
     providers: list[dict],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, list[dict]]:
     """
     Validate and persist a new LLM providers list.
     Returns (ok, error_message, saved_providers).
     """
+    path = path or get_settings_path()
     ok, err = validate_providers_list(providers)
     if not ok:
         return False, err, []

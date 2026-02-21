@@ -44,11 +44,13 @@ class TelegramBot:
         authorized_users: list[str],
         chat_handler=None,
         on_command: Optional[Callable] = None,
+        mode: str = "controller",
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.chat_handler = chat_handler  # TelegramChatHandler
         self.on_command = on_command  # Legacy fallback
+        self.mode = mode
         self._app = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -88,6 +90,10 @@ class TelegramBot:
 
     async def _start_bot(self) -> None:
         """Start the Telegram bot with polling."""
+        if self.mode == "reporting":
+            logger.info("🤖 Telegram bot in REPORTING mode (no polling, outbound only).")
+            return
+
         from telegram import Update
         from telegram.ext import (
             Application,

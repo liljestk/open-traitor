@@ -34,13 +34,13 @@ from src.utils.tracer import LLMTracer, get_llm_tracer
 
 def load_config() -> dict:
     """Load configuration from settings.yaml."""
-    config_path = os.path.join("config", "settings.yaml")
+    config_path = os.path.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
     if not os.path.exists(config_path):
         print(f"❌ Config file not found: {config_path}")
         sys.exit(1)
 
     with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def print_banner(mode: str) -> None:
@@ -82,7 +82,18 @@ def main():
         default="paper",
         help="Trading mode",
     )
+    parser.add_argument(
+        "--config",
+        default="config/settings.yaml",
+        help="Path to the configuration file (determines profile)",
+    )
     args = parser.parse_args()
+
+    # Determine profile name and set env vars
+    config_name = os.path.splitext(os.path.basename(args.config))[0]
+    profile = config_name.replace("settings_", "") if config_name.startswith("settings_") else config_name
+    os.environ["AUTO_TRAITOR_PROFILE"] = profile
+    os.environ["AUTO_TRAITOR_CONFIG"] = args.config
 
     # Load environment
     load_dotenv(os.path.join("config", ".env"))
@@ -219,20 +230,33 @@ def main():
         else:
             logger.warning("⚠️ Ollama not responding — will retry during operation")
 
-    # Exchange Client
-    exchange: ExchangeClient = CoinbaseClient(
-        api_key=os.environ.get("COINBASE_API_KEY"),
-        api_secret=os.environ.get("COINBASE_API_SECRET"),
-        paper_mode=paper_mode,
-        paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
-    )
+    # Exchange Client Selection
+    exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
+    
+    if exchange_type == "nordnet":
+        try:
+            from src.core.nordnet_client import NordnetClient
+            exchange: ExchangeClient = NordnetClient(
+                paper_mode=paper_mode,
+                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
+            )
+        except ImportError:
+            logger.error("NordnetClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
+            exchange = CoinbaseClient(paper_mode=True)
+    else:
+        exchange: ExchangeClient = CoinbaseClient(
+            api_key=os.environ.get("COINBASE_API_KEY"),
+            api_secret=os.environ.get("COINBASE_API_SECRET"),
+            paper_mode=paper_mode,
+            paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
+        )
 
     # -------------------------------------------------------------------------
-    # Coinbase API health-check & dynamic currency / pair adaption
+    # API health-check & dynamic currency / pair adaption
     # -------------------------------------------------------------------------
     conn = exchange.check_connection()
     if conn["ok"]:
-        logger.info(f"✅ Coinbase API: {conn['message']}")
+        logger.info(f"✅ Exchange API ({exchange.__class__.__name__}): {conn['message']}")
         if conn.get("non_zero_accounts") is not None:
             logger.info(
                 f"   Accounts with balance: {conn['non_zero_accounts']} / "
@@ -240,13 +264,14 @@ def main():
             )
     else:
         err = conn.get("error", "unknown error")
-        logger.error(f"❌ Coinbase API connection failed: {err}")
+        logger.error(f"❌ Exchange API connection failed: {err}")
         if not paper_mode:
-            logger.error(
-                "Cannot run in LIVE mode without Coinbase API access. "
-                "Check COINBASE_API_KEY / COINBASE_API_SECRET."
+            logger.warning(
+                "Cannot run in LIVE mode without Exchange API access. "
+                "Automatically dropping to paper mode so other services remain online."
             )
-            sys.exit(1)
+            paper_mode = True
+            exchange._paper_mode = True
         else:
             logger.warning("Continuing in paper mode — using mock market data.")
 
@@ -329,31 +354,34 @@ def main():
 
     # Telegram Bot
     telegram_bot = None
-    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_config = config.get("telegram", {})
+    telegram_token = telegram_config.get("bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = telegram_config.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+    
     if telegram_token and telegram_chat_id:
         from src.telegram_bot.bot import TelegramBot
 
         # SECURITY: TELEGRAM_AUTHORIZED_USERS is REQUIRED.
-        # We do NOT fall back to chat_id because chat_id could be a group,
-        # which would let ANY group member control the bot.
-        authorized_raw = os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
-        if not authorized_raw.strip():
+        authorized_raw = telegram_config.get("authorized_users") or os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
+        if not authorized_raw:
             logger.error(
-                "❌ TELEGRAM_AUTHORIZED_USERS is not set! "
-                "This is REQUIRED for security. "
-                "Set it to your numeric Telegram user ID. "
-                "Message @userinfobot on Telegram to get your ID."
+                "❌ Telegram authorized_users is not set! "
+                "This is REQUIRED for security. Set it in settings.yaml or env vars."
             )
             sys.exit(1)
 
-        authorized_list = [u.strip() for u in authorized_raw.split(",") if u.strip()]
+        if isinstance(authorized_raw, list):
+            authorized_list = [str(u).strip() for u in authorized_raw if str(u).strip()]
+        else:
+            authorized_list = [u.strip() for u in str(authorized_raw).split(",") if u.strip()]
+            
         logger.info(f"🔒 Telegram authorized users: {authorized_list}")
 
         telegram_bot = TelegramBot(
             bot_token=telegram_token,
             chat_id=telegram_chat_id,
             authorized_users=authorized_list,
+            mode=telegram_config.get("mode", "controller"),
         )
         telegram_bot.start()
         logger.info("📱 Telegram bot started")

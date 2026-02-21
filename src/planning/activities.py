@@ -30,7 +30,6 @@ from src.utils.logger import get_logger
 
 logger = get_logger("planning.activities")
 
-_DB_PATH = os.path.join("data", "stats.db")
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _PLANNING_MODEL = os.environ.get("PLANNING_MODEL", os.environ.get("OLLAMA_MODEL", "llama3.1:8b"))
 
@@ -97,7 +96,8 @@ def _get_planning_tracer():
 # --- Helpers ------------------------------------------------------------------
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_DB_PATH, timeout=5)
+    from src.utils.stats import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -185,8 +185,8 @@ async def fetch_portfolio_history(days: int = 7) -> dict:
     currency_symbol = "$"
     native_currency = "USD"
     try:
-        import yaml
-        settings_path = os.path.join(os.path.dirname(_DB_PATH), "..", "config", "settings.yaml")
+        from src.utils.settings_manager import get_settings_path
+        settings_path = get_settings_path()
         if os.path.exists(settings_path):
             with open(settings_path) as f:
                 _cfg = yaml.safe_load(f) or {}

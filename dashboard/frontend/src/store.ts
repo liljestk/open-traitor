@@ -4,6 +4,8 @@ import type { LiveEvent } from './api'
 const MAX_EVENTS = 200
 
 interface LiveStore {
+  profile: string
+  setProfile: (p: string) => void
   events: LiveEvent[]
   connected: boolean
   setConnected: (v: boolean) => void
@@ -12,6 +14,11 @@ interface LiveStore {
 }
 
 export const useLiveStore = create<LiveStore>((set) => ({
+  profile: localStorage.getItem('auto_traitor_profile') || '',
+  setProfile: (profile) => {
+    localStorage.setItem('auto_traitor_profile', profile)
+    set({ profile })
+  },
   events: [],
   connected: false,
   setConnected: (connected) => set({ connected }),

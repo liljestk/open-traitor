@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 from src.utils.logger import get_logger
@@ -11,6 +12,10 @@ class StateManager:
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
 
+    def _get_redis_key(self, base_key: str) -> str:
+        profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+        return f"{profile}:{base_key}" if profile else base_key
+
     def sync_to_redis(self):
         """Sync current state to Redis for the dashboard / other services."""
         orch = self.orchestrator
@@ -18,12 +23,12 @@ class StateManager:
             return
         try:
             orch.redis.set(
-                "agent:state",
+                self._get_redis_key("agent:state"),
                 json.dumps(orch.state.to_summary(), default=str),
                 ex=300,
             )
             orch.redis.set(
-                "agent:rules_status",
+                self._get_redis_key("agent:rules_status"),
                 json.dumps(orch.rules.get_status(), default=str),
                 ex=300,
             )
@@ -32,7 +37,7 @@ class StateManager:
                 pending_snapshot = dict(orch._pending_approvals) if orch._pending_approvals else None
             if pending_snapshot:
                 orch.redis.set(
-                    "agent:pending_approvals",
+                    self._get_redis_key("agent:pending_approvals"),
                     json.dumps(pending_snapshot, default=str),
                     ex=86400,  # 24h TTL
                 )
@@ -44,7 +49,7 @@ class StateManager:
         if not orch.redis:
             return
         try:
-            data = orch.redis.get("agent:pending_approvals")
+            data = orch.redis.get(self._get_redis_key("agent:pending_approvals"))
             if not data:
                 return
             loaded: dict = json.loads(data)
