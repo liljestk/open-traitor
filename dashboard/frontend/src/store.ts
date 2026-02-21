@@ -14,10 +14,14 @@ function currencyForProfile(profile: string): string {
   return PROFILE_CURRENCIES[profile.toLowerCase()] ?? 'EUR'
 }
 
+export type Density = 'comfortable' | 'compact'
+
 interface LiveStore {
   profile: string
   currency: string
+  density: Density
   setProfile: (p: string) => void
+  setDensity: (d: Density) => void
   events: LiveEvent[]
   connected: boolean
   setConnected: (v: boolean) => void
@@ -26,13 +30,19 @@ interface LiveStore {
 }
 
 const initialProfile = localStorage.getItem('auto_traitor_profile') || ''
+const initialDensity = (localStorage.getItem('auto_traitor_density') || 'comfortable') as Density
 
 export const useLiveStore = create<LiveStore>((set) => ({
   profile: initialProfile,
   currency: currencyForProfile(initialProfile),
+  density: initialDensity,
   setProfile: (profile) => {
     localStorage.setItem('auto_traitor_profile', profile)
     set({ profile, currency: currencyForProfile(profile) })
+  },
+  setDensity: (density) => {
+    localStorage.setItem('auto_traitor_density', density)
+    set({ density })
   },
   events: [],
   connected: false,

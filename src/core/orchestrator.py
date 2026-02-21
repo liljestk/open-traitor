@@ -668,6 +668,12 @@ class Orchestrator:
                 # Sync state to Redis
                 self.state_manager.sync_to_redis()
 
+                # Publish trailing stop state to Redis for dashboard
+                self._publish_trailing_stops()
+
+                # Process any HITL commands from dashboard
+                self._process_dashboard_commands()
+
                 # Prune stale pending approvals (> 1 hour old)
                 self.state_manager.prune_stale_approvals()
 
@@ -853,3 +859,111 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Rotation error: {e}", exc_info=True)
+
+    # =========================================================================
+    # Dashboard Integration — HITL Commands & Trailing Stop State Publishing
+    # =========================================================================
+
+    def _publish_trailing_stops(self) -> None:
+        """Publish current trailing stop state to Redis for the dashboard."""
+        if not self.redis:
+            return
+        try:
+            stops = self.trailing_stops.get_all_stops()
+            import json as _json
+            self.redis.set(
+                "trailing_stops:state",
+                _json.dumps(stops, default=str),
+                ex=300,  # 5 min TTL
+            )
+        except Exception as e:
+            logger.debug(f"Failed to publish trailing stops: {e}")
+
+    def _process_dashboard_commands(self) -> None:
+        """Check Redis for HITL commands published by the dashboard."""
+        if not self.redis:
+            return
+        try:
+            import json as _json
+            # Process up to 5 commands per cycle to avoid blocking
+            for _ in range(5):
+                raw = self.redis.lpop("dashboard:commands_queue")
+                if not raw:
+                    break
+                try:
+                    cmd = _json.loads(raw)
+                except Exception:
+                    continue
+
+                action = cmd.get("action")
+                pair = cmd.get("pair", "")
+                logger.info(f"📥 Dashboard HITL command: {action} for {pair}")
+
+                if action == "liquidate":
+                    self._handle_liquidate(pair)
+                elif action == "tighten_stop":
+                    self._handle_tighten_stop(pair)
+                elif action == "pause":
+                    self._handle_pause_pair(pair)
+                else:
+                    logger.warning(f"Unknown dashboard command: {action}")
+        except Exception as e:
+            logger.debug(f"Dashboard command processing error: {e}")
+
+    def _handle_liquidate(self, pair: str) -> None:
+        """Emergency liquidate a position."""
+        try:
+            price = self.state.current_prices.get(pair, 0)
+            result = self.executor.close_position_by_pair(pair, price, "dashboard_liquidate")
+            if result:
+                self.trailing_stops.remove_stop(pair)
+                pnl = result.get("pnl", 0)
+                msg = f"🔴 Dashboard liquidation: {pair} at {format_currency(price)} — PnL: {format_currency(pnl or 0)}"
+                logger.warning(msg)
+                if self.telegram:
+                    self.telegram.send_alert(msg)
+                self.chat_handler.queue_event(msg)
+            else:
+                logger.warning(f"Dashboard liquidation: no open position for {pair}")
+        except Exception as e:
+            logger.error(f"Dashboard liquidation failed for {pair}: {e}")
+
+    def _handle_tighten_stop(self, pair: str) -> None:
+        """Move trailing stop to breakeven."""
+        try:
+            stop = self.trailing_stops.get_stop(pair)
+            if stop:
+                entry = stop.entry_price
+                # Tighten stop to entry price (breakeven)
+                stop.stop_price = entry
+                msg = f"🎯 Dashboard tightened stop on {pair} to breakeven ({format_currency(entry)})"
+                logger.info(msg)
+                if self.telegram:
+                    self.telegram.send_alert(msg)
+                self.chat_handler.queue_event(msg)
+            else:
+                logger.warning(f"No trailing stop found for {pair}")
+        except Exception as e:
+            logger.error(f"Dashboard tighten-stop failed for {pair}: {e}")
+
+    def _handle_pause_pair(self, pair: str) -> None:
+        """Exclude a pair from trading."""
+        try:
+            from src.utils.settings_manager import load_settings, save_section
+            settings = load_settings()
+            excluded = settings.get("absolute_rules", {}).get("never_trade_pairs", [])
+            if pair not in excluded:
+                excluded.append(pair)
+                save_section("absolute_rules", {"never_trade_pairs": excluded})
+                self.rules._never_trade = set(excluded)
+                if pair in self.pairs:
+                    self.pairs.remove(pair)
+                msg = f"⏸️ Dashboard paused trading on {pair}"
+                logger.info(msg)
+                if self.telegram:
+                    self.telegram.send_alert(msg)
+                self.chat_handler.queue_event(msg)
+            else:
+                logger.info(f"{pair} already in never_trade list")
+        except Exception as e:
+            logger.error(f"Dashboard pause-pair failed for {pair}: {e}")

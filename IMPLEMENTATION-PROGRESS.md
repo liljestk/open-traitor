@@ -62,15 +62,41 @@
 - **Page transitions** — `PageTransition` wrapper using framer-motion, applied to all 8 pages
 - Updated `CycleExplorer`, `TradesLog` to use dynamic `fmtCurrency` from store instead of hardcoded EUR
 
-### Deferred (Needs Backend Work)
-- TradingView charts integration
-- Equity curve / analytics hub  
-- Risk heatmaps / VaR visualization
-- HITL intervention buttons (Liquidate, Tighten Stop-Loss)
-- Trade anatomy deep-dive view
-- News aggregation view
-- Watchlist / asset monitor
-- Density controls (compact/comfortable toggle)
+### Deferred (Needs Backend Work) — ✅ All Complete
+
+#### Backend Additions
+- **10 new API endpoints** in `src/dashboard/server.py`:
+  - `GET /api/portfolio/history` — portfolio snapshots time-series
+  - `GET /api/analytics` — combined performance stats, best/worst trades, daily summaries, win/loss
+  - `GET /api/portfolio/exposure` — position concentration breakdown with % allocation
+  - `GET /api/news` — articles from Redis `news:latest`
+  - `GET /api/watchlist` — active pairs + live prices + scan results
+  - `GET /api/candles` — OHLCV from exchange client
+  - `POST /api/trade/{pair}/command` — HITL commands (liquidate, tighten_stop, pause) via Redis queue
+  - `GET /api/trade/commands/history` — audit trail
+  - `GET /api/trailing-stops` — read from Redis `trailing_stops:state`
+
+#### Orchestrator HITL Integration
+- New methods in `src/core/orchestrator.py`:
+  - `_publish_trailing_stops()` — publishes stop state to Redis each cycle
+  - `_process_dashboard_commands()` — polls command queue from Redis
+  - `_handle_liquidate(pair)` — emergency market sell
+  - `_handle_tighten_stop(pair)` — move stop to breakeven
+  - `_handle_pause_pair(pair)` — add to never_trade list
+
+#### Frontend Pages & Features
+- **TradingView Charts** — `CandlestickChart.tsx` component wrapping `lightweight-charts` v5, used in Watchlist and CyclePlayback
+- **Analytics Hub** — `pages/Analytics.tsx` with equity curve, drawdown chart, daily PnL bar chart, stat cards, time range selector, best/worst trades leaderboard
+- **Risk & Exposure** — `pages/RiskExposure.tsx` with portfolio concentration pie chart, trailing stops panel, daily drawdown chart, risk KPI cards
+- **News Feed** — `pages/NewsFeed.tsx` with sentiment badges, article cards, sentiment summary bar, auto-refresh
+- **Watchlist** — `pages/Watchlist.tsx` with active pairs list, live prices, top movers, TradingView candlestick chart per pair
+- **HITL Intervention Buttons** — Added to LiveMonitor: Liquidate, Tighten Stop, Pause buttons per position with confirmation dialog and command history
+- **Trade Anatomy Enhancement** — CyclePlayback now shows 5-minute candlestick chart context with entry/exit trade markers
+- **Density Controls** — Comfortable/Compact toggle in Settings (persisted to localStorage), applied globally via CSS
+
+#### Navigation Updates
+- Added routes: `/analytics`, `/watchlist`, `/risk`, `/news`
+- Updated sidebar nav with new items in Trading (Analytics, Watchlist) and System (Risk & Exposure, News Feed) sections
 
 ---
 

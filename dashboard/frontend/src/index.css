@@ -86,3 +86,40 @@ input, select, textarea {
 .font-mono {
   font-family: var(--font-mono) !important;
 }
+
+/* ── Density controls ── */
+.density-compact {
+  font-size: 13px;
+}
+.density-compact .p-6 {
+  padding: 12px !important;
+}
+.density-compact .space-y-4 > * + * {
+  margin-top: 8px !important;
+}
+.density-compact .space-y-6 > * + * {
+  margin-top: 12px !important;
+}
+.density-compact .gap-4 {
+  gap: 8px !important;
+}
+.density-compact .gap-3 {
+  gap: 6px !important;
+}
+.density-compact .rounded-xl {
+  border-radius: 8px !important;
+}
+.density-compact .px-4 {
+  padding-left: 10px !important;
+  padding-right: 10px !important;
+}
+.density-compact .py-3 {
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+}
+.density-compact .text-xl {
+  font-size: 1rem !important;
+}
+.density-compact .text-2xl {
+  font-size: 1.125rem !important;
+}

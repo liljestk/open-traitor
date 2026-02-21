@@ -1293,6 +1293,286 @@ def update_api_keys(body: _ApiKeysUpdateBody):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _utcnow_str() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# REST — Portfolio History & Analytics
+# ---------------------------------------------------------------------------
+
+@app.get("/api/portfolio/history", summary="Portfolio value time-series for equity curve")
+def get_portfolio_history(hours: int = Query(720, ge=1, le=8760)):
+    """Returns portfolio snapshots as time-series data for charting."""
+    db = _require_db()
+    try:
+        rows = db.get_portfolio_history(hours=hours)
+        return _sanitize_floats({"history": rows, "count": len(rows)})
+    except Exception as exc:
+        logger.exception("portfolio/history error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/analytics", summary="Comprehensive performance analytics")
+def get_analytics(hours: int = Query(720, ge=1, le=8760)):
+    """Combined analytics dashboard data: performance, best/worst, daily summaries, win/loss stats."""
+    db = _require_db()
+    try:
+        perf = db.get_performance_summary(hours=hours)
+        best_worst = db.get_best_worst_trades(hours=hours)
+        days = max(1, hours // 24)
+        summaries = db.get_daily_summaries(days=days)
+        win_loss = db.get_win_loss_stats(hours=hours)
+        portfolio_range = db.get_portfolio_range(hours=hours)
+
+        return _sanitize_floats({
+            "performance": perf,
+            "best_worst": best_worst,
+            "daily_summaries": summaries,
+            "win_loss": win_loss,
+            "portfolio_range": portfolio_range,
+        })
+    except Exception as exc:
+        logger.exception("analytics error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# REST — Portfolio Exposure (position concentration)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/portfolio/exposure", summary="Current portfolio position concentration")
+def get_portfolio_exposure():
+    """Returns the latest portfolio snapshot with position breakdown."""
+    db = _require_db()
+    conn = _fresh_conn()
+    try:
+        row = conn.execute(
+            """SELECT portfolio_value, cash_balance, return_pct, total_pnl,
+                      max_drawdown, open_positions, current_prices, fear_greed_value,
+                      high_stakes_active, ts
+               FROM portfolio_snapshots ORDER BY ts DESC LIMIT 1"""
+        ).fetchone()
+        if not row:
+            return {"exposure": None}
+
+        data = dict(row)
+        # Parse JSON fields
+        for field in ("open_positions", "current_prices"):
+            if isinstance(data.get(field), str):
+                try:
+                    data[field] = json.loads(data[field])
+                except Exception:
+                    pass
+
+        # Compute concentration breakdown
+        positions = data.get("open_positions") or {}
+        prices = data.get("current_prices") or {}
+        portfolio_val = data.get("portfolio_value") or 1
+
+        breakdown = []
+        allocated = 0.0
+        for pair, pos in positions.items():
+            qty = pos.get("quantity", 0) if isinstance(pos, dict) else 0
+            price = prices.get(pair, pos.get("entry_price", 0)) if isinstance(pos, dict) else 0
+            value = qty * price
+            pct = (value / portfolio_val * 100) if portfolio_val else 0
+            allocated += value
+            entry_price = pos.get("entry_price", 0) if isinstance(pos, dict) else 0
+            pnl_pct = ((price - entry_price) / entry_price * 100) if entry_price else 0
+            breakdown.append({
+                "pair": pair,
+                "quantity": qty,
+                "entry_price": entry_price,
+                "current_price": price,
+                "value": round(value, 2),
+                "pct_of_portfolio": round(pct, 1),
+                "pnl_pct": round(pnl_pct, 2),
+            })
+
+        cash_pct = ((portfolio_val - allocated) / portfolio_val * 100) if portfolio_val else 100
+        data["breakdown"] = sorted(breakdown, key=lambda x: x["value"], reverse=True)
+        data["cash_pct"] = round(cash_pct, 1)
+        data["allocated_pct"] = round(100 - cash_pct, 1)
+
+        return _sanitize_floats({"exposure": data})
+    except Exception as exc:
+        logger.exception("portfolio/exposure error")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# REST — News Feed
+# ---------------------------------------------------------------------------
+
+@app.get("/api/news", summary="Recent news headlines with sentiment")
+def get_news(count: int = Query(30, ge=1, le=100)):
+    """Returns recent news articles from Redis cache (populated by news worker)."""
+    if not _redis_client:
+        return {"articles": [], "count": 0, "source": "unavailable"}
+    try:
+        raw = _redis_client.get("news:latest")
+        if not raw:
+            return {"articles": [], "count": 0, "source": "redis_empty"}
+        articles = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+        # Ensure list format and limit
+        if isinstance(articles, list):
+            articles = articles[:count]
+        else:
+            articles = []
+        return {"articles": articles, "count": len(articles), "source": "redis"}
+    except Exception as exc:
+        logger.warning(f"news endpoint error: {exc}")
+        return {"articles": [], "count": 0, "source": "error"}
+
+
+# ---------------------------------------------------------------------------
+# REST — Watchlist / Scan Results
+# ---------------------------------------------------------------------------
+
+@app.get("/api/watchlist", summary="Active pairs watchlist with scan results")
+def get_watchlist():
+    """Returns the latest universe scan results + active pair configuration."""
+    db = _require_db()
+    config = _get_config()
+    try:
+        scan = db.get_latest_scan_results()
+        pairs = config.get("trading", {}).get("pairs", [])
+
+        # Get live prices for active pairs
+        live_prices = {}
+        if _exchange_client and pairs:
+            for pair in pairs[:20]:  # limit to avoid rate-limiting
+                try:
+                    live_prices[pair] = _exchange_client.get_current_price(pair)
+                except Exception:
+                    pass
+
+        # Parse scan results JSON
+        scan_data = None
+        if scan:
+            scan_data = dict(scan)
+            for field in ("results_json", "top_movers"):
+                if isinstance(scan_data.get(field), str):
+                    try:
+                        scan_data[field] = json.loads(scan_data[field])
+                    except Exception:
+                        pass
+
+        return _sanitize_floats({
+            "active_pairs": pairs,
+            "live_prices": live_prices,
+            "scan": scan_data,
+            "pair_count": len(pairs),
+        })
+    except Exception as exc:
+        logger.exception("watchlist error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# REST — Candle data for charts
+# ---------------------------------------------------------------------------
+
+@app.get("/api/candles", summary="OHLCV candle data for a trading pair")
+def get_candles(
+    pair: str = Query(..., description="Trading pair, e.g. BTC-EUR"),
+    granularity: str = Query("ONE_HOUR", description="Candle granularity"),
+    limit: int = Query(200, ge=10, le=1000),
+):
+    """Returns OHLCV candle data from the exchange for charting."""
+    if not _exchange_client:
+        raise HTTPException(status_code=503, detail="Exchange client not available")
+    try:
+        candles = _exchange_client.get_candles(pair, granularity=granularity, limit=limit)
+        if not candles:
+            return {"candles": [], "pair": pair}
+        return _sanitize_floats({"candles": candles, "pair": pair, "count": len(candles)})
+    except Exception as exc:
+        logger.warning(f"candles error for {pair}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# REST — HITL (Human-in-the-Loop) Trade Commands
+# ---------------------------------------------------------------------------
+
+@app.post("/api/trade/{pair}/command", summary="Send a trading command to the agent")
+def send_trade_command(
+    pair: str,
+    action: str = Query(..., description="Command: liquidate, tighten_stop, pause"),
+):
+    """Publish a trade command via Redis for the orchestrator to execute.
+    
+    Supported actions:
+    - liquidate: Market sell the entire position
+    - tighten_stop: Move stop-loss to breakeven
+    - pause: Exclude pair from trading
+    """
+    if action not in ("liquidate", "tighten_stop", "pause"):
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
+    if not _redis_client:
+        raise HTTPException(status_code=503, detail="Redis not available — cannot send commands")
+
+    try:
+        command = {
+            "action": action,
+            "pair": pair,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": "dashboard",
+        }
+        # Push to processing queue (orchestrator polls this)
+        _redis_client.rpush("dashboard:commands_queue", json.dumps(command))
+        # Also publish for real-time subscribers
+        _redis_client.publish("dashboard:commands", json.dumps(command))
+        # Audit trail
+        _redis_client.lpush("dashboard:command_history", json.dumps(command))
+        _redis_client.ltrim("dashboard:command_history", 0, 99)
+
+        logger.info(f"📤 HITL command sent: {action} for {pair}")
+        return {"status": "command_sent", "action": action, "pair": pair}
+    except Exception as exc:
+        logger.exception("HITL command error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/trade/commands/history", summary="Recent HITL command history")
+def get_command_history(limit: int = Query(20, ge=1, le=100)):
+    """Returns recent dashboard-initiated commands."""
+    if not _redis_client:
+        return {"commands": []}
+    try:
+        raw_list = _redis_client.lrange("dashboard:command_history", 0, limit - 1)
+        commands = []
+        for raw in raw_list:
+            try:
+                commands.append(json.loads(raw))
+            except Exception:
+                pass
+        return {"commands": commands}
+    except Exception:
+        return {"commands": []}
+
+
+@app.get("/api/trailing-stops", summary="Active trailing stop states")
+def get_trailing_stops():
+    """Returns trailing stop data from Redis (published by the orchestrator)."""
+    if not _redis_client:
+        return {"stops": {}, "source": "unavailable"}
+    try:
+        raw = _redis_client.get("trailing_stops:state")
+        if not raw:
+            return {"stops": {}, "source": "redis_empty"}
+        stops = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+        return _sanitize_floats({"stops": stops, "source": "redis"})
+    except Exception as exc:
+        logger.warning(f"trailing-stops error: {exc}")
+        return {"stops": {}, "source": "error"}
+
+
 def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
     """Update or append env vars in a .env file, preserving existing content."""
     lines: list[str] = []

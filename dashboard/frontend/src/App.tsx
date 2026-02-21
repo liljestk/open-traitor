@@ -9,6 +9,10 @@ import TradesLog from './pages/TradesLog'
 import SystemLogs from './pages/SystemLogs'
 import SimulatedTrades from './pages/SimulatedTrades'
 import Settings from './pages/Settings'
+import Analytics from './pages/Analytics'
+import NewsFeed from './pages/NewsFeed'
+import Watchlist from './pages/Watchlist'
+import RiskExposure from './pages/RiskExposure'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,9 +32,13 @@ export default function App() {
             <Route index element={<CycleExplorer />} />
             <Route path="/cycle/:cycleId" element={<CyclePlayback />} />
             <Route path="/trades" element={<TradesLog />} />
+            <Route path="/analytics" element={<Analytics />} />
+            <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/simulations" element={<SimulatedTrades />} />
             <Route path="/logs" element={<SystemLogs />} />
             <Route path="/live" element={<LiveMonitor />} />
+            <Route path="/risk" element={<RiskExposure />} />
+            <Route path="/news" element={<NewsFeed />} />
             <Route path="/planning" element={<PlanningAudit />} />
             <Route path="/settings" element={<Settings />} />
           </Route>

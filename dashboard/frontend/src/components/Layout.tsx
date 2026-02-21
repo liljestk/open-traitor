@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield } from 'lucide-react'
 import { useLiveStore } from '../store'
 import { openLiveSocket } from '../api'
 
@@ -16,6 +16,8 @@ const NAV = [
     items: [
       { to: '/', icon: <BarChart2 size={16} />, label: 'Cycle Explorer' },
       { to: '/trades', icon: <List size={16} />, label: 'Trades Log' },
+      { to: '/analytics', icon: <TrendingUp size={16} />, label: 'Analytics' },
+      { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
     ]
   },
@@ -24,6 +26,8 @@ const NAV = [
     items: [
       { to: '/logs', icon: <Terminal size={16} />, label: 'System Logs' },
       { to: '/live', icon: <Activity size={16} />, label: 'Live Monitor' },
+      { to: '/risk', icon: <Shield size={16} />, label: 'Risk & Exposure' },
+      { to: '/news', icon: <Newspaper size={16} />, label: 'News Feed' },
       { to: '/planning', icon: <BookOpen size={16} />, label: 'Planning Audit' },
       { to: '/settings', icon: <Sliders size={16} />, label: 'Settings' },
     ]
@@ -33,15 +37,20 @@ const NAV = [
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Cycle Explorer',
   '/trades': 'Trades Log',
+  '/analytics': 'Analytics',
+  '/watchlist': 'Watchlist',
   '/simulations': 'Simulate Trade',
   '/logs': 'System Logs',
   '/live': 'Live Monitor',
+  '/risk': 'Risk & Exposure',
+  '/news': 'News Feed',
   '/planning': 'Planning Audit',
   '/settings': 'Settings',
 }
 
 export default function Layout() {
   const connected = useLiveStore((s) => s.connected)
+  const density = useLiveStore((s) => s.density)
   const { setConnected, addEvent } = useLiveStore()
   const wsRef = useRef<WebSocket | null>(null)
   const location = useLocation()
@@ -70,7 +79,7 @@ export default function Layout() {
     .find(([path]) => location.pathname.startsWith(path))?.[1] ?? 'Dashboard'
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: '#080c10' }}>
+    <div className={density === 'compact' ? 'density-compact' : ''} style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: '#080c10' }}>
       {/* Sidebar */}
       <aside style={{
         width: '220px',

@@ -355,6 +355,210 @@ export const updateApiKeys = (keys: Record<string, string>) =>
     body: JSON.stringify({ keys }),
   })
 
+// ─── Portfolio & Analytics ─────────────────────────────────────────────────
+
+export interface PortfolioSnapshot {
+  ts: string
+  portfolio_value: number
+  return_pct: number
+  total_pnl: number
+}
+
+export interface PortfolioRange {
+  low: number
+  high: number
+  avg: number
+  samples: number
+}
+
+export interface TradeStatsDetail {
+  total_trades: number
+  winning: number
+  losing: number
+  pending: number
+  total_pnl: number
+  best_pnl: number
+  worst_pnl: number
+  avg_pnl: number
+  total_volume: number
+  total_fees: number
+  avg_confidence: number
+}
+
+export interface WinLossStats {
+  win_rate: number
+  avg_win: number
+  avg_loss: number
+  sample_size: number
+}
+
+export interface DailySummary {
+  date: string
+  ts: string
+  opening_value: number
+  closing_value: number
+  high_value: number
+  low_value: number
+  total_trades: number
+  winning_trades: number
+  losing_trades: number
+  total_pnl: number
+  best_trade: number
+  worst_trade: number
+  events_count: number
+  summary_text: string | null
+  plan_text: string | null
+}
+
+export interface BestWorstTrade {
+  pair: string
+  action: string
+  pnl: number
+  price: number
+  quote_amount: number
+  ts: string
+}
+
+export interface AnalyticsData {
+  performance: {
+    trade_stats: TradeStatsDetail
+    portfolio_range: PortfolioRange
+    event_counts: Record<string, number>
+    recent_trades: TradeFull[]
+  }
+  best_worst: {
+    best: BestWorstTrade[]
+    worst: BestWorstTrade[]
+  }
+  daily_summaries: DailySummary[]
+  win_loss: WinLossStats
+  portfolio_range: PortfolioRange
+}
+
+export const fetchPortfolioHistory = (hours = 720) =>
+  apiFetch<{ history: PortfolioSnapshot[]; count: number }>(`/portfolio/history?hours=${hours}`)
+
+export const fetchAnalytics = (hours = 720) =>
+  apiFetch<AnalyticsData>(`/analytics?hours=${hours}`)
+
+// ─── Portfolio Exposure ────────────────────────────────────────────────────
+
+export interface ExposureBreakdown {
+  pair: string
+  quantity: number
+  entry_price: number
+  current_price: number
+  value: number
+  pct_of_portfolio: number
+  pnl_pct: number
+}
+
+export interface PortfolioExposure {
+  portfolio_value: number
+  cash_balance: number
+  return_pct: number
+  total_pnl: number
+  max_drawdown: number
+  fear_greed_value: number | null
+  high_stakes_active: boolean | null
+  breakdown: ExposureBreakdown[]
+  cash_pct: number
+  allocated_pct: number
+  ts: string
+}
+
+export const fetchPortfolioExposure = () =>
+  apiFetch<{ exposure: PortfolioExposure | null }>('/portfolio/exposure')
+
+// ─── News ──────────────────────────────────────────────────────────────────
+
+export interface NewsArticle {
+  id: string
+  title: string
+  summary: string
+  source: string
+  url: string
+  published: string
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+  relevance_score: number
+  tags: string[]
+}
+
+export const fetchNews = (count = 30) =>
+  apiFetch<{ articles: NewsArticle[]; count: number; source: string }>(`/news?count=${count}`)
+
+// ─── Watchlist ─────────────────────────────────────────────────────────────
+
+export interface ScanResult {
+  ts: string
+  universe_size: number
+  scanned_pairs: number
+  results_json: Record<string, unknown>
+  top_movers: Array<{ pair: string; change_pct: number; volume: number }>
+  summary_text: string
+}
+
+export interface WatchlistData {
+  active_pairs: string[]
+  live_prices: Record<string, number>
+  scan: ScanResult | null
+  pair_count: number
+}
+
+export const fetchWatchlist = () =>
+  apiFetch<WatchlistData>('/watchlist')
+
+// ─── Candles / Charts ──────────────────────────────────────────────────────
+
+export interface CandleData {
+  start: string
+  low: number
+  high: number
+  open: number
+  close: number
+  volume: number
+}
+
+export const fetchCandles = (pair: string, granularity = 'ONE_HOUR', limit = 200) =>
+  apiFetch<{ candles: CandleData[]; pair: string }>(`/candles?pair=${encodeURIComponent(pair)}&granularity=${granularity}&limit=${limit}`)
+
+// ─── HITL (Human-in-the-Loop) Commands ─────────────────────────────────────
+
+export interface TradeCommand {
+  action: string
+  pair: string
+  ts: string
+  source: string
+}
+
+export const sendTradeCommand = (pair: string, action: 'liquidate' | 'tighten_stop' | 'pause') =>
+  apiFetch<{ status: string; action: string; pair: string }>(`/trade/${encodeURIComponent(pair)}/command?action=${action}`, { method: 'POST' })
+
+export const fetchCommandHistory = (limit = 20) =>
+  apiFetch<{ commands: TradeCommand[] }>(`/trade/commands/history?limit=${limit}`)
+
+// ─── Trailing Stops ────────────────────────────────────────────────────────
+
+export interface TrailingStopData {
+  pair: string
+  entry_price: number
+  trail_pct: number
+  stop_price: number
+  triggered: boolean
+  highest_price: number
+  total_quantity: number
+  remaining_quantity: number
+  tiers: Array<{
+    trigger_pct: number
+    exit_fraction: number
+    triggered: boolean
+    trigger_price: number | null
+  }>
+}
+
+export const fetchTrailingStops = () =>
+  apiFetch<{ stops: Record<string, TrailingStopData>; source: string }>('/trailing-stops')
+
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {
