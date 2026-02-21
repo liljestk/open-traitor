@@ -51,6 +51,11 @@ from src.utils.tracer import get_llm_tracer
 from src.utils import settings_manager as sm
 from src.core.managers.pipeline_manager import PipelineManager
 from src.core.managers.state_manager import StateManager
+from src.core.managers.telegram_manager import TelegramManager
+from src.core.managers.universe_scanner import UniverseScanner
+from src.core.managers.holdings_manager import HoldingsManager
+from src.core.managers.context_manager import ContextManager
+from src.core.managers.event_manager import EventManager
 from src.core.health import check_component_health, update_health
 import asyncio
 
@@ -198,6 +203,11 @@ class Orchestrator:
         
         self.pipeline_manager = PipelineManager(self)
         self.state_manager = StateManager(self)
+        self.telegram_manager = TelegramManager(self)
+        self.universe_scanner = UniverseScanner(self)
+        self.holdings_manager = HoldingsManager(self)
+        self.context_manager = ContextManager(self)
+        self.event_manager = EventManager(self)
         
         self._pending_approvals: dict[str, dict] = {}
         self._pending_approvals_lock = threading.Lock()
@@ -215,7 +225,7 @@ class Orchestrator:
         # Initial sync on startup (live mode only)
         if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False):
             try:
-                snapshot = self._live_coinbase_snapshot()
+                snapshot = self.holdings_manager.live_coinbase_snapshot()
                 self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)
                 logger.info("📡 Initial live holdings sync complete")
 
@@ -330,15 +340,15 @@ class Orchestrator:
             llm_client=llm,
             rate_limiter=self.rate_limiter,
         )
-        self._register_chat_functions()
+        self.telegram_manager.register_chat_functions()
 
         # Connect to Telegram bot
         if self.telegram:
             self.telegram.chat_handler = self.chat_handler
-            self.telegram.on_command = self._handle_telegram_command  # Legacy fallback
+            self.telegram.on_command = self.telegram_manager.handle_telegram_command  # Legacy fallback
             self.chat_handler.set_send_callback(self.telegram.send_message)
             # Connect proactive engine to trading state + stats
-            self.chat_handler.set_context_provider(self._get_trading_context)
+            self.chat_handler.set_context_provider(self.telegram_manager.get_trading_context)
             if self.chat_handler._proactive:
                 self.chat_handler._proactive.set_stats_db(self.stats_db)
 
@@ -347,10 +357,10 @@ class Orchestrator:
 
         # Register WS price-move detector (runs in WS thread, very lightweight)
         if self.ws_feed:
-            self.ws_feed.add_ticker_callback(self._on_ws_ticker)
+            self.ws_feed.add_ticker_callback(self.event_manager.on_ws_ticker)
 
         # Subscribe to Redis news:updates channel so fresh news triggers early pipelines
-        self._start_news_subscriber()
+        self.event_manager.start_news_subscriber()
 
         _sync_status = '✅ Enabled' if (self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False)) else '❌ Disabled'
         logger.info("═══════════════════════════════════════════")
@@ -436,13 +446,13 @@ class Orchestrator:
 
                 # ─── Universe Scan + LLM Screener (funnel system) ─────
                 try:
-                    self._refresh_pair_universe()
-                    self._run_universe_scan()
+                    self.universe_scanner.refresh_pair_universe()
+                    self.universe_scanner.run_universe_scan()
 
                     self._screener_cycle_counter += 1
                     if self._screener_cycle_counter >= self._SCREENER_INTERVAL:
                         self._screener_cycle_counter = 0
-                        self._run_llm_screener()
+                        self.universe_scanner.run_llm_screener()
                 except Exception as _uf_err:
                     logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
 
@@ -588,7 +598,7 @@ class Orchestrator:
                     self.chat_handler.queue_event(f"CRITICAL: {msg}")
                     if self.telegram:
                         self.telegram.send_alert(msg)
-                    self._trigger_emergency_replan(
+                    self.event_manager.trigger_emergency_replan(
                         f"Circuit breaker: drawdown {format_percentage(self.state.max_drawdown)}"
                     )
 
@@ -600,20 +610,20 @@ class Orchestrator:
                     self._reconcile_counter += 1
                     if self._reconcile_counter >= self._reconcile_every:
                         self._reconcile_counter = 0
-                        self._reconcile_positions()
+                        self.holdings_manager.reconcile_positions()
 
                 # ─── Autonomous Settings Advisor ────────────────────
                 if self.settings_advisor.should_run():
                     try:
                         advisor_ctx = {
                             "fear_greed": getattr(self.state, "fear_greed_summary", "unavailable"),
-                            "recent_performance": self._get_performance_summary(),
+                            "recent_performance": self.context_manager.get_performance_summary(),
                             "market_volatility": getattr(self.state, "volatility_summary", "moderate"),
                             "current_prices": dict(self.state.current_prices),
                             "cycle_id": str(cycle_count),
                             "stats_db": self.stats_db if hasattr(self, "stats_db") else None,
                             "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
-                            "scan_results_summary": self._get_scan_summary(),
+                            "scan_results_summary": self.universe_scanner.get_scan_summary(),
                             "universe_size": len(self._pair_universe),
                         }
                         advisor_result = asyncio.run(
@@ -715,7 +725,7 @@ class Orchestrator:
             )
 
             # ─── Proactive Updates (LLM-generated) ───
-            self._send_proactive_update()
+            self.telegram_manager.send_proactive_update()
 
             # ─── Wait for next cycle, waking every 10 s to check early triggers ──
             # WS price-move or news pub/sub events can fire a pipeline mid-interval
@@ -766,1614 +776,108 @@ class Orchestrator:
         logger.info("Orchestrator stopped.")
 
     # =========================================================================
-    # Reactive Emergency Re-Planning
+    # Delegation Methods (backward compatibility for pipeline_manager, etc.)
     # =========================================================================
-
-    _REPLAN_COOLDOWN_S: float = 1800.0  # min 30 min between emergency replans
-    _replan_last_ts: float = 0.0
-
-    def _trigger_emergency_replan(self, reason: str) -> None:
-        """Write an emergency conservative strategic context and attempt a Temporal replan.
-
-        Called when the circuit breaker fires or an extreme WS price move (≥3%)
-        is detected.  Works even if Temporal is down — the local DB write is
-        immediate and the orchestrator picks it up on the next cache refresh.
-        """
-        now = time.time()
-        if now - self._replan_last_ts < self._REPLAN_COOLDOWN_S:
-            logger.debug("Emergency replan skipped — cooldown active")
-            return
-        self._replan_last_ts = now
-
-        logger.warning(f"🚨 Emergency replan triggered: {reason}")
-
-        # 1. Write a conservative emergency context to StatsDB immediately
-        try:
-            emergency_plan = {
-                "regime": "volatile",
-                "confidence": 0.3,
-                "risk_posture": "conservative",
-                "preferred_pairs": [],
-                "avoid_pairs": list(self.pairs),  # avoid all pairs until next plan
-                "key_observations": [
-                    f"EMERGENCY: {reason}",
-                    "All pairs set to avoid — waiting for next scheduled plan evaluation",
-                ],
-                "today_focus": "Capital preservation — emergency mode active",
-                "summary": (
-                    f"Emergency replan: {reason}. "
-                    "Switched to conservative posture, all pairs on avoid. "
-                    "Next scheduled plan will re-evaluate."
-                ),
-            }
-            self.stats_db.save_strategic_context(
-                horizon="daily",
-                plan_json=emergency_plan,
-                summary_text=emergency_plan["summary"],
-            )
-            # Invalidate the cache so the next cycle picks up the emergency plan
-            self._strategic_context_ts = 0.0
-
-            if self.telegram:
-                self.telegram.send_alert(
-                    f"🚨 *Emergency Replan*\n\n"
-                    f"Reason: {reason}\n"
-                    f"Action: Switched to conservative posture, all pairs on avoid.\n"
-                    f"Next scheduled plan will re-evaluate."
-                )
-        except Exception as e:
-            logger.error(f"Failed to write emergency context: {e}")
-
-        # 2. Optionally trigger a Temporal DailyPlanWorkflow
-        def _try_temporal_replan() -> None:
-            try:
-                import temporalio.client as _tc
-
-                temporal_host = os.environ.get("TEMPORAL_HOST", "localhost:7233")
-                temporal_ns = os.environ.get("TEMPORAL_NAMESPACE", "default")
-
-                async def _start_workflow():
-                    client = await _tc.Client.connect(temporal_host, namespace=temporal_ns)
-                    from src.planning.workflows import DailyPlanWorkflow
-                    await client.start_workflow(
-                        DailyPlanWorkflow.run,
-                        id=f"emergency-replan-{uuid.uuid4().hex[:8]}",
-                        task_queue="planning-queue",
-                    )
-                    logger.info("📋 Emergency Temporal replan workflow started")
-
-                loop = asyncio.new_event_loop()
-                try:
-                    loop.run_until_complete(_start_workflow())
-                finally:
-                    loop.close()
-            except Exception as e:
-                logger.debug(
-                    f"Temporal emergency replan unavailable (local context already written): {e}"
-                )
-
-        # Run Temporal attempt in background thread to avoid blocking
-        threading.Thread(
-            target=_try_temporal_replan, daemon=True, name="emergency-replan"
-        ).start()
-
-    # =========================================================================
-    # Event-Driven Helpers — WS Trigger + News Pub/Sub
-    # =========================================================================
-
-    def _on_ws_ticker(self, data: dict) -> None:
-        """Called by the WS feed on every ticker tick (runs in WS thread).
-
-        Compares the new price against the snapshot recorded at the last pipeline
-        start for this pair.  If the move exceeds *_ws_trigger_pct* the pair is
-        queued for an early pipeline run during the idle sleep period.
-        """
-        pair = data.get("product_id", "")
-        price = float(data.get("price", 0))
-        if not pair or price <= 0 or pair not in self.pairs:
-            return
-
-        with self._ws_trigger_lock:
-            last = self._ws_last_prices.get(pair, 0)
-            if last > 0:
-                change_pct = abs(price - last) / last
-                if change_pct >= self._ws_trigger_pct:
-                    self._ws_trigger_pairs.add(pair)
-                    logger.info(
-                        f"📡 WS trigger: {pair} moved {change_pct:+.2%} "
-                        f"(${last:,.2f} → ${price:,.2f}) — early pipeline queued"
-                    )
-                # Extreme move (≥3%) → trigger emergency replan
-                if change_pct >= 0.03:
-                    threading.Thread(
-                        target=self._trigger_emergency_replan,
-                        args=(f"{pair} moved {change_pct:+.2%} in a single tick",),
-                        daemon=True,
-                        name="ws-emergency-replan",
-                    ).start()
-            # Always keep the running WS price current so the next check is fresh
-            self._ws_last_prices[pair] = price
-
-    def _start_news_subscriber(self) -> None:
-        """Subscribe to Redis *news:updates* pub/sub channel in a daemon thread.
-
-        When the news worker publishes a fresh batch all active pairs are added
-        to the news-trigger set so the main loop fetches up-to-date headlines
-        during the next early-pipeline check rather than waiting a full interval.
-        No-op if Redis is not configured.
-        """
-        if not self.redis:
-            return
-
-        def _listener() -> None:
-            try:
-                pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
-                pubsub.subscribe("news:updates")
-                for message in pubsub.listen():
-                    if not self.state.is_running:
-                        break
-                    if message and message.get("type") == "message":
-                        with self._ws_trigger_lock:
-                            self._news_trigger_pairs.update(self.pairs)
-                        logger.debug(
-                            "📰 Breaking news detected via pub/sub — early pipeline queued"
-                        )
-            except Exception as e:
-                logger.debug(f"News pub/sub subscriber error: {e}")
-
-        t = threading.Thread(target=_listener, daemon=True, name="news-sub")
-        t.start()
-        logger.info("📰 News pub/sub subscriber started")
 
     def _get_strategic_context(self) -> str:
-        """Return the latest strategic context string (cached 60s, reads from StatsDB)."""
-        now = time.time()
-        if now - self._strategic_context_ts < self._STRATEGIC_CONTEXT_TTL:
-            return self._strategic_context_str
-        try:
-            rows = self.stats_db.get_latest_strategic_context()
-            if not rows:
-                self._strategic_context_str = ""
-                self._pair_priority_map = {}
-            else:
-                parts = []
-                for row in rows:
-                    horizon = row["horizon"].upper()
-                    text = row["summary_text"] or ""
-                    if text:
-                        parts.append(f"[{horizon} PLAN] {text}")
-                self._strategic_context_str = "\n".join(parts)
-
-                # ── Parse pair priority from latest daily plan ──────────
-                self._pair_priority_map = self._parse_pair_priorities(rows)
-
-                # Warn when the newest plan is older than 48 h (planning worker down?)
-                try:
-                    latest_ts_str = max(row["ts"] for row in rows)
-                    latest_ts = datetime.fromisoformat(latest_ts_str.replace("Z", "+00:00"))
-                    age_h = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 3600
-                    if age_h > 48:
-                        logger.warning(
-                            f"⚠️ Strategic context is {age_h:.0f}h old — "
-                            "planning worker may not be running; using stale plan."
-                        )
-                except Exception:
-                    pass
-            self._strategic_context_ts = now
-        except Exception as e:
-            logger.debug(f"Failed to load strategic context: {e}")
-        return self._strategic_context_str
-
-    def _parse_pair_priorities(self, context_rows: list[dict]) -> dict[str, float]:
-        """Extract per-pair confidence adjustments from the latest daily/weekly plans.
-
-        Returns a dict mapping pair -> confidence_adjustment:
-          * preferred pairs get -0.05 (slightly more lenient)
-          * avoid pairs get +0.10 (need stronger signal to trade)
-          * other pairs get 0.0 (no adjustment)
-        """
-        preferred: set[str] = set()
-        avoid: set[str] = set()
-
-        for row in context_rows:
-            try:
-                plan = json.loads(row.get("plan_json", "{}"))
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-            horizon = row.get("horizon", "")
-            if horizon in ("daily", "weekly"):
-                for p in plan.get("preferred_pairs", plan.get("pairs_to_focus", [])):
-                    preferred.add(p)
-                for p in plan.get("avoid_pairs", plan.get("pairs_to_reduce", [])):
-                    avoid.add(p)
-
-        priority_map: dict[str, float] = {}
-        for pair in self.pairs:
-            if pair in avoid:
-                priority_map[pair] = 0.10   # raise min_confidence by 10pp
-            elif pair in preferred:
-                priority_map[pair] = -0.05   # lower min_confidence by 5pp
-            # else: 0.0 (default, not stored to keep map sparse)
-
-        if priority_map:
-            logger.info(
-                f"📋 Pair priority from planning: "
-                f"focus={[p for p, v in priority_map.items() if v < 0]}, "
-                f"avoid={[p for p, v in priority_map.items() if v > 0]}"
-            )
-        return priority_map
+        """Delegate to ContextManager."""
+        return self.context_manager.get_strategic_context()
 
     def get_pair_confidence_adjustment(self, pair: str) -> float:
-        """Return the confidence threshold adjustment for a pair (from planning context)."""
-        return getattr(self, "_pair_priority_map", {}).get(pair, 0.0)
+        """Delegate to ContextManager."""
+        return self.context_manager.get_pair_confidence_adjustment(pair)
 
     def _maybe_refresh_holdings(self) -> None:
-        """Refresh live Coinbase holdings if the TTL has elapsed.
-
-        TTL-cached: only calls the API if enough time has passed since the
-        last successful sync.  Graceful degradation: on failure, keeps the
-        previous snapshot and does NOT update the timestamp, so the next
-        cycle retries immediately.
-        """
-        if not self._holdings_sync_enabled or getattr(self.exchange, 'paper_mode', False):
-            return
-        now = time.time()
-        if now - self.state._live_snapshot_ts < self._holdings_refresh_seconds:
-            return  # still fresh
-        try:
-            snapshot = self._live_coinbase_snapshot()
-            self.state.sync_live_holdings(
-                snapshot, dust_threshold=self._holdings_dust_threshold
-            )
-        except Exception as e:
-            # Graceful degradation: keep stale data, do NOT update _live_snapshot_ts
-            # so the next pipeline cycle retries immediately.
-            logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
-
-
+        """Delegate to HoldingsManager."""
+        self.holdings_manager.maybe_refresh_holdings()
 
     def _get_performance_summary(self) -> str:
-        """Build a short performance summary string for the settings advisor.
-
-        Uses StatsDB for accurate historical metrics (24h window) and
-        TradingState for live portfolio/position data.
-        """
-        try:
-            sym = self.state.currency_symbol
-            parts: list[str] = []
-
-            # Historical trade performance from StatsDB (24h)
-            perf = self.stats_db.get_performance_summary(hours=24)
-            stats = perf.get("trade_stats", {})
-            total_trades = stats.get("total_trades", 0)
-            winning = stats.get("winning", 0)
-            total_pnl = stats.get("total_pnl", 0)
-            win_rate = (winning / total_trades * 100) if total_trades > 0 else 0
-            avg_confidence = stats.get("avg_confidence", 0)
-
-            parts.append(f"24h trades: {total_trades}")
-            if total_trades > 0:
-                parts.append(f"win rate: {win_rate:.0f}%")
-                parts.append(f"PnL: {sym}{total_pnl:+.2f}")
-                parts.append(f"avg confidence: {avg_confidence:.0%}")
-
-            # Current portfolio state
-            n_positions = len(self.state.open_positions)
-            pv = self.state.portfolio_value
-            ret = self.state.return_pct
-            dd = self.state.max_drawdown
-            parts.append(f"open positions: {n_positions}")
-            parts.append(f"portfolio: {sym}{pv:,.2f} ({ret:+.1%})")
-            parts.append(f"max drawdown: {dd:.1%}")
-
-            # Win/loss streak from recent trades
-            recent = list(self.state.trades[-20:])
-            closed = [t for t in recent if t.pnl is not None]
-            if closed:
-                streak = 0
-                streak_type = "win" if (closed[-1].pnl or 0) > 0 else "loss"
-                for t in reversed(closed):
-                    if (streak_type == "win" and (t.pnl or 0) > 0) or \
-                       (streak_type == "loss" and (t.pnl or 0) <= 0):
-                        streak += 1
-                    else:
-                        break
-                parts.append(f"current streak: {streak} {streak_type}{'es' if streak_type == 'loss' else 's'}")
-
-            return " | ".join(parts)
-        except Exception as e:
-            logger.debug(f"Performance summary fallback: {e}")
-            # Minimal fallback from TradingState only
-            try:
-                return (
-                    f"trades: {self.state.total_trades}, "
-                    f"win rate: {self.state.win_rate:.0%}, "
-                    f"PnL: {self.state.total_pnl:+.2f}"
-                )
-            except Exception:
-                return "unavailable"
-
-    def _reconcile_positions(self) -> None:
-        """
-        Reconcile TradingState.positions against actual Coinbase balances (live mode only).
-        Corrects drift caused by partial fills, crashes, or external account changes.
-        Runs every reconcile_every_cycles cycles (~20 min at default 120s interval).
-        """
-        try:
-            # Reconcile fiat-quoted pairs (USD, EUR, GBP, etc.).
-            # Skip crypto-to-crypto cross pairs (e.g. ETH-BTC) because they
-            # would produce an incorrect derived pair and corrupt state.
-            # Build a mapping of base_currency -> original_pair for reconstruction.
-            base_to_pair: dict[str, str] = {}
-            expected: dict[str, float] = {}
-            for pair, qty in self.state.open_positions.items():
-                if qty <= 0 or "-" not in pair:
-                    continue
-                base, quote = pair.split("-", 1)
-                if quote in _KNOWN_QUOTES:
-                    expected[base] = qty
-                    base_to_pair[base] = pair
-            result = self.exchange.reconcile_positions(expected)
-
-            if not result["matched"]:
-                for d in result["discrepancies"]:
-                    currency = d["currency"]
-                    actual_qty = d["actual"]
-                    # Reconstruct the original pair (e.g. ATOM-EUR, not ATOM-USD)
-                    pair = base_to_pair.get(currency, f"{currency}-USD")
-
-                    # Correct state to match actual Coinbase balance
-                    with self.state._lock:
-                        if actual_qty > 1e-8:
-                            self.state.positions[pair] = actual_qty
-                        else:
-                            self.state.positions.pop(pair, None)
-
-                    msg = (
-                        f"⚠️ Position drift corrected: {currency} "
-                        f"expected={d['expected']:.6f} actual={actual_qty:.6f} "
-                        f"diff={d['diff']:+.6f}"
-                    )
-                    logger.warning(msg)
-                    self.audit.log_rule_check(
-                        "position_reconciliation",
-                        passed=False,
-                        details=msg,
-                    )
-                    self.stats_db.record_event(
-                        event_type="reconciliation",
-                        message=msg,
-                        severity="warning",
-                        pair=pair,
-                        data=d,
-                    )
-                    if self.telegram:
-                        self.telegram.send_alert(msg)
-            else:
-                logger.debug("✅ Position reconciliation: no discrepancies")
-
-        except Exception as e:
-            logger.warning(f"Position reconciliation failed: {e}")
-
-
-
-    # =========================================================================
-    # LLM Chat Handler — Function Registry
-    # =========================================================================
+        """Delegate to ContextManager."""
+        return self.context_manager.get_performance_summary()
 
     def _live_coinbase_snapshot(self) -> dict:
-        """
-        Fetch actual live account data directly from the Coinbase API.
-
-        Returns a structured dict with:
-          native_currency    – detected account currency (e.g. "EUR")
-          total_portfolio    – total portfolio value in native currency
-          fiat_cash          – fiat/cash balance in native currency
-          currency_symbol    – display symbol (e.g. "€" or "$")
-          holdings           – list of {currency, amount, native_value, is_fiat, pair, price}
-          prices_by_pair     – {pair: price} for all tracked + held pairs
-          fetch_ts           – UTC timestamp of this fetch
-        """
-        from datetime import timezone as _tz
-        fetch_ts = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        # Detect the native (quote) currency from config or fallback to pairs
-        # e.g. pairs=["BTC-EUR","ETH-EUR","ATOM-EUR"] → native="EUR"
-        native = self.config.get("trading", {}).get("quote_currency", "auto").upper()
-        if native == "AUTO":
-            native = "USD"
-            for pair in self.pairs:
-                if "-" in pair:
-                    _, quote = pair.rsplit("-", 1)
-                    if quote in _KNOWN_FIAT:
-                        native = quote
-                        break
-                    # EURC → treat as EUR for display
-                    if quote in _EUR_EQUIVALENTS:
-                        native = "EUR"
-                        break
-        currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
-        symbol = currency_symbols.get(native, native + " ")
-
-        try:
-            accounts = self.exchange.get_accounts()
-        except Exception as e:
-            logger.warning(f"_live_coinbase_snapshot: get_accounts failed: {e}")
-            accounts = []
-
-        holdings = []
-        prices_by_pair: dict[str, float] = {}
-        total_value = 0.0
-        fiat_cash = 0.0
-
-        # Build a mapping of all tracked pairs to native currency pairs
-        native_tracked = {}
-        for pair in self.pairs:
-            base = pair.split("-")[0] if "-" in pair else pair
-            native_tracked[base] = pair  # e.g. ATOM → ATOM-EUR
-
-        if accounts:
-            raw = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-            account_list = raw.get("accounts", accounts)
-
-            for acct in account_list:
-                bal = acct.get("available_balance", {})
-                currency = bal.get("currency", acct.get("currency", ""))
-                val_str = bal.get("value", "0")
-                try:
-                    amount = float(val_str)
-                except (ValueError, TypeError):
-                    amount = 0.0
-
-                if amount <= 0 or not currency:
-                    continue
-
-                is_fiat = currency in _KNOWN_FIAT or currency in _ALL_STABLECOINS
-
-                # Convert to native account currency (e.g. EUR)
-                if hasattr(self.exchange, "_currency_to_native"):
-                    native_val = self.exchange._currency_to_native(currency, amount, native)
-                else:
-                    native_val = amount # Fallback
-
-                # Determine best price pair to quote for this asset
-                tracked_pair = native_tracked.get(currency)
-                price = 0.0
-                if not is_fiat:
-                    # Try native pair first (e.g. ATOM-EUR)
-                    native_pair = f"{currency}-{native}"
-                    if tracked_pair:
-                        try:
-                            price = self.exchange.get_current_price(tracked_pair)
-                            if price > 0:
-                                prices_by_pair[tracked_pair] = price
-                                self.state.update_price(tracked_pair, price)
-                        except Exception:
-                            pass
-                    elif native != "USD":
-                        # Try the native pair even if not tracked
-                        try:
-                            price = self.exchange.get_current_price(native_pair)
-                            if price > 0:
-                                prices_by_pair[native_pair] = price
-                        except Exception:
-                            pass
-                    if price == 0:
-                        # Fallback: USD pair → convert to native
-                        usd_pair = f"{currency}-USD"
-                        try:
-                            price_usd = self.exchange.get_current_price(usd_pair)
-                            if price_usd > 0:
-                                prices_by_pair[usd_pair] = price_usd
-                                # Convert to native display price
-                                if native != "USD":
-                                    rate_nat = _get_fiat_rate_usd(native)
-                                    price = price_usd / rate_nat if rate_nat > 0 else price_usd
-                                else:
-                                    price = price_usd
-                        except Exception:
-                            pass
-
-                holding = {
-                    "currency": currency,
-                    "amount": amount,
-                    "native_value": round(native_val, 4),
-                    "is_fiat": is_fiat,
-                    "pair": tracked_pair or (f"{currency}-{native}" if not is_fiat else None),
-                    "price": price,
-                }
-                holdings.append(holding)
-                total_value += native_val
-                if is_fiat:
-                    fiat_cash += native_val
-
-        # Also fetch prices for tracked pairs that aren't in the account
-        for pair in self.pairs:
-            if pair not in prices_by_pair:
-                try:
-                    p = self.exchange.get_current_price(pair)
-                    if p > 0:
-                        prices_by_pair[pair] = p
-                        self.state.update_price(pair, p)
-                except Exception:
-                    pass
-
-        # Sort holdings by value descending
-        holdings.sort(key=lambda h: h["native_value"], reverse=True)
-
-        return {
-            "fetch_ts": fetch_ts,
-            "native_currency": native,
-            "currency_symbol": symbol,
-            "total_portfolio": round(total_value, 2),
-            "fiat_cash": round(fiat_cash, 2),
-            # Legacy keys for backward compat
-            "total_portfolio_usd": round(total_value, 2),
-            "fiat_cash_usd": round(fiat_cash, 2),
-            "holdings": holdings,
-            "prices_by_pair": prices_by_pair,
-            "tracked_pairs": self.pairs,
-            "bot_pnl": self.state.total_pnl,
-            "bot_trades": self.state.total_trades,
-            "is_paused": self.state.is_paused,
-            "circuit_breaker": self.state.circuit_breaker_triggered,
-        }
-
-    def _register_chat_functions(self) -> None:
-        """Register all trading functions the LLM chat handler can call."""
-        ch = self.chat_handler
-
-        # ─── Read functions ────────────────────────────────────────────
-
-        def _live_get_status(p):
-            """Combine live Coinbase snapshot with agent state."""
-            snap = self._live_coinbase_snapshot()
-            return {
-                # Currency metadata
-                "native_currency": snap["native_currency"],
-                "currency_symbol": snap["currency_symbol"],
-                # Live Coinbase numbers (in native currency)
-                "portfolio_value": snap["total_portfolio"],
-                "fiat_cash": snap["fiat_cash"],
-                "holdings": snap["holdings"],
-                "tracked_pairs": snap["tracked_pairs"],
-                "prices": snap["prices_by_pair"],
-                "data_fetched_at": snap["fetch_ts"],
-                # Agent state (bot activity)
-                "bot_trades_executed": snap["bot_trades"],
-                "bot_pnl": snap["bot_pnl"],
-                "bot_open_positions": self.state.open_positions,
-                "win_rate": self.state.win_rate,
-                "max_drawdown": self.state.max_drawdown,
-                "is_running": self.state.is_running,
-                "is_paused": snap["is_paused"],
-                "circuit_breaker": snap["circuit_breaker"],
-            }
-
-        ch.register_function("get_status", _live_get_status)
-
-        def _live_get_positions(p):
-            """Return actual Coinbase holdings, not just bot-tracked positions."""
-            snap = self._live_coinbase_snapshot()
-            crypto_holdings = [h for h in snap["holdings"] if not h["is_fiat"]]
-            return {
-                "data_source": "live_coinbase_api",
-                "native_currency": snap["native_currency"],
-                "currency_symbol": snap["currency_symbol"],
-                "fetched_at": snap["fetch_ts"],
-                "coinbase_holdings": crypto_holdings,
-                "total_crypto_value": sum(h["native_value"] for h in crypto_holdings),
-                # Also expose what the bot itself opened (may be subset/empty)
-                "bot_tracked_positions": self.state.open_positions,
-            }
-
-        ch.register_function("get_positions", _live_get_positions)
-
-        def _live_get_balance(p):
-            """Return live Coinbase portfolio value, not stale agent state."""
-            snap = self._live_coinbase_snapshot()
-            fiat = [h for h in snap["holdings"] if h["is_fiat"]]
-            crypto = [h for h in snap["holdings"] if not h["is_fiat"]]
-            return {
-                "data_source": "live_coinbase_api",
-                "native_currency": snap["native_currency"],
-                "currency_symbol": snap["currency_symbol"],
-                "fetched_at": snap["fetch_ts"],
-                "total_portfolio": snap["total_portfolio"],
-                "fiat_cash": snap["fiat_cash"],
-                "fiat_accounts": [{"currency": h["currency"], "amount": h["amount"]} for h in fiat],
-                "crypto_positions_value": sum(h["native_value"] for h in crypto),
-                "bot_pnl": snap["bot_pnl"],
-            }
-
-        ch.register_function("get_balance", _live_get_balance)
-
-        def _live_get_prices(p):
-            """Fetch fresh prices directly from Coinbase REST API."""
-            prices = {}
-            for pair in self.pairs:
-                try:
-                    price = self.exchange.get_current_price(pair)
-                    if price > 0:
-                        prices[pair] = price
-                        self.state.update_price(pair, price)
-                except Exception as e:
-                    logger.debug(f"Price fetch failed for {pair}: {e}")
-            return {
-                "data_source": "live_coinbase_api",
-                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "prices": prices,
-            }
-
-        ch.register_function("get_current_prices", _live_get_prices)
-
-        def _live_get_account_holdings(p):
-            """Full raw account breakdown from Coinbase."""
-            snap = self._live_coinbase_snapshot()
-            return snap
-
-        ch.register_function("get_account_holdings", _live_get_account_holdings)
-
-        ch.register_function("get_recent_trades", lambda p: {
-            "trades": [t.to_summary() for t in self.state.recent_trades]
-        })
-
-
-        ch.register_function("get_recent_signals", lambda p: {
-            "signals": [
-                {
-                    "pair": s.pair,
-                    "signal_type": s.signal_type,
-                    "confidence": s.confidence,
-                    "reasoning": s.reasoning[:200] if s.reasoning else "",
-                }
-                for s in self.state.recent_signals
-            ]
-        })
-
-        ch.register_function("get_news_summary", lambda p: {
-            "news": self.news.get_summary() if self.news else "News not configured."
-        })
-
-        ch.register_function("get_fear_greed", lambda p: {
-            "fear_greed": self.fear_greed.get_current()
-        })
-
-        ch.register_function("get_trading_rules", lambda p: {
-            **self.rules.get_all_rules(),
-            **self.rules.get_status(),
-        })
-
-        ch.register_function("get_fee_info", lambda p: self.fee_manager.get_fee_summary())
-
-        ch.register_function("get_pending_swaps", lambda p: {
-            "pending_swaps": {
-                sid: {
-                    "sell": sp.sell_pair,
-                    "buy": sp.buy_pair,
-                    "quote_amount": sp.quote_amount,
-                    "net_gain": f"+{sp.net_gain_pct*100:.2f}%",
-                    "priority": sp.priority,
-                }
-                for sid, sp in self.rotator.pending_swaps.items()
-            }
-        })
-
-        ch.register_function("get_highstakes_status", lambda p: {
-            "status": self.high_stakes.get_status()
-        })
-
-        ch.register_function("get_rotation_analysis", lambda p: {
-            "analysis": self._cmd_rotate({})
-        })
-
-        # ─── Action functions ──────────────────────────────────────────
-        ch.register_function("enable_highstakes", lambda p: self._cmd_highstakes({
-            "description": p.get("duration", "4h"),
-            "user_id": "owner",
-        }))
-
-        ch.register_function("disable_highstakes", lambda p: self._cmd_highstakes({
-            "description": "off",
-            "user_id": "owner",
-        }))
-
-        ch.register_function("create_task", lambda p: self._cmd_task({
-            "description": p.get("description", ""),
-        }))
-
-        ch.register_function("approve_item", lambda p: self._cmd_approve_trade({
-            "trade_id": p.get("item_id", ""),
-        }))
-
-        ch.register_function("reject_item", lambda p: self._cmd_reject_trade({
-            "trade_id": p.get("item_id", ""),
-        }))
-
-        ch.register_function("pause_trading", lambda p: self._cmd_pause({}))
-        ch.register_function("resume_trading", lambda p: self._cmd_resume({}))
-        ch.register_function("emergency_stop", lambda p: self._cmd_stop({}))
-
-        # ─── Settings management (new) ─────────────────────────────────
-        def _enable_trading(p: dict) -> dict:
-            preset = p.get("preset", "moderate")
-            ok, err, changes = sm.apply_preset(preset)
-            if ok:
-                sm.push_to_runtime(self.rules, self.config, changes)
-                logger.warning(f"🟢 TRADING ENABLED via preset '{preset}' (Telegram)")
-                return {"ok": True, "preset": preset, "changes": changes}
-            return {"ok": False, "error": err}
-
-        def _disable_trading(p: dict) -> dict:
-            ok, err, changes = sm.apply_preset("disabled")
-            if ok:
-                sm.push_to_runtime(self.rules, self.config, changes)
-                logger.warning("🔴 TRADING DISABLED (Telegram)")
-                return {"ok": True, "preset": "disabled", "changes": changes}
-            return {"ok": False, "error": err}
-
-        def _apply_preset(p: dict) -> dict:
-            preset = p.get("preset", "")
-            if preset not in sm.PRESETS:
-                return {"ok": False, "error": f"Unknown preset: {preset!r}. Available: {list(sm.PRESETS.keys())}"}
-            ok, err, changes = sm.apply_preset(preset)
-            if ok:
-                sm.push_to_runtime(self.rules, self.config, changes)
-                logger.warning(f"📋 PRESET '{preset}' applied (Telegram)")
-                return {"ok": True, "preset": preset, "changes": changes}
-            return {"ok": False, "error": err}
-
-        def _update_settings(p: dict) -> dict:
-            section = p.get("section", "")
-            param = p.get("param", "")
-            value = p.get("value", "")
-            if not section or not param:
-                return {"ok": False, "error": "section and param are required"}
-            if not sm.is_telegram_allowed(section):
-                return {"ok": False, "error": f"Section '{section}' is blocked for Telegram updates. Use the Dashboard instead."}
-            ok, err, applied = sm.update_section(section, {param: value})
-            if ok:
-                sm.push_section_to_runtime(section, {param: applied[param]}, self.rules, self.config)
-                logger.warning(f"🔧 SETTINGS UPDATE via Telegram | {section}.{param} → {applied[param]}")
-                return {"ok": True, "section": section, "param": param, "new": applied[param]}
-            return {"ok": False, "error": err}
-
-        def _get_settings_tiers(_p: dict) -> dict:
-            return sm.TELEGRAM_SAFETY_TIERS
-
-        ch.register_function("enable_trading", _enable_trading)
-        ch.register_function("disable_trading", _disable_trading)
-        ch.register_function("apply_preset", _apply_preset)
-        ch.register_function("update_settings", _update_settings)
-        ch.register_function("get_settings_tiers", _get_settings_tiers)
-
-        # ─── Stats & Analytics functions ───────────────────────────────
-        ch.register_function("get_stats", lambda p: self.stats_db.get_performance_summary(
-            hours=int(p.get("hours", 24))
-        ))
-
-        ch.register_function("get_trade_history", lambda p: {
-            "trades": self.stats_db.get_trades(
-                hours=int(p.get("hours", 24)),
-                pair=p.get("pair"),
-            )
-        })
-
-        ch.register_function("get_pair_stats", lambda p: self.stats_db.get_pair_stats(
-            pair=p.get("pair", "BTC-USD"),
-            hours=int(p.get("hours", 168)),
-        ))
-
-        ch.register_function("get_daily_summaries", lambda p: {
-            "summaries": self.stats_db.get_daily_summaries(days=int(p.get("days", 7)))
-        })
-
-        ch.register_function("get_best_worst", lambda p: self.stats_db.get_best_worst_trades(
-            hours=int(p.get("hours", 168))
-        ))
-
-        ch.register_function("schedule_report", lambda p: {
-            "id": self.stats_db.add_scheduled_report(
-                name=p.get("name", "Custom Report"),
-                description=p.get("description", ""),
-                cron_expression=p.get("interval", "1h"),
-                query_type=p.get("query_type", "performance"),
-                query_params=p,
-            ),
-            "status": "scheduled",
-        })
-
-        ch.register_function("get_schedules", lambda p: {
-            "schedules": self.stats_db.get_active_schedules()
-        })
-
-        ch.register_function("delete_schedule", lambda p: {
-            "deleted": self.stats_db.delete_schedule(int(p.get("id", 0)))
-        })
-
-        # ─── Config / settings read ────────────────────────────────────
-        ch.register_function("get_config", lambda p: {
-            "absolute_rules": self.rules.get_all_rules(),
-            "trading": {
-                "mode": self.config.get("trading", {}).get("mode", "paper"),
-                "pairs": list(self.pairs),
-                "interval_seconds": self.interval,
-                "min_confidence": self.config.get("trading", {}).get("min_confidence", 1.0),
-                "max_open_positions": self.config.get("trading", {}).get("max_open_positions", 3),
-            },
-            "risk": dict(self.config.get("risk", {})),
-            "fees": dict(self.config.get("fees", {})),
-            "high_stakes": self.high_stakes.get_status(),
-            "rotation": dict(self.config.get("rotation", {})),
-        })
-
-        # ─── Config / settings write ───────────────────────────────────
-        def _update_rule(p: dict) -> dict:
-            result = self.rules.update_param(
-                param=p.get("param", ""),
-                value=str(p.get("value", "")),
-            )
-            # Persist to settings.yaml
-            if result.get("ok"):
-                try:
-                    sm.update_section("absolute_rules", {p["param"]: result["new"]})
-                except Exception as e:
-                    logger.error(f"Failed to persist rule update to disk: {e}")
-            return result
-
-        ch.register_function("update_rule", _update_rule)
-
-        def _update_trading_param(p: dict) -> dict:
-            param = p.get("param", "")
-            value_str = str(p.get("value", ""))
-            trading_cfg = self.config.setdefault("trading", {})
-            _float_params = {"min_confidence", "paper_slippage_pct"}
-            _int_params = {"max_open_positions", "interval"}
-            try:
-                if param in _float_params:
-                    new_val: Any = float(value_str)
-                elif param in _int_params:
-                    new_val = int(float(value_str))
-                else:
-                    return {"ok": False, "error": f"Unknown trading param: {param!r}"}
-            except (ValueError, TypeError) as e:
-                return {"ok": False, "error": str(e)}
-            old_val = trading_cfg.get(param)
-            trading_cfg[param] = new_val
-            if param == "interval":
-                self.interval = new_val
-            logger.warning(f"🔧 TRADING PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
-            # Persist to settings.yaml
-            try:
-                sm.update_section("trading", {param: new_val})
-            except Exception as e:
-                logger.error(f"Failed to persist trading param to disk: {e}")
-            return {"ok": True, "param": param, "old": old_val, "new": new_val}
-
-        ch.register_function("update_trading_param", _update_trading_param)
-
-        def _update_risk_param(p: dict) -> dict:
-            param = p.get("param", "")
-            value_str = str(p.get("value", ""))
-            risk_cfg = self.config.setdefault("risk", {})
-            _risk_params = {
-                "stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
-                "max_position_pct", "max_total_exposure_pct", "max_drawdown_pct",
-            }
-            _risk_int_params = {"max_trades_per_hour", "loss_cooldown_seconds"}
-            try:
-                if param in _risk_params:
-                    new_val: Any = float(value_str)
-                elif param in _risk_int_params:
-                    new_val = int(float(value_str))
-                else:
-                    return {"ok": False, "error": f"Unknown risk param: {param!r}"}
-            except (ValueError, TypeError) as e:
-                return {"ok": False, "error": str(e)}
-            old_val = risk_cfg.get(param)
-            risk_cfg[param] = new_val
-            # Propagate trailing_stop_pct to the TrailingStopManager
-            if param == "trailing_stop_pct":
-                self.trailing_stops.default_trail_pct = new_val
-            logger.warning(f"🔧 RISK PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
-            # Persist to settings.yaml
-            try:
-                sm.update_section("risk", {param: new_val})
-            except Exception as e:
-                logger.error(f"Failed to persist risk param to disk: {e}")
-            return {"ok": True, "param": param, "old": old_val, "new": new_val}
-
-        ch.register_function("update_risk_param", _update_risk_param)
-
-        # ─── Pair management ───────────────────────────────────────────
-        def _add_pair(p: dict) -> dict:
-            pair = str(p.get("pair", "")).upper().strip()
-            if not pair:
-                return {"ok": False, "error": "pair is required"}
-            if pair not in self.pairs:
-                self.pairs.append(pair)
-                self.config.setdefault("trading", {}).setdefault("pairs", []).append(pair)
-                logger.info(f"📌 Pair added (runtime): {pair}. Active pairs: {self.pairs}")
-            return {"ok": True, "pair": pair, "all_pairs": list(self.pairs)}
-
-        ch.register_function("add_pair", _add_pair)
-
-        def _remove_pair(p: dict) -> dict:
-            pair = str(p.get("pair", "")).upper().strip()
-            if pair in self.pairs:
-                self.pairs.remove(pair)
-                cfg_pairs = self.config.get("trading", {}).get("pairs", [])
-                if pair in cfg_pairs:
-                    cfg_pairs.remove(pair)
-                logger.info(f"🗑️ Pair removed (runtime): {pair}. Active pairs: {self.pairs}")
-            return {"ok": True, "pair": pair, "all_pairs": list(self.pairs)}
-
-        ch.register_function("remove_pair", _remove_pair)
-
-        ch.register_function("blacklist_pair", lambda p: self.rules.add_never_trade_pair(
-            str(p.get("pair", ""))
-        ))
-
-        ch.register_function("unblacklist_pair", lambda p: self.rules.remove_never_trade_pair(
-            str(p.get("pair", ""))
-        ))
-
-        # ─── Trailing stops ────────────────────────────────────────────
-        ch.register_function("get_trailing_stops", lambda p: {
-            "trailing_stops": self.trailing_stops.get_all_stops()  # already serialized dicts
-        })
-
-        # ─── Pending swap management ───────────────────────────────────
-        def _cancel_swap(p: dict) -> dict:
-            swap_id = str(p.get("swap_id", ""))
-            if swap_id in self.rotator.pending_swaps:
-                del self.rotator.pending_swaps[swap_id]
-                return {"ok": True, "cancelled": swap_id}
-            return {"ok": False, "error": f"Swap {swap_id!r} not found"}
-
-        ch.register_function("cancel_swap", _cancel_swap)
-
-        # ─── Simulated Trades ──────────────────────────────────────────────────
-        def _simulate_trade(p: dict) -> dict:
-            pair = str(p.get("pair", "")).upper().strip()
-            from_currency = str(p.get("from_currency", "")).upper().strip()
-            notes = str(p.get("notes", ""))
-            try:
-                from_amount = float(p.get("from_amount", 0))
-            except (TypeError, ValueError):
-                return {"ok": False, "error": "from_amount must be a number"}
-
-            if not pair or not from_currency or from_amount <= 0:
-                return {"ok": False, "error": "pair, from_currency, and from_amount are required"}
-
-            # Derive to_currency from pair
-            parts = pair.split("-")
-            if len(parts) != 2:
-                return {"ok": False, "error": f"Invalid pair format: {pair!r}"}
-            base, quote = parts
-            to_currency = base if from_currency == quote else quote
-
-            # Get live entry price
-            try:
-                entry_price = self.exchange.get_current_price(pair)
-            except Exception as e:
-                return {"ok": False, "error": f"Cannot fetch price for {pair}: {e}"}
-
-            if entry_price <= 0:
-                return {"ok": False, "error": f"No live price available for {pair}"}
-
-            quantity = from_amount / entry_price if from_currency == quote else from_amount * entry_price
-
-            sim_id = self.stats_db.record_simulated_trade(
-                pair=pair,
-                from_currency=from_currency,
-                from_amount=from_amount,
-                entry_price=entry_price,
-                quantity=quantity,
-                to_currency=to_currency,
-                notes=notes,
-            )
-            return {
-                "ok": True,
-                "id": sim_id,
-                "pair": pair,
-                "from_currency": from_currency,
-                "to_currency": to_currency,
-                "from_amount": from_amount,
-                "entry_price": entry_price,
-                "quantity": round(quantity, 8),
-                "notes": notes,
-            }
-
-        ch.register_function("simulate_trade", _simulate_trade)
-
-        def _list_simulations(p: dict) -> dict:
-            include_closed = bool(p.get("include_closed", False))
-            rows = self.stats_db.get_simulated_trades(include_closed=include_closed)
-            # Enrich open rows with live PnL
-            for row in rows:
-                if row["status"] == "open":
-                    try:
-                        current_price = self.exchange.get_current_price(row["pair"])
-                    except Exception:
-                        current_price = row["entry_price"]
-                    if current_price > 0:
-                        pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
-                        pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
-                    else:
-                        pnl_abs = 0.0
-                        pnl_pct = 0.0
-                    row["current_price"] = current_price
-                    row["pnl_abs"] = round(pnl_abs, 4)
-                    row["pnl_pct"] = round(pnl_pct, 2)
-            return {"simulations": rows, "count": len(rows)}
-
-        ch.register_function("list_simulations", _list_simulations)
-
-        def _close_simulation(p: dict) -> dict:
-            try:
-                sim_id = int(p.get("sim_id", 0))
-            except (TypeError, ValueError):
-                return {"ok": False, "error": "sim_id must be an integer"}
-            # Fetch current price for this sim
-            rows = self.stats_db.get_simulated_trades(include_closed=False)
-            target = next((r for r in rows if r["id"] == sim_id), None)
-            if not target:
-                return {"ok": False, "error": f"No open simulation with id={sim_id}"}
-            try:
-                close_price = self.exchange.get_current_price(target["pair"])
-            except Exception:
-                close_price = target["entry_price"]
-            if close_price <= 0:
-                close_price = target["entry_price"]
-            result = self.stats_db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
-            if not result:
-                return {"ok": False, "error": f"Failed to close simulation {sim_id}"}
-            return {"ok": True, **result}
-
-        ch.register_function("close_simulation", _close_simulation)
-
-        logger.info(f"🧠 Registered {len(ch._function_handlers)} chat functions ({len(ch._tool_defs)} with schemas)")
-
+        """Delegate to HoldingsManager."""
+        return self.holdings_manager.live_coinbase_snapshot()
+
+    def _get_scan_summary(self) -> str:
+        """Delegate to UniverseScanner."""
+        return self.universe_scanner.get_scan_summary()
+
+    def _trigger_emergency_replan(self, reason: str) -> None:
+        """Delegate to EventManager."""
+        self.event_manager.trigger_emergency_replan(reason)
 
     # =========================================================================
-    # Proactive Updates
+    # LLM Chat Handler — Function Registry (delegated to TelegramManager)
+    # =========================================================================
+
+    # =========================================================================
+    # Telegram stubs — delegate to TelegramManager
     # =========================================================================
 
     def _send_proactive_update(self) -> None:
-        """Generate and send LLM-powered proactive updates via Telegram."""
-        if not self.telegram or not self.chat_handler:
-            return
-
-        try:
-            context = self._get_trading_context()
-            update = self.chat_handler.generate_proactive_update(context)
-            if update:
-                self.telegram.send_message(update)
-        except Exception as e:
-            logger.debug(f"Proactive update skipped: {e}")
+        self.telegram_manager.send_proactive_update()
 
     def _get_trading_context(self) -> dict:
-        """Assemble trading context for the LLM."""
-        s = self.state
-        sym = s.currency_symbol
-        return {
-            "portfolio_value": format_currency(s.portfolio_value, sym),
-            "cash_balance": format_currency(s.cash_balance, sym),
-            "return_pct": format_percentage(s.return_pct),
-            "max_drawdown": format_percentage(s.max_drawdown),
-            "total_trades": s.total_trades,
-            "win_rate": format_percentage(s.win_rate),
-            "total_pnl": format_currency(s.total_pnl, sym),
-            "open_positions": {
-                pair: {
-                    "qty": qty,
-                    "price": format_currency(s.current_prices.get(pair, 0), sym),
-                }
-                for pair, qty in s.open_positions.items()
-            },
-            "current_prices": {
-                pair: format_currency(price, sym)
-                for pair, price in s.current_prices.items()
-            },
-            "is_paused": s.is_paused,
-            "circuit_breaker": s.circuit_breaker_triggered,
-            "fear_greed": self.fear_greed.get_current(),
-            "high_stakes_active": self.high_stakes.is_active,
-            "pending_swaps": len(self.rotator.pending_swaps),
-            "trailing_stops": self.trailing_stops.get_active_count(),
-            # Raw numeric data (for proactive engine calculations + stats DB)
-            "raw_prices": dict(s.current_prices),
-            "raw_positions": dict(s.open_positions),
-            "raw_portfolio_value": s.portfolio_value,
-            "raw_cash_balance": s.cash_balance,
-            "raw_return_pct": s.return_pct,
-            "raw_total_pnl": s.total_pnl,
-            "raw_max_drawdown": s.max_drawdown,
-            "currency_symbol": s.currency_symbol,
-        }
-
-    # =========================================================================
-    # Telegram Command Handling (legacy fallback)
-    # =========================================================================
+        return self.telegram_manager.get_trading_context()
 
     def _handle_telegram_command(self, command: str, data: dict) -> str:
-        """Handle commands from Telegram."""
-        handlers = {
-            "status": self._cmd_status,
-            "task": self._cmd_task,
-            "rules": self._cmd_rules,
-            "positions": self._cmd_positions,
-            "trades": self._cmd_trades,
-            "news": self._cmd_news,
-            "balance": self._cmd_balance,
-            "pause": self._cmd_pause,
-            "resume": self._cmd_resume,
-            "stop": self._cmd_stop,
-            "approve_trade": self._cmd_approve_trade,
-            "reject_trade": self._cmd_reject_trade,
-            "highstakes": self._cmd_highstakes,
-            "fees": self._cmd_fees,
-            "swaps": self._cmd_swaps,
-            "rotate": self._cmd_rotate,
-            "message": self._cmd_message,
-        }
+        return self.telegram_manager.handle_telegram_command(command, data)
 
-        handler = handlers.get(command)
-        if handler:
-            return handler(data)
-        return f"Unknown command: {command}"
+    def _register_chat_functions(self) -> None:
+        self.telegram_manager.register_chat_functions()
 
     def _cmd_status(self, data: dict) -> str:
-        s = self.state
-        return (
-            f"📊 *Portfolio Status*\n\n"
-            f"💰 Value: {format_currency(s.portfolio_value)}\n"
-            f"💵 Cash: {format_currency(s.cash_balance)}\n"
-            f"📈 Return: {format_percentage(s.return_pct)}\n"
-            f"📉 Max Drawdown: {format_percentage(s.max_drawdown)}\n"
-            f"🔄 Total Trades: {s.total_trades}\n"
-            f"✅ Win Rate: {format_percentage(s.win_rate)}\n"
-            f"💰 Total PnL: {format_currency(s.total_pnl)}\n"
-            f"📊 Open Positions: {len(s.open_positions)}\n"
-            f"{'⏸️ PAUSED' if s.is_paused else '▶️ Running'}\n"
-            f"{'🛑 CIRCUIT BREAKER' if s.circuit_breaker_triggered else ''}"
-        )
+        return self.telegram_manager.cmd_status(data)
 
     def _cmd_task(self, data: dict) -> str:
-        description = sanitize_input(data.get("description", ""), max_length=300)
-        if not description:
-            return "Please provide a task description."
-
-        # Try to parse spending limit from the task
-        max_spend = None
-        spend_match = re.search(r"\$(\d+(?:\.\d+)?)", description)
-        if spend_match:
-            max_spend = float(spend_match.group(1))
-
-        # Try to identify pair
-        pair = None
-        for p in self.pairs:
-            base = p.split("-")[0]
-            if base.lower() in description.lower():
-                pair = p
-                break
-
-        task = Task(description=description, max_spend=max_spend, pair=pair)
-        # Evict completed/stale tasks; cap list at 20 to prevent unbounded growth
-        self.active_tasks = [t for t in self.active_tasks if not t.completed][-20:]
-        self.active_tasks.append(task)
-
-        return (
-            f"📝 *Task Created*\n\n"
-            f"ID: `{task.id}`\n"
-            f"Description: {description}\n"
-            f"Max Spend: {format_currency(max_spend) if max_spend else 'Not set'}\n"
-            f"Pair: {pair or 'Any'}"
-        )
+        return self.telegram_manager.cmd_task(data)
 
     def _cmd_rules(self, data: dict) -> str:
-        rules_text = self.rules.get_rules_text()
-        status = self.rules.get_status()
-        return (
-            f"{rules_text}\n"
-            f"📊 *Today's Usage*\n"
-            f"• Spent: {format_currency(status['daily_spend'])} / {format_currency(status['daily_spend_remaining'])} remaining\n"
-            f"• Losses: {format_currency(status['daily_loss'])} / {format_currency(status['daily_loss_remaining'])} remaining\n"
-            f"• Trades: {status['trades_today']} / {status['trades_remaining']} remaining"
-        )
+        return self.telegram_manager.cmd_rules(data)
 
     def _cmd_positions(self, data: dict) -> str:
-        positions = self.state.open_positions
-        if not positions:
-            return "📊 No open positions."
-
-        lines = ["📊 *Open Positions*\n"]
-        for pair, qty in positions.items():
-            price = self.state.current_prices.get(pair, 0)
-            value = qty * price
-            lines.append(
-                f"• {pair}: {qty:.6f} ({format_currency(value)})"
-            )
-        return "\n".join(lines)
+        return self.telegram_manager.cmd_positions(data)
 
     def _cmd_trades(self, data: dict) -> str:
-        trades = self.state.recent_trades
-        if not trades:
-            return "📊 No recent trades."
-
-        lines = ["📊 *Recent Trades*\n"]
-        for trade in trades[-10:]:
-            lines.append(trade.to_summary())
-        return "\n".join(lines)
+        return self.telegram_manager.cmd_trades(data)
 
     def _cmd_news(self, data: dict) -> str:
-        if self.news:
-            headlines = self.news.get_headlines(10)
-            return f"📰 *Latest Crypto News*\n\n{headlines}"
-
-        if self.redis:
-            try:
-                cached = self.redis.get("news:latest")
-                if cached:
-                    articles = json.loads(cached)
-                    lines = [f"- {a.get('title', '')}" for a in articles[:10]]
-                    return "📰 *Latest News*\n\n" + "\n".join(lines)
-            except Exception:
-                pass
-        return "📰 No news available."
+        return self.telegram_manager.cmd_news(data)
 
     def _cmd_balance(self, data: dict) -> str:
-        balance = self.exchange.balance
-        lines = ["💰 *Account Balance*\n"]
-        for currency, amount in balance.items():
-            lines.append(f"• {currency}: {amount:,.6f}")
-        return "\n".join(lines)
+        return self.telegram_manager.cmd_balance(data)
 
     def _cmd_pause(self, data: dict) -> str:
-        self.state.is_paused = True
-        return "⏸️ Trading paused."
+        return self.telegram_manager.cmd_pause(data)
 
     def _cmd_resume(self, data: dict) -> str:
-        user_id = data.get("user_id", "telegram")
-        was_circuit_breaker = self.state.circuit_breaker_triggered
-        self.state.is_paused = False
-        self.state.circuit_breaker_triggered = False
-        self.audit.log_auth(user_id, authorized=True, command="resume_trading")
-        if was_circuit_breaker:
-            alert = f"⚠️ Circuit breaker manually reset and trading resumed by {user_id}."
-            logger.warning(alert)
-            if self.telegram:
-                self.telegram.send_alert(alert)
-        return "▶️ Trading resumed."
+        return self.telegram_manager.cmd_resume(data)
 
     def _cmd_stop(self, data: dict) -> str:
-        self.state.is_running = False
-        self.state.is_paused = True
-        return "🛑 Emergency stop activated."
+        return self.telegram_manager.cmd_stop(data)
 
     def _cmd_approve_trade(self, data: dict) -> str:
-        trade_id = data.get("trade_id", "")
-        with self._pending_approvals_lock:
-            approved = self._pending_approvals.pop(trade_id, None)
-        if approved is not None:
-            # Clear needs_approval so the executor does not short-circuit again
-            approved = {**approved, "needs_approval": False}
-            result = self.executor.execute({"approved_trade": approved})
-            if result.get("executed"):
-                return "✅ Trade executed successfully!"
-            return f"❌ Execution failed: {result.get('error', 'Unknown')}"
-        return "Trade not found or already processed."
+        return self.telegram_manager.cmd_approve_trade(data)
 
     def _cmd_reject_trade(self, data: dict) -> str:
-        trade_id = data.get("trade_id", "")
-        with self._pending_approvals_lock:
-            removed = self._pending_approvals.pop(trade_id, None)
-        if removed is not None:
-            return "Trade rejected."
-        return "Trade not found or already processed."
+        return self.telegram_manager.cmd_reject_trade(data)
 
     def _cmd_message(self, data: dict) -> str:
-        """Legacy fallback — only used if chat handler is not connected."""
-        text = sanitize_input(data.get("text", ""), max_length=500)
-        if not text:
-            return "Empty message received."
-        return f"📝 Noted: {text}\nI'll factor this into my decisions."
+        return self.telegram_manager.cmd_message(data)
 
     # =========================================================================
-    # Universe Scanning & LLM Screener (Funnel System)
+    # Universe Scanning stubs — delegate to UniverseScanner
     # =========================================================================
 
     def _refresh_pair_universe(self) -> None:
-        """Stage 1: Refresh full product universe from Coinbase (cached)."""
-        now = time.time()
-        if self._pair_universe and (now - self._pair_universe_ts) < self._PAIR_UNIVERSE_TTL:
-            return  # cache still fresh
-
-        try:
-            never_trade = self.config.get("trading", {}).get("never_trade", [])
-            only_trade = self.config.get("trading", {}).get("only_trade", [])
-            products = self.exchange.discover_all_pairs_detailed(
-                quote_currencies=None,  # use default
-                never_trade=never_trade,
-                only_trade=only_trade if only_trade else None,
-                include_crypto_quotes=self._include_crypto_quotes,
-            )
-            old_ids = {p["product_id"] for p in self._pair_universe}
-            new_ids = {p["product_id"] for p in products}
-            added = new_ids - old_ids
-            if added and self._pair_universe:  # skip first load
-                logger.info(f"🌍 Universe refresh: {len(added)} new listings: {sorted(added)[:10]}")
-            self._pair_universe = products
-            self._pair_universe_ts = now
-            logger.debug(f"Universe: {len(products)} tradeable products")
-        except Exception as e:
-            logger.warning(f"Universe refresh failed: {e}")
+        self.universe_scanner.refresh_pair_universe()
 
     def _run_universe_scan(self) -> None:
-        """Stage 2: Technical screen — pure math, zero LLM calls.
-
-        Filters universe by volume/movement thresholds, fetches candles,
-        runs TechnicalAnalyzer + strategies, computes composite score.
-        """
-        if not self._pair_universe:
-            return
-
-        # Pre-filter by 24h volume and price movement
-        candidates = []
-        for p in self._pair_universe:
-            vol = float(p.get("volume_24h", 0) or 0)
-            pct = abs(float(p.get("price_percentage_change_24h", 0) or 0))
-            if vol >= self._scan_volume_threshold and pct >= self._scan_movement_threshold_pct:
-                candidates.append(p)
-
-        if not candidates:
-            logger.debug("Universe scan: no candidates passed volume/movement filter")
-            return
-
-        # Sort by volume descending, cap at 50 to limit API calls
-        candidates.sort(key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True)
-        candidates = candidates[:50]
-
-        analyzer = TechnicalAnalyzer(
-            self.config.get("analysis", {}).get("technical", {})
-        )
-        ema_strategy = EMACrossoverStrategy(self.config)
-        bb_strategy = BollingerReversionStrategy(self.config)
-
-        scan_results: dict[str, dict] = {}
-        rate_limiter = get_rate_limiter()
-
-        for product in candidates:
-            pair = product["product_id"]
-            try:
-                rate_limiter.wait("coinbase_rest")
-                candles = self.exchange.get_candles(pair, granularity="ONE_HOUR", limit=200)
-                if not candles or len(candles) < 30:
-                    continue
-
-                analysis = analyzer.analyze(candles)
-                if "error" in analysis:
-                    continue
-
-                # Run strategy signals (pure math)
-                ema_sig = ema_strategy.generate_signal(pair, candles, analysis)
-                bb_sig = bb_strategy.generate_signal(pair, candles, analysis)
-
-                # Composite score: combine indicators
-                indicators = analysis.get("indicators", {})
-                rsi = indicators.get("rsi")
-                adx = indicators.get("adx")
-                volume_ratio = indicators.get("volume_ratio", 1.0)
-                macd_hist = indicators.get("macd_histogram")
-
-                score = 0.0
-                # RSI momentum (not overbought, not oversold — sweet spot 30-65 for buys)
-                if rsi is not None:
-                    if 30 <= rsi <= 45:
-                        score += 0.25  # oversold bounce potential
-                    elif 45 < rsi <= 65:
-                        score += 0.15  # healthy momentum
-                    elif rsi > 80:
-                        score -= 0.2  # overbought
-
-                # ADX trend strength
-                if adx is not None and adx > 25:
-                    score += 0.2
-
-                # Volume confirmation
-                if volume_ratio > 1.5:
-                    score += 0.15
-                elif volume_ratio > 1.2:
-                    score += 0.1
-
-                # MACD histogram positive
-                if macd_hist is not None and macd_hist > 0:
-                    score += 0.1
-
-                # Strategy confidence boost
-                for sig in [ema_sig, bb_sig]:
-                    if sig.action == "buy" and sig.confidence > 0.5:
-                        score += 0.2 * sig.confidence
-
-                # Movement bonus (higher absolute % change = more opportunity)
-                pct_change = abs(float(product.get("price_percentage_change_24h", 0) or 0))
-                score += min(pct_change / 20.0, 0.15)  # cap at 15%
-
-                scan_results[pair] = {
-                    "product": product,
-                    "current_price": analysis.get("current_price"),
-                    "rsi": rsi,
-                    "adx": adx,
-                    "volume_ratio": volume_ratio,
-                    "macd_histogram": macd_hist,
-                    "ema_signal": ema_sig.action,
-                    "ema_confidence": ema_sig.confidence,
-                    "bb_signal": bb_sig.action,
-                    "bb_confidence": bb_sig.confidence,
-                    "composite_score": round(score, 3),
-                    "price_change_24h_pct": float(product.get("price_percentage_change_24h", 0) or 0),
-                    "volume_24h": float(product.get("volume_24h", 0) or 0),
-                }
-            except Exception as e:
-                logger.debug(f"Scan skip {pair}: {e}")
-                continue
-
-        self._scan_results = scan_results
-
-        # Persist to StatsDB
-        if scan_results:
-            top_movers = sorted(
-                scan_results.items(),
-                key=lambda kv: kv[1]["composite_score"],
-                reverse=True,
-            )[:10]
-            top_movers_str = ", ".join(
-                f"{p}={d['composite_score']}" for p, d in top_movers
-            )
-            try:
-                self.stats_db.save_scan_results(
-                    universe_size=len(self._pair_universe),
-                    scanned_pairs=len(scan_results),
-                    results_json=scan_results,
-                    top_movers=top_movers_str,
-                    summary_text=self._get_scan_summary(),
-                )
-            except Exception as e:
-                logger.debug(f"Failed to persist scan results: {e}")
-
-            logger.info(
-                f"📊 Universe scan: {len(candidates)} candidates → "
-                f"{len(scan_results)} scored | top: {top_movers_str[:120]}"
-            )
+        self.universe_scanner.run_universe_scan()
 
     def _run_llm_screener(self) -> None:
-        """Stage 3: Single LLM call to pick top-N active pairs from scan results.
-
-        Uses ONE compact prompt with a summary table — not per-pair analysis.
-        """
-        if not self._scan_results:
-            return
-
-        # Build top candidates sorted by composite score
-        ranked = sorted(
-            self._scan_results.items(),
-            key=lambda kv: kv[1]["composite_score"],
-            reverse=True,
-        )[:20]  # top 20 for LLM consideration
-
-        if not ranked:
-            return
-
-        # Build compact table for LLM
-        table_lines = ["Pair | Price | RSI | ADX | Vol24h | MACDh | EMA | BB | Score | Chg24h%"]
-        table_lines.append("-" * 90)
-        for pair, d in ranked:
-            table_lines.append(
-                f"{pair} | {d.get('current_price', '?'):.6g} | "
-                f"{d.get('rsi', '?'):.1f} | "
-                f"{d.get('adx', '?'):.1f} | "
-                f"{d.get('volume_24h', 0):.0f} | "
-                f"{d.get('macd_histogram', '?'):.4f} | "
-                f"{d.get('ema_signal', '?')}({d.get('ema_confidence', 0):.2f}) | "
-                f"{d.get('bb_signal', '?')}({d.get('bb_confidence', 0):.2f}) | "
-                f"{d.get('composite_score', 0):.3f} | "
-                f"{d.get('price_change_24h_pct', 0):+.2f}%"
-            )
-
-        table_str = "\n".join(table_lines)
-
-        # Currently held positions (must keep awareness)
-        held_pairs = list(self.state.open_positions.keys())
-        held_note = f"Currently holding positions in: {', '.join(held_pairs)}" if held_pairs else "No open positions."
-
-        prompt = (
-            f"You are a crypto pair screener. Pick the best {self._max_active_pairs} "
-            f"pairs to actively trade from the scan results below.\n\n"
-            f"SCAN RESULTS (sorted by composite score):\n{table_str}\n\n"
-            f"{held_note}\n\n"
-            f"RULES:\n"
-            f"- Pick {self._max_active_pairs} pairs total (can include held pairs if still strong)\n"
-            f"- Prioritize: high composite score, buy signals, strong momentum, adequate volume\n"
-            f"- Avoid: overbought (RSI>80), low volume, sell signals unless reversal expected\n"
-            f"- If a held pair is weakening, it's OK to drop it (rotation will handle exit)\n\n"
-            f"Reply with ONLY a JSON array of pair names, e.g. [\"BTC-USD\",\"ETH-USD\",\"SOL-USD\"]\n"
-            f"No explanation needed."
-        )
-
-        try:
-            response = self.llm.generate(
-                prompt=prompt,
-                system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
-                temperature=0.2,
-                max_tokens=200,
-            )
-
-            # Parse JSON array from response
-            text = response.strip()
-            # Extract JSON array from possible markdown wrapping
-            import re as _re
-            json_match = _re.search(r'\[.*?\]', text, _re.DOTALL)
-            if json_match:
-                selected = json.loads(json_match.group())
-                if isinstance(selected, list) and all(isinstance(s, str) for s in selected):
-                    # Validate pairs exist in scan results
-                    valid = [p for p in selected if p in self._scan_results]
-                    if valid:
-                        old_pairs = set(self._screener_active_pairs)
-                        self._screener_active_pairs = valid[:self._max_active_pairs]
-                        new_pairs = set(self._screener_active_pairs)
-
-                        if old_pairs != new_pairs:
-                            added = new_pairs - old_pairs
-                            removed = old_pairs - new_pairs
-                            changes = []
-                            if added:
-                                changes.append(f"+{','.join(added)}")
-                            if removed:
-                                changes.append(f"-{','.join(removed)}")
-                            logger.info(
-                                f"🎯 LLM Screener selected {len(valid)} pairs: "
-                                f"{valid} | changes: {' '.join(changes)}"
-                            )
-
-                            # Update WebSocket subscriptions
-                            try:
-                                if self.ws_feed:
-                                    self.ws_feed.update_subscriptions(valid)
-                            except Exception as ws_err:
-                                logger.debug(f"WS subscription update failed: {ws_err}")
-                        return
-
-            logger.warning(f"LLM screener returned unparseable response: {text[:200]}")
-        except Exception as e:
-            logger.warning(f"LLM screener failed (non-fatal): {e}")
-
-    def _get_scan_summary(self) -> str:
-        """Build human-readable summary of latest scan results for injection."""
-        if not self._scan_results:
-            return "No scan results available yet."
-
-        ranked = sorted(
-            self._scan_results.items(),
-            key=lambda kv: kv[1]["composite_score"],
-            reverse=True,
-        )
-
-        lines = [f"Universe: {len(self._pair_universe)} products | Scanned: {len(self._scan_results)}"]
-        if self._screener_active_pairs:
-            lines.append(f"Active (LLM-selected): {', '.join(self._screener_active_pairs)}")
-
-        lines.append("Top 10 by composite score:")
-        for pair, d in ranked[:10]:
-            lines.append(
-                f"  {pair}: score={d['composite_score']:.3f} "
-                f"RSI={d.get('rsi', '?'):.1f} ADX={d.get('adx', '?'):.1f} "
-                f"EMA={d.get('ema_signal', '?')} BB={d.get('bb_signal', '?')} "
-                f"vol24h={d.get('volume_24h', 0):.0f} chg={d.get('price_change_24h_pct', 0):+.2f}%"
-            )
-        return "\n".join(lines)
+        self.universe_scanner.run_llm_screener()
 
     # =========================================================================
     # Portfolio Rotation
@@ -2460,73 +964,17 @@ class Orchestrator:
             logger.error(f"Rotation error: {e}", exc_info=True)
 
     # =========================================================================
-    # New Telegram Commands
+    # Backward-compat Telegram command stubs — delegate to TelegramManager
     # =========================================================================
 
     def _cmd_highstakes(self, data: dict) -> str:
-        """
-        /highstakes 4h     — Enable high-stakes mode for 4 hours
-        /highstakes 2d     — Enable for 2 days
-        /highstakes off    — Disable immediately
-        /highstakes status — Show current status
-        """
-        arg = data.get("description", "").strip().lower()
-        user_id = data.get("user_id", "unknown")
-
-        if not arg or arg == "status":
-            return self.high_stakes.get_status()
-
-        if arg == "off":
-            self.audit.log_auth(user_id, authorized=True, command="highstakes_off")
-            return self.high_stakes.deactivate(deactivated_by=user_id)
-
-        # Activate with duration
-        self.audit.log_auth(user_id, authorized=True, command=f"highstakes_{arg}")
-        success, msg = self.high_stakes.activate(
-            duration_str=arg,
-            activated_by=user_id,
-        )
-
-        if success and self.telegram:
-            # Also notify as an alert
-            self.telegram.send_alert(
-                f"⚡ High-stakes mode activated by {user_id} for {arg}"
-            )
-
-        return msg
+        return self.telegram_manager.cmd_highstakes(data)
 
     def _cmd_fees(self, data: dict) -> str:
-        """Show current fee configuration and breakeven analysis."""
-        return self.fee_manager.get_fee_summary()
+        return self.telegram_manager.cmd_fees(data)
 
     def _cmd_swaps(self, data: dict) -> str:
-        """Show pending swap proposals."""
-        pending = self.rotator.pending_swaps
-        if not pending:
-            return "🔄 No pending swap proposals."
-
-        lines = ["🔄 *Pending Swaps*\n"]
-        for swap_id, proposal in pending.items():
-            lines.append(
-                f"• `{swap_id}`\n"
-                f"  {proposal.sell_pair} → {proposal.buy_pair}\n"
-                f"  {format_currency(proposal.quote_amount)} | "
-                f"net +{proposal.net_gain_pct*100:.2f}%\n"
-            )
-        lines.append("\nReply /approve <id> or /reject <id>")
-        return "\n".join(lines)
+        return self.telegram_manager.cmd_swaps(data)
 
     def _cmd_rotate(self, data: dict) -> str:
-        """Force a rotation check immediately."""
-        held_pairs = list(self.state.open_positions.keys())
-        if not held_pairs:
-            return "🔄 No open positions to rotate."
-
-        proposals = asyncio.run(self.rotator.evaluate_rotation(
-            held_pairs=held_pairs,
-            all_pairs=self.pairs,
-            current_prices=self.state.current_prices,
-            portfolio_value=self.state.portfolio_value,
-        ))
-
-        return self.rotator.get_rotation_summary(proposals)
+        return self.telegram_manager.cmd_rotate(data)
