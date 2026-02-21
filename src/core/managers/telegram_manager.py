@@ -786,7 +786,7 @@ class TelegramManager:
         if approved is not None:
             # Clear needs_approval so the executor does not short-circuit again
             approved = {**approved, "needs_approval": False}
-            result = orch.executor.execute({"approved_trade": approved})
+            result = asyncio.run(orch.executor.execute({"approved_trade": approved}))
             if result.get("executed"):
                 return "✅ Trade executed successfully!"
             return f"❌ Execution failed: {result.get('error', 'Unknown')}"

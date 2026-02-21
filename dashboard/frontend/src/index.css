@@ -19,6 +19,18 @@
   --color-surface-800: #161b22;
   --color-surface-700: #21262d;
   --color-surface-600: #30363d;
+
+  --color-gray-50:  #f8f9fa;
+  --color-gray-100: #e6edf3;
+  --color-gray-200: #c9d1d9;
+  --color-gray-300: #b1bac4;
+  --color-gray-400: #8b949e;
+  --color-gray-500: #6e7681;
+  --color-gray-600: #484f58;
+  --color-gray-700: #30363d;
+  --color-gray-800: #21262d;
+  --color-gray-900: #161b22;
+  --color-gray-950: #0d1117;
 }
 
 *, *::before, *::after {

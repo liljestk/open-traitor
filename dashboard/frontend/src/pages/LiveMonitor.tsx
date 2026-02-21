@@ -7,6 +7,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import dayjs from 'dayjs'
 import type { LiveEvent } from '../api'
 import { useLiveStore } from '../store'
+import EmptyState from '../components/EmptyState'
+import PageTransition from '../components/PageTransition'
 
 const AGENT_COLORS: Record<string, string> = {
   market_analyst: 'border-l-brand-500',
@@ -74,6 +76,7 @@ export default function LiveMonitor() {
   const spanEvents = events.filter((e) => e.type !== 'ping')
 
   return (
+    <PageTransition>
     <div className="p-6 flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold text-gray-100">Live Monitor</h2>
@@ -94,8 +97,12 @@ export default function LiveMonitor() {
       </div>
 
       {spanEvents.length === 0 && (
-        <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">
-          Waiting for LLM events…
+        <div className="flex-1 flex items-center justify-center">
+          <EmptyState
+            icon="live"
+            title="Waiting for LLM events"
+            description="Events will stream in real-time as the trading bot processes cycles."
+          />
         </div>
       )}
 
@@ -108,5 +115,6 @@ export default function LiveMonitor() {
         <div ref={bottomRef} />
       </div>
     </div>
+    </PageTransition>
   )
 }

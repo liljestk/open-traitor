@@ -11,6 +11,7 @@ import {
   ChevronDown, ChevronRight, Save, X, AlertTriangle, Check,
   Info, ArrowRight, ArrowUp, ArrowDown, Zap, Server, Cloud, Eye, EyeOff, Key,
 } from 'lucide-react'
+import PageTransition from '../components/PageTransition'
 
 // ── Preset button config ────────────────────────────────────────────────────
 
@@ -866,6 +867,7 @@ export default function Settings() {
   const isShowingComparison = hoveredPreset !== null && hoveredPreset !== activePreset
 
   return (
+    <PageTransition>
     <div style={{ padding: '20px 24px', maxWidth: 900 }}>
       {/* Trading Status Banner */}
       <div style={{
@@ -1054,5 +1056,6 @@ export default function Settings() {
         )
       })}
     </div>
+    </PageTransition>
   )
 }

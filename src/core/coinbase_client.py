@@ -635,6 +635,8 @@ class CoinbaseClient(ExchangeClient):
             return (reverse, "buy")  # buy base from quote side
 
         return None
+
+    def _currency_to_usd(self, currency: str, amount: float) -> float:
         """
         Convert a currency amount to its approximate USD value.
         Order of preference:

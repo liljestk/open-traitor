@@ -109,10 +109,10 @@ class PipelineManager:
                     orch._ws_last_prices[pair] = ws_now
 
         cycle_id = str(uuid.uuid4())
-        strategic_context = orch._get_strategic_context()
+        strategic_context = orch.context_manager.get_strategic_context()
 
         # Run synchronous blocking functions in executor if necessary
-        await asyncio.to_thread(orch._maybe_refresh_holdings)
+        await asyncio.to_thread(orch.holdings_manager.maybe_refresh_holdings)
 
         tracer = get_llm_tracer()
         trace_ctx = tracer.start_trace(
@@ -321,7 +321,7 @@ class PipelineManager:
         # Step 3: Strategy Generation
         _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context
-        pair_confidence_adj = orch.get_pair_confidence_adjustment(pair)
+        pair_confidence_adj = orch.context_manager.get_pair_confidence_adjustment(pair)
 
         strategy_result = await orch.strategist.execute({
             "signal": signal,
@@ -375,6 +375,7 @@ class PipelineManager:
             "avg_win": kelly_stats.get("avg_win", 0),
             "avg_loss": kelly_stats.get("avg_loss", 0),
             "correlation_matrix": correlation_matrix,
+            "atr": tech_analysis.get("atr") if tech_analysis else None,
         })
 
         if not risk_result.get("approved"):

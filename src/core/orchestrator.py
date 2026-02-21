@@ -11,7 +11,6 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -123,6 +122,10 @@ class Orchestrator:
         self.redis = redis_client
         self.ws_feed = ws_feed
         self.rate_limiter = get_rate_limiter()
+
+        # Persistent event loop for async operations within the sync run_forever() loop.
+        # Avoids repeatedly creating/destroying event loops via asyncio.run().
+        self._loop = asyncio.new_event_loop()
 
         # Trading state
         if getattr(exchange, "paper_mode", False):
@@ -466,11 +469,7 @@ class Orchestrator:
 
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
-
-                    async def _run_pipelines():
-                        await asyncio.gather(*tasks)
-
-                    asyncio.run(_run_pipelines())
+                    self._loop.run_until_complete(asyncio.gather(*tasks))
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
 
@@ -626,7 +625,7 @@ class Orchestrator:
                             "scan_results_summary": self.universe_scanner.get_scan_summary(),
                             "universe_size": len(self._pair_universe),
                         }
-                        advisor_result = asyncio.run(
+                        advisor_result = self._loop.run_until_complete(
                             self.settings_advisor.execute(advisor_ctx)
                         )
 
@@ -756,11 +755,7 @@ class Orchestrator:
                 )
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(ep) for ep in early_pairs]
-
-                    async def _run_early():
-                        await asyncio.gather(*tasks)
-
-                    asyncio.run(_run_early())
+                    self._loop.run_until_complete(asyncio.gather(*tasks))
                 except Exception as _ep_err:
                     logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
                     
@@ -774,110 +769,6 @@ class Orchestrator:
                 break  # restart the full interval after an early trigger
 
         logger.info("Orchestrator stopped.")
-
-    # =========================================================================
-    # Delegation Methods (backward compatibility for pipeline_manager, etc.)
-    # =========================================================================
-
-    def _get_strategic_context(self) -> str:
-        """Delegate to ContextManager."""
-        return self.context_manager.get_strategic_context()
-
-    def get_pair_confidence_adjustment(self, pair: str) -> float:
-        """Delegate to ContextManager."""
-        return self.context_manager.get_pair_confidence_adjustment(pair)
-
-    def _maybe_refresh_holdings(self) -> None:
-        """Delegate to HoldingsManager."""
-        self.holdings_manager.maybe_refresh_holdings()
-
-    def _get_performance_summary(self) -> str:
-        """Delegate to ContextManager."""
-        return self.context_manager.get_performance_summary()
-
-    def _live_coinbase_snapshot(self) -> dict:
-        """Delegate to HoldingsManager."""
-        return self.holdings_manager.live_coinbase_snapshot()
-
-    def _get_scan_summary(self) -> str:
-        """Delegate to UniverseScanner."""
-        return self.universe_scanner.get_scan_summary()
-
-    def _trigger_emergency_replan(self, reason: str) -> None:
-        """Delegate to EventManager."""
-        self.event_manager.trigger_emergency_replan(reason)
-
-    # =========================================================================
-    # LLM Chat Handler — Function Registry (delegated to TelegramManager)
-    # =========================================================================
-
-    # =========================================================================
-    # Telegram stubs — delegate to TelegramManager
-    # =========================================================================
-
-    def _send_proactive_update(self) -> None:
-        self.telegram_manager.send_proactive_update()
-
-    def _get_trading_context(self) -> dict:
-        return self.telegram_manager.get_trading_context()
-
-    def _handle_telegram_command(self, command: str, data: dict) -> str:
-        return self.telegram_manager.handle_telegram_command(command, data)
-
-    def _register_chat_functions(self) -> None:
-        self.telegram_manager.register_chat_functions()
-
-    def _cmd_status(self, data: dict) -> str:
-        return self.telegram_manager.cmd_status(data)
-
-    def _cmd_task(self, data: dict) -> str:
-        return self.telegram_manager.cmd_task(data)
-
-    def _cmd_rules(self, data: dict) -> str:
-        return self.telegram_manager.cmd_rules(data)
-
-    def _cmd_positions(self, data: dict) -> str:
-        return self.telegram_manager.cmd_positions(data)
-
-    def _cmd_trades(self, data: dict) -> str:
-        return self.telegram_manager.cmd_trades(data)
-
-    def _cmd_news(self, data: dict) -> str:
-        return self.telegram_manager.cmd_news(data)
-
-    def _cmd_balance(self, data: dict) -> str:
-        return self.telegram_manager.cmd_balance(data)
-
-    def _cmd_pause(self, data: dict) -> str:
-        return self.telegram_manager.cmd_pause(data)
-
-    def _cmd_resume(self, data: dict) -> str:
-        return self.telegram_manager.cmd_resume(data)
-
-    def _cmd_stop(self, data: dict) -> str:
-        return self.telegram_manager.cmd_stop(data)
-
-    def _cmd_approve_trade(self, data: dict) -> str:
-        return self.telegram_manager.cmd_approve_trade(data)
-
-    def _cmd_reject_trade(self, data: dict) -> str:
-        return self.telegram_manager.cmd_reject_trade(data)
-
-    def _cmd_message(self, data: dict) -> str:
-        return self.telegram_manager.cmd_message(data)
-
-    # =========================================================================
-    # Universe Scanning stubs — delegate to UniverseScanner
-    # =========================================================================
-
-    def _refresh_pair_universe(self) -> None:
-        self.universe_scanner.refresh_pair_universe()
-
-    def _run_universe_scan(self) -> None:
-        self.universe_scanner.run_universe_scan()
-
-    def _run_llm_screener(self) -> None:
-        self.universe_scanner.run_llm_screener()
 
     # =========================================================================
     # Portfolio Rotation
@@ -896,7 +787,7 @@ class Orchestrator:
             scan_pairs = list(self._scan_results.keys()) if self._scan_results else []
             all_candidate_pairs = list(set(self.pairs + scan_pairs))
 
-            proposals = asyncio.run(self.rotator.evaluate_rotation(
+            proposals = self._loop.run_until_complete(self.rotator.evaluate_rotation(
                 held_pairs=held_pairs,
                 all_pairs=all_candidate_pairs,
                 current_prices=self.state.current_prices,
@@ -962,19 +853,3 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Rotation error: {e}", exc_info=True)
-
-    # =========================================================================
-    # Backward-compat Telegram command stubs — delegate to TelegramManager
-    # =========================================================================
-
-    def _cmd_highstakes(self, data: dict) -> str:
-        return self.telegram_manager.cmd_highstakes(data)
-
-    def _cmd_fees(self, data: dict) -> str:
-        return self.telegram_manager.cmd_fees(data)
-
-    def _cmd_swaps(self, data: dict) -> str:
-        return self.telegram_manager.cmd_swaps(data)
-
-    def _cmd_rotate(self, data: dict) -> str:
-        return self.telegram_manager.cmd_rotate(data)

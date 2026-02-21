@@ -9,6 +9,7 @@ import dayjs from 'dayjs'
 import { ChevronLeft, ExternalLink, CheckCircle2, XCircle, PauseCircle, Clock, AlertTriangle } from 'lucide-react'
 import { fetchCycleFull, type AgentSpan, type CycleFull } from '../api'
 import SpanWaterfall from '../components/SpanWaterfall'
+import PageTransition from '../components/PageTransition'
 
 const OUTCOME_CONFIG = {
   executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
@@ -115,6 +116,7 @@ export default function CyclePlayback() {
   const cycleStartMs = dayjs(cycle.started_at).valueOf()
 
   return (
+    <PageTransition>
     <div className="p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center gap-4">
@@ -203,5 +205,6 @@ export default function CyclePlayback() {
         </div>
       )}
     </div>
+    </PageTransition>
   )
 }

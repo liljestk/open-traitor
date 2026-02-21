@@ -184,11 +184,8 @@ class RiskManagerAgent(BaseAgent):
         stop_loss = proposal.get("stop_loss_price")
         take_profit = proposal.get("take_profit_price")
 
-        # Get ATR if available from the latest signal
-        latest_signal = self.state.latest_signals.get(pair)
-        atr = None
-        if latest_signal and hasattr(latest_signal, "technical") and latest_signal.technical:
-            atr = getattr(latest_signal.technical, "atr", None)
+        # Get ATR from pipeline context (computed by TechnicalAnalyzer)
+        atr = context.get("atr")
 
         # If no amount specified, use quantity * price
         quantity = float(proposal.get("quantity", 0) or 0)

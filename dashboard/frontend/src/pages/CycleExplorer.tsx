@@ -8,6 +8,10 @@ import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { fetchCycles, fetchStatsSummary, type CycleSummary } from '../api'
 import StatCard from '../components/StatCard'
+import { SkeletonTable, SkeletonStatCards } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
+import PageTransition from '../components/PageTransition'
+import { useCurrencyFormatter } from '../store'
 
 const PAGE_SIZE = 50
 
@@ -16,16 +20,17 @@ function pnlColor(pnl: number | null): string {
   return pnl >= 0 ? 'text-green-400' : 'text-red-400'
 }
 
-function fmtPnl(pnl: number | null): string {
-  if (pnl == null) return '—'
-  const sign = pnl >= 0 ? '+' : ''
-  return `${sign}€${pnl.toFixed(2)}`
-}
-
 export default function CycleExplorer() {
   const [pair, setPair] = useState('')
   const [offset, setOffset] = useState(0)
   const navigate = useNavigate()
+  const fmtCurrency = useCurrencyFormatter()
+
+  const fmtPnl = (pnl: number | null): string => {
+    if (pnl == null) return '—'
+    const sign = pnl >= 0 ? '+' : ''
+    return `${sign}${fmtCurrency(pnl)}`
+  }
 
   const pairs = ['', 'BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'XRP-EUR']
 
@@ -44,6 +49,7 @@ export default function CycleExplorer() {
   const cycles = cyclesData?.cycles ?? []
 
   return (
+    <PageTransition>
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-100">Cycle Explorer</h2>
@@ -59,18 +65,22 @@ export default function CycleExplorer() {
       </div>
 
       {/* Stats row */}
-      {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4">
-          <StatCard label="Win rate" value={stats.win_rate != null ? `${stats.win_rate}%` : '—'} accent="green" />
-          <StatCard label="Total PnL" value={fmtPnl(stats.total_pnl)} accent={stats.total_pnl != null && stats.total_pnl >= 0 ? 'green' : 'red'} />
-          <StatCard label="24h trades" value={stats.trades_24h} accent="blue" />
-          <StatCard label="24h cycles" value={stats.cycles_24h} accent="blue" />
-          <StatCard label="Active pairs" value={stats.active_pairs} />
-          {stats.portfolio && (
-            <StatCard label="Portfolio" value={`€${stats.portfolio.portfolio_value.toFixed(2)}`} accent="blue" />
-          )}
-        </div>
-      )}
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4">
+        {!stats ? (
+          <SkeletonStatCards count={6} />
+        ) : (
+          <>
+            <StatCard label="Win rate" value={stats.win_rate != null ? `${stats.win_rate}%` : '—'} accent="green" />
+            <StatCard label="Total PnL" value={fmtPnl(stats.total_pnl)} accent={stats.total_pnl != null && stats.total_pnl >= 0 ? 'green' : 'red'} />
+            <StatCard label="24h trades" value={stats.trades_24h} accent="blue" />
+            <StatCard label="24h cycles" value={stats.cycles_24h} accent="blue" />
+            <StatCard label="Active pairs" value={stats.active_pairs} />
+            {stats.portfolio && (
+              <StatCard label="Portfolio" value={fmtCurrency(stats.portfolio.portfolio_value)} accent="blue" />
+            )}
+          </>
+        )}
+      </div>
 
       {/* Table */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -83,11 +93,15 @@ export default function CycleExplorer() {
             </tr>
           </thead>
           <tbody>
-            {cyclesLoading && (
-              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
-            )}
+            {cyclesLoading && <SkeletonTable rows={10} cols={10} />}
             {!cyclesLoading && cycles.length === 0 && (
-              <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">No cycles found</td></tr>
+              <tr><td colSpan={10}>
+                <EmptyState
+                  icon="chart"
+                  title="No cycles found"
+                  description="Cycles will appear here once the trading bot starts analyzing pairs."
+                />
+              </td></tr>
             )}
             {cycles.map((c: CycleSummary) => (
               <tr
@@ -148,5 +162,6 @@ export default function CycleExplorer() {
         </div>
       </div>
     </div>
+    </PageTransition>
   )
 }

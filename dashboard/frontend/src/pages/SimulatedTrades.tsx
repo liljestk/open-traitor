@@ -10,6 +10,7 @@ import {
     fetchProducts,
 } from '../api'
 import type { CoinbaseProduct } from '../api'
+import PageTransition from '../components/PageTransition'
 
 // Sensible fallback pairs when Coinbase API is unavailable
 const FALLBACK_PRODUCTS: CoinbaseProduct[] = [
@@ -136,6 +137,7 @@ export default function SimulatedTrades() {
     }
 
     return (
+        <PageTransition>
         <div className="p-6 space-y-8 max-w-6xl mx-auto">
             <div className="flex items-center justify-between">
                 <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
@@ -371,5 +373,6 @@ export default function SimulatedTrades() {
                 )}
             </div>
         </div>
+        </PageTransition>
     )
 }

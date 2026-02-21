@@ -1,8 +1,14 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown } from 'lucide-react'
 import { useLiveStore } from '../store'
 import { openLiveSocket } from '../api'
+
+const PROFILES = [
+  { id: '', label: 'Default', sub: 'All Systems' },
+  { id: 'crypto', label: 'Crypto', sub: 'EUR' },
+  { id: 'nordnet', label: 'Nordnet Shares', sub: 'SEK' },
+]
 
 const NAV = [
   {
@@ -90,6 +96,50 @@ export default function Layout() {
               <div style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3', letterSpacing: '-0.01em' }}>Auto-Traitor</div>
               <div style={{ fontSize: 11, color: '#8b949e', marginTop: 1 }}>LLM Trading Ops</div>
             </div>
+          </div>
+        </div>
+
+        {/* Profile Switcher */}
+        <div style={{ padding: '10px 8px 4px' }}>
+          <div style={{ position: 'relative' }}>
+            <select
+              value={useLiveStore.getState().profile}
+              onChange={(e) => {
+                useLiveStore.getState().setProfile(e.target.value)
+                window.location.reload()
+              }}
+              style={{
+                width: '100%',
+                appearance: 'none',
+                background: 'linear-gradient(145deg, #161b22, #0d1117)',
+                border: '1px solid #30363d',
+                borderRadius: 8,
+                padding: '8px 32px 8px 10px',
+                color: '#e6edf3',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                outline: 'none',
+                fontFamily: 'inherit',
+              }}
+            >
+              {PROFILES.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.sub})
+                </option>
+              ))}
+            </select>
+            <ChevronDown
+              size={13}
+              style={{
+                position: 'absolute',
+                right: 10,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: '#6e7681',
+                pointerEvents: 'none',
+              }}
+            />
           </div>
         </div>
 

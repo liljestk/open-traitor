@@ -3,6 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import { Search, RefreshCw, Info, AlertTriangle, AlertCircle, XCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { fetchEvents } from '../api'
+import { SkeletonLogEntries } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
+import PageTransition from '../components/PageTransition'
 
 type Severity = 'info' | 'warning' | 'error' | 'critical' | string
 
@@ -53,6 +56,7 @@ export default function SystemLogs() {
     }
 
     return (
+        <PageTransition>
         <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20, height: '100%', boxSizing: 'border-box' }}>
 
             {/* Toolbar */}
@@ -103,16 +107,13 @@ export default function SystemLogs() {
 
                 {/* Entries */}
                 <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-                    {isLoading && (
-                        <div style={{ padding: 48, textAlign: 'center', color: '#6e7681' }}>
-                            <RefreshCw size={20} className="animate-spin" style={{ margin: '0 auto 8px', display: 'block' }} />
-                            Loading events...
-                        </div>
-                    )}
+                    {isLoading && <SkeletonLogEntries count={15} />}
                     {!isLoading && events.length === 0 && (
-                        <div style={{ padding: 48, textAlign: 'center', color: '#6e7681' }}>
-                            No events found for the selected criteria.
-                        </div>
+                        <EmptyState
+                            icon="logs"
+                            title="No events found"
+                            description="System events will appear here as the bot runs."
+                        />
                     )}
 
                     <AnimatePresence>
@@ -227,5 +228,6 @@ export default function SystemLogs() {
                 </div>
             </div>
         </div>
+        </PageTransition>
     )
 }

@@ -143,3 +143,106 @@ class ExchangeClient(abc.ABC):
         Returns a dict with 'base_currency_id', 'quote_currency_id', 'base_min_size', 'base_max_size', 'base_increment', 'quote_increment'
         """
         pass
+
+    # =========================================================================
+    # Methods with default implementations (override in subclasses as needed)
+    # =========================================================================
+
+    @property
+    def balance(self) -> dict[str, float]:
+        """
+        Get aggregated account balances as {currency: available_amount}.
+
+        Default implementation calls get_accounts() and aggregates.
+        Subclasses may override for cached/optimized access.
+        """
+        accounts = self.get_accounts()
+        result: dict[str, float] = {}
+        for acc in accounts:
+            currency = acc.get("currency", "")
+            available = float(acc.get("available", 0))
+            if currency and available > 0:
+                result[currency] = result.get(currency, 0) + available
+        return result
+
+    def detect_native_currency(self) -> str:
+        """
+        Detect the native/home currency of the account (e.g. 'EUR', 'USD', 'SEK').
+
+        Default: returns 'USD'. Subclasses should override based on account data.
+        """
+        return "USD"
+
+    def adapt_pairs_to_account(self, pairs: list[str], native_currency: str) -> list[str]:
+        """
+        Adapt trading pairs to the account's native currency.
+        
+        E.g. if native is EUR and pairs contain BTC-USD, convert to BTC-EUR if available.
+        Default: returns pairs unchanged.
+        """
+        return pairs
+
+    def discover_all_pairs(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: list[str] | None = None,
+        only_trade: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Discover all available trading pairs, filtered by quote currency and exclusions.
+
+        Returns a list of pair strings (e.g. ['BTC-EUR', 'ETH-EUR']).
+        Default: returns empty list.
+        """
+        return []
+
+    def discover_all_pairs_detailed(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: list[str] | None = None,
+        only_trade: list[str] | None = None,
+        include_crypto_quotes: bool = False,
+    ) -> list[dict]:
+        """
+        Discover all available trading pairs with detailed metadata.
+
+        Returns a list of dicts with keys: product_id, base_currency_id,
+        quote_currency_id, base_min_size, quote_min_size, volume_24h,
+        price_percentage_change_24h.
+        Default: returns empty list.
+        """
+        return []
+
+    def get_portfolio_value(self) -> float:
+        """
+        Calculate total portfolio value in the native currency.
+
+        Default: sums all account balances at face value (no conversion).
+        Subclasses should override with proper currency conversion.
+        """
+        accounts = self.get_accounts()
+        total = 0.0
+        for acc in accounts:
+            total += float(acc.get("balance", 0))
+        return total
+
+    def reconcile_positions(self, expected: dict[str, float]) -> dict:
+        """
+        Compare expected positions with actual exchange positions.
+
+        Args:
+            expected: Dict of {pair: expected_quantity}
+
+        Returns a dict with 'mismatches' (list), 'matched' (int), 'total' (int).
+        Default: returns empty reconciliation.
+        """
+        return {"mismatches": [], "matched": 0, "total": 0}
+
+    def get_open_orders(self, pair: str | None = None) -> list[dict]:
+        """
+        Get all open/pending orders, optionally filtered by pair.
+
+        Returns a list of order dicts.
+        Default: returns empty list.
+        """
+        return []

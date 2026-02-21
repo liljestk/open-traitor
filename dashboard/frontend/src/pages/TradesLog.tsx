@@ -3,6 +3,10 @@ import { useQuery } from '@tanstack/react-query'
 import { Download, Search, RefreshCw, TrendingUp, TrendingDown, CircleDollarSign, Hash } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { fetchTrades, exportTradesUrl } from '../api'
+import { SkeletonTable } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
+import PageTransition from '../components/PageTransition'
+import { useCurrencyFormatter } from '../store'
 
 const inputStyle: React.CSSProperties = {
     background: '#161b22',
@@ -32,17 +36,13 @@ export default function TradesLog() {
     const [pairFilter, setPairFilter] = useState('')
     const [hours, setHours] = useState(168)
     const [limit, setLimit] = useState(500)
+    const fmtCurrency = useCurrencyFormatter()
 
     const { data, isLoading, isFetching, refetch } = useQuery({
         queryKey: ['trades', pairFilter, limit, hours],
         queryFn: () => fetchTrades(pairFilter || undefined, limit, hours),
         refetchInterval: 30000,
     })
-
-    const fmtCurrency = (val: number | null | undefined) => {
-        if (val == null) return '—'
-        return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 }).format(val)
-    }
 
     const fmtDate = (iso: string) => {
         try {
@@ -59,6 +59,7 @@ export default function TradesLog() {
     const winRate = trades.length > 0 ? Math.round((wins / trades.length) * 100) : 0
 
     return (
+        <PageTransition>
         <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20, height: '100%', boxSizing: 'border-box' }}>
 
             {/* Toolbar */}
@@ -155,15 +156,14 @@ export default function TradesLog() {
                             </tr>
                         </thead>
                         <tbody>
-                            {isLoading && (
-                                <tr><td colSpan={9} style={{ padding: 48, textAlign: 'center', color: '#6e7681' }}>
-                                    <RefreshCw size={20} className="animate-spin" style={{ margin: '0 auto 8px', display: 'block' }} />
-                                    Loading trades...
-                                </td></tr>
-                            )}
+                            {isLoading && <SkeletonTable rows={10} cols={9} />}
                             {!isLoading && trades.length === 0 && (
-                                <tr><td colSpan={9} style={{ padding: 48, textAlign: 'center', color: '#6e7681' }}>
-                                    No trades match the selected criteria.
+                                <tr><td colSpan={9}>
+                                    <EmptyState
+                                        icon="trades"
+                                        title="No trades yet"
+                                        description="Trades will appear here once the bot executes its first order."
+                                    />
                                 </td></tr>
                             )}
                             <AnimatePresence>
@@ -266,5 +266,6 @@ export default function TradesLog() {
                 </div>
             </div>
         </div>
+        </PageTransition>
     )
 }
