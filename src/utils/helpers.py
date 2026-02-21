@@ -1,8 +1,32 @@
-"""
-Utility helper functions for Auto-Traitor.
-"""
+"""Utility helper functions for Auto-Traitor."""
 
+import os
 from datetime import datetime, timezone
+
+
+def get_data_dir() -> str:
+    """Return the profile-scoped data directory.
+
+    Uses ``AUTO_TRAITOR_PROFILE`` to isolate state files when multiple
+    instances run side-by-side (e.g. crypto vs shares).
+
+    Falls back to the flat ``data/`` directory when no profile is set.
+    """
+    profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+    base = os.path.join("data", profile) if profile else "data"
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def get_log_dir() -> str:
+    """Return the profile-scoped log directory.
+
+    Mirrors :func:`get_data_dir` logic for the ``logs/`` tree.
+    """
+    profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+    base = os.path.join("logs", profile) if profile else "logs"
+    os.makedirs(base, exist_ok=True)
+    return base
 
 
 def format_currency(value: float, symbol: str = "$") -> str:

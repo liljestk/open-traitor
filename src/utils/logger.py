@@ -12,6 +12,7 @@ from typing import Optional
 from rich.console import Console
 from rich.logging import RichHandler
 
+from src.utils.helpers import get_log_dir
 
 _loggers: dict[str, logging.Logger] = {}
 _initialized = False
@@ -21,7 +22,7 @@ console = Console()
 
 def setup_logger(
     log_level: str = "INFO",
-    log_dir: str = "logs",
+    log_dir: str = None,
     max_file_size_mb: int = 50,
     backup_count: int = 5,
     file_enabled: bool = True,
@@ -32,6 +33,10 @@ def setup_logger(
         return
 
     level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # Resolve profile-scoped log directory
+    if log_dir is None:
+        log_dir = get_log_dir()
 
     # Create log directory
     if file_enabled:

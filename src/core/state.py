@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import os
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,11 +17,15 @@ from pydantic import BaseModel, Field
 
 from src.models.signal import Signal
 from src.models.trade import Trade, TradeStatus
+from src.utils.helpers import get_data_dir
 from src.utils.logger import get_logger
 
 logger = get_logger("core.state")
 
-_STATE_FILE = "data/trading_state.json"
+
+def _get_state_file() -> str:
+    """Return the profile-scoped trading state file path."""
+    return os.path.join(get_data_dir(), "trading_state.json")
 
 
 class PortfolioSnapshot(BaseModel):
@@ -82,7 +87,7 @@ class TradingState:
         self.agent_states: dict[str, dict] = {}
 
         # Warm-start from persisted snapshot (trades + signals only; balance is live)
-        self._warm_start(_STATE_FILE)
+        self._warm_start(_get_state_file())
 
         logger.info(f"TradingState initialized | Balance: ${initial_balance:,.2f}")
 
@@ -441,8 +446,10 @@ class TradingState:
             "circuit_breaker": self.circuit_breaker_triggered,
         }
 
-    def save_state(self, filepath: str = _STATE_FILE) -> None:
+    def save_state(self, filepath: str = None) -> None:
         """Save the current state to a JSON file (atomic write)."""
+        if filepath is None:
+            filepath = _get_state_file()
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
 

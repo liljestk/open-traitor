@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from src.utils.helpers import get_data_dir
 from src.utils.logger import get_logger
 
 logger = get_logger("utils.audit")
@@ -35,7 +36,9 @@ class AuditLog:
       - Emergency stops
     """
 
-    def __init__(self, log_dir: str = "data"):
+    def __init__(self, log_dir: str = None):
+        if log_dir is None:
+            log_dir = get_data_dir()
         self.log_dir = os.path.join(log_dir, "audit")
         os.makedirs(self.log_dir, exist_ok=True)
 

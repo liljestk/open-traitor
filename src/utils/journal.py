@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from src.utils.helpers import get_data_dir
 from src.utils.logger import get_logger
 
 logger = get_logger("utils.journal")
@@ -26,7 +27,9 @@ class TradeJournal:
       - trades.csv       (human-readable summary of executed trades)
     """
 
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = None):
+        if data_dir is None:
+            data_dir = get_data_dir()
         self.data_dir = data_dir
         self.journal_dir = os.path.join(data_dir, "journal")
         os.makedirs(self.journal_dir, exist_ok=True)
