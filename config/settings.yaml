@@ -65,31 +65,34 @@ llm:
 
     '
   providers:
-    - name: gemini
-      enabled: true
-      base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-      api_key_env: GEMINI_API_KEY
-      model: gemini-2.0-flash
-      timeout: 30
-      rpm_limit: 14
-      daily_token_limit: 950000
-      cooldown_seconds: 65
-    - name: openai
-      enabled: true
-      base_url: https://api.openai.com/v1
-      api_key_env: OPENAI_API_KEY
-      model: gpt-4o-mini
-      timeout: 45
-      rpm_limit: 450
-      daily_token_limit: 0
-      cooldown_seconds: 30
-    - name: ollama
-      enabled: true
-      model: llama3.1:8b
-      base_url_env: OLLAMA_BASE_URL
-      model_env: OLLAMA_MODEL
-      timeout: 60
-      is_local: true
+  - name: gemini
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: AIzaSyC7noaJLIlH9MPxTStIn3Rc9aAukbDyU6A
+    model: gemini-2.0-flash
+    timeout: 30
+    rpm_limit: 14
+    daily_token_limit: 950000
+    cooldown_seconds: 65
+    api_key_set: false
+  - name: openai
+    enabled: true
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+    timeout: 45
+    rpm_limit: 450
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    api_key_set: false
+  - name: ollama
+    enabled: true
+    model: llama3.1:8b
+    base_url_env: OLLAMA_BASE_URL
+    model_env: OLLAMA_MODEL
+    timeout: 60
+    is_local: true
+    api_key_set: true
 analysis:
   technical:
     rsi_period: 14
@@ -181,6 +184,10 @@ high_stakes:
   min_swap_gain_pct: 0.01
   auto_approve_up_to: 500
 routing:
-  bridge_currencies: ["EUR", "EURC", "USDC", "BTC"]
+  bridge_currencies:
+  - EUR
+  - EURC
+  - USDC
+  - BTC
   min_bridge_volume_24h: 10000
   slippage_factor: 0.001

@@ -20,7 +20,7 @@ from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
 from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
-from src.core.coinbase_client import CoinbaseClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
+from src.core.exchange_client import ExchangeClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
@@ -100,7 +100,7 @@ class Orchestrator:
     def __init__(
         self,
         config: dict,
-        coinbase: CoinbaseClient,
+        exchange: ExchangeClient,
         llm: LLMClient,
         rules: AbsoluteRules,
         news_aggregator: Optional[NewsAggregator] = None,
@@ -109,7 +109,7 @@ class Orchestrator:
         ws_feed: Optional[CoinbaseWebSocketFeed] = None,
     ):
         self.config = config
-        self.coinbase = coinbase
+        self.exchange = exchange
         self.llm = llm
         self.rules = rules
         self.news = news_aggregator
@@ -119,11 +119,11 @@ class Orchestrator:
         self.rate_limiter = get_rate_limiter()
 
         # Trading state
-        if coinbase.paper_mode:
+        if getattr(exchange, "paper_mode", False):
             initial_balance = 10000.0
         else:
             try:
-                initial_balance = coinbase.get_portfolio_value()
+                initial_balance = exchange.get_portfolio_value()
             except Exception as _e:
                 logger.warning(f"⚠️ Could not fetch live portfolio value on startup: {_e} — defaulting to $0")
                 initial_balance = 0.0
@@ -132,13 +132,15 @@ class Orchestrator:
 
         # Trading pairs
         self.pairs = config.get("trading", {}).get("pairs", ["BTC-USD"])
+        self.watchlist_pairs = config.get("trading", {}).get("watchlist_pairs", [])
+        self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
         self.interval = config.get("trading", {}).get("interval", 120)
 
         # Initialize agents
         self.market_analyst = MarketAnalystAgent(llm, self.state, config)
         self.strategist = StrategistAgent(llm, self.state, config)
         self.risk_manager = RiskManagerAgent(llm, self.state, config, rules)
-        self.executor = ExecutorAgent(llm, self.state, config, coinbase, rules)
+        self.executor = ExecutorAgent(llm, self.state, config, exchange, rules)
         self.settings_advisor = SettingsAdvisorAgent(
             llm, self.state, config, rules,
             review_interval=config.get("trading", {}).get("settings_review_interval", 10),
@@ -1194,10 +1196,10 @@ class Orchestrator:
         symbol = currency_symbols.get(native, native + " ")
 
         try:
-            accounts = self.coinbase._rest_client.get_accounts() if self.coinbase._rest_client else None
+            accounts = self.exchange.get_accounts()
         except Exception as e:
             logger.warning(f"_live_coinbase_snapshot: get_accounts failed: {e}")
-            accounts = None
+            accounts = []
 
         holdings = []
         prices_by_pair: dict[str, float] = {}
@@ -1212,7 +1214,7 @@ class Orchestrator:
 
         if accounts:
             raw = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-            account_list = raw.get("accounts", [])
+            account_list = raw.get("accounts", accounts)
 
             for acct in account_list:
                 bal = acct.get("available_balance", {})
@@ -1229,7 +1231,10 @@ class Orchestrator:
                 is_fiat = currency in _KNOWN_FIAT or currency in _ALL_STABLECOINS
 
                 # Convert to native account currency (e.g. EUR)
-                native_val = self.coinbase._currency_to_native(currency, amount, native)
+                if hasattr(self.exchange, "_currency_to_native"):
+                    native_val = self.exchange._currency_to_native(currency, amount, native)
+                else:
+                    native_val = amount # Fallback
 
                 # Determine best price pair to quote for this asset
                 tracked_pair = native_tracked.get(currency)

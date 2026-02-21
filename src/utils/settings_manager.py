@@ -64,7 +64,7 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "holdings_refresh_seconds":     {"type": int,   "min": 5, "max": 3600},
     "holdings_dust_threshold":      {"type": float, "min": 0.0, "max": 100.0},
     "invalidate_strategic_context": {"type": bool},
-    "watchlist":                     {"type": list},
+    "watchlist_pairs":               {"type": list},
     "pair_universe_refresh_seconds": {"type": int,   "min": 300, "max": 86400},
     "max_active_pairs":              {"type": int,   "min": 1, "max": 50},
     "include_crypto_quotes":         {"type": bool},

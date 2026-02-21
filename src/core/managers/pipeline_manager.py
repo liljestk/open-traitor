@@ -307,6 +307,17 @@ class PipelineManager:
             if signal_obj:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
 
+        # Stop early if this is strictly a watchlist pair
+        is_watchlist_only = pair in getattr(orch, "watchlist_pairs", []) and pair not in orch.pairs
+        if is_watchlist_only:
+            _timings["analyst"] = time.monotonic() - _step_t
+            _total = time.monotonic() - _t0
+            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            logger.info(f"👀 Pipeline {pair}: {_parts} total={_total:.1f}s [watchlist-only]")
+            if trace_ctx is not None:
+                trace_ctx.finish(metadata={"action": "watchlist_only", "signal": signal.get("action")})
+            return
+
         # Step 3: Strategy Generation
         _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context

@@ -21,6 +21,7 @@ import yaml
 from dotenv import load_dotenv
 
 from src.core.coinbase_client import CoinbaseClient
+from src.core.exchange_client import ExchangeClient
 from src.core.llm_client import LLMClient, build_providers
 from src.core.orchestrator import Orchestrator
 from src.core.rules import AbsoluteRules
@@ -218,8 +219,8 @@ def main():
         else:
             logger.warning("⚠️ Ollama not responding — will retry during operation")
 
-    # Coinbase Client
-    coinbase = CoinbaseClient(
+    # Exchange Client
+    exchange: ExchangeClient = CoinbaseClient(
         api_key=os.environ.get("COINBASE_API_KEY"),
         api_secret=os.environ.get("COINBASE_API_SECRET"),
         paper_mode=paper_mode,
@@ -229,7 +230,7 @@ def main():
     # -------------------------------------------------------------------------
     # Coinbase API health-check & dynamic currency / pair adaption
     # -------------------------------------------------------------------------
-    conn = coinbase.check_connection()
+    conn = exchange.check_connection()
     if conn["ok"]:
         logger.info(f"✅ Coinbase API: {conn['message']}")
         if conn.get("non_zero_accounts") is not None:
@@ -257,8 +258,8 @@ def main():
     
     if quote_currency_setting != "AUTO":
         native_currency = quote_currency_setting
-    elif coinbase._rest_client:
-        native_currency = coinbase.detect_native_currency()
+    elif hasattr(exchange, "detect_native_currency"):
+        native_currency = exchange.detect_native_currency()
 
     # Pair discovery: "all" = discover every tradable pair on Coinbase for the
     # configured quote currencies; "configured" = use only settings.yaml pairs
@@ -267,13 +268,13 @@ def main():
         "quote_currencies", [native_currency]
     )
 
-    if coinbase._rest_client:
+    if hasattr(exchange, "discover_all_pairs"):
         if pair_discovery == "all":
-            # Discover ALL tradable pairs on Coinbase for our quote currencies
+            # Discover ALL tradable pairs on Exchange for our quote currencies
             abs_rules_cfg = config.get("absolute_rules", {})
             never_trade = set(abs_rules_cfg.get("never_trade_pairs", []))
             only_trade = set(abs_rules_cfg.get("only_trade_pairs", []))
-            discovered = coinbase.discover_all_pairs(
+            discovered = exchange.discover_all_pairs(
                 quote_currencies=quote_currencies,
                 never_trade=never_trade if never_trade else None,
                 only_trade=only_trade if only_trade else None,
@@ -291,7 +292,7 @@ def main():
         else:
             # Legacy mode: expand configured pairs via asset-based discovery
             raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
-            adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
+            adapted_pairs = exchange.adapt_pairs_to_account(raw_pairs, native_currency) if hasattr(exchange, "adapt_pairs_to_account") else raw_pairs
             if set(adapted_pairs) != set(raw_pairs):
                 logger.info(
                     f"🌍 Trading pairs dynamically expanded: "
@@ -303,9 +304,9 @@ def main():
 
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).
-    if paper_mode and native_currency != "USD":
-        initial_paper = coinbase._paper_balance.pop("USD", 10_000.0)
-        coinbase._paper_balance[native_currency] = initial_paper
+    if getattr(exchange, "paper_mode", False) and native_currency != "USD" and hasattr(exchange, "_paper_balance"):
+        initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
+        exchange._paper_balance[native_currency] = initial_paper
         logger.info(f"📝 Paper balance: {initial_paper:,.2f} {native_currency}")
 
     # Absolute Rules
@@ -389,7 +390,7 @@ def main():
 
     orchestrator = Orchestrator(
         config=config,
-        coinbase=coinbase,
+        exchange=exchange,
         llm=llm,
         rules=rules,
         news_aggregator=news_aggregator,

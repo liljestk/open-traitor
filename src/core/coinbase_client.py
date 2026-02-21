@@ -68,7 +68,9 @@ def _get_fiat_rate_usd(currency: str) -> float:
     return result[0] if result else 0.0
 
 
-class CoinbaseClient:
+from src.core.exchange_client import ExchangeClient
+
+class CoinbaseClient(ExchangeClient):
     """Wrapper around the Coinbase Advanced Trade API with paper trading support."""
 
     def __init__(
@@ -749,6 +751,29 @@ class CoinbaseClient:
                 continue
             total += self._currency_to_usd(currency, value)
         return total
+
+    # =========================================================================
+    # ExchangeClient Implementations
+    # =========================================================================
+
+    def place_market_order(self, pair: str, side: str, amount: float, amount_is_base: bool = False, client_oid: str = "") -> dict:
+        """Place a market order (ExchangeClient abstract method implementation)."""
+        if side.upper() == "BUY":
+            if amount_is_base:
+                return self.market_order_buy(pair, base_size=str(amount))
+            else:
+                return self.market_order_buy(pair, quote_size=str(amount))
+        elif side.upper() == "SELL":
+            return self.market_order_sell(pair, base_size=str(amount))
+        return {"success": False, "error": f"Invalid side: {side}"}
+
+    def place_limit_order(self, pair: str, side: str, price: float, size: float, client_oid: str = "") -> dict:
+        """Place a limit order (ExchangeClient abstract method implementation)."""
+        if side.upper() == "BUY":
+            return self.limit_order_buy(pair, base_size=str(size), limit_price=str(price))
+        elif side.upper() == "SELL":
+            return self.limit_order_sell(pair, base_size=str(size), limit_price=str(price))
+        return {"success": False, "error": f"Invalid side: {side}"}
 
     # =========================================================================
     # Order Execution

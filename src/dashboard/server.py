@@ -59,7 +59,7 @@ _temporal_client = None   # temporalio.client.Client instance (optional)
 _temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 _temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
 _config: dict = {}
-_coinbase_client = None   # CoinbaseClient instance (optional, for price lookups)
+_exchange_client = None   # ExchangeClient instance (optional, for price lookups)
 
 _ws_connections: list[WebSocket] = []
 
@@ -70,7 +70,7 @@ _llm_client = None        # LLMClient instance (optional, for provider status)
 
 def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None):
     """Inject shared services.  Called from main.py before uvicorn starts."""
-    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client, _rules_instance, _llm_client
+    global _stats_db, _redis_client, _temporal_client, _config, _exchange_client, _rules_instance, _llm_client
     _stats_db = stats_db
     _redis_client = redis_client
     _temporal_client = temporal_client
@@ -83,7 +83,7 @@ def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: di
         key_file = os.environ.get("COINBASE_KEY_FILE", "")
         api_key = os.environ.get("COINBASE_API_KEY", "")
         api_secret = os.environ.get("COINBASE_API_SECRET", "")
-        _coinbase_client = CoinbaseClient(
+        _exchange_client = CoinbaseClient(
             api_key=api_key or None,
             api_secret=api_secret or None,
             key_file=key_file or None,
@@ -91,7 +91,7 @@ def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: di
         )
         logger.info("✅ Dashboard Coinbase price client ready")
     except Exception as e:
-        logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
+        logger.warning(f"⚠️ Dashboard Exchange client not available: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -162,22 +162,21 @@ async def lifespan(application: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Temporal not available: {e} — replay/rerun disabled")
 
-    # --- Initialise Coinbase price client if not already set -----------------
-    if _coinbase_client is None:
+    if _exchange_client is None:
         try:
             from src.core.coinbase_client import CoinbaseClient
             key_file = os.environ.get("COINBASE_KEY_FILE", "")
             api_key = os.environ.get("COINBASE_API_KEY", "")
             api_secret = os.environ.get("COINBASE_API_SECRET", "")
-            globals()["_coinbase_client"] = CoinbaseClient(
+            globals()["_exchange_client"] = CoinbaseClient(
                 api_key=api_key or None,
                 api_secret=api_secret or None,
                 key_file=key_file or None,
                 paper_mode=True,
             )
-            logger.info("✅ Dashboard Coinbase price client ready")
+            logger.info("✅ Dashboard exchange price client ready")
         except Exception as e:
-            logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
+            logger.warning(f"⚠️ Dashboard exchange client not available: {e}")
 
     yield
     if task:
@@ -469,10 +468,10 @@ def get_stats_summary():
 # ---------------------------------------------------------------------------
 
 def _get_live_price(pair: str) -> float:
-    """Fetch the current price for a pair via CoinbaseClient (or return 0 on failure)."""
-    if _coinbase_client:
+    """Fetch the current price for a pair via ExchangeClient (or return 0 on failure)."""
+    if _exchange_client:
         try:
-            return _coinbase_client.get_current_price(pair)
+            return _exchange_client.get_current_price(pair)
         except Exception:
             pass
     return 0.0
@@ -485,11 +484,11 @@ def list_products():
     Response: ``{"products": [{"id": "BTC-EUR", "base": "BTC", "quote": "EUR"}, ...]}``
     Each entry is a product that is *online* and not disabled on the exchange.
     """
-    if not _coinbase_client or not _coinbase_client._rest_client:
+    if not getattr(_exchange_client, "_rest_client", None):
         return {"products": []}
 
     try:
-        resp = _coinbase_client._rest_client.get_products()
+        resp = _exchange_client._rest_client.get_products()
         raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
         items = raw.get("products", [])
         products = []
@@ -1164,6 +1163,101 @@ def update_llm_providers(body: _ProvidersUpdateBody):
     except Exception as exc:
         logger.exception("llm-providers PUT error")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+class _ApiKeysUpdateBody(_BaseModel):
+    keys: dict[str, str]  # env_var_name → value
+
+
+@app.put("/api/settings/api-keys", summary="Update API keys for LLM providers")
+def update_api_keys(body: _ApiKeysUpdateBody):
+    """
+    Accepts a dict of env var names to values, e.g.
+    ``{"GEMINI_API_KEY": "AIza...", "OPENAI_API_KEY": "sk-..."}``
+
+    Only allows updating keys that are referenced by configured LLM providers.
+    Persists to config/.env and updates os.environ at runtime.
+    """
+    try:
+        # Validate: only allow env vars referenced by providers' api_key_env
+        providers_config = _sm_get_providers()
+        allowed_vars: set[str] = set()
+        for pc in providers_config:
+            env_var = pc.get("api_key_env", "")
+            if env_var:
+                allowed_vars.add(env_var)
+
+        for var_name in body.keys:
+            if var_name not in allowed_vars:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{var_name}' is not a recognized LLM provider API key env var. "
+                           f"Allowed: {sorted(allowed_vars)}",
+                )
+
+        # Update os.environ immediately
+        for var_name, value in body.keys.items():
+            os.environ[var_name] = value
+
+        # Persist to config/.env
+        env_path = os.path.join("config", ".env")
+        _update_env_file(env_path, body.keys)
+
+        # Hot-reload LLMClient providers so new keys take effect
+        if _llm_client:
+            from src.core.llm_client import build_providers
+            saved_providers = _sm_get_providers()
+            llm_config = _config.get("llm", {})
+            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+            new_providers = build_providers(
+                saved_providers,
+                fallback_base_url=ollama_url,
+                fallback_model=fallback_model,
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
+            )
+            _llm_client.reload_providers(new_providers)
+
+        logger.warning(f"🔑 API keys updated: {sorted(body.keys.keys())}")
+        return {"ok": True, "updated": sorted(body.keys.keys())}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("api-keys PUT error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
+    """Update or append env vars in a .env file, preserving existing content."""
+    lines: list[str] = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                new_lines.append(f"{key}={updates[key]}\n")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line)
+
+    # Append any keys that weren't already in the file
+    remaining = set(updates.keys()) - updated_keys
+    if remaining:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines.append("\n")
+        new_lines.append("\n# LLM Provider API Keys (added by dashboard)\n")
+        for key in sorted(remaining):
+            new_lines.append(f"{key}={updates[key]}\n")
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
 
 
 # ---------------------------------------------------------------------------

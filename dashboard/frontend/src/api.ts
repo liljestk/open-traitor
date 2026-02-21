@@ -342,6 +342,13 @@ export const updateLLMProviders = (providers: LLMProviderConfig[]) =>
     body: JSON.stringify({ providers }),
   })
 
+export const updateApiKeys = (keys: Record<string, string>) =>
+  apiFetch<{ ok: boolean; updated: string[] }>('/settings/api-keys', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys }),
+  })
+
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {

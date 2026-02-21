@@ -2,14 +2,14 @@ import { useState, useMemo, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
-  fetchLLMProviders, updateLLMProviders,
+  fetchLLMProviders, updateLLMProviders, updateApiKeys,
   type SectionSchema, type FieldSchema, type PresetInfo,
   type LLMProviderConfig,
 } from '../api'
 import {
   Shield, ShieldAlert, ShieldOff, ToggleLeft, ToggleRight,
   ChevronDown, ChevronRight, Save, X, AlertTriangle, Check,
-  Info, ArrowRight, ArrowUp, ArrowDown, Zap, Server, Cloud,
+  Info, ArrowRight, ArrowUp, ArrowDown, Zap, Server, Cloud, Eye, EyeOff, Key,
 } from 'lucide-react'
 
 // ── Preset button config ────────────────────────────────────────────────────
@@ -419,6 +419,9 @@ function LLMProvidersSection() {
   const [draft, setDraft] = useState<LLMProviderConfig[]>([])
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  // API key editing state: env_var_name → value (only non-empty entries are sent)
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
+  const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
 
   const mutation = useMutation({
     mutationFn: updateLLMProviders,
@@ -428,21 +431,40 @@ function LLMProvidersSection() {
     },
   })
 
+  const keysMutation = useMutation({
+    mutationFn: updateApiKeys,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+    },
+  })
+
   const providers = data?.providers ?? []
 
   const startEdit = () => {
     setDraft(providers.map(p => ({ ...p })))
+    setKeyDrafts({})
+    setVisibleKeys({})
     setEditing(true)
     setMsg(null)
   }
 
-  const cancel = () => { setEditing(false); setMsg(null) }
+  const cancel = () => { setEditing(false); setKeyDrafts({}); setVisibleKeys({}); setMsg(null) }
 
   const handleSave = async () => {
     setSaving(true)
     try {
       await mutation.mutateAsync(draft)
+      // Save any API keys that were entered
+      const keysToSave: Record<string, string> = {}
+      for (const [envVar, val] of Object.entries(keyDrafts)) {
+        if (val.trim()) keysToSave[envVar] = val.trim()
+      }
+      if (Object.keys(keysToSave).length > 0) {
+        await keysMutation.mutateAsync(keysToSave)
+      }
       setEditing(false)
+      setKeyDrafts({})
+      setVisibleKeys({})
       setMsg({ ok: true, text: 'Saved & applied' })
       setTimeout(() => setMsg(null), 3000)
     } catch (e: any) {
@@ -627,12 +649,43 @@ function LLMProvidersSection() {
                   </div>
 
                   {/* API Key */}
-                  {!p.is_local && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>API Key</span>
-                      <span style={{ color: p.api_key_set ? '#22c55e' : '#f59e0b' }}>
-                        {p.api_key_set ? 'Set' : `${p.api_key_env} not set`}
+                  {!p.is_local && p.api_key_env && (
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      padding: '3px 0', borderBottom: '1px solid #21262d',
+                      gridColumn: editing ? '1 / -1' : undefined,
+                    }}>
+                      <span style={{ color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Key size={11} /> API Key
                       </span>
+                      {editing ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'monospace' }}>
+                            {p.api_key_env}
+                          </span>
+                          <input
+                            type={visibleKeys[p.api_key_env!] ? 'text' : 'password'}
+                            value={keyDrafts[p.api_key_env!] ?? ''}
+                            onChange={(e) => setKeyDrafts(prev => ({ ...prev, [p.api_key_env!]: e.target.value }))}
+                            placeholder={p.api_key_set ? '••••••••  (unchanged)' : 'Paste API key'}
+                            style={{
+                              background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                              borderRadius: 4, padding: '2px 8px', fontSize: 12, width: 200,
+                            }}
+                          />
+                          <button
+                            onClick={() => setVisibleKeys(prev => ({ ...prev, [p.api_key_env!]: !prev[p.api_key_env!] }))}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#8b949e' }}
+                            title={visibleKeys[p.api_key_env!] ? 'Hide' : 'Show'}
+                          >
+                            {visibleKeys[p.api_key_env!] ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </button>
+                        </div>
+                      ) : (
+                        <span style={{ color: p.api_key_set ? '#22c55e' : '#f59e0b' }}>
+                          {p.api_key_set ? 'Set' : `${p.api_key_env} not set`}
+                        </span>
+                      )}
                     </div>
                   )}
 

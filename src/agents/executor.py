@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
-from src.core.coinbase_client import CoinbaseClient
+from src.core.exchange_client import ExchangeClient
 from src.core.rules import AbsoluteRules
 from src.models.trade import Trade, TradeAction, TradeStatus
 from src.utils.logger import get_logger
@@ -26,11 +26,11 @@ class ExecutorAgent(BaseAgent):
         llm,
         state,
         config,
-        coinbase: CoinbaseClient,
+        exchange: ExchangeClient,
         rules: AbsoluteRules,
     ):
         super().__init__("executor", llm, state, config)
-        self.coinbase = coinbase
+        self.exchange = exchange
         self.rules = rules
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
@@ -131,24 +131,27 @@ class ExecutorAgent(BaseAgent):
                 # Limit buy: place slightly below current price to ensure maker fee
                 limit_price = price * (1 - self.limit_price_offset_pct)
                 base_size = str(round(quote_amount / limit_price, 8))
-                result = self.coinbase.limit_order_buy(
-                    product_id=pair,
-                    base_size=base_size,
-                    limit_price=str(round(limit_price, 2)),
+                result = self.exchange.place_limit_order(
+                    pair=pair,
+                    side="BUY",
+                    size=float(base_size),
+                    price=limit_price,
                 )
                 self.logger.info(
                     f"📋 Limit BUY placed for {pair} @ {limit_price:,.2f} "
                     f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
                 )
-            elif action == "buy":
-                result = self.coinbase.market_order_buy(
-                    product_id=pair,
-                    quote_size=str(round(quote_amount, 2)),
+                result = self.exchange.place_market_order(
+                    pair=pair,
+                    side="BUY",
+                    amount=quote_amount,
+                    amount_is_base=False,
                 )
-            else:
-                result = self.coinbase.market_order_sell(
-                    product_id=pair,
-                    base_size=str(quantity),
+                result = self.exchange.place_market_order(
+                    pair=pair,
+                    side="SELL",
+                    amount=quantity,
+                    amount_is_base=True,
                 )
 
             if result.get("success", True) and "error" not in result:
@@ -175,11 +178,11 @@ class ExecutorAgent(BaseAgent):
                     }
 
                 # Verify fill status for live orders
-                if order_id and not self.coinbase.paper_mode:
+                if order_id and not getattr(self.exchange, "paper_mode", False):
                     order = self._verify_fill(order_id, order)
 
                 fill_status = order.get("status", "FILLED")
-                if fill_status == "FILLED" or self.coinbase.paper_mode:
+                if fill_status == "FILLED" or getattr(self.exchange, "paper_mode", False):
                     trade.status = TradeStatus.FILLED
                 elif fill_status in ("CANCELLED", "FAILED", "EXPIRED"):
                     trade.status = TradeStatus.FAILED
@@ -246,7 +249,7 @@ class ExecutorAgent(BaseAgent):
         delay = 0.2  # Start at 200 ms
         for attempt in range(max_attempts):
             try:
-                order = self.coinbase.get_order(order_id)
+                order = self.exchange.get_order(order_id)
                 status = order.get("status", "")
                 if status in ("FILLED", "CANCELLED", "FAILED", "EXPIRED"):
                     self.logger.info(f"Order {order_id} status: {status}")
@@ -281,9 +284,11 @@ class ExecutorAgent(BaseAgent):
 
     def _partial_sell(self, trade: Trade, quantity: float, price: float, reason: str) -> dict:
         """Sell a portion of a position (used for tiered exits)."""
-        result = self.coinbase.market_order_sell(
-            product_id=trade.pair,
-            base_size=str(quantity),
+        result = self.exchange.place_market_order(
+            pair=trade.pair,
+            side="SELL",
+            amount=quantity,
+            amount_is_base=True,
         )
 
         success = result.get("success", True) and "error" not in result
@@ -363,9 +368,11 @@ class ExecutorAgent(BaseAgent):
         """
         qty = trade.filled_quantity or trade.quantity
 
-        result = self.coinbase.market_order_sell(
-            product_id=trade.pair,
-            base_size=str(qty),
+        result = self.exchange.place_market_order(
+            pair=trade.pair,
+            side="SELL",
+            amount=qty,
+            amount_is_base=True,
         )
 
         success = result.get("success", True) and "error" not in result
@@ -433,7 +440,7 @@ class ExecutorAgent(BaseAgent):
 
         for trade in pending_trades:
             try:
-                order = self.coinbase.get_order(trade.coinbase_order_id)
+                order = self.exchange.get_order(trade.coinbase_order_id)
                 if not order:
                     self.logger.warning(
                         f"⚠️ Order {trade.coinbase_order_id} for {trade.pair} "
@@ -538,7 +545,7 @@ class ExecutorAgent(BaseAgent):
             f"(age: {time.time() - trade.timestamp.timestamp():.0f}s > "
             f"TTL: {self._LIMIT_ORDER_TTL:.0f}s)"
         )
-        cancel_result = self.coinbase.cancel_order(trade.coinbase_order_id)
+        cancel_result = self.exchange.cancel_order(trade.coinbase_order_id)
 
         if cancel_result.get("success"):
             trade.status = TradeStatus.CANCELLED
