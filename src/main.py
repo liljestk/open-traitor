@@ -355,14 +355,21 @@ def main():
     # Telegram Bot
     telegram_bot = None
     telegram_config = config.get("telegram", {})
-    telegram_token = telegram_config.get("bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = telegram_config.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID")
+
+    # Resolve token and chat_id from config-specified env var names
+    # (allows per-exchange Telegram bots: TELEGRAM_BOT_TOKEN_COINBASE, etc.)
+    _token_env = telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")
+    _chat_env = telegram_config.get("chat_id_env", "TELEGRAM_CHAT_ID")
+    _auth_env = telegram_config.get("authorized_users_env", "TELEGRAM_AUTHORIZED_USERS")
+
+    telegram_token = telegram_config.get("bot_token") or os.environ.get(_token_env) or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = telegram_config.get("chat_id") or os.environ.get(_chat_env) or os.environ.get("TELEGRAM_CHAT_ID")
     
     if telegram_token and telegram_chat_id:
         from src.telegram_bot.bot import TelegramBot
 
         # SECURITY: TELEGRAM_AUTHORIZED_USERS is REQUIRED.
-        authorized_raw = telegram_config.get("authorized_users") or os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
+        authorized_raw = telegram_config.get("authorized_users") or os.environ.get(_auth_env) or os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
         if not authorized_raw:
             logger.error(
                 "❌ Telegram authorized_users is not set! "

@@ -45,17 +45,32 @@ class StatsDB:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._db_path = db_path
         self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []  # Track all thread-local connections
+        self._conn_lock = threading.Lock()
         self._init_db()
         logger.info(f"📊 Stats DB initialized: {db_path}")
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get thread-local connection."""
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self._db_path)
-            self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA synchronous=NORMAL")
+            conn = sqlite3.connect(self._db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._local.conn = conn
+            with self._conn_lock:
+                self._connections.append(conn)
         return self._local.conn
+
+    def close(self) -> None:
+        """Close all thread-local connections."""
+        with self._conn_lock:
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._connections.clear()
 
     def _init_db(self) -> None:
         """Create tables if they don't exist."""
@@ -64,6 +79,7 @@ class StatsDB:
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 portfolio_value REAL NOT NULL,
                 cash_balance REAL NOT NULL DEFAULT 0,
                 return_pct REAL NOT NULL DEFAULT 0,
@@ -78,6 +94,7 @@ class StatsDB:
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 pair TEXT NOT NULL,
                 action TEXT NOT NULL,
                 quantity REAL NOT NULL DEFAULT 0,
@@ -140,6 +157,7 @@ class StatsDB:
             CREATE TABLE IF NOT EXISTS agent_reasoning (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 cycle_id TEXT NOT NULL,
                 pair TEXT NOT NULL,
                 agent_name TEXT NOT NULL,
@@ -169,6 +187,7 @@ class StatsDB:
             CREATE TABLE IF NOT EXISTS simulated_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 pair TEXT NOT NULL,
                 from_currency TEXT NOT NULL,
                 from_amount REAL NOT NULL,
@@ -198,6 +217,7 @@ class StatsDB:
             CREATE TABLE IF NOT EXISTS scan_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 universe_size INTEGER NOT NULL DEFAULT 0,
                 scanned_pairs INTEGER NOT NULL DEFAULT 0,
                 results_json TEXT NOT NULL DEFAULT '{}',
@@ -226,6 +246,7 @@ class StatsDB:
             """CREATE TABLE IF NOT EXISTS simulated_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
                 pair TEXT NOT NULL,
                 from_currency TEXT NOT NULL,
                 from_amount REAL NOT NULL,
@@ -242,6 +263,12 @@ class StatsDB:
             # Currency-agnostic rename: usd_amount → quote_amount, fee_usd → fee_quote
             "ALTER TABLE trades RENAME COLUMN usd_amount TO quote_amount",
             "ALTER TABLE trades RENAME COLUMN fee_usd TO fee_quote",
+            # Multi-exchange: add exchange column to existing tables
+            "ALTER TABLE portfolio_snapshots ADD COLUMN exchange TEXT NOT NULL DEFAULT 'coinbase'",
+            "ALTER TABLE trades ADD COLUMN exchange TEXT NOT NULL DEFAULT 'coinbase'",
+            "ALTER TABLE agent_reasoning ADD COLUMN exchange TEXT NOT NULL DEFAULT 'coinbase'",
+            "ALTER TABLE simulated_trades ADD COLUMN exchange TEXT NOT NULL DEFAULT 'coinbase'",
+            "ALTER TABLE scan_results ADD COLUMN exchange TEXT NOT NULL DEFAULT 'coinbase'",
         ]
         for sql in migrations:
             try:
@@ -263,15 +290,16 @@ class StatsDB:
         current_prices: Optional[dict] = None,
         fear_greed_value: Optional[float] = None,
         high_stakes_active: bool = False,
+        exchange: str = "coinbase",
     ) -> None:
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO portfolio_snapshots
-               (portfolio_value, cash_balance, return_pct, total_pnl, max_drawdown,
+               (exchange, portfolio_value, cash_balance, return_pct, total_pnl, max_drawdown,
                 open_positions, current_prices, fear_greed_value, high_stakes_active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                portfolio_value, cash_balance, return_pct, total_pnl, max_drawdown,
+                exchange, portfolio_value, cash_balance, return_pct, total_pnl, max_drawdown,
                 json.dumps(open_positions or {}, default=str),
                 json.dumps(current_prices or {}, default=str),
                 fear_greed_value,
@@ -319,16 +347,17 @@ class StatsDB:
         fee_quote: float = 0,
         is_rotation: bool = False,
         approved_by: str = "auto",
+        exchange: str = "coinbase",
     ) -> int:
         conn = self._get_conn()
         cursor = conn.execute(
             """INSERT INTO trades
-               (pair, action, quantity, price, quote_amount, confidence,
+               (exchange, pair, action, quantity, price, quote_amount, confidence,
                 signal_type, stop_loss, take_profit, reasoning, pnl,
                 fee_quote, is_rotation, approved_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                pair, action, quantity, price, quote_amount, confidence,
+                exchange, pair, action, quantity, price, quote_amount, confidence,
                 signal_type, stop_loss, take_profit, reasoning, pnl,
                 fee_quote, 1 if is_rotation else 0, approved_by,
             ),
@@ -622,17 +651,18 @@ class StatsDB:
         completion_tokens: int = 0,
         latency_ms: float = 0.0,
         raw_prompt: str = "",
+        exchange: str = "coinbase",
     ) -> int:
         """Persist a full LLM reasoning trace for one agent call."""
         conn = self._get_conn()
         cursor = conn.execute(
             """INSERT INTO agent_reasoning
-               (cycle_id, pair, agent_name, reasoning_json, signal_type, confidence,
+               (exchange, cycle_id, pair, agent_name, reasoning_json, signal_type, confidence,
                 trade_id, langfuse_trace_id, langfuse_span_id,
                 prompt_tokens, completion_tokens, latency_ms, raw_prompt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                cycle_id, pair, agent_name,
+                exchange, cycle_id, pair, agent_name,
                 json.dumps(reasoning_json, default=str),
                 signal_type, confidence, trade_id,
                 langfuse_trace_id, langfuse_span_id,
@@ -953,14 +983,15 @@ class StatsDB:
         quantity: float,
         to_currency: str,
         notes: str = "",
+        exchange: str = "coinbase",
     ) -> int:
         """Record a new simulated (paper) trade and return its id."""
         conn = self._get_conn()
         cursor = conn.execute(
             """INSERT INTO simulated_trades
-               (pair, from_currency, from_amount, entry_price, quantity, to_currency, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (pair, from_currency, from_amount, entry_price, quantity, to_currency, notes),
+               (exchange, pair, from_currency, from_amount, entry_price, quantity, to_currency, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (exchange, pair, from_currency, from_amount, entry_price, quantity, to_currency, notes),
         )
         conn.commit()
         return cursor.lastrowid

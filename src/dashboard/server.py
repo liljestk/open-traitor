@@ -27,11 +27,15 @@ Or programmatically:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import math
 import os
+import secrets
 import sqlite3
+import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -40,12 +44,13 @@ from typing import Any, AsyncGenerator, Optional
 from pathlib import Path
 import io
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.utils.logger import get_logger
+from src.utils.pair_format import parse_pair
 
 logger = get_logger("dashboard")
 
@@ -66,6 +71,10 @@ _ws_connections: list[WebSocket] = []
 
 _rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
 _llm_client = None        # LLMClient instance (optional, for provider status)
+
+# Pending confirmation tokens for sensitive operations (C4/H5 fix)
+# Maps token → {action, payload, expires}
+_pending_confirmations: dict[str, dict] = {}
 
 
 def _get_config() -> dict:
@@ -204,7 +213,9 @@ app = FastAPI(
 )
 
 _cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
-_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["*"]
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["http://localhost:5173", "http://localhost:8090"]
+if _cors_origins == ["*"]:
+    logger.warning("⚠️ CORS allow_origins set to wildcard — restrict via DASHBOARD_CORS_ORIGINS env var")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -219,39 +230,28 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 _DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+_DASHBOARD_COMMAND_SIGNING_KEY: str = (
+    os.environ.get("DASHBOARD_COMMAND_SIGNING_KEY", "") or _DASHBOARD_API_KEY
+)
 if not _DASHBOARD_API_KEY:
     logger.warning(
         "⚠️  DASHBOARD_API_KEY not set — the dashboard API is open to all network "
         "clients. Set this env var to require X-API-Key header authentication."
     )
+if not _DASHBOARD_COMMAND_SIGNING_KEY:
+    logger.warning(
+        "⚠️  DASHBOARD_COMMAND_SIGNING_KEY not set — trade command endpoint will "
+        "reject command enqueueing for safety."
+    )
 
 
 @app.middleware("http")
 async def _api_key_middleware(request: Request, call_next):
-    """Require X-API-Key on /api/* and /ws/* when DASHBOARD_API_KEY is configured.
-
-    WebSocket upgrade requests are also HTTP requests, but browsers cannot set
-    custom headers on ``new WebSocket(url)``.  We therefore accept the key as a
-    ``?api_key=`` query parameter as a secondary credential path, **only** for
-    WebSocket paths where the header mechanism is unavailable.
-    """
-    if _DASHBOARD_API_KEY and (
-        request.url.path.startswith("/api/")
-        or request.url.path.startswith("/ws/")
-    ):
-        # Browsers set Sec-Fetch-Site automatically; same-origin means the
-        # request comes from the SPA served by this very server — safe to
-        # allow without an explicit API key.
-        sec_fetch_site = request.headers.get("Sec-Fetch-Site", "")
-        if sec_fetch_site != "same-origin":
-            # Primary: X-API-Key header (server-side / curl / fetch clients)
-            api_key = request.headers.get("X-API-Key", "")
-            if not api_key and request.url.path.startswith("/ws/"):
-                # Fallback for browser WebSocket: ?api_key=... query parameter
-                api_key = request.query_params.get("api_key", "")
-            # Constant-time comparison prevents timing-oracle attacks
-            if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    """Require explicit API key auth for dashboard endpoints when configured."""
+    if _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
+        api_key = request.headers.get("X-API-Key", "")
+        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
+            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
     return await call_next(request)
 
 
@@ -259,10 +259,45 @@ async def _api_key_middleware(request: Request, call_next):
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-def _require_db():
-    if _stats_db is None:
-        raise HTTPException(status_code=503, detail="Stats DB not initialised")
-    return _stats_db
+# Per-profile StatsDB cache — avoids re-opening the same DB file on every request
+_profile_db_cache: dict[str, Any] = {}
+_profile_db_lock = threading.Lock()
+
+
+def _require_db(profile: str = ""):
+    """Return the StatsDB for *profile* (empty string → default / injected)."""
+    if not profile:
+        if _stats_db is None:
+            raise HTTPException(status_code=503, detail="Stats DB not initialised")
+        return _stats_db
+
+    # Sanitise: alphanumeric + underscore only
+    safe = "".join(c for c in profile if c.isalnum() or c == "_")
+    if not safe:
+        raise HTTPException(status_code=400, detail=f"Invalid profile: {profile!r}")
+
+    with _profile_db_lock:
+        if safe in _profile_db_cache:
+            return _profile_db_cache[safe]
+        try:
+            from src.utils.stats import StatsDB
+            db_path = os.path.join("data", f"stats_{safe}.db")
+            if not os.path.exists(db_path):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Stats DB for profile '{safe}' not found ({db_path})",
+                )
+            db = StatsDB(db_path=db_path)
+            _profile_db_cache[safe] = db
+            logger.info(f"📊 Loaded StatsDB for profile '{safe}': {db_path}")
+            return db
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot load StatsDB for profile '{safe}': {e}",
+            )
 
 
 def _sanitize_floats(obj):
@@ -276,17 +311,34 @@ def _sanitize_floats(obj):
     return obj
 
 
-def _fresh_conn() -> sqlite3.Connection:
+def _sign_dashboard_command(action: str, pair: str, ts: str, source: str, nonce: str) -> str:
+    """Create a deterministic HMAC signature for dashboard trade commands."""
+    payload = f"{action}|{pair}|{ts}|{source}|{nonce}"
+    return hmac.new(
+        _DASHBOARD_COMMAND_SIGNING_KEY.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _fresh_conn(profile: str = "") -> sqlite3.Connection:
     """Open a fresh SQLite connection for this request.
 
     Avoids relying on the thread-local connection inside StatsDB, which is
     not safe to share across FastAPI's async threadpool workers.
     """
-    _require_db()
-    conn = sqlite3.connect(_stats_db._db_path, check_same_thread=False)
+    db = _require_db(profile)
+    conn = sqlite3.connect(db._db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _get_profile_db(
+    profile: str = Query("", description="Exchange profile (e.g. 'coinbase', 'nordnet')"),
+):
+    """FastAPI dependency — resolves the StatsDB for the requested profile."""
+    return _require_db(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -298,12 +350,12 @@ def list_cycles(
     pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    db=Depends(_get_profile_db),
 ):
     """
     Returns a paginated list of trading cycles with outcome summary.
     Each item represents one unique `cycle_id` across all agent spans.
     """
-    db = _require_db()
     cycles = db.get_cycles(pair=pair, limit=limit, offset=offset)
     for c in cycles:
         c["langfuse_url"] = _langfuse_url(c.get("langfuse_trace_id"))
@@ -322,13 +374,12 @@ def list_cycles(
 
 
 @app.get("/api/cycles/{cycle_id}", summary="Full span chain for one cycle (Playback)")
-def get_cycle(cycle_id: str):
+def get_cycle(cycle_id: str, db=Depends(_get_profile_db)):
     """
     Returns the complete trace: all agent spans with token counts, latency,
     LLM prompt/output, plus the resulting trade (if any).
     Powers the animated Waterfall timeline on the Playback page.
     """
-    db = _require_db()
     cycle = db.get_cycle_full(cycle_id)
     if not cycle:
         raise HTTPException(status_code=404, detail=f"Cycle {cycle_id!r} not found")
@@ -344,17 +395,16 @@ def get_cycle(cycle_id: str):
 def list_trades(
     pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
     hours: int = Query(24 * 7, ge=1, description="Hours of history to fetch"),
-    limit: int = Query(500, ge=1, le=5000)
+    limit: int = Query(500, ge=1, le=5000),
+    db=Depends(_get_profile_db),
 ):
     """Returns a list of raw trades from the database, newest first."""
-    db = _require_db()
     trades = db.get_trades(hours=hours, pair=pair, limit=limit)
     return {"trades": trades, "count": len(trades)}
 
 @app.get("/api/trades/export", summary="Export trades to CSV")
-def export_trades(hours: int = Query(24 * 30, ge=1)):
+def export_trades(hours: int = Query(24 * 30, ge=1), db=Depends(_get_profile_db)):
     """Exports raw trades to a downloadable CSV file."""
-    db = _require_db()
     trades = db.get_trades(hours=hours, limit=100000)
     
     if not trades:
@@ -383,10 +433,10 @@ def export_trades(hours: int = Query(24 * 30, ge=1)):
 def list_events(
     event_type: Optional[str] = Query(None),
     hours: int = Query(24 * 7, ge=1),
-    limit: int = Query(500, ge=1, le=5000)
+    limit: int = Query(500, ge=1, le=5000),
+    db=Depends(_get_profile_db),
 ):
     """Returns a list of system events/logs from the database."""
-    db = _require_db()
     events = db.get_events(hours=hours, event_type=event_type, limit=limit)
     # Parse event data json if possible
     for e in events:
@@ -404,10 +454,11 @@ def list_events(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/stats/summary", summary="Portfolio and trade stats overview")
-def get_stats_summary():
+def get_stats_summary(db=Depends(_get_profile_db)):
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
-    _require_db()
-    conn = _fresh_conn()
+    conn = sqlite3.connect(db._db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         # Overall trade stats
         trade_row = conn.execute(
@@ -536,7 +587,7 @@ class SimulatedTradeCreate(_BaseModel):
 
 
 @app.post("/api/simulated-trades", summary="Open a new simulated trade")
-def create_simulated_trade(body: SimulatedTradeCreate):
+def create_simulated_trade(body: SimulatedTradeCreate, db=Depends(_get_profile_db)):
     """
     Opens a new paper simulation. The server fetches the live entry price,
     computes the implied quantity, and persists the record.
@@ -544,15 +595,14 @@ def create_simulated_trade(body: SimulatedTradeCreate):
     For EUR→Crypto: `from_currency=EUR`, `pair=BTC-EUR`
     For Crypto→Crypto: `from_currency=BTC`, `pair=ETH-BTC` (or similar)
     """
-    db = _require_db()
     pair = body.pair.upper().strip()
     from_currency = body.from_currency.upper().strip()
 
     # Derive to_currency from pair (e.g. BTC-EUR → BTC when buying with EUR)
-    parts = pair.split("-")
-    if len(parts) != 2:
+    try:
+        base, quote = parse_pair(pair)
+    except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid pair format: {pair!r}")
-    base, quote = parts
     # If from_currency matches the quote, we're buying the base
     if from_currency == quote:
         to_currency = base
@@ -598,21 +648,32 @@ def create_simulated_trade(body: SimulatedTradeCreate):
 @app.get("/api/simulated-trades", summary="List simulated trades with live PnL")
 def list_simulated_trades(
     include_closed: bool = Query(False, description="Include closed simulations"),
+    db=Depends(_get_profile_db),
 ):
     """
     Returns all simulated trades. For open ones, the current price is fetched
     live and PnL (absolute + %) is computed on the fly.
     """
-    db = _require_db()
     rows = db.get_simulated_trades(include_closed=include_closed)
 
     # Enrich open rows with live PnL
     for row in rows:
         if row["status"] == "open":
             current_price = _get_live_price(row["pair"])
-            if current_price > 0:
-                pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
-                pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
+            if current_price > 0 and row["entry_price"] > 0:
+                # Determine direction: if from_currency is the quote (e.g. USD),
+                # user bought the base (long). Otherwise they sold base (short).
+                try:
+                    _, quote = parse_pair(row["pair"])
+                except ValueError:
+                    quote = ""
+                is_long = row.get("from_currency", quote) == quote
+                if is_long:
+                    pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
+                    pnl_pct = ((current_price / row["entry_price"]) - 1) * 100
+                else:
+                    pnl_abs = (row["entry_price"] - current_price) * row["quantity"]
+                    pnl_pct = ((row["entry_price"] / current_price) - 1) * 100
             else:
                 current_price = row["entry_price"]
                 pnl_abs = 0.0
@@ -630,12 +691,11 @@ def list_simulated_trades(
 
 
 @app.delete("/api/simulated-trades/{sim_id}", summary="Close a simulated trade")
-def close_simulated_trade_route(sim_id: int):
+def close_simulated_trade_route(sim_id: int, db=Depends(_get_profile_db)):
     """
     Closes an open simulation by recording the current live price as the
     close price and computing the final PnL.
     """
-    db = _require_db()
 
     # First, look up the sim to get the pair
     rows = db.get_simulated_trades(include_closed=False)
@@ -688,7 +748,7 @@ def get_executive_summary():
                         active_pairs.update(pr["pair"] for pr in pairs)
                         
                         profiles.append({
-                            "profile": pname,
+                            "profile": f"profile_{len(profiles) + 1}",
                             "trades": t,
                             "pnl": round(p, 2),
                             "active_pairs_24h": len(pairs)
@@ -717,10 +777,12 @@ def get_executive_summary():
 def get_strategic(
     horizon: Optional[str] = Query(None, description="daily | weekly | monthly"),
     limit: int = Query(20, ge=1, le=100),
+    db=Depends(_get_profile_db),
 ):
     """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    _require_db()
-    conn = _fresh_conn()
+    conn = sqlite3.connect(db._db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         if horizon:
             rows = conn.execute(
@@ -921,6 +983,25 @@ async def ws_live(websocket: WebSocket):
             "ts": "2025-01-01T00:00:00Z"
         }
     """
+    if _DASHBOARD_API_KEY:
+        # Try X-API-Key header first; fall back to Sec-WebSocket-Protocol
+        # (browsers can't set custom headers on WS, so the frontend encodes
+        # the key as a subprotocol: "apikey.<base64_key>")
+        api_key = websocket.headers.get("x-api-key", "")
+        if not api_key:
+            for proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
+                proto = proto.strip()
+                if proto.startswith("apikey."):
+                    import base64
+                    try:
+                        api_key = base64.b64decode(proto[7:]).decode("utf-8")
+                    except Exception:
+                        pass
+                    break
+        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
+            await websocket.close(code=1008, reason="Invalid or missing API key")
+            return
+
     await websocket.accept()
     _ws_connections.append(websocket)
     logger.info(f"WS client connected ({len(_ws_connections)} total)")
@@ -942,6 +1023,8 @@ async def _redis_subscriber():
     """
     Background task: subscribes to Redis `llm:events` channel and
     broadcasts each message to all connected WebSocket clients.
+
+    Reconnects with exponential backoff if the Redis connection drops.
     """
     if _redis_client is None:
         return
@@ -949,33 +1032,51 @@ async def _redis_subscriber():
     import redis.asyncio as aioredis
 
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    # Use a separate async connection so we don't block the sync Redis client
-    async_redis = aioredis.from_url(redis_url)
-    pubsub = async_redis.pubsub()
-    await pubsub.subscribe("llm:events")
-    logger.info("Subscribed to Redis llm:events")
+    backoff = 1.0
+    max_backoff = 60.0
 
-    try:
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
-            try:
-                payload = json.loads(message["data"])
-            except Exception:
-                continue
+    while True:
+        try:
+            async_redis = aioredis.from_url(redis_url)
+            pubsub = async_redis.pubsub()
+            await pubsub.subscribe("llm:events")
+            logger.info("Subscribed to Redis llm:events")
+            backoff = 1.0  # Reset on successful connect
 
-            dead = []
-            for ws in list(_ws_connections):
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
                 try:
-                    await ws.send_json(payload)
+                    payload = json.loads(message["data"])
                 except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                if ws in _ws_connections:
-                    _ws_connections.remove(ws)
-    except asyncio.CancelledError:
-        await pubsub.unsubscribe("llm:events")
-        await async_redis.aclose()
+                    continue
+
+                dead = []
+                for ws in list(_ws_connections):
+                    try:
+                        await ws.send_json(payload)
+                    except Exception:
+                        dead.append(ws)
+                for ws in dead:
+                    if ws in _ws_connections:
+                        _ws_connections.remove(ws)
+
+        except asyncio.CancelledError:
+            # Graceful shutdown
+            try:
+                await pubsub.unsubscribe("llm:events")
+                await async_redis.aclose()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            logger.warning(f"Redis subscriber disconnected: {e} — reconnecting in {backoff:.0f}s")
+            try:
+                await async_redis.aclose()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
 
 # ---------------------------------------------------------------------------
@@ -1083,25 +1184,64 @@ class _SettingsUpdateBody(_BaseModel):
     section: Optional[str] = None
     updates: Optional[dict] = None
     preset: Optional[str] = None
+    confirmation_token: Optional[str] = None  # Required for sensitive sections
+
+
+# Sections that require confirmation before mutation
+_SETTINGS_CONFIRM_SECTIONS = frozenset({
+    "absolute_rules", "trading", "high_stakes",
+})
 
 
 @app.put("/api/settings", summary="Update settings section or apply preset")
-def update_settings(body: _SettingsUpdateBody):
+def update_settings(body: _SettingsUpdateBody, request: Request):
     """
     Two modes:
       1. ``{ "preset": "moderate" }`` — apply a named preset
       2. ``{ "section": "risk", "updates": {"stop_loss_pct": 0.05} }`` — update individual fields
 
-    Changes are validated, persisted to settings.yaml, and pushed to the
-    live runtime immediately (no restart needed).
+    Sensitive sections (absolute_rules, trading, high_stakes) require a
+    two-step confirmation flow — first call returns a ``confirmation_token``,
+    second call with that token applies the change.
+
+    All mutations are audit-logged.
     """
     try:
+        _prune_expired_confirmations()
+        source_ip = request.client.host if request.client else "unknown"
+
         # Mode 1: Apply preset
         if body.preset:
+            # Presets always require confirmation
+            if not body.confirmation_token:
+                token = secrets.token_urlsafe(32)
+                _pending_confirmations[token] = {
+                    "action": "settings-preset",
+                    "preset": body.preset,
+                    "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
+                }
+                return {
+                    "ok": False,
+                    "confirmation_required": True,
+                    "confirmation_token": token,
+                    "message": f"Confirm applying preset '{body.preset}'.",
+                    "expires_in_seconds": _CONFIRM_TTL_SECONDS,
+                }
+
+            pending = _pending_confirmations.pop(body.confirmation_token, None)
+            if not pending or pending["expires"] < time.monotonic():
+                raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
+            if pending.get("preset") != body.preset:
+                raise HTTPException(status_code=400, detail="Preset does not match confirmation")
+
             ok, err, changes = _sm_apply_preset(body.preset)
             if not ok:
                 raise HTTPException(status_code=400, detail=err)
             _sm_push_runtime(_rules_instance, _get_config(), changes)
+            logger.warning(
+                f"⚙️ Settings preset applied: {body.preset} "
+                f"({len(changes)} changes, ip={source_ip})"
+            )
             return {
                 "ok": True,
                 "preset": body.preset,
@@ -1116,11 +1256,43 @@ def update_settings(body: _SettingsUpdateBody):
                 detail="Provide either {preset} or {section, updates}",
             )
 
+        # Require confirmation for sensitive sections
+        needs_confirm = body.section in _SETTINGS_CONFIRM_SECTIONS
+        if needs_confirm and not body.confirmation_token:
+            token = secrets.token_urlsafe(32)
+            _pending_confirmations[token] = {
+                "action": "settings-section",
+                "section": body.section,
+                "field_names": sorted(body.updates.keys()),
+                "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
+            }
+            return {
+                "ok": False,
+                "confirmation_required": True,
+                "confirmation_token": token,
+                "section": body.section,
+                "fields_to_update": sorted(body.updates.keys()),
+                "message": f"Confirm update to '{body.section}' settings.",
+                "expires_in_seconds": _CONFIRM_TTL_SECONDS,
+            }
+
+        if needs_confirm:
+            pending = _pending_confirmations.pop(body.confirmation_token, None)
+            if not pending or pending["expires"] < time.monotonic():
+                raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
+            if pending.get("section") != body.section:
+                raise HTTPException(status_code=400, detail="Section does not match confirmation")
+
         ok, err, changes = _sm_update_section(body.section, body.updates)
         if not ok:
             raise HTTPException(status_code=400, detail=err)
 
         _sm_push_section(body.section, changes, _rules_instance, _get_config())
+        logger.warning(
+            f"⚙️ Settings updated: section={body.section}, "
+            f"fields={sorted(changes.keys()) if isinstance(changes, dict) else changes} "
+            f"(ip={source_ip})"
+        )
         return {
             "ok": True,
             "section": body.section,
@@ -1171,14 +1343,16 @@ def get_llm_providers():
             for ps in _llm_client.provider_status():
                 live_status[ps["name"]] = ps
 
+        # Fields safe to expose to the dashboard (redact base_url, api_key_env, etc.)
+        _SAFE_PROVIDER_FIELDS = {"name", "model", "is_local", "enabled", "priority"}
         result = []
         for pc in providers_config:
             name = pc.get("name", "")
-            entry = {**pc}
+            entry = {k: v for k, v in pc.items() if k in _SAFE_PROVIDER_FIELDS}
             # Add live status if available
             if name in live_status:
                 entry["live_status"] = live_status[name]
-            # Indicate whether the API key is set (don't expose the key itself)
+            # Indicate whether the API key is set (don't expose the env var name)
             api_key_env = pc.get("api_key_env", "")
             if api_key_env:
                 entry["api_key_set"] = bool(os.environ.get(api_key_env, ""))
@@ -1232,18 +1406,34 @@ def update_llm_providers(body: _ProvidersUpdateBody):
 
 class _ApiKeysUpdateBody(_BaseModel):
     keys: dict[str, str]  # env_var_name → value
+    confirmation_token: Optional[str] = None  # Required on second step
+
+
+def _prune_expired_confirmations() -> None:
+    """Remove expired confirmation tokens."""
+    now = time.monotonic()
+    expired = [t for t, v in _pending_confirmations.items() if v["expires"] < now]
+    for t in expired:
+        del _pending_confirmations[t]
+
+
+_CONFIRM_TTL_SECONDS = 120  # 2-minute window to confirm
 
 
 @app.put("/api/settings/api-keys", summary="Update API keys for LLM providers")
 def update_api_keys(body: _ApiKeysUpdateBody):
     """
-    Accepts a dict of env var names to values, e.g.
-    ``{"GEMINI_API_KEY": "AIza...", "OPENAI_API_KEY": "sk-..."}``
+    Two-step confirmation flow for credential updates:
 
-    Only allows updating keys that are referenced by configured LLM providers.
-    Persists to config/.env and updates os.environ at runtime.
+    **Step 1** — Send ``{"keys": {"GEMINI_API_KEY": "AIza..."}}``
+      Returns a ``confirmation_token`` and lists the keys that will be updated.
+
+    **Step 2** — Re-send with the token: ``{"keys": {...}, "confirmation_token": "..."}``
+      Validates, persists to config/.env (atomic write), and hot-reloads providers.
     """
     try:
+        _prune_expired_confirmations()
+
         # Validate: only allow env vars referenced by providers' api_key_env
         providers_config = _sm_get_providers()
         allowed_vars: set[str] = set()
@@ -1260,11 +1450,43 @@ def update_api_keys(body: _ApiKeysUpdateBody):
                            f"Allowed: {sorted(allowed_vars)}",
                 )
 
+        key_names = sorted(body.keys.keys())
+
+        # ── Step 1: issue confirmation token ──────────────────────────
+        if not body.confirmation_token:
+            token = secrets.token_urlsafe(32)
+            _pending_confirmations[token] = {
+                "action": "api-keys",
+                "key_names": key_names,
+                "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
+            }
+            logger.info(f"🔑 API key update requested (awaiting confirmation): {key_names}")
+            return {
+                "ok": False,
+                "confirmation_required": True,
+                "confirmation_token": token,
+                "keys_to_update": key_names,
+                "message": f"Confirm update of {len(key_names)} API key(s) by re-sending with confirmation_token.",
+                "expires_in_seconds": _CONFIRM_TTL_SECONDS,
+            }
+
+        # ── Step 2: validate confirmation token ──────────────────────
+        pending = _pending_confirmations.pop(body.confirmation_token, None)
+        if not pending:
+            raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
+        if pending["expires"] < time.monotonic():
+            raise HTTPException(status_code=403, detail="Confirmation token expired")
+        if sorted(pending["key_names"]) != key_names:
+            raise HTTPException(
+                status_code=400,
+                detail="Key names do not match the original confirmation request",
+            )
+
         # Update os.environ immediately
         for var_name, value in body.keys.items():
             os.environ[var_name] = value
 
-        # Persist to config/.env
+        # Persist to config/.env (atomic write)
         env_path = os.path.join("config", ".env")
         _update_env_file(env_path, body.keys)
 
@@ -1284,8 +1506,8 @@ def update_api_keys(body: _ApiKeysUpdateBody):
             )
             _llm_client.reload_providers(new_providers)
 
-        logger.warning(f"🔑 API keys updated: {sorted(body.keys.keys())}")
-        return {"ok": True, "updated": sorted(body.keys.keys())}
+        logger.warning(f"🔑 API keys updated (confirmed): {key_names}")
+        return {"ok": True, "updated": key_names}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1302,9 +1524,8 @@ def _utcnow_str() -> str:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/portfolio/history", summary="Portfolio value time-series for equity curve")
-def get_portfolio_history(hours: int = Query(720, ge=1, le=8760)):
+def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), db=Depends(_get_profile_db)):
     """Returns portfolio snapshots as time-series data for charting."""
-    db = _require_db()
     try:
         rows = db.get_portfolio_history(hours=hours)
         return _sanitize_floats({"history": rows, "count": len(rows)})
@@ -1314,9 +1535,8 @@ def get_portfolio_history(hours: int = Query(720, ge=1, le=8760)):
 
 
 @app.get("/api/analytics", summary="Comprehensive performance analytics")
-def get_analytics(hours: int = Query(720, ge=1, le=8760)):
+def get_analytics(hours: int = Query(720, ge=1, le=8760), db=Depends(_get_profile_db)):
     """Combined analytics dashboard data: performance, best/worst, daily summaries, win/loss stats."""
-    db = _require_db()
     try:
         perf = db.get_performance_summary(hours=hours)
         best_worst = db.get_best_worst_trades(hours=hours)
@@ -1342,10 +1562,11 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/portfolio/exposure", summary="Current portfolio position concentration")
-def get_portfolio_exposure():
+def get_portfolio_exposure(db=Depends(_get_profile_db)):
     """Returns the latest portfolio snapshot with position breakdown."""
-    db = _require_db()
-    conn = _fresh_conn()
+    conn = sqlite3.connect(db._db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         row = conn.execute(
             """SELECT portfolio_value, cash_balance, return_pct, total_pnl,
@@ -1433,9 +1654,8 @@ def get_news(count: int = Query(30, ge=1, le=100)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/watchlist", summary="Active pairs watchlist with scan results")
-def get_watchlist():
+def get_watchlist(db=Depends(_get_profile_db)):
     """Returns the latest universe scan results + active pair configuration."""
-    db = _require_db()
     config = _get_config()
     try:
         scan = db.get_latest_scan_results()
@@ -1516,14 +1736,31 @@ def send_trade_command(
 
     if not _redis_client:
         raise HTTPException(status_code=503, detail="Redis not available — cannot send commands")
+    if not _DASHBOARD_COMMAND_SIGNING_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Dashboard command signing key not configured",
+        )
 
     try:
+        import uuid as _uuid
+
+        ts = datetime.now(timezone.utc).isoformat()
+        nonce = _uuid.uuid4().hex
         command = {
             "action": action,
             "pair": pair,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": ts,
             "source": "dashboard",
+            "nonce": nonce,
         }
+        command["signature"] = _sign_dashboard_command(
+            action=action,
+            pair=pair,
+            ts=ts,
+            source=command["source"],
+            nonce=nonce,
+        )
         # Push to processing queue (orchestrator polls this)
         _redis_client.rpush("dashboard:commands_queue", json.dumps(command))
         # Also publish for real-time subscribers
@@ -1574,7 +1811,11 @@ def get_trailing_stops():
 
 
 def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
-    """Update or append env vars in a .env file, preserving existing content."""
+    """Update or append env vars in a .env file, preserving existing content.
+
+    Uses atomic write (write to temp file → rename) to avoid partial writes
+    corrupting the .env file on crash or power loss.
+    """
     lines: list[str] = []
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
@@ -1601,8 +1842,22 @@ def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
         for key in sorted(remaining):
             new_lines.append(f"{key}={updates[key]}\n")
 
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
+    # Atomic write: write to temp file in same directory, then rename
+    env_dir = os.path.dirname(os.path.abspath(env_path))
+    fd, tmp_path = tempfile.mkstemp(dir=env_dir, suffix=".env.tmp", prefix=".env_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, os.path.abspath(env_path))
+    except BaseException:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------

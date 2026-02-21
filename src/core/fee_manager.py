@@ -1,10 +1,16 @@
 """
 Fee Manager — Fee-aware trading decisions.
 
-Coinbase Advanced Trade fee tiers (based on 30-day volume):
-  Tier 1 (<$1K):    Taker 0.60%, Maker 0.40%
-  Tier 2 (<$10K):   Taker 0.40%, Maker 0.25%
-  Tier 3 (<$50K):   Taker 0.25%, Maker 0.15%
+Supports pluggable fee models:
+
+  - ``crypto_percentage`` (default): Percentage-based taker/maker fees.
+    Coinbase Advanced Trade fee tiers (based on 30-day volume):
+      Tier 1 (<$1K):    Taker 0.60%, Maker 0.40%
+      Tier 2 (<$10K):   Taker 0.40%, Maker 0.25%
+      Tier 3 (<$50K):   Taker 0.25%, Maker 0.15%
+
+  - ``equity_flat_plus_pct``: Flat minimum fee per trade plus a percentage.
+    Typical for Scandinavian stock brokers (e.g. Nordnet Courtage Mini).
 
 A swap (sell A → buy B) costs TWO trades worth of fees.
 We must ensure expected gain > total fees or we lose money.
@@ -12,6 +18,7 @@ We must ensure expected gain > total fees or we lose money.
 
 from __future__ import annotations
 
+import abc
 from dataclasses import dataclass
 from typing import Optional
 
@@ -33,6 +40,86 @@ class FeeEstimate:
     is_profitable: bool        # True if expected gain > fees
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Fee model ABCs
+# ═══════════════════════════════════════════════════════════════════════════
+
+class BaseFeeModel(abc.ABC):
+    """Interface for pluggable fee calculation strategies."""
+
+    @abc.abstractmethod
+    def estimate_trade_fee(self, quote_amount: float, is_maker: bool = False) -> float:
+        """Return the estimated fee in quote currency for a single trade."""
+
+    @abc.abstractmethod
+    def effective_fee_pct(self, quote_amount: float, is_maker: bool = False) -> float:
+        """Return the effective fee as a fraction of ``quote_amount``."""
+
+
+class CryptoPercentageFeeModel(BaseFeeModel):
+    """
+    Percentage-based fee model (typical for crypto exchanges).
+
+    Both maker and taker pay a flat percentage of the trade value.
+    """
+
+    def __init__(self, taker_pct: float = 0.006, maker_pct: float = 0.004):
+        self.taker_pct = taker_pct
+        self.maker_pct = maker_pct
+
+    def estimate_trade_fee(self, quote_amount: float, is_maker: bool = False) -> float:
+        pct = self.maker_pct if is_maker else self.taker_pct
+        return quote_amount * pct
+
+    def effective_fee_pct(self, quote_amount: float, is_maker: bool = False) -> float:
+        return self.maker_pct if is_maker else self.taker_pct
+
+
+class EquityFlatPlusPctFeeModel(BaseFeeModel):
+    """
+    Flat minimum + percentage fee model (typical for Nordic stock brokers).
+
+    The fee is ``max(flat_fee_min, quote_amount * percent_fee)``, optionally
+    plus a currency-conversion surcharge for foreign-listed instruments.
+    """
+
+    def __init__(
+        self,
+        flat_fee_min: float = 39.0,       # SEK
+        percent_fee: float = 0.0015,       # 0.15 %
+        currency_conversion_pct: float = 0.0025,
+    ):
+        self.flat_fee_min = flat_fee_min
+        self.percent_fee = percent_fee
+        self.currency_conversion_pct = currency_conversion_pct
+
+    def estimate_trade_fee(self, quote_amount: float, is_maker: bool = False) -> float:
+        return max(self.flat_fee_min, quote_amount * self.percent_fee)
+
+    def effective_fee_pct(self, quote_amount: float, is_maker: bool = False) -> float:
+        if quote_amount <= 0:
+            return 0.0
+        return self.estimate_trade_fee(quote_amount) / quote_amount
+
+
+def _build_fee_model(config: dict) -> BaseFeeModel:
+    """Instantiate the correct fee model from the ``fees`` config block."""
+    model_type = config.get("model_type", "crypto_percentage")
+
+    if model_type == "equity_flat_plus_pct":
+        return EquityFlatPlusPctFeeModel(
+            flat_fee_min=config.get("flat_fee_min", 39.0),
+            percent_fee=config.get("percent_fee", 0.0015),
+            currency_conversion_pct=config.get("currency_conversion_pct", 0.0025),
+        )
+
+    # Default / "crypto_percentage"
+    return CryptoPercentageFeeModel(
+        taker_pct=config.get("trade_fee_pct", 0.006),
+        maker_pct=config.get("maker_fee_pct", 0.004),
+    )
+
+
 class FeeManager:
     """
     Manages fee calculations and determines if trades are worth executing.
@@ -45,17 +132,18 @@ class FeeManager:
         expected_relative_gain > 2 * trade_fee * safety_margin
     """
 
-    # Coinbase fee tiers (simplification — uses conservative tier)
-    TAKER_FEE_PCT = 0.006   # 0.60% (worst case, <$1K volume)
-    MAKER_FEE_PCT = 0.004   # 0.40%
-
-    # We use taker fees as default since market orders = taker
+    # Legacy class-level constants kept for backward compatibility
+    TAKER_FEE_PCT = 0.006
+    MAKER_FEE_PCT = 0.004
     DEFAULT_FEE_PCT = TAKER_FEE_PCT
 
     def __init__(self, config: dict):
         self.config = config.get("fees", {})
 
-        # Override fee rates from config
+        # Build the pluggable fee model
+        self._fee_model: BaseFeeModel = _build_fee_model(self.config)
+
+        # Override fee rates from config (used as fallback / summary display)
         self.trade_fee_pct = self.config.get("trade_fee_pct", self.DEFAULT_FEE_PCT)
         self.maker_fee_pct = self.config.get("maker_fee_pct", self.MAKER_FEE_PCT)
 
@@ -83,9 +171,8 @@ class FeeManager:
         quote_amount: float,
         is_maker: bool = False,
     ) -> float:
-        """Estimate fees for a single trade."""
-        fee_pct = self.maker_fee_pct if is_maker else self.trade_fee_pct
-        return quote_amount * fee_pct
+        """Estimate fees for a single trade (delegates to the active fee model)."""
+        return self._fee_model.estimate_trade_fee(quote_amount, is_maker)
 
     def estimate_swap_fees(
         self,
@@ -101,14 +188,12 @@ class FeeManager:
             is_maker: Whether using maker (limit) orders
             n_legs: Number of trade legs (1=direct, 2=fiat-routed, 3+=bridged)
         """
-        fee_pct = self.maker_fee_pct if is_maker else self.trade_fee_pct
-
-        # Compound fees across N legs
+        # Compound fees across N legs using the pluggable model
         remaining = quote_amount
         total_fee = 0.0
         leg_fees: list[float] = []
         for _ in range(n_legs):
-            leg_fee = remaining * fee_pct
+            leg_fee = self._fee_model.estimate_trade_fee(remaining, is_maker)
             leg_fees.append(leg_fee)
             total_fee += leg_fee
             remaining -= leg_fee
@@ -163,14 +248,15 @@ class FeeManager:
             estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs)
         else:
             fee_quote = self.estimate_trade_fees(quote_amount)
+            eff_pct = self._fee_model.effective_fee_pct(quote_amount)
             estimate = FeeEstimate(
-                sell_fee_pct=self.trade_fee_pct,
+                sell_fee_pct=eff_pct,
                 buy_fee_pct=0,
-                total_fee_pct=self.trade_fee_pct,
+                total_fee_pct=eff_pct,
                 sell_fee_quote=fee_quote,
                 buy_fee_quote=0,
                 total_fee_quote=fee_quote,
-                breakeven_move_pct=self.trade_fee_pct * self.fee_safety_margin,
+                breakeven_move_pct=eff_pct * self.fee_safety_margin,
                 is_profitable=False,
             )
 

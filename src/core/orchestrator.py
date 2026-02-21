@@ -6,6 +6,8 @@ Manages tasks, handles Telegram commands, and runs autonomously.
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import threading
@@ -122,6 +124,18 @@ class Orchestrator:
         self.redis = redis_client
         self.ws_feed = ws_feed
         self.rate_limiter = get_rate_limiter()
+        self._dashboard_command_signing_key = (
+            os.environ.get("DASHBOARD_COMMAND_SIGNING_KEY", "")
+            or os.environ.get("DASHBOARD_API_KEY", "")
+        )
+        self._dashboard_command_max_age_seconds = int(
+            config.get("dashboard", {}).get("command_max_age_seconds", 120)
+        )
+        if not self._dashboard_command_signing_key:
+            logger.warning(
+                "⚠️ DASHBOARD_COMMAND_SIGNING_KEY not configured; unsigned dashboard "
+                "commands will be rejected"
+            )
 
         # Persistent event loop for async operations within the sync run_forever() loop.
         # Avoids repeatedly creating/destroying event loops via asyncio.run().
@@ -139,8 +153,9 @@ class Orchestrator:
         self.state = TradingState(initial_balance=initial_balance)
         self.state.is_running = True
 
-        # Trading pairs
-        self.pairs = config.get("trading", {}).get("pairs", ["BTC-USD"])
+        # Trading pairs (copy-on-write: always replace the list, never mutate in-place)
+        self._pairs_lock = threading.Lock()
+        self.pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
         self.watchlist_pairs = config.get("trading", {}).get("watchlist_pairs", [])
         self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
         self.interval = config.get("trading", {}).get("interval", 120)
@@ -183,23 +198,36 @@ class Orchestrator:
         self.audit = AuditLog()
         self.high_stakes.audit = self.audit  # Connect audit after creation
 
-        # Route finder (optimal swap route discovery)
-        self.route_finder = RouteFinder(exchange, self.fee_manager, config)
+        # Route finder (optimal swap route discovery) — only for crypto exchanges
+        routing_enabled = config.get("routing", {}).get("enabled", True)
+        if routing_enabled:
+            self.route_finder = RouteFinder(exchange, self.fee_manager, config)
+        else:
+            self.route_finder = None
+            logger.info("🛤️ Route Finder disabled (non-crypto exchange or routing.enabled=false)")
 
         # Portfolio rotator (autonomous crypto-to-crypto swaps)
-        self.rotator = PortfolioRotator(
-            config=config,
-            coinbase_client=exchange,
-            llm_client=llm,
-            fee_manager=self.fee_manager,
-            high_stakes=self.high_stakes,
-            multi_tf=self.multi_tf,
-            fear_greed=self.fear_greed,
-            journal=self.journal,
-            audit=self.audit,
-            route_finder=self.route_finder,
-            rules=rules,
-        )
+        rotation_enabled = config.get("rotation", {}).get("enabled", True)
+        if rotation_enabled and self.route_finder is not None:
+            self.rotator = PortfolioRotator(
+                config=config,
+                coinbase_client=exchange,
+                llm_client=llm,
+                fee_manager=self.fee_manager,
+                high_stakes=self.high_stakes,
+                multi_tf=self.multi_tf,
+                fear_greed=self.fear_greed,
+                journal=self.journal,
+                audit=self.audit,
+                route_finder=self.route_finder,
+                rules=rules,
+            )
+        else:
+            self.rotator = None
+            if not rotation_enabled:
+                logger.info("🔄 Portfolio Rotator disabled (rotation.enabled=false)")
+            elif self.route_finder is None:
+                logger.info("🔄 Portfolio Rotator disabled (no route finder)")
 
         # Tasks
         self.active_tasks: list[Task] = []
@@ -480,7 +508,8 @@ class Orchestrator:
                     logger.debug(f"Pending order check error: {_po_err}")
 
                 # ─── Portfolio Rotation (autonomous swaps) ───
-                self._run_rotation()
+                if self.rotator is not None:
+                    self._run_rotation()
 
                 # Update trailing stops with current prices — execute sells for triggered stops
                 triggered = self.trailing_stops.update_prices(
@@ -645,11 +674,12 @@ class Orchestrator:
                             if ("trading", "pairs") in changed_fields:
                                 new_pairs = self.config.get("trading", {}).get("pairs", self.pairs)
                                 if isinstance(new_pairs, list) and new_pairs:
-                                    old_count = len(self.pairs)
-                                    self.pairs = new_pairs
+                                    with self._pairs_lock:
+                                        old_count = len(self.pairs)
+                                        self.pairs = list(new_pairs)  # copy-on-write
                                     logger.info(
                                         f"🔄 Active pairs updated by settings advisor: "
-                                        f"{old_count} → {len(self.pairs)} pairs"
+                                        f"{old_count} → {len(new_pairs)} pairs"
                                     )
                             # Notify via Telegram
                             notif = format_advisor_notification(advisor_result)
@@ -663,7 +693,7 @@ class Orchestrator:
                                 advisor_result,
                             )
                     except Exception as _sa_err:
-                        logger.warning(f"Settings advisor error (non-fatal): {_sa_err}")
+                        logger.warning("Settings advisor error (non-fatal)", exc_info=True)
 
                 # Sync state to Redis
                 self.state_manager.sync_to_redis()
@@ -816,6 +846,14 @@ class Orchestrator:
                         portfolio_value=self.state.portfolio_value,
                         cash_balance=self.state.cash_balance,
                     )
+                    if result.get("partial") and self.telegram:
+                        partial_msg = result.get("alert_message") or (
+                            f"⚠️ Rotation partial failure: {proposal.sell_pair}→{proposal.buy_pair}. "
+                            f"Details: {result.get('error', 'unknown error')}"
+                        )
+                        if result.get("reversal"):
+                            partial_msg += f"\nReversal result: {result.get('reversal')}"
+                        self.telegram.send_alert(partial_msg)
                     if result.get("executed") and self.telegram:
                         route_info = ""
                         if result.get("route_type"):
@@ -895,6 +933,11 @@ class Orchestrator:
                 except Exception:
                     continue
 
+                valid, reason = self._validate_dashboard_command(cmd)
+                if not valid:
+                    logger.warning(f"Rejected dashboard command: {reason}")
+                    continue
+
                 action = cmd.get("action")
                 pair = cmd.get("pair", "")
                 logger.info(f"📥 Dashboard HITL command: {action} for {pair}")
@@ -909,6 +952,52 @@ class Orchestrator:
                     logger.warning(f"Unknown dashboard command: {action}")
         except Exception as e:
             logger.debug(f"Dashboard command processing error: {e}")
+
+    def _validate_dashboard_command(self, cmd: dict) -> tuple[bool, str]:
+        """Validate signature and freshness of dashboard-originated commands."""
+        if not isinstance(cmd, dict):
+            return False, "payload is not a JSON object"
+
+        if not self._dashboard_command_signing_key:
+            return False, "signing key not configured"
+
+        action = str(cmd.get("action", ""))
+        pair = str(cmd.get("pair", ""))
+        ts = str(cmd.get("ts", ""))
+        source = str(cmd.get("source", ""))
+        nonce = str(cmd.get("nonce", ""))
+        signature = str(cmd.get("signature", ""))
+
+        if source != "dashboard":
+            return False, f"invalid source: {source!r}"
+
+        if not all([action, pair, ts, nonce, signature]):
+            return False, "missing required signed fields"
+
+        try:
+            normalized_ts = ts.replace("Z", "+00:00")
+            parsed_ts = datetime.fromisoformat(normalized_ts)
+            if parsed_ts.tzinfo is None:
+                parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - parsed_ts.astimezone(timezone.utc)).total_seconds()
+            if age_seconds < -30:
+                return False, "timestamp is in the future"
+            if age_seconds > self._dashboard_command_max_age_seconds:
+                return False, "timestamp is stale"
+        except Exception:
+            return False, "invalid timestamp"
+
+        payload = f"{action}|{pair}|{ts}|{source}|{nonce}"
+        expected = hmac.new(
+            self._dashboard_command_signing_key.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected):
+            return False, "invalid signature"
+
+        return True, "ok"
 
     def _handle_liquidate(self, pair: str) -> None:
         """Emergency liquidate a position."""
@@ -931,11 +1020,9 @@ class Orchestrator:
     def _handle_tighten_stop(self, pair: str) -> None:
         """Move trailing stop to breakeven."""
         try:
-            stop = self.trailing_stops.get_stop(pair)
+            stop = self.trailing_stops.tighten_to_breakeven(pair)
             if stop:
                 entry = stop.entry_price
-                # Tighten stop to entry price (breakeven)
-                stop.stop_price = entry
                 msg = f"🎯 Dashboard tightened stop on {pair} to breakeven ({format_currency(entry)})"
                 logger.info(msg)
                 if self.telegram:
@@ -955,9 +1042,10 @@ class Orchestrator:
             if pair not in excluded:
                 excluded.append(pair)
                 save_section("absolute_rules", {"never_trade_pairs": excluded})
-                self.rules._never_trade = set(excluded)
-                if pair in self.pairs:
-                    self.pairs.remove(pair)
+                self.rules.never_trade_pairs = set(excluded)
+                with self._pairs_lock:
+                    if pair in self.pairs:
+                        self.pairs = [p for p in self.pairs if p != pair]
                 msg = f"⏸️ Dashboard paused trading on {pair}"
                 logger.info(msg)
                 if self.telegram:

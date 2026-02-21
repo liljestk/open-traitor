@@ -6,6 +6,7 @@ Handles both REST and WebSocket connections with paper trading support.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -36,6 +37,7 @@ _KNOWN_QUOTES = _KNOWN_FIAT | _ALL_STABLECOINS
 
 # Live fiat-to-USD rate cache {currency: (rate, fetched_at_epoch)}
 _FIAT_RATE_CACHE: dict[str, tuple[float, float]] = {}
+_FIAT_RATE_LOCK = threading.Lock()
 _FIAT_RATE_TTL = 6 * 3600  # 6 hours — fiat rates are stable intraday
 _FIAT_RATE_URL = "https://api.frankfurter.app/latest?from=USD"  # ECB rates, no API key
 
@@ -47,9 +49,10 @@ def _get_fiat_rate_usd(currency: str) -> float:
     Returns 0 if the currency is unknown or the request fails.
     """
     now = time.time()
-    cached = _FIAT_RATE_CACHE.get(currency)
-    if cached and (now - cached[1]) < _FIAT_RATE_TTL:
-        return cached[0]
+    with _FIAT_RATE_LOCK:
+        cached = _FIAT_RATE_CACHE.get(currency)
+        if cached and (now - cached[1]) < _FIAT_RATE_TTL:
+            return cached[0]
 
     try:
         resp = requests.get(_FIAT_RATE_URL, timeout=8)
@@ -57,14 +60,16 @@ def _get_fiat_rate_usd(currency: str) -> float:
         data = resp.json()
         # Response: {"base": "USD", "rates": {"EUR": 0.952, "GBP": 0.789, ...}}
         # rates[X] = how many X per 1 USD  →  USD per X = 1 / rates[X]
-        for code, per_usd in data.get("rates", {}).items():
-            if per_usd and per_usd > 0:
-                _FIAT_RATE_CACHE[code] = (1.0 / per_usd, now)
+        with _FIAT_RATE_LOCK:
+            for code, per_usd in data.get("rates", {}).items():
+                if per_usd and per_usd > 0:
+                    _FIAT_RATE_CACHE[code] = (1.0 / per_usd, now)
         logger.debug(f"Fiat exchange rates refreshed ({len(data.get('rates', {}))} currencies)")
     except Exception as e:
         logger.warning(f"⚠️ Fiat rate fetch failed: {e} — using cached/zero rate for {currency}")
 
-    result = _FIAT_RATE_CACHE.get(currency)
+    with _FIAT_RATE_LOCK:
+        result = _FIAT_RATE_CACHE.get(currency)
     return result[0] if result else 0.0
 
 
@@ -72,6 +77,18 @@ from src.core.exchange_client import ExchangeClient
 
 class CoinbaseClient(ExchangeClient):
     """Wrapper around the Coinbase Advanced Trade API with paper trading support."""
+
+    # ── ExchangeClient identity ──────────────────────────────────────────
+
+    @property
+    def exchange_id(self) -> str:
+        return "coinbase"
+
+    @property
+    def asset_class(self) -> str:
+        return "crypto"
+
+    # ─────────────────────────────────────────────────────────────────────
 
     def __init__(
         self,
@@ -88,11 +105,15 @@ class CoinbaseClient(ExchangeClient):
         self._paper_balance: dict[str, float] = {
             "USD": 10000.0,  # Start with $10,000 in paper mode
         }
+        self._paper_balance_lock = threading.Lock()
         self._paper_orders: list[dict] = []
         self._paper_fee_pct: float = 0.006  # Match Coinbase taker fee (0.6%)
         self._paper_slippage_pct: float = paper_slippage_pct
         self._max_paper_orders: int = 500
         self._last_prices: dict[str, float] = {}
+        self._product_cache: list[dict] = []
+        self._product_cache_ts: float = 0.0
+        self._product_cache_lock = threading.RLock()
 
         if not paper_mode:
             self._init_real_client(api_key, api_secret, key_file)
@@ -313,10 +334,11 @@ class CoinbaseClient(ExchangeClient):
                 ),
             }
         except Exception as e:
+            logger.error(f"Account validation error: {e}")
             return {
                 "ok": False,
                 "mode": "live" if not self.paper_mode else "paper",
-                "error": str(e),
+                "error": "Account validation failed — check logs for details",
             }
 
     def detect_native_currency(self) -> str:
@@ -507,26 +529,25 @@ class CoinbaseClient(ExchangeClient):
     # ─── Universe Discovery (detailed metadata) ───────────────────────────
 
     # Cached product list for find_direct_pair and universe discovery
-    _product_cache: list[dict] = []
-    _product_cache_ts: float = 0.0
     _PRODUCT_CACHE_TTL: float = 600.0  # 10 min
 
     def _refresh_product_cache(self) -> list[dict]:
         """Refresh the full product list from Coinbase (cached 10 min)."""
         import time as _time
         now = _time.time()
-        if self._product_cache and (now - self._product_cache_ts) < self._PRODUCT_CACHE_TTL:
+        with self._product_cache_lock:
+            if self._product_cache and (now - self._product_cache_ts) < self._PRODUCT_CACHE_TTL:
+                return self._product_cache
+            if not self._rest_client:
+                return self._product_cache or []
+            try:
+                resp = self._rest_client.get_products()
+                pdata = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+                self._product_cache = pdata.get("products", [])
+                self._product_cache_ts = now
+            except Exception as e:
+                logger.warning(f"⚠️ Product cache refresh failed: {e}")
             return self._product_cache
-        if not self._rest_client:
-            return self._product_cache or []
-        try:
-            resp = self._rest_client.get_products()
-            pdata = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
-            self._product_cache = pdata.get("products", [])
-            self._product_cache_ts = now
-        except Exception as e:
-            logger.warning(f"⚠️ Product cache refresh failed: {e}")
-        return self._product_cache
 
     def discover_all_pairs_detailed(
         self,
@@ -807,7 +828,7 @@ class CoinbaseClient(ExchangeClient):
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place buy order: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Order failed — check logs for details"}
 
         return {"success": False, "error": "No client available"}
 
@@ -851,7 +872,7 @@ class CoinbaseClient(ExchangeClient):
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place limit buy order: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Order failed — check logs for details"}
 
         return {"success": False, "error": "No client available"}
 
@@ -895,7 +916,7 @@ class CoinbaseClient(ExchangeClient):
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place limit sell order: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Order failed — check logs for details"}
 
         return {"success": False, "error": "No client available"}
 
@@ -917,7 +938,7 @@ class CoinbaseClient(ExchangeClient):
                 return {"success": True, "result": res}
             except Exception as e:
                 logger.error(f"❌ Failed to cancel order {order_id}: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Order failed — check logs for details"}
 
         return {"success": False, "error": "No client available"}
 
@@ -945,7 +966,7 @@ class CoinbaseClient(ExchangeClient):
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place sell order: {e}")
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": "Order failed — check logs for details"}
 
         return {"success": False, "error": "No client available"}
 
@@ -1026,25 +1047,24 @@ class CoinbaseClient(ExchangeClient):
             quantity = float(base_size)
             quote_amount = quantity * fill_price
 
-        # Check balance (include estimated fee so post-fee deduction cannot go negative)
-        fee_estimate = quote_amount * self._paper_fee_pct
-        quote_bal = self._paper_balance.get(quote_currency, 0)
-        if quote_bal < quote_amount + fee_estimate:
-            return {
-                "success": False,
-                "error": (
-                    f"Insufficient balance. "
-                    f"Have: {quote_bal:,.2f} {quote_currency}, "
-                    f"Need: {quote_amount + fee_estimate:,.2f} {quote_currency} (incl. fee)"
-                ),
-            }
+        fee = round(quote_amount * self._paper_fee_pct, 8)
+        total_cost = round(quote_amount + fee, 8)
+        with self._paper_balance_lock:
+            quote_bal = self._paper_balance.get(quote_currency, 0)
+            if quote_bal < total_cost:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient balance. "
+                        f"Have: {quote_bal:,.2f} {quote_currency}, "
+                        f"Need: {total_cost:,.2f} {quote_currency} (incl. fee)"
+                    ),
+                }
 
-        # Execute paper trade
-        self._paper_balance[quote_currency] = quote_bal - quote_amount
-        self._paper_balance[base_currency] = self._paper_balance.get(base_currency, 0) + quantity
-
-        fee = quote_amount * self._paper_fee_pct
-        self._paper_balance[quote_currency] -= fee
+            self._paper_balance[quote_currency] = round(quote_bal - total_cost, 8)
+            self._paper_balance[base_currency] = round(
+                self._paper_balance.get(base_currency, 0) + quantity, 8
+            )
 
         order_id = str(uuid.uuid4())
         order = {
@@ -1059,9 +1079,10 @@ class CoinbaseClient(ExchangeClient):
             "fee": str(fee),
             "created_time": datetime.now(timezone.utc).isoformat(),
         }
-        self._paper_orders.append(order)
-        if len(self._paper_orders) > self._max_paper_orders:
-            self._paper_orders = self._paper_orders[-self._max_paper_orders:]
+        with self._paper_balance_lock:
+            self._paper_orders.append(order)
+            if len(self._paper_orders) > self._max_paper_orders:
+                self._paper_orders = self._paper_orders[-self._max_paper_orders:]
 
         logger.info(
             f"📝 Paper BUY: {quantity:.6f} {base_currency} @ {fill_price:,.2f} {quote_currency} "
@@ -1080,23 +1101,22 @@ class CoinbaseClient(ExchangeClient):
         quote_currency = parts[1] if len(parts) > 1 else "USD"
         quantity = float(base_size)
 
-        # Check balance
-        if self._paper_balance.get(base_currency, 0) < quantity:
-            return {
-                "success": False,
-                "error": f"Insufficient {base_currency} balance. Have: {self._paper_balance.get(base_currency, 0):.6f}, Need: {quantity:.6f}",
-            }
-
         # Apply slippage: sells fill slightly below mid-price
         fill_price = price * (1.0 - self._paper_slippage_pct)
         quote_amount = quantity * fill_price
-
-        # Execute paper trade
-        self._paper_balance[base_currency] -= quantity
-        self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount
-
         fee = quote_amount * self._paper_fee_pct
-        self._paper_balance[quote_currency] -= fee
+
+        with self._paper_balance_lock:
+            base_bal = self._paper_balance.get(base_currency, 0)
+            if base_bal < quantity:
+                return {
+                    "success": False,
+                    "error": f"Insufficient {base_currency} balance. Have: {base_bal:.6f}, Need: {quantity:.6f}",
+                }
+
+            self._paper_balance[base_currency] = base_bal - quantity
+            self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount
+            self._paper_balance[quote_currency] -= fee
 
         order_id = str(uuid.uuid4())
         order = {
@@ -1111,9 +1131,10 @@ class CoinbaseClient(ExchangeClient):
             "fee": str(fee),
             "created_time": datetime.now(timezone.utc).isoformat(),
         }
-        self._paper_orders.append(order)
-        if len(self._paper_orders) > self._max_paper_orders:
-            self._paper_orders = self._paper_orders[-self._max_paper_orders:]
+        with self._paper_balance_lock:
+            self._paper_orders.append(order)
+            if len(self._paper_orders) > self._max_paper_orders:
+                self._paper_orders = self._paper_orders[-self._max_paper_orders:]
 
         logger.info(
             f"📝 Paper SELL: {quantity:.6f} {base_currency} @ {fill_price:,.2f} {quote_currency} "

@@ -72,6 +72,7 @@ class Signal(BaseModel):
     """Combined trading signal from all analyses."""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     pair: str
+    exchange: str = "coinbase"  # Exchange identifier ("coinbase", "nordnet", …)
     current_price: float
     signal_type: SignalType = SignalType.NEUTRAL
     confidence: float = 0.0  # 0.0 to 1.0

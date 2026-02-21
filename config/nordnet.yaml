@@ -1,0 +1,174 @@
+trading:
+  exchange: nordnet
+  mode: paper           # Start in paper mode until NordnetClient is battle-tested
+  pair_discovery: all
+  quote_currencies:
+  - SEK
+  pairs:
+  - VOLV-B.ST
+  - ERIC-B.ST
+  - ABB.ST
+  quote_currency: SEK
+  interval: 300         # Stocks move slower; 5-min cycles are sufficient
+  min_confidence: 0.60
+  max_open_positions: 10
+  reconcile_every_cycles: 10
+  paper_slippage_pct: 0.001
+  live_holdings_sync: true
+  holdings_refresh_seconds: 120
+  holdings_dust_threshold: 0.01
+  invalidate_strategic_context: false
+  include_crypto_quotes: false
+  pair_universe_refresh_seconds: 3600
+  max_active_pairs: 8
+  scan_volume_threshold: 5000     # SEK volume threshold
+  scan_movement_threshold_pct: 0.5
+  screener_interval_cycles: 3
+absolute_rules:
+  max_single_trade: 5000          # SEK — higher nominal, similar real exposure
+  max_daily_spend: 20000
+  max_daily_loss: 5000
+  max_portfolio_risk_pct: 0.15
+  require_approval_above: 2000
+  never_trade_pairs: []
+  only_trade_pairs: []
+  min_trade_interval_seconds: 120
+  max_trades_per_day: 30
+  max_cash_per_trade_pct: 0.20
+  emergency_stop_portfolio: 80000
+  always_use_stop_loss: true
+  max_stop_loss_pct: 0.08         # Stocks can gap — wider stop
+risk:
+  max_position_pct: 0.10
+  max_total_exposure_pct: 0.40    # Equities: higher total exposure OK
+  max_drawdown_pct: 0.12
+  stop_loss_pct: 0.06
+  take_profit_pct: 0.10
+  trailing_stop_pct: 0.05
+  max_trades_per_hour: 6
+  loss_cooldown_seconds: 600
+llm:
+  model: llama3.1:8b
+  temperature: 0.2
+  max_tokens: 2000
+  max_retries: 3
+  timeout: 60
+  persona: 'You are a cautious, analytical equity trading assistant focused on
+    the Stockholm (OMX) stock exchange. You prioritize capital preservation
+    over aggressive gains. You always consider risk-reward ratios before
+    suggesting trades. You never recommend trading with more than the user''s
+    specified limits. When uncertain, you recommend holding or waiting for
+    better setups.
+    '
+  providers:
+  - name: gemini
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.0-flash
+    timeout: 30
+    rpm_limit: 14
+    daily_token_limit: 950000
+    cooldown_seconds: 65
+    api_key_set: false
+  - name: openai
+    enabled: true
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+    timeout: 45
+    rpm_limit: 450
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    api_key_set: false
+  - name: ollama
+    enabled: true
+    model: llama3.1:8b
+    base_url_env: OLLAMA_BASE_URL
+    model_env: OLLAMA_MODEL
+    timeout: 60
+    is_local: true
+    api_key_set: true
+analysis:
+  technical:
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2
+    ema_periods:
+    - 9
+    - 21
+    - 50
+    - 200
+    candle_count: 200
+    candle_granularity: ONE_HOUR
+  sentiment:
+    enabled: true
+    sample_size: 20
+news:
+  fetch_interval: 600
+  reddit_subreddits:
+  - stockholmsborsen
+  - AvanzaAktier
+  rss_feeds:
+  - https://www.di.se/rss
+  max_articles: 50
+  articles_for_analysis: 10
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN_NORDNET
+  chat_id_env: TELEGRAM_CHAT_ID_NORDNET
+  authorized_users_env: TELEGRAM_AUTHORIZED_USERS
+  status_update_interval: 3600
+  notify_on_trade: true
+  notify_on_signal_confidence: 0.8
+  daily_summary: true
+  daily_summary_hour: 8
+logging:
+  level: INFO
+  file_enabled: true
+  directory: logs
+  max_file_size: 50
+  backup_count: 5
+health:
+  port: 8081           # Different port than coinbase agent
+dashboard:
+  enabled: true
+  port: 8090
+  langfuse_host: http://localhost:3000
+  langfuse_enabled: true
+fear_greed:
+  enabled: false        # Crypto-specific index — not relevant for OMX stocks
+  cache_ttl: 600
+multi_timeframe:
+  enabled: true
+  min_alignment: 3
+journal:
+  enabled: true
+  data_dir: data
+audit:
+  enabled: true
+  data_dir: data
+rotation:
+  enabled: false        # Crypto swap rotation doesn't apply to stocks
+fees:
+  model_type: equity_flat_plus_pct
+  # Nordnet Sweden — Courtage Mini (typical retail)
+  flat_fee_min: 39               # SEK — minimum fee per trade
+  percent_fee: 0.0015            # 0.15% of trade value
+  currency_conversion_pct: 0.0025  # 0.25% for foreign-listed instruments
+  safety_margin: 1.5
+  min_gain_after_fees_pct: 0.008  # Need higher gain to cover flat fee + pct
+  min_trade_quote: 500            # SEK — below this, flat fee dominates
+  swap_cooldown_seconds: 0        # N/A for equities
+high_stakes:
+  trade_size_multiplier: 2.0
+  swap_allocation_multiplier: 1.0
+  min_confidence: 0.55
+  min_swap_gain_pct: 0.02
+  auto_approve_up_to: 5000
+routing:
+  enabled: false        # No swap routing for stocks — direct buy/sell only

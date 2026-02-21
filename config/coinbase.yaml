@@ -1,4 +1,5 @@
 trading:
+  exchange: coinbase
   mode: live
   pair_discovery: all
   quote_currencies:
@@ -54,15 +55,10 @@ llm:
   max_retries: 3
   timeout: 60
   persona: 'You are a cautious, analytical cryptocurrency trading assistant.
-
     You prioritize capital preservation over aggressive gains.
-
     You always consider risk-reward ratios before suggesting trades.
-
     You never recommend trading with more than the user''s specified limits.
-
     When uncertain, you recommend holding or waiting for better setups.
-
     '
   providers:
   - name: gemini
@@ -129,8 +125,8 @@ news:
   max_articles: 100
   articles_for_analysis: 15
 telegram:
-  bot_token_env: TELEGRAM_BOT_TOKEN
-  chat_id_env: TELEGRAM_CHAT_ID
+  bot_token_env: TELEGRAM_BOT_TOKEN_COINBASE
+  chat_id_env: TELEGRAM_CHAT_ID_COINBASE
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
   status_update_interval: 3600
   notify_on_trade: true

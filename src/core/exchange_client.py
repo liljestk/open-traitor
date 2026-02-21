@@ -17,6 +17,28 @@ class ExchangeClient(abc.ABC):
     Abstract interface for an exchange or broker client.
     """
 
+    # ── Identity properties ──────────────────────────────────────────────
+
+    @property
+    @abc.abstractmethod
+    def exchange_id(self) -> str:
+        """
+        Unique short identifier for this exchange (e.g. ``"coinbase"``, ``"nordnet"``).
+        Used as a key in per-exchange state, stats, config, and logging.
+        """
+
+    @property
+    @abc.abstractmethod
+    def asset_class(self) -> str:
+        """
+        The asset class traded on this exchange.
+        Returns ``"crypto"`` or ``"equity"``.
+        Allows generic branching (fee models, routing, pair parsing) without
+        exchange-specific ``if`` checks.
+        """
+
+    # ── Connection & account methods ─────────────────────────────────────
+
     @abc.abstractmethod
     def check_connection(self) -> dict[str, Any]:
         """
