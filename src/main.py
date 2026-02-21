@@ -21,7 +21,7 @@ import yaml
 from dotenv import load_dotenv
 
 from src.core.coinbase_client import CoinbaseClient
-from src.core.llm_client import LLMClient
+from src.core.llm_client import LLMClient, build_providers
 from src.core.orchestrator import Orchestrator
 from src.core.rules import AbsoluteRules
 from src.core.ws_feed import CoinbaseWebSocketFeed
@@ -161,31 +161,62 @@ def main():
             except Exception as e:
                 logger.warning(f"⚠️ LLM Tracer init failed: {e} — tracing disabled")
 
-    # Ollama LLM
+    # LLM — multi-provider chain (Gemini → OpenAI → Ollama)
     llm_config = config.get("llm", {})
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+    fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+
+    providers_config = llm_config.get("providers", [])
+    if providers_config:
+        logger.info("🔗 Building LLM provider chain...")
+        providers = build_providers(
+            providers_config,
+            fallback_base_url=ollama_url,
+            fallback_model=fallback_model,
+            fallback_timeout=llm_config.get("timeout", 60),
+            fallback_max_retries=llm_config.get("max_retries", 3),
+        )
+    else:
+        providers = None  # backward compat: single Ollama
 
     llm = LLMClient(
         base_url=ollama_url,
-        model=model,
+        model=fallback_model,
         temperature=llm_config.get("temperature", 0.2),
         max_tokens=llm_config.get("max_tokens", 2000),
         max_retries=llm_config.get("max_retries", 3),
         timeout=llm_config.get("timeout", 60),
         persona=llm_config.get("persona", ""),
+        providers=providers,
     )
 
-    # Wait for Ollama to be ready
-    logger.info("⏳ Waiting for Ollama to be ready...")
-    for attempt in range(30):
-        if llm.is_available():
-            logger.info("✅ Ollama is ready!")
-            break
-        logger.debug(f"Ollama not ready yet (attempt {attempt + 1}/30)...")
-        time.sleep(5)
+    # Wait for at least one LLM provider to be ready
+    has_cloud = any(not p.is_local for p in llm._providers)
+    if has_cloud:
+        # Cloud providers available — just check Ollama status without blocking
+        for p in llm._providers:
+            if p.is_local:
+                try:
+                    import requests as _req
+                    _url = str(p.client.base_url).rstrip("/").removesuffix("/v1")
+                    _resp = _req.get(f"{_url}/api/tags", timeout=5)
+                    if _resp.status_code == 200:
+                        logger.info("✅ Ollama is ready (fallback)")
+                    else:
+                        logger.info("ℹ️ Ollama not ready yet (cloud providers are primary)")
+                except Exception:
+                    logger.info("ℹ️ Ollama not ready yet (cloud providers are primary)")
     else:
-        logger.warning("⚠️ Ollama not responding — will retry during operation")
+        # Ollama-only — wait for it
+        logger.info("⏳ Waiting for Ollama to be ready...")
+        for attempt in range(30):
+            if llm.is_available():
+                logger.info("✅ Ollama is ready!")
+                break
+            logger.debug(f"Ollama not ready yet (attempt {attempt + 1}/30)...")
+            time.sleep(5)
+        else:
+            logger.warning("⚠️ Ollama not responding — will retry during operation")
 
     # Coinbase Client
     coinbase = CoinbaseClient(

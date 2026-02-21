@@ -71,24 +71,30 @@ class SpanContext:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         latency_ms: Optional[float] = None,
+        model: str = "",
     ) -> None:
         """Called by LLMClient after the API call completes."""
         self.output = output
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.latency_ms = latency_ms if latency_ms is not None else (time.time() - self._start_time) * 1000
+        if model:
+            self.model = model
 
         # Finish Langfuse generation (v3 SDK: update then end)
         if self._generation is not None:
             try:
                 truncated_output = str(output)[:2000] if not isinstance(output, str) else output[:2000]
-                self._generation.update(
-                    output=truncated_output,
-                    usage_details={
+                update_kwargs: dict[str, Any] = {
+                    "output": truncated_output,
+                    "usage_details": {
                         "input": prompt_tokens,
                         "output": completion_tokens,
                     },
-                )
+                }
+                if model:
+                    update_kwargs["model"] = model
+                self._generation.update(**update_kwargs)
                 self._generation.end()
                 self.span_id = getattr(self._generation, "id", "") or ""
             except Exception as e:
@@ -252,7 +258,8 @@ class _NullSpanContext:
     output = None
 
     def finish(self, output: Any = None, prompt_tokens: int = 0,
-               completion_tokens: int = 0, latency_ms: Optional[float] = None) -> None:
+               completion_tokens: int = 0, latency_ms: Optional[float] = None,
+               model: str = "") -> None:
         pass
 
 

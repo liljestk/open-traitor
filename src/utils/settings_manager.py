@@ -926,3 +926,110 @@ def get_schema_metadata() -> dict[str, Any]:
             meta[parent]["nested"][child_name] = child_meta
 
     return meta
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LLM Provider validation & management
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LLM_PROVIDER_SCHEMA: dict[str, dict[str, Any]] = {
+    "name":              {"type": str,  "required": True},
+    "enabled":           {"type": bool},
+    "model":             {"type": str,  "required": True},
+    "base_url":          {"type": str},
+    "base_url_env":      {"type": str},
+    "api_key_env":       {"type": str},
+    "model_env":         {"type": str},
+    "timeout":           {"type": int,  "min": 5,  "max": 600},
+    "rpm_limit":         {"type": int,  "min": 0,  "max": 10_000},
+    "daily_token_limit": {"type": int,  "min": 0,  "max": 100_000_000},
+    "cooldown_seconds":  {"type": int,  "min": 5,  "max": 3600},
+    "is_local":          {"type": bool},
+}
+
+
+def validate_provider(provider: dict) -> tuple[bool, str]:
+    """Validate a single LLM provider config dict."""
+    errors: list[str] = []
+    name = provider.get("name", "<unnamed>")
+
+    for field_name, field_def in _LLM_PROVIDER_SCHEMA.items():
+        if field_def.get("required") and field_name not in provider:
+            errors.append(f"Provider '{name}': missing required field '{field_name}'")
+            continue
+
+        if field_name not in provider:
+            continue
+
+        value = provider[field_name]
+        expected = field_def["type"]
+
+        if expected == bool:
+            if not isinstance(value, bool):
+                errors.append(f"Provider '{name}': {field_name} must be boolean")
+        elif expected == str:
+            if not isinstance(value, str):
+                errors.append(f"Provider '{name}': {field_name} must be string")
+        elif expected == int:
+            try:
+                cast = int(value)
+            except (ValueError, TypeError):
+                errors.append(f"Provider '{name}': {field_name} must be int")
+                continue
+            if "min" in field_def and cast < field_def["min"]:
+                errors.append(f"Provider '{name}': {field_name} must be >= {field_def['min']}")
+            if "max" in field_def and cast > field_def["max"]:
+                errors.append(f"Provider '{name}': {field_name} must be <= {field_def['max']}")
+
+    if errors:
+        return False, "; ".join(errors)
+    return True, ""
+
+
+def validate_providers_list(providers: list[dict]) -> tuple[bool, str]:
+    """Validate a full ordered providers list."""
+    if not isinstance(providers, list):
+        return False, "providers must be a list"
+
+    names: set[str] = set()
+    for i, p in enumerate(providers):
+        if not isinstance(p, dict):
+            return False, f"Provider at index {i} must be a dict"
+
+        ok, err = validate_provider(p)
+        if not ok:
+            return False, err
+
+        name = p.get("name", "")
+        if name in names:
+            return False, f"Duplicate provider name: '{name}'"
+        names.add(name)
+
+    return True, ""
+
+
+def update_llm_providers(
+    providers: list[dict],
+    path: str = _SETTINGS_PATH,
+) -> tuple[bool, str, list[dict]]:
+    """
+    Validate and persist a new LLM providers list.
+    Returns (ok, error_message, saved_providers).
+    """
+    ok, err = validate_providers_list(providers)
+    if not ok:
+        return False, err, []
+
+    cfg = load_settings(path)
+    llm_section = cfg.setdefault("llm", {})
+    llm_section["providers"] = providers
+    save_settings(cfg, path)
+
+    logger.warning(f"🔧 LLM providers updated: {[p.get('name') for p in providers]}")
+    return True, "", providers
+
+
+def get_llm_providers(path: str = _SETTINGS_PATH) -> list[dict]:
+    """Return the current providers list from settings."""
+    cfg = load_settings(path)
+    return cfg.get("llm", {}).get("providers", [])

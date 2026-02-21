@@ -300,6 +300,48 @@ export const updateSettings = (data: { section?: string; updates?: Record<string
 export const fetchPresets = () =>
   apiFetch<{ presets: Record<string, PresetInfo>; current_enabled: boolean }>('/settings/presets')
 
+// ─── LLM Providers ────────────────────────────────────────────────────────
+
+export interface LLMProviderLiveStatus {
+  name: string
+  model: string
+  is_local: boolean
+  available: boolean
+  in_cooldown?: boolean
+  cooldown_remaining_s?: number
+  daily_tokens?: number
+  daily_token_limit?: number
+  rpm_limit?: number
+  rpm_current?: number
+}
+
+export interface LLMProviderConfig {
+  name: string
+  enabled: boolean
+  model: string
+  base_url?: string
+  base_url_env?: string
+  api_key_env?: string
+  model_env?: string
+  timeout?: number
+  rpm_limit?: number
+  daily_token_limit?: number
+  cooldown_seconds?: number
+  is_local?: boolean
+  api_key_set?: boolean
+  live_status?: LLMProviderLiveStatus
+}
+
+export const fetchLLMProviders = () =>
+  apiFetch<{ providers: LLMProviderConfig[] }>('/settings/llm-providers')
+
+export const updateLLMProviders = (providers: LLMProviderConfig[]) =>
+  apiFetch<{ ok: boolean; providers: LLMProviderConfig[] }>('/settings/llm-providers', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers }),
+  })
+
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {

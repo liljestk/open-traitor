@@ -2,12 +2,14 @@ import { useState, useMemo, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
+  fetchLLMProviders, updateLLMProviders,
   type SectionSchema, type FieldSchema, type PresetInfo,
+  type LLMProviderConfig,
 } from '../api'
 import {
   Shield, ShieldAlert, ShieldOff, ToggleLeft, ToggleRight,
   ChevronDown, ChevronRight, Save, X, AlertTriangle, Check,
-  Info, ArrowRight,
+  Info, ArrowRight, ArrowUp, ArrowDown, Zap, Server, Cloud,
 } from 'lucide-react'
 
 // ── Preset button config ────────────────────────────────────────────────────
@@ -407,6 +409,330 @@ function btnStyle(bg: string): React.CSSProperties {
   }
 }
 
+// ── LLM Providers Section ────────────────────────────────────────────────────
+
+function LLMProvidersSection() {
+  const queryClient = useQueryClient()
+  const { data, isLoading } = useQuery({ queryKey: ['llm-providers'], queryFn: fetchLLMProviders })
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<LLMProviderConfig[]>([])
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: updateLLMProviders,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+  })
+
+  const providers = data?.providers ?? []
+
+  const startEdit = () => {
+    setDraft(providers.map(p => ({ ...p })))
+    setEditing(true)
+    setMsg(null)
+  }
+
+  const cancel = () => { setEditing(false); setMsg(null) }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await mutation.mutateAsync(draft)
+      setEditing(false)
+      setMsg({ ok: true, text: 'Saved & applied' })
+      setTimeout(() => setMsg(null), 3000)
+    } catch (e: any) {
+      setMsg({ ok: false, text: e.message || 'Save failed' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const moveProvider = (idx: number, dir: -1 | 1) => {
+    const next = [...draft]
+    const target = idx + dir
+    if (target < 0 || target >= next.length) return
+    ;[next[idx], next[target]] = [next[target], next[idx]]
+    setDraft(next)
+  }
+
+  const updateDraftField = (idx: number, field: string, value: any) => {
+    setDraft(prev => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p))
+  }
+
+  const displayProviders = editing ? draft : providers
+
+  const getStatusBadge = (p: LLMProviderConfig) => {
+    if (!p.enabled) return { label: 'Disabled', color: '#6e7681' }
+    if (!p.api_key_set && !p.is_local) return { label: 'No API Key', color: '#f59e0b' }
+    if (p.live_status?.in_cooldown) return { label: 'Cooldown', color: '#f59e0b' }
+    if (p.live_status?.available === false) return { label: 'Unavailable', color: '#ef4444' }
+    return { label: 'Active', color: '#22c55e' }
+  }
+
+  return (
+    <div style={{
+      background: '#0d1117', border: '1px solid #21262d', borderRadius: 8,
+      marginBottom: 8, overflow: 'hidden',
+    }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px',
+          color: '#e6edf3',
+        }}
+      >
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <Zap size={14} style={{ color: '#f59e0b' }} />
+        <span style={{ fontWeight: 600, fontSize: 14, flex: 1, textAlign: 'left' }}>LLM Provider Chain</span>
+        <span style={{
+          fontSize: 10, padding: '2px 6px', borderRadius: 4,
+          background: '#ef444422', color: '#ef4444', fontWeight: 600,
+        }}>
+          Dashboard Only
+        </span>
+        {!isLoading && (
+          <span style={{ fontSize: 11, color: '#8b949e' }}>
+            {providers.filter(p => p.enabled && (p.api_key_set || p.is_local)).length} active
+          </span>
+        )}
+        {msg && (
+          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 3 }}>
+            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div style={{ padding: '0 14px 14px', borderTop: '1px solid #21262d' }}>
+          {/* Action bar */}
+          <div style={{ display: 'flex', gap: 8, padding: '10px 0 6px', justifyContent: 'flex-end', alignItems: 'center' }}>
+            <span style={{ flex: 1, fontSize: 11, color: '#8b949e' }}>
+              Providers are tried top-to-bottom. First available provider handles each call.
+            </span>
+            {!editing ? (
+              <button onClick={startEdit} style={btnStyle('#30363d')}>Edit</button>
+            ) : (
+              <>
+                <button onClick={cancel} style={btnStyle('#30363d')}><X size={12} /> Cancel</button>
+                <button onClick={handleSave} disabled={saving} style={btnStyle('#238636')}>
+                  <Save size={12} /> {saving ? 'Saving...' : 'Save & Apply'}
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Provider cards */}
+          {displayProviders.map((p, idx) => {
+            const badge = getStatusBadge(p)
+            const icon = p.is_local
+              ? <Server size={16} style={{ color: '#8b949e' }} />
+              : <Cloud size={16} style={{ color: '#58a6ff' }} />
+
+            return (
+              <div key={p.name} style={{
+                background: '#161b22', border: '1px solid #21262d', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 6,
+                opacity: p.enabled ? 1 : 0.5,
+              }}>
+                {/* Provider header */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {/* Priority number */}
+                  <span style={{
+                    width: 22, height: 22, borderRadius: '50%',
+                    background: '#30363d', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 11, fontWeight: 700, color: '#e6edf3',
+                  }}>
+                    {idx + 1}
+                  </span>
+
+                  {icon}
+
+                  <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3', flex: 1 }}>
+                    {p.name}
+                  </span>
+
+                  {/* Status badge */}
+                  <span style={{
+                    fontSize: 10, padding: '2px 8px', borderRadius: 10,
+                    background: badge.color + '22', color: badge.color, fontWeight: 600,
+                  }}>
+                    {badge.label}
+                  </span>
+
+                  {/* Toggle */}
+                  {editing && (
+                    <button
+                      onClick={() => updateDraftField(idx, 'enabled', !p.enabled)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: p.enabled ? '#22c55e' : '#6e7681' }}
+                    >
+                      {p.enabled ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+                    </button>
+                  )}
+
+                  {/* Reorder buttons */}
+                  {editing && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <button
+                        onClick={() => moveProvider(idx, -1)}
+                        disabled={idx === 0}
+                        style={{
+                          background: 'none', border: 'none', cursor: idx === 0 ? 'default' : 'pointer',
+                          padding: 0, color: idx === 0 ? '#30363d' : '#8b949e',
+                        }}
+                      >
+                        <ArrowUp size={14} />
+                      </button>
+                      <button
+                        onClick={() => moveProvider(idx, 1)}
+                        disabled={idx === displayProviders.length - 1}
+                        style={{
+                          background: 'none', border: 'none',
+                          cursor: idx === displayProviders.length - 1 ? 'default' : 'pointer',
+                          padding: 0,
+                          color: idx === displayProviders.length - 1 ? '#30363d' : '#8b949e',
+                        }}
+                      >
+                        <ArrowDown size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Provider details */}
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+                  gap: '4px 16px', marginTop: 8, fontSize: 12,
+                }}>
+                  {/* Model */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                    <span style={{ color: '#8b949e' }}>Model</span>
+                    {editing ? (
+                      <input
+                        type="text" value={p.model}
+                        onChange={(e) => updateDraftField(idx, 'model', e.target.value)}
+                        style={{
+                          background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                          borderRadius: 4, padding: '1px 6px', fontSize: 12, width: 130, textAlign: 'right',
+                        }}
+                      />
+                    ) : (
+                      <span style={{ color: '#e6edf3', fontFamily: 'monospace' }}>{p.model}</span>
+                    )}
+                  </div>
+
+                  {/* API Key */}
+                  {!p.is_local && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                      <span style={{ color: '#8b949e' }}>API Key</span>
+                      <span style={{ color: p.api_key_set ? '#22c55e' : '#f59e0b' }}>
+                        {p.api_key_set ? 'Set' : `${p.api_key_env} not set`}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Timeout */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                    <span style={{ color: '#8b949e' }}>Timeout</span>
+                    {editing ? (
+                      <input
+                        type="number" value={p.timeout ?? 60} min={5} max={600}
+                        onChange={(e) => updateDraftField(idx, 'timeout', parseInt(e.target.value, 10))}
+                        style={{
+                          background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                          borderRadius: 4, padding: '1px 6px', fontSize: 12, width: 60, textAlign: 'right',
+                        }}
+                      />
+                    ) : (
+                      <span style={{ color: '#e6edf3' }}>{p.timeout ?? 60}s</span>
+                    )}
+                  </div>
+
+                  {/* Rate limits (cloud only) */}
+                  {!p.is_local && (
+                    <>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                        <span style={{ color: '#8b949e' }}>RPM Limit</span>
+                        {editing ? (
+                          <input
+                            type="number" value={p.rpm_limit ?? 0} min={0}
+                            onChange={(e) => updateDraftField(idx, 'rpm_limit', parseInt(e.target.value, 10))}
+                            style={{
+                              background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                              borderRadius: 4, padding: '1px 6px', fontSize: 12, width: 60, textAlign: 'right',
+                            }}
+                          />
+                        ) : (
+                          <span style={{ color: '#e6edf3' }}>
+                            {p.live_status?.rpm_current !== undefined
+                              ? `${p.live_status.rpm_current}/${p.rpm_limit ?? 0}`
+                              : p.rpm_limit ?? 0
+                            }
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                        <span style={{ color: '#8b949e' }}>Daily Tokens</span>
+                        {editing ? (
+                          <input
+                            type="number" value={p.daily_token_limit ?? 0} min={0} step={10000}
+                            onChange={(e) => updateDraftField(idx, 'daily_token_limit', parseInt(e.target.value, 10))}
+                            style={{
+                              background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                              borderRadius: 4, padding: '1px 6px', fontSize: 12, width: 90, textAlign: 'right',
+                            }}
+                          />
+                        ) : (
+                          <span style={{ color: '#e6edf3' }}>
+                            {p.live_status?.daily_tokens !== undefined
+                              ? `${(p.live_status.daily_tokens / 1000).toFixed(0)}k / ${p.daily_token_limit ? `${(p.daily_token_limit / 1000).toFixed(0)}k` : 'unlimited'}`
+                              : p.daily_token_limit ? `${(p.daily_token_limit / 1000).toFixed(0)}k` : 'unlimited'
+                            }
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #21262d' }}>
+                        <span style={{ color: '#8b949e' }}>Cooldown</span>
+                        {editing ? (
+                          <input
+                            type="number" value={p.cooldown_seconds ?? 60} min={5}
+                            onChange={(e) => updateDraftField(idx, 'cooldown_seconds', parseInt(e.target.value, 10))}
+                            style={{
+                              background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d',
+                              borderRadius: 4, padding: '1px 6px', fontSize: 12, width: 60, textAlign: 'right',
+                            }}
+                          />
+                        ) : (
+                          <span style={{ color: '#e6edf3' }}>
+                            {p.live_status?.in_cooldown
+                              ? `${p.live_status.cooldown_remaining_s}s remaining`
+                              : `${p.cooldown_seconds ?? 60}s`
+                            }
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+
+          {isLoading && <div style={{ padding: 12, color: '#8b949e', fontSize: 13 }}>Loading providers...</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ── Section ordering ─────────────────────────────────────────────────────────
 
 const SECTION_ORDER = [
@@ -654,6 +980,9 @@ export default function Settings() {
           </span>
         ))}
       </div>
+
+      {/* LLM Provider Chain */}
+      <LLMProvidersSection />
 
       {/* Settings Sections */}
       {sortedSections.map(sectionName => {

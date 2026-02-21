@@ -65,16 +65,18 @@ _ws_connections: list[WebSocket] = []
 
 
 _rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
+_llm_client = None        # LLMClient instance (optional, for provider status)
 
 
-def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None):
+def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None):
     """Inject shared services.  Called from main.py before uvicorn starts."""
-    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client, _rules_instance
+    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client, _rules_instance, _llm_client
     _stats_db = stats_db
     _redis_client = redis_client
     _temporal_client = temporal_client
     _config = config
     _rules_instance = rules_instance
+    _llm_client = llm_client
     # Spin up a read-only Coinbase client for live price lookups (market data only)
     try:
         from src.core.coinbase_client import CoinbaseClient
@@ -96,13 +98,14 @@ def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: di
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None) -> FastAPI:
+def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None) -> FastAPI:
     set_globals(
         stats_db=stats_db,
         redis_client=redis_client,
         temporal_client=temporal_client,
         config=config,
         rules_instance=rules_instance,
+        llm_client=llm_client,
     )
     return app
 
@@ -995,6 +998,8 @@ from src.utils.settings_manager import (
     is_trading_enabled as _sm_is_trading_enabled,
     is_telegram_allowed as _sm_tg_allowed,
     TELEGRAM_SAFETY_TIERS as _SM_TG_TIERS,
+    get_llm_providers as _sm_get_providers,
+    update_llm_providers as _sm_update_providers,
 )
 
 
@@ -1081,6 +1086,84 @@ def get_presets():
 def get_telegram_tiers():
     """Returns which settings sections are safe/semi-safe/blocked for Telegram."""
     return _SM_TG_TIERS
+
+
+# ---------------------------------------------------------------------------
+# REST — LLM Provider management
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings/llm-providers", summary="Get LLM provider chain with live status")
+def get_llm_providers():
+    """
+    Returns the configured LLM providers with their live status
+    (daily tokens used, cooldown state, API key availability).
+    """
+    try:
+        providers_config = _sm_get_providers()
+
+        # Enrich with live status from LLMClient if available
+        live_status = {}
+        if _llm_client:
+            for ps in _llm_client.provider_status():
+                live_status[ps["name"]] = ps
+
+        result = []
+        for pc in providers_config:
+            name = pc.get("name", "")
+            entry = {**pc}
+            # Add live status if available
+            if name in live_status:
+                entry["live_status"] = live_status[name]
+            # Indicate whether the API key is set (don't expose the key itself)
+            api_key_env = pc.get("api_key_env", "")
+            if api_key_env:
+                entry["api_key_set"] = bool(os.environ.get(api_key_env, ""))
+            else:
+                entry["api_key_set"] = pc.get("is_local", False)
+            result.append(entry)
+
+        return {"providers": result}
+    except Exception as exc:
+        logger.exception("llm-providers GET error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class _ProvidersUpdateBody(_BaseModel):
+    providers: list[dict]
+
+
+@app.put("/api/settings/llm-providers", summary="Update LLM provider chain")
+def update_llm_providers(body: _ProvidersUpdateBody):
+    """
+    Accepts a full ordered providers list. Validates, persists to settings.yaml,
+    and hot-reloads the LLMClient's provider chain.
+    """
+    try:
+        ok, err, saved = _sm_update_providers(body.providers)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+
+        # Hot-reload the LLMClient if available
+        if _llm_client:
+            from src.core.llm_client import build_providers
+            llm_config = _config.get("llm", {})
+            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+            new_providers = build_providers(
+                saved,
+                fallback_base_url=ollama_url,
+                fallback_model=fallback_model,
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
+            )
+            _llm_client.reload_providers(new_providers)
+
+        return {"ok": True, "providers": saved}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("llm-providers PUT error")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
