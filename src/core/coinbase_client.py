@@ -1066,20 +1066,20 @@ class CoinbaseClient(ExchangeClient):
                 self._paper_balance.get(base_currency, 0) + quantity, 8
             )
 
-        order_id = str(uuid.uuid4())
-        order = {
-            "order_id": order_id,
-            "product_id": product_id,
-            "side": "BUY",
-            "type": "MARKET",
-            "status": "FILLED",
-            "filled_size": str(quantity),
-            "filled_value": str(quote_amount),
-            "average_filled_price": str(fill_price),
-            "fee": str(fee),
-            "created_time": datetime.now(timezone.utc).isoformat(),
-        }
-        with self._paper_balance_lock:
+            # L14 fix: create and append order inside the same lock scope
+            order_id = str(uuid.uuid4())
+            order = {
+                "order_id": order_id,
+                "product_id": product_id,
+                "side": "BUY",
+                "type": "MARKET",
+                "status": "FILLED",
+                "filled_size": str(quantity),
+                "filled_value": str(quote_amount),
+                "average_filled_price": str(fill_price),
+                "fee": str(fee),
+                "created_time": datetime.now(timezone.utc).isoformat(),
+            }
             self._paper_orders.append(order)
             if len(self._paper_orders) > self._max_paper_orders:
                 self._paper_orders = self._paper_orders[-self._max_paper_orders:]
@@ -1104,7 +1104,7 @@ class CoinbaseClient(ExchangeClient):
         # Apply slippage: sells fill slightly below mid-price
         fill_price = price * (1.0 - self._paper_slippage_pct)
         quote_amount = quantity * fill_price
-        fee = quote_amount * self._paper_fee_pct
+        fee = round(quote_amount * self._paper_fee_pct, 8)  # L9: consistent rounding
 
         with self._paper_balance_lock:
             base_bal = self._paper_balance.get(base_currency, 0)
@@ -1118,20 +1118,20 @@ class CoinbaseClient(ExchangeClient):
             self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount
             self._paper_balance[quote_currency] -= fee
 
-        order_id = str(uuid.uuid4())
-        order = {
-            "order_id": order_id,
-            "product_id": product_id,
-            "side": "SELL",
-            "type": "MARKET",
-            "status": "FILLED",
-            "filled_size": str(quantity),
-            "filled_value": str(quote_amount),
-            "average_filled_price": str(fill_price),
-            "fee": str(fee),
-            "created_time": datetime.now(timezone.utc).isoformat(),
-        }
-        with self._paper_balance_lock:
+            # L14 fix: create and append order inside the same lock scope
+            order_id = str(uuid.uuid4())
+            order = {
+                "order_id": order_id,
+                "product_id": product_id,
+                "side": "SELL",
+                "type": "MARKET",
+                "status": "FILLED",
+                "filled_size": str(quantity),
+                "filled_value": str(quote_amount),
+                "average_filled_price": str(fill_price),
+                "fee": str(fee),
+                "created_time": datetime.now(timezone.utc).isoformat(),
+            }
             self._paper_orders.append(order)
             if len(self._paper_orders) > self._max_paper_orders:
                 self._paper_orders = self._paper_orders[-self._max_paper_orders:]

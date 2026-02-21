@@ -28,15 +28,40 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
     # Truncate
     text = text[:max_length]
 
-    # Normalize Unicode to prevent homoglyph/confusable attacks
+    # Normalize Unicode FIRST (NFKC maps confusable glyphs to ASCII),
+    # THEN strip invisible chars, so that homoglyph bypass is blocked before
+    # the injection regex runs.
     import unicodedata
     text = unicodedata.normalize("NFKC", text)
+
+    # M22 fix: Map Cyrillic / Greek visual homoglyphs to Latin *before*
+    # injection regex runs.  NFKC does NOT handle cross-script lookalikes
+    # (e.g. Cyrillic 'а' U+0430 looks like Latin 'a' but is distinct).
+    _HOMOGLYPH_MAP = str.maketrans({
+        '\u0430': 'a', '\u0435': 'e', '\u043e': 'o', '\u0440': 'p',
+        '\u0441': 'c', '\u0443': 'y', '\u0445': 'x', '\u0456': 'i',
+        '\u0458': 'j', '\u04bb': 'h', '\u0455': 's', '\u0457': 'i',
+        '\u0410': 'A', '\u0412': 'B', '\u0415': 'E', '\u041a': 'K',
+        '\u041c': 'M', '\u041d': 'H', '\u041e': 'O', '\u0420': 'P',
+        '\u0421': 'C', '\u0422': 'T', '\u0425': 'X',
+        # Greek
+        '\u03b1': 'a', '\u03bf': 'o', '\u03b5': 'e', '\u03c1': 'p',
+        '\u0391': 'A', '\u0392': 'B', '\u0395': 'E', '\u0397': 'H',
+        '\u039a': 'K', '\u039c': 'M', '\u039d': 'N', '\u039f': 'O',
+        '\u03a1': 'P', '\u03a4': 'T', '\u03a7': 'X', '\u0396': 'Z',
+    })
+    text = text.translate(_HOMOGLYPH_MAP)
 
     # Remove control characters (except newlines and tabs)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     # Remove zero-width and invisible Unicode characters
     text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]', '', text)
+
+    # Second normalization pass: catch any remaining confusables exposed
+    # after invisible char removal (e.g. combining marks that were hidden
+    # between zero-width chars).
+    text = unicodedata.normalize("NFKC", text)
 
     # Remove potential prompt injection markers
     injection_patterns = [
@@ -132,7 +157,7 @@ def validate_env_credentials() -> dict[str, bool]:
         is_set = bool(value) and value not in ("your-key-here", "")
         status[name] = is_set
         if is_set:
-            logger.info(f"  ✅ {name}: {mask_secret(value)}")
+            logger.debug(f"  ✅ {name}: {mask_secret(value)}")
         else:
             logger.warning(f"  ❌ {name}: NOT SET (required)")
 
@@ -140,7 +165,7 @@ def validate_env_credentials() -> dict[str, bool]:
         is_set = bool(value) and not value.startswith("your-")
         status[name] = is_set
         if is_set:
-            logger.info(f"  ✅ {name}: {mask_secret(value)}")
+            logger.debug(f"  ✅ {name}: {mask_secret(value)}")
         else:
             logger.debug(f"  ⚠️ {name}: not set (optional)")
 

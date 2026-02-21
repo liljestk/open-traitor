@@ -27,10 +27,11 @@ class EventManager:
     """Handles event-driven triggers: WS price moves, news pub/sub, emergency replans."""
 
     _REPLAN_COOLDOWN_S: float = 1800.0  # min 30 min between emergency replans
-    _replan_last_ts: float = 0.0
 
     def __init__(self, orchestrator: "Orchestrator"):
         self.orchestrator = orchestrator
+        self._replan_last_ts: float = 0.0
+        self._replan_lock = threading.Lock()
 
     # =========================================================================
     # WebSocket Ticker Callback
@@ -119,49 +120,52 @@ class EventManager:
         """
         orch = self.orchestrator
         now = time.time()
-        if now - self._replan_last_ts < self._REPLAN_COOLDOWN_S:
-            logger.debug("Emergency replan skipped — cooldown active")
-            return
-        self._replan_last_ts = now
+        with self._replan_lock:
+            if now - self._replan_last_ts < self._REPLAN_COOLDOWN_S:
+                logger.debug("Emergency replan skipped — cooldown active")
+                return
+            self._replan_last_ts = now
 
-        logger.warning(f"🚨 Emergency replan triggered: {reason}")
+            logger.warning(f"🚨 Emergency replan triggered: {reason}")
 
-        # 1. Write a conservative emergency context to StatsDB immediately
-        try:
-            emergency_plan = {
-                "regime": "volatile",
-                "confidence": 0.3,
-                "risk_posture": "conservative",
-                "preferred_pairs": [],
-                "avoid_pairs": list(orch.pairs),  # avoid all pairs until next plan
-                "key_observations": [
-                    f"EMERGENCY: {reason}",
-                    "All pairs set to avoid — waiting for next scheduled plan evaluation",
-                ],
-                "today_focus": "Capital preservation — emergency mode active",
-                "summary": (
-                    f"Emergency replan: {reason}. "
-                    "Switched to conservative posture, all pairs on avoid. "
-                    "Next scheduled plan will re-evaluate."
-                ),
-            }
-            orch.stats_db.save_strategic_context(
-                horizon="daily",
-                plan_json=emergency_plan,
-                summary_text=emergency_plan["summary"],
-            )
-            # Invalidate the cache so the next cycle picks up the emergency plan
-            orch._strategic_context_ts = 0.0
-
-            if orch.telegram:
-                orch.telegram.send_alert(
-                    f"🚨 *Emergency Replan*\n\n"
-                    f"Reason: {reason}\n"
-                    f"Action: Switched to conservative posture, all pairs on avoid.\n"
-                    f"Next scheduled plan will re-evaluate."
+            # 1. Write a conservative emergency context to StatsDB immediately
+            try:
+                emergency_plan = {
+                    "regime": "volatile",
+                    "confidence": 0.3,
+                    "risk_posture": "conservative",
+                    "preferred_pairs": [],
+                    "avoid_pairs": list(orch.pairs),  # avoid all pairs until next plan
+                    "key_observations": [
+                        f"EMERGENCY: {reason}",
+                        "All pairs set to avoid — waiting for next scheduled plan evaluation",
+                    ],
+                    "today_focus": "Capital preservation — emergency mode active",
+                    "summary": (
+                        f"Emergency replan: {reason}. "
+                        "Switched to conservative posture, all pairs on avoid. "
+                        "Next scheduled plan will re-evaluate."
+                    ),
+                }
+                orch.stats_db.save_strategic_context(
+                    horizon="daily",
+                    plan_json=emergency_plan,
+                    summary_text=emergency_plan["summary"],
                 )
-        except Exception as e:
-            logger.error(f"Failed to write emergency context: {e}")
+                # Invalidate the cache so the next cycle picks up the emergency plan
+                orch._strategic_context_ts = 0.0
+
+                if orch.telegram:
+                    orch.telegram.send_alert(
+                        f"🚨 *Emergency Replan*\n\n"
+                        f"Reason: {reason}\n"
+                        f"Action: Switched to conservative posture, all pairs on avoid.\n"
+                        f"Next scheduled plan will re-evaluate."
+                    )
+            except Exception as e:
+                # M10 fix: reset cooldown so next attempt can try again
+                self._replan_last_ts = 0.0
+                logger.error(f"Failed to write emergency context: {e}")
 
         # 2. Optionally trigger a Temporal DailyPlanWorkflow
         def _try_temporal_replan() -> None:

@@ -53,7 +53,7 @@ class TelegramBot:
         self.mode = mode
         self._app = None
         self._thread: Optional[threading.Thread] = None
-        self._running = False
+        self._running_event = threading.Event()
 
         # =====================================================================
         # AUTHORIZATION — STRICT USER ID ALLOWLIST
@@ -77,6 +77,7 @@ class TelegramBot:
 
         self._unauthorized_attempts: dict[str, int] = {}
         self._unauthorized_log_times: dict[str, float] = {}  # last log timestamp per user
+        self._MAX_TRACKED_UNAUTHORIZED = 1000  # Cap to prevent unbounded memory growth
 
         logger.info(
             f"🔒 Telegram bot initialized | Chat: {self.chat_id} | "
@@ -138,7 +139,7 @@ class TelegramBot:
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(self._start_bot())
-                self._running = True
+                self._running_event.set()
                 loop.run_forever()
             except Exception as e:
                 logger.error(f"Telegram bot error: {e}")
@@ -153,7 +154,7 @@ class TelegramBot:
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
-        self._running = False
+        self._running_event.clear()
 
     # =========================================================================
     # Authorization
@@ -166,7 +167,12 @@ class TelegramBot:
         if uid_str in self.authorized_users:
             return True
 
-        # UNAUTHORIZED
+        # UNAUTHORIZED — evict oldest entries if dict is at cap
+        if len(self._unauthorized_attempts) >= self._MAX_TRACKED_UNAUTHORIZED and uid_str not in self._unauthorized_attempts:
+            oldest = min(self._unauthorized_log_times, key=self._unauthorized_log_times.get, default=None)
+            if oldest:
+                self._unauthorized_attempts.pop(oldest, None)
+                self._unauthorized_log_times.pop(oldest, None)
         self._unauthorized_attempts[uid_str] = self._unauthorized_attempts.get(uid_str, 0) + 1
         count = self._unauthorized_attempts[uid_str]
 

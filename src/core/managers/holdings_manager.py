@@ -81,8 +81,16 @@ class HoldingsManager:
             native_tracked[base] = pair
 
         if accounts:
-            raw = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-            account_list = raw.get("accounts", accounts)
+            # M30 fix: handle list input (from ABC), SDK response objects, or dicts
+            if isinstance(accounts, list):
+                account_list = accounts
+            elif hasattr(accounts, "to_dict"):
+                raw = accounts.to_dict()
+                account_list = raw.get("accounts", [])
+            elif isinstance(accounts, dict):
+                account_list = accounts.get("accounts", [])
+            else:
+                account_list = []
 
             for acct in account_list:
                 bal = acct.get("available_balance", {})

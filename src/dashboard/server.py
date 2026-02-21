@@ -75,6 +75,28 @@ _llm_client = None        # LLMClient instance (optional, for provider status)
 # Pending confirmation tokens for sensitive operations (C4/H5 fix)
 # Maps token → {action, payload, expires}
 _pending_confirmations: dict[str, dict] = {}
+_pending_confirmations_lock = threading.Lock()  # M24 fix: thread-safe access
+
+
+def _store_confirmation(token: str, data: dict) -> None:
+    """Thread-safe store for confirmation tokens."""
+    with _pending_confirmations_lock:
+        _pending_confirmations[token] = data
+
+
+def _pop_confirmation(token: str) -> dict | None:
+    """Thread-safe pop for confirmation tokens."""
+    with _pending_confirmations_lock:
+        return _pending_confirmations.pop(token, None)
+
+
+def _expire_confirmations() -> None:
+    """Remove expired confirmation tokens (thread-safe)."""
+    now = time.monotonic()
+    with _pending_confirmations_lock:
+        expired = [t for t, v in _pending_confirmations.items() if v["expires"] < now]
+        for t in expired:
+            del _pending_confirmations[t]
 
 
 def _get_config() -> dict:
@@ -247,11 +269,24 @@ if not _DASHBOARD_COMMAND_SIGNING_KEY:
 
 @app.middleware("http")
 async def _api_key_middleware(request: Request, call_next):
-    """Require explicit API key auth for dashboard endpoints when configured."""
+    """Require explicit API key auth for dashboard endpoints when configured.
+
+    H28 fix: When DASHBOARD_API_KEY is unset, restrict mutating endpoints
+    to localhost-only connections to avoid leaving the API wide open.
+    """
     if _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
         api_key = request.headers.get("X-API-Key", "")
         if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
             return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    elif not _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
+        # H28: No API key configured — only allow from localhost
+        client_host = request.client.host if request.client else ""
+        _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
+        if client_host not in _LOCALHOST_ADDRS:
+            return JSONResponse(
+                {"detail": "API key not configured; remote access denied"},
+                status_code=403,
+            )
     return await call_next(request)
 
 
@@ -1002,7 +1037,14 @@ async def ws_live(websocket: WebSocket):
             await websocket.close(code=1008, reason="Invalid or missing API key")
             return
 
-    await websocket.accept()
+    # L22 fix: echo the auth subprotocol so browsers don't reject per RFC 6455
+    _accepted_subprotocol = None
+    for _proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
+        _proto = _proto.strip()
+        if _proto.startswith("apikey."):
+            _accepted_subprotocol = _proto
+            break
+    await websocket.accept(subprotocol=_accepted_subprotocol)
     _ws_connections.append(websocket)
     logger.info(f"WS client connected ({len(_ws_connections)} total)")
     try:
@@ -1215,11 +1257,11 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
             # Presets always require confirmation
             if not body.confirmation_token:
                 token = secrets.token_urlsafe(32)
-                _pending_confirmations[token] = {
+                _store_confirmation(token, {
                     "action": "settings-preset",
                     "preset": body.preset,
                     "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
-                }
+                })
                 return {
                     "ok": False,
                     "confirmation_required": True,
@@ -1228,7 +1270,7 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
                     "expires_in_seconds": _CONFIRM_TTL_SECONDS,
                 }
 
-            pending = _pending_confirmations.pop(body.confirmation_token, None)
+            pending = _pop_confirmation(body.confirmation_token)
             if not pending or pending["expires"] < time.monotonic():
                 raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
             if pending.get("preset") != body.preset:
@@ -1260,12 +1302,12 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
         needs_confirm = body.section in _SETTINGS_CONFIRM_SECTIONS
         if needs_confirm and not body.confirmation_token:
             token = secrets.token_urlsafe(32)
-            _pending_confirmations[token] = {
+            _store_confirmation(token, {
                 "action": "settings-section",
                 "section": body.section,
                 "field_names": sorted(body.updates.keys()),
                 "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
-            }
+            })
             return {
                 "ok": False,
                 "confirmation_required": True,
@@ -1277,7 +1319,7 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
             }
 
         if needs_confirm:
-            pending = _pending_confirmations.pop(body.confirmation_token, None)
+            pending = _pop_confirmation(body.confirmation_token)
             if not pending or pending["expires"] < time.monotonic():
                 raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
             if pending.get("section") != body.section:
@@ -1411,10 +1453,7 @@ class _ApiKeysUpdateBody(_BaseModel):
 
 def _prune_expired_confirmations() -> None:
     """Remove expired confirmation tokens."""
-    now = time.monotonic()
-    expired = [t for t, v in _pending_confirmations.items() if v["expires"] < now]
-    for t in expired:
-        del _pending_confirmations[t]
+    _expire_confirmations()  # M24 fix: delegate to thread-safe helper
 
 
 _CONFIRM_TTL_SECONDS = 120  # 2-minute window to confirm
@@ -1455,11 +1494,11 @@ def update_api_keys(body: _ApiKeysUpdateBody):
         # ── Step 1: issue confirmation token ──────────────────────────
         if not body.confirmation_token:
             token = secrets.token_urlsafe(32)
-            _pending_confirmations[token] = {
+            _store_confirmation(token, {
                 "action": "api-keys",
                 "key_names": key_names,
                 "expires": time.monotonic() + _CONFIRM_TTL_SECONDS,
-            }
+            })
             logger.info(f"🔑 API key update requested (awaiting confirmation): {key_names}")
             return {
                 "ok": False,
@@ -1471,7 +1510,7 @@ def update_api_keys(body: _ApiKeysUpdateBody):
             }
 
         # ── Step 2: validate confirmation token ──────────────────────
-        pending = _pending_confirmations.pop(body.confirmation_token, None)
+        pending = _pop_confirmation(body.confirmation_token)
         if not pending:
             raise HTTPException(status_code=403, detail="Invalid or expired confirmation token")
         if pending["expires"] < time.monotonic():

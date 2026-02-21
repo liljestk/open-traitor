@@ -203,9 +203,13 @@ class FeeManager:
         # Breakeven: price of target needs to move this much to cover fees
         breakeven = total_fee_pct * self.fee_safety_margin
 
+        # C7 fix: compute per-leg fee percentage from the model
+        sell_fee_pct = self._fee_model.effective_fee_pct(quote_amount, is_maker)
+        buy_fee_pct = self._fee_model.effective_fee_pct(quote_amount, is_maker)
+
         return FeeEstimate(
-            sell_fee_pct=fee_pct,
-            buy_fee_pct=fee_pct,
+            sell_fee_pct=sell_fee_pct,
+            buy_fee_pct=buy_fee_pct,
             total_fee_pct=total_fee_pct,
             sell_fee_quote=leg_fees[0] if leg_fees else 0,
             buy_fee_quote=leg_fees[-1] if leg_fees else 0,

@@ -376,6 +376,13 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
+# List-type fields where the autonomous LLM can only ADD items, never remove.
+# This prevents the LLM from clearing safety-critical blacklists/whitelists.
+_AUTONOMOUS_APPEND_ONLY_LISTS = frozenset({
+    "never_trade_pairs",
+    "only_trade_pairs",
+})
+
 # Fields the autonomous LLM may NOT touch even within allowed sections
 AUTONOMOUS_BLOCKED_FIELDS = frozenset({
     ("trading", "mode"),
@@ -440,6 +447,23 @@ def validate_autonomous_update(
             if guard_max is not None and cast_val > guard_max:
                 cast_val = type(cast_val)(guard_max)
                 logger.info(f"  ↳ Autonomous guard: clamped {section}.{field} to ceiling {guard_max}")
+
+        # List-field guardrails: LLM can add items but cannot clear/shrink
+        # safety-critical lists (never_trade_pairs, only_trade_pairs).
+        if isinstance(cast_val, list) and field in _AUTONOMOUS_APPEND_ONLY_LISTS:
+            current_settings = load_settings()
+            current_list = current_settings.get(section, {}).get(field, [])
+            if isinstance(current_list, list):
+                current_set = set(current_list)
+                new_set = set(cast_val)
+                removed = current_set - new_set
+                if removed:
+                    # LLM tried to remove items — re-add them
+                    cast_val = list(new_set | current_set)
+                    logger.warning(
+                        f"  ↳ Autonomous guard: blocked removal of {removed} from "
+                        f"{section}.{field} — LLM can only add, not remove"
+                    )
 
         clamped[field] = cast_val
 
@@ -720,19 +744,20 @@ def update_section(
     if not cast_updates:
         return True, "No changes", {}
 
-    cfg = load_settings(path)
+    with _lock:
+        cfg = load_settings(path)
 
-    if "." in section:
-        parts = section.split(".", 1)
-        parent = cfg.setdefault(parts[0], {})
-        target = parent.setdefault(parts[1], {})
-    else:
-        target = cfg.setdefault(section, {})
+        if "." in section:
+            parts = section.split(".", 1)
+            parent = cfg.setdefault(parts[0], {})
+            target = parent.setdefault(parts[1], {})
+        else:
+            target = cfg.setdefault(section, {})
 
-    for key, new_val in cast_updates.items():
-        target[key] = new_val
+        for key, new_val in cast_updates.items():
+            target[key] = new_val
 
-    save_settings(cfg, path)
+        save_settings(cfg, path)
     logger.warning(f"🔧 [{section}] updated (persisted): {cast_updates}")
     return True, "", cast_updates
 
@@ -789,16 +814,18 @@ def apply_preset(
             {},
         )
 
-    cfg = load_settings(path)
-    changes: dict[str, Any] = {}
+    # M26 fix: hold _lock for the entire load→modify→save to prevent TOCTOU
+    with _lock:
+        cfg = load_settings(path)
+        changes: dict[str, Any] = {}
 
-    for section_name, section_updates in preset.items():
-        target = cfg.setdefault(section_name, {})
-        for k, v in section_updates.items():
-            target[k] = v
-            changes[f"{section_name}.{k}"] = v
+        for section_name, section_updates in preset.items():
+            target = cfg.setdefault(section_name, {})
+            for k, v in section_updates.items():
+                target[k] = v
+                changes[f"{section_name}.{k}"] = v
 
-    save_settings(cfg, path)
+        save_settings(cfg, path)
     logger.warning(f"🔧 Preset '{preset_name}' applied (persisted): {changes}")
     return True, "", changes
 
@@ -825,11 +852,23 @@ def push_to_runtime(
         else:
             section, attr = "absolute_rules", key
 
+        # Allowlist of rule attributes that may be hot-reloaded via setattr.
+        # Prevents YAML field names from setting arbitrary attributes.
+        _RULES_SETTABLE_ATTRS = frozenset({
+            "max_single_trade", "max_daily_spend", "max_daily_loss",
+            "max_portfolio_risk_pct", "require_approval_above",
+            "never_trade_pairs", "only_trade_pairs",
+            "min_trade_interval_seconds", "max_trades_per_day",
+            "max_cash_per_trade_pct", "emergency_stop_portfolio",
+            "always_use_stop_loss", "max_stop_loss_pct",
+        })
         if section == "absolute_rules":
-            if rules_instance and hasattr(rules_instance, attr):
+            if rules_instance and attr in _RULES_SETTABLE_ATTRS and hasattr(rules_instance, attr):
                 with rules_instance._lock:
                     setattr(rules_instance, attr, value)
                 logger.info(f"  ↳ Runtime rule {attr} → {value!r}")
+            elif rules_instance and attr not in _RULES_SETTABLE_ATTRS:
+                logger.warning(f"  ↳ Blocked setattr for disallowed rule attribute: {attr}")
         else:
             section_cfg = config.setdefault(section, {})
             section_cfg[attr] = value
@@ -1044,7 +1083,8 @@ def update_llm_providers(
     return True, "", providers
 
 
-def get_llm_providers(path: str = _SETTINGS_PATH) -> list[dict]:
+def get_llm_providers(path: str = None) -> list[dict]:
     """Return the current providers list from settings."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     return cfg.get("llm", {}).get("providers", [])

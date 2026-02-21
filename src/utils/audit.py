@@ -50,29 +50,44 @@ class AuditLog:
         logger.info(f"📋 Audit log initialized (seq: {self._sequence})")
 
     def _get_last_hash(self) -> str:
-        """Get the hash of the last entry in the log."""
+        """Get the hash of the last entry in the log.
+
+        Reads from the end of the file (O(1) for typical line lengths)
+        instead of scanning the entire file.
+        """
         if not os.path.exists(self._log_file):
             return "genesis"
 
         try:
-            from collections import deque
-            with open(self._log_file, "r") as f:
-                last_lines = deque(f, maxlen=1)
-            if last_lines:
-                entry = json.loads(last_lines[0].strip())
-                return entry.get("hash", "genesis")
+            with open(self._log_file, "rb") as f:
+                # Seek to end, then scan backwards for last newline
+                f.seek(0, 2)
+                size = f.tell()
+                if size == 0:
+                    return "genesis"
+                # Read last chunk (audit lines are typically < 2KB)
+                chunk_size = min(size, 4096)
+                f.seek(size - chunk_size)
+                chunk = f.read().decode("utf-8", errors="replace")
+                lines = chunk.strip().split("\n")
+                if lines:
+                    entry = json.loads(lines[-1].strip())
+                    return entry.get("hash", "genesis")
         except (json.JSONDecodeError, Exception):
             pass
 
         return "genesis"
 
     def _get_sequence(self) -> int:
-        """Get the current sequence number."""
+        """Get the current sequence number (L17 fix: fast binary newline count)."""
         if not os.path.exists(self._log_file):
             return 0
         try:
-            with open(self._log_file, "r") as f:
-                return sum(1 for _ in f)
+            count = 0
+            with open(self._log_file, "rb") as f:
+                while chunk := f.read(65536):
+                    count += chunk.count(b'\n')
+            return count
         except Exception:
             return 0
 
@@ -116,10 +131,12 @@ class AuditLog:
             full_entry["prev_hash"] = self._last_hash
             full_entry["hash"] = entry_hash
 
-            # Write
+            # Write (fsync to ensure durability for audit integrity)
             try:
                 with open(self._log_file, "a") as f:
                     f.write(json.dumps(full_entry, default=str) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
                 self._last_hash = entry_hash
             except Exception as e:
                 logger.error(f"Audit log write failed: {e}")
@@ -160,15 +177,16 @@ class AuditLog:
         Verify the integrity of the entire audit chain.
         Returns verification result.
         """
-        if not os.path.exists(self._log_file):
-            return {"valid": True, "entries": 0}
+        with self._lock:
+            if not os.path.exists(self._log_file):
+                return {"valid": True, "entries": 0}
 
         prev_hash = "genesis"
         count = 0
         broken_at = None
 
         try:
-            with open(self._log_file, "r") as f:
+            with self._lock, open(self._log_file, "r") as f:
                 for line_num, line in enumerate(f, 1):
                     try:
                         entry = json.loads(line.strip())

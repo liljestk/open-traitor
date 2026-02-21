@@ -17,6 +17,7 @@ unless full_autonomy is disabled and trade size exceeds limits.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional, TYPE_CHECKING
@@ -167,6 +168,7 @@ class PortfolioRotator:
 
         # Pending swap proposals awaiting approval
         self.pending_swaps: dict[str, SwapProposal] = {}
+        self._state_lock = threading.Lock()
 
         logger.info(
             f"🔄 Portfolio Rotator initialized: "
@@ -177,6 +179,40 @@ class PortfolioRotator:
             f"llm_validation={self.llm_validation}, "
             f"route_finder={'ON' if self.route_finder else 'OFF'}"
         )
+
+    def _get_last_swap_time(self, pair: str) -> float:
+        with self._state_lock:
+            return self._last_swap_times.get(pair, 0.0)
+
+    def get_pending_swaps(self) -> dict[str, "SwapProposal"]:
+        """Thread-safe copy of pending swaps (M27 fix)."""
+        with self._state_lock:
+            return dict(self.pending_swaps)
+
+    def pop_pending_swap(self, swap_id: str) -> "SwapProposal | None":
+        """Thread-safe removal of a pending swap (M27 fix)."""
+        with self._state_lock:
+            return self.pending_swaps.pop(swap_id, None)
+
+    def add_pending_swap(self, swap_id: str, proposal: "SwapProposal") -> None:
+        """Thread-safe addition of a pending swap (M27 fix)."""
+        with self._state_lock:
+            self.pending_swaps[swap_id] = proposal
+
+    def _set_last_swap_times(self, *pairs: str) -> None:
+        now_ts = time.time()
+        with self._state_lock:
+            for pair in pairs:
+                self._last_swap_times[pair] = now_ts
+
+    def _record_rotation_leg(self, quote_value: float, action: str, leg_name: str) -> None:
+        if not self.rules:
+            return
+        try:
+            safe_quote = max(0.0, float(quote_value))
+            self.rules.record_trade(safe_quote, action=action)
+        except Exception as e:
+            logger.warning(f"Failed to record {leg_name} ({action}) leg in rules counters: {e}")
 
     async def evaluate_rotation(
         self,
@@ -247,7 +283,7 @@ class PortfolioRotator:
                 continue
 
             # Check cooldown
-            last_swap = self._last_swap_times.get(held_pair, 0)
+            last_swap = self._get_last_swap_time(held_pair)
             cooldown = self.fee_manager.swap_cooldown_seconds
             if time.time() - last_swap < cooldown:
                 logger.debug(
@@ -480,6 +516,7 @@ class PortfolioRotator:
             return result
 
         try:
+            leg_quote_value = proposal.quote_amount
             if leg.side == "sell":
                 sell_price = self.coinbase.get_current_price(leg.product_id)
                 if sell_price <= 0:
@@ -503,6 +540,7 @@ class PortfolioRotator:
                 if sell_pair_price <= 0:
                     sell_pair_price = buy_price
                 quote_for_buy = proposal.quote_amount / sell_pair_price * buy_price
+                leg_quote_value = quote_for_buy
                 direct_result = self.coinbase.market_order_buy(
                     product_id=leg.product_id,
                     quote_size=str(round(quote_for_buy, 2)),
@@ -513,8 +551,8 @@ class PortfolioRotator:
                 result["buy_result"] = direct_result
                 result["executed"] = True
                 result["direct_pair"] = leg.product_id
-                self._last_swap_times[proposal.sell_pair] = time.time()
-                self._last_swap_times[proposal.buy_pair] = time.time()
+                self._record_rotation_leg(leg_quote_value, leg.side, "direct")
+                self._set_last_swap_times(proposal.sell_pair, proposal.buy_pair)
                 self._log_swap(proposal, result, "swap_direct", "rotation_direct")
                 logger.info(
                     f"✅ Direct swap completed: {proposal.sell_pair} → {proposal.buy_pair} "
@@ -591,6 +629,7 @@ class PortfolioRotator:
             bridge_amount = float(order.get("filled_value", proposal.quote_amount))
             leg1_fee = float(order.get("fee", 0))
             bridge_amount -= leg1_fee
+            self._record_rotation_leg(proposal.quote_amount, leg1.side, "bridged_leg1")
 
         except Exception as e:
             logger.error(f"Bridged swap leg1 exception: {e}")
@@ -638,8 +677,8 @@ class PortfolioRotator:
             result["buy_result"] = leg2_result
             result["executed"] = True
 
-            self._last_swap_times[proposal.sell_pair] = time.time()
-            self._last_swap_times[proposal.buy_pair] = time.time()
+            self._record_rotation_leg(bridge_amount, leg2.side, "bridged_leg2")
+            self._set_last_swap_times(proposal.sell_pair, proposal.buy_pair)
             self._log_swap(proposal, result, "swap_bridged", "rotation_bridged")
             logger.info(
                 f"✅ Bridged swap completed: {proposal.sell_pair} → "
@@ -727,6 +766,48 @@ class PortfolioRotator:
                 "reversal_result": result.get("reversal", "unknown"),
             })
 
+    def _attempt_fiat_reversal(
+        self,
+        proposal: SwapProposal,
+        fiat_amount: float,
+        result: dict,
+    ) -> None:
+        """Attempt to reverse failed fiat-routed swap by buying original asset back."""
+        try:
+            reversal = self.coinbase.market_order_buy(
+                product_id=proposal.sell_pair,
+                quote_size=str(round(fiat_amount, 2)),
+            )
+            if reversal and not reversal.get("error"):
+                # M28 fix: reversals are net-zero, don't record as new spend
+                result["reversal"] = "success"
+                result["reversal_result"] = reversal
+                logger.info(
+                    f"✅ Fiat reversal succeeded: bought back {proposal.sell_pair} "
+                    f"for {fiat_amount:.2f}"
+                )
+                return
+
+            result["reversal"] = "failed"
+            result["reversal_error"] = str(reversal)
+            logger.warning(
+                f"⚠️ Fiat reversal failed for {proposal.sell_pair}: {reversal}"
+            )
+        except Exception as re:
+            result["reversal"] = "error"
+            result["reversal_error"] = str(re)
+            logger.error(f"Fiat reversal exception: {re}")
+
+        if self.audit:
+            self.audit.log("fiat_swap_partial_failure", {
+                "original_sell": proposal.sell_pair,
+                "intended_buy": proposal.buy_pair,
+                "fiat_amount": fiat_amount,
+                "reversal_attempted": True,
+                "reversal_result": result.get("reversal", "unknown"),
+                "reversal_error": result.get("reversal_error"),
+            })
+
     def _execute_fiat_routed(
         self,
         proposal: SwapProposal,
@@ -771,6 +852,7 @@ class PortfolioRotator:
         actual_proceeds = float(order.get("filled_value", proposal.quote_amount))
         sell_fee = float(order.get("fee", 0))
         actual_proceeds -= sell_fee
+        self._record_rotation_leg(actual_proceeds, "sell", "fiat_leg1")
 
         # Step 2: Buy the strong asset
         buy_result = self.coinbase.market_order_buy(
@@ -786,13 +868,20 @@ class PortfolioRotator:
             )
             result["error"] = f"Buy failed (sell succeeded): {buy_result}"
             result["partial"] = True
+            result["partial_failure_type"] = "fiat_routed"
+            result["fiat_stuck_amount"] = actual_proceeds
+            result["alert_message"] = (
+                f"⚠️ Rotation partial failure ({proposal.sell_pair}→{proposal.buy_pair}): "
+                f"sell leg succeeded, buy leg failed. Attempting auto-reversal."
+            )
+            self._attempt_fiat_reversal(proposal, actual_proceeds, result)
             return result
 
         result["buy_result"] = buy_result
         result["executed"] = True
+        self._record_rotation_leg(actual_proceeds, "buy", "fiat_leg2")
 
-        self._last_swap_times[proposal.sell_pair] = time.time()
-        self._last_swap_times[proposal.buy_pair] = time.time()
+        self._set_last_swap_times(proposal.sell_pair, proposal.buy_pair)
         self._log_swap(proposal, result, "swap", "rotation")
         logger.info(
             f"✅ Fiat-routed swap completed: {proposal.sell_pair} → {proposal.buy_pair} | "

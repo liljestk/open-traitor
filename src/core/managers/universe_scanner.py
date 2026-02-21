@@ -210,6 +210,7 @@ class UniverseScanner:
 
         Uses ONE compact prompt with a summary table — not per-pair analysis.
         """
+        import asyncio
         import re as _re
         orch = self.orchestrator
         if not orch._scan_results:
@@ -262,12 +263,13 @@ class UniverseScanner:
         )
 
         try:
-            response = orch.llm.generate(
-                prompt=prompt,
+            # C10 fix: LLMClient has no generate() method; use async chat()
+            response = orch._loop.run_until_complete(orch.llm.chat(
                 system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
+                user_message=prompt,
                 temperature=0.2,
                 max_tokens=200,
-            )
+            ))
 
             # Parse JSON array from response
             text = response.strip()

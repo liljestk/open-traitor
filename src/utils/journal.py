@@ -36,7 +36,7 @@ class TradeJournal:
 
         self._decisions_file = os.path.join(self.journal_dir, "decisions.jsonl")
         self._trades_file = os.path.join(self.journal_dir, "trades.csv")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # L19 fix: RLock so log_trade can call log_decision under lock
 
         # Initialize CSV if it doesn't exist
         if not os.path.exists(self._trades_file):
@@ -107,29 +107,30 @@ class TradeJournal:
         macd_signal: str = "",
     ) -> None:
         """Log an executed trade to both JSONL and CSV."""
-        # Log to JSONL
-        self.log_decision(
-            decision_type="trade_executed",
-            pair=pair,
-            action=action,
-            context={
-                "quantity": quantity,
-                "price": price,
-                "quote_amount": quote_amount,
-                "fee": fee,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "confidence": confidence,
-                "signal_type": signal_type,
-                "fear_greed": fear_greed,
-                "rsi": rsi,
-                "macd_signal": macd_signal,
-            },
-            reasoning=reasoning,
-        )
-
-        # Log to CSV
+        # L19 fix: single lock scope for both writes to prevent inconsistency
         with self._lock:
+            # Log to JSONL
+            self.log_decision(
+                decision_type="trade_executed",
+                pair=pair,
+                action=action,
+                context={
+                    "quantity": quantity,
+                    "price": price,
+                    "quote_amount": quote_amount,
+                    "fee": fee,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "confidence": confidence,
+                    "signal_type": signal_type,
+                    "fear_greed": fear_greed,
+                    "rsi": rsi,
+                    "macd_signal": macd_signal,
+                },
+                reasoning=reasoning,
+            )
+
+            # Log to CSV (already under self._lock from outer scope, RLock is reentrant)
             try:
                 with open(self._trades_file, "a", newline="") as f:
                     writer = csv.writer(f)

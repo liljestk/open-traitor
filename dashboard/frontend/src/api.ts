@@ -8,6 +8,18 @@ import { useLiveStore } from './store'
 
 const BASE = '/api'
 
+// ─── API Key helpers ────────────────────────────────────────────────────────
+
+const API_KEY_STORAGE_KEY = 'auto_traitor_api_key'
+
+export function getApiKey(): string {
+  return localStorage.getItem(API_KEY_STORAGE_KEY) || ''
+}
+
+export function setApiKey(key: string): void {
+  localStorage.setItem(API_KEY_STORAGE_KEY, key)
+}
+
 // ─── Generic fetch wrapper ─────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -15,7 +27,13 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const sep = path.includes('?') ? '&' : '?'
   const finalPath = profile ? `${path}${sep}profile=${encodeURIComponent(profile)}` : path
 
-  const res = await fetch(`${BASE}${finalPath}`, options)
+  const apiKey = getApiKey()
+  const headers = new Headers(options?.headers)
+  if (apiKey) {
+    headers.set('X-API-Key', apiKey)
+  }
+
+  const res = await fetch(`${BASE}${finalPath}`, { ...options, headers })
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
@@ -567,7 +585,10 @@ export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: 
   const port = window.location.port || (proto === 'wss' ? '443' : '80')
   const profile = useLiveStore.getState().profile
   const qs = profile ? `?profile=${encodeURIComponent(profile)}` : ''
-  const ws = new WebSocket(`${proto}://${host}:${port}/ws/live${qs}`)
+  // Send API key via Sec-WebSocket-Protocol (browsers can't set custom WS headers)
+  const apiKey = getApiKey()
+  const protocols = apiKey ? [`apikey.${btoa(apiKey)}`] : undefined
+  const ws = new WebSocket(`${proto}://${host}:${port}/ws/live${qs}`, protocols)
   ws.onmessage = (e) => {
     try {
       onMessage(JSON.parse(e.data))

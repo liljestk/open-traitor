@@ -150,9 +150,12 @@ class TradingState:
                 if h.get("is_fiat"):
                     self.live_cash_balances[h["currency"]] = h.get("native_value", 0.0)
 
-            # Update cash_balance to reflect real fiat totals
+            # Update cash_balance to reflect real fiat totals, but only if there
+            # are no open (in-flight) trades that may have already deducted cash
+            # from our internal balance — prevents races with the executor.
+            has_open_trades = any(t.is_open for t in self.trades)
             total_cash = sum(self.live_cash_balances.values())
-            if total_cash > 0 or self.live_cash_balances:
+            if total_cash > 0 and not has_open_trades:  # M7 fix: only update when positive
                 self.cash_balance = total_cash
 
             # Correct initial_balance on first successful sync
@@ -277,6 +280,18 @@ class TradingState:
     def add_trade(self, trade: Trade) -> None:
         """Record a new trade."""
         with self._lock:
+            if trade.action.value == "buy":
+                if trade.value > self.cash_balance:
+                    raise ValueError(
+                        f"Insufficient cash for buy {trade.pair}: have={self.cash_balance:.2f}, need={trade.value:.2f}"
+                    )
+            elif trade.action.value == "sell":
+                position = self.positions.get(trade.pair, 0)
+                if trade.quantity > position:
+                    raise ValueError(
+                        f"Insufficient position for sell {trade.pair}: have={position:.8f}, need={trade.quantity:.8f}"
+                    )
+
             self.trades.append(trade)
             self.total_trades += 1
             self.last_trade_time = trade.timestamp
@@ -311,6 +326,28 @@ class TradingState:
                     logger.info(f"Trade closed: {trade.to_summary()}")
                     return trade
             return None
+
+    def update_partial_fill(self, trade_id: str, remaining_quantity: float) -> None:
+        """Update trade quantity after a partial sell (M12 fix: public API instead of _lock)."""
+        with self._lock:
+            for t in self.trades:
+                if t.id == trade_id:
+                    t.filled_quantity = remaining_quantity
+                    return
+
+    def reverse_trade_booking(self, trade) -> None:
+        """Undo the position/cash changes from add_trade for a cancelled/failed order."""
+        with self._lock:
+            if trade.action.value == "buy":
+                self.positions[trade.pair] = (
+                    self.positions.get(trade.pair, 0) - trade.quantity
+                )
+                self.cash_balance += trade.value
+            elif trade.action.value == "sell":
+                self.positions[trade.pair] = (
+                    self.positions.get(trade.pair, 0) + trade.quantity
+                )
+                self.cash_balance -= trade.value
 
     # ── Live-snapshot staleness threshold (seconds) ──
     _LIVE_STALENESS_THRESHOLD: float = 300.0  # 5 minutes
@@ -430,21 +467,22 @@ class TradingState:
             }
 
     def to_summary(self) -> dict:
-        """Get a summary of the current state."""
-        return {
-            "portfolio_value": self.portfolio_value,
-            "cash_balance": self.cash_balance,
-            "return_pct": self.return_pct,
-            "total_pnl": self.total_pnl,
-            "total_trades": self.total_trades,
-            "win_rate": self.win_rate,
-            "max_drawdown": self.max_drawdown,
-            "open_positions": self.open_positions,
-            "current_prices": self.current_prices,
-            "is_running": self.is_running,
-            "is_paused": self.is_paused,
-            "circuit_breaker": self.circuit_breaker_triggered,
-        }
+        """Get an atomic snapshot of the current state."""
+        with self._lock:
+            return {
+                "portfolio_value": self.portfolio_value,
+                "cash_balance": self.cash_balance,
+                "return_pct": self.return_pct,
+                "total_pnl": self.total_pnl,
+                "total_trades": self.total_trades,
+                "win_rate": self.win_rate,
+                "max_drawdown": self.max_drawdown,
+                "open_positions": self.open_positions,
+                "current_prices": dict(self.current_prices),
+                "is_running": self.is_running,
+                "is_paused": self.is_paused,
+                "circuit_breaker": self.circuit_breaker_triggered,
+            }
 
     def save_state(self, filepath: str = None) -> None:
         """Save the current state to a JSON file (atomic write)."""

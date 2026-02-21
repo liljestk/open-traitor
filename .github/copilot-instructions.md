@@ -3,37 +3,20 @@ We are not live yet, refactoring is okay if needed.
 
 NEVER suggest to edit or update files manually, just tell if you cant edit and I will fix.
 
-ALWAYS use git command-line, never GIT MCP
+## General Principles
+- ** Autonomous Agent Focus:** All suggestions should prioritize enhancing the autonomous capabilities of the trading agents, improving decision-making, execution, and adaptability without manual intervention.
+- **Modularity & Maintainability:** Propose changes that are modular, well-encapsulated, and maintainable. Avoid monolithic changes that touch too many unrelated components.
 
-## Big picture architecture
-- Python trading daemon + React dashboard.
-- Entry point: `src/main.py` initializes services, then runs `Orchestrator.run_forever()` in `src/core/orchestrator.py`.
-- Core cycle: market analysis → strategy → risk validation → execution → rotation/trailing stops/reconciliation → snapshot/audit sync.
-- `src/core/rules.py` (`AbsoluteRules`) is a hard boundary; no strategy/planning output may bypass it.
-- Temporal planning (`src/planning/workflows.py`, `activities.py`, `worker.py`) writes soft context, not hard trade overrides.
+## Premium Request Optimization
+- **Chain Tasks:** When given a multi-step objective, do NOT stop after the first step. Perform the full implementation, including edge cases and basic unit tests, in a single response.
+- **Self-Correction:** If you realize a mistake while generating code, correct it immediately within the same output rather than waiting for user feedback.
+- **Verify Imports:** Always double-check that all required imports/dependencies for your code are included in the output to avoid "fix the import" follow-up requests.
 
-## Service boundaries and data flow
-- Persistent state/analytics live in SQLite via `StatsDB` (`src/utils/stats.py`, `data/stats.db`, WAL).
-- LLM tracing path: agent span → `LLMTracer` (`src/utils/tracer.py`) → Langfuse + Redis `llm:events` → dashboard `/ws/live`.
-- Dashboard backend (`src/dashboard/server.py`) reads from `StatsDB`; frontend consumes via `dashboard/frontend/src/api.ts`.
-- Frontend uses relative `/api` + `/ws` and local Vite proxy (`dashboard/frontend/vite.config.ts`).
+## Output Efficiency
+- **No Conversational Filler:** Skip "Sure, I can help with that" or "Here is the code." Start directly with the implementation or the plan.
+- **Diff-Only Format:** For large files, provide only the changed code blocks or a `sed`-style patch unless I explicitly ask for the full file. 
+- **Plan Mode First:** (For Agent mode) Always present a concise plan (using <plan> tags) and wait for a single "Go" before consuming a heavy reasoning request for the implementation.
 
-## Critical workflows and commands
-- First-time setup: `./setup.ps1` (interactive `.env` generation, including Telegram auth).
-- Main runtime is Docker Compose (`docker-compose.yml`) with `agent`, `news-worker`, `planning-worker`, `ollama`, `redis`, `langfuse`, `temporal`.
-- Local commands: `python -m src.main --mode paper|live`, `python -m src.news.worker`, `python -m src.planning.worker`.
-- Frontend (`dashboard/frontend`): `npm run dev`, `npm run build`, `npm run lint`.
-
-## Project-specific coding patterns
-- Agents inherit `BaseAgent` (`src/agents/base_agent.py`) and implement `run(context)`; call `.execute()` for tracking/error handling.
-- For LLM paths, create spans (`trace_ctx.start_span(...)`) and persist reasoning via `StatsDB.save_reasoning(...)` (see `src/agents/market_analyst.py`).
-- Strategic context should calibrate confidence only; do not override technical/risk evidence.
-- Keep graceful degradation: Redis/Langfuse/WebSocket/Temporal outages must not stop core trading.
-
-## Security and safety constraints
-- `TELEGRAM_AUTHORIZED_USERS` is mandatory (`src/main.py`); never add fallback auth paths.
-- Preserve deployment hardening from `docker-compose.yml` (`read_only`, `no-new-privileges`, non-root).
-- Keep paper/live safeguards explicit (live-mode confirmation, circuit breakers, conservative defaults).
 
 ## Engineering principles for this project
 - Apply least privilege by default for permissions, credentials, and runtime capabilities.
@@ -55,5 +38,8 @@ ALWAYS use git command-line, never GIT MCP
 - Dashboard schema/API changes: update backend endpoints (`src/dashboard/server.py`) and frontend consumers/types (`dashboard/frontend/src/api.ts`, page components).
 
 ## Git workflow
-- After completing changes, always create a commit and push to remote.
+- After completing changes, always create a commit and push to remote using command line.
 - Use clear, descriptive commit messages that explain what changed and why.
+
+## MCPs
+Avoid MCPs if possible; if a change is large, break it into logical commits that can be reviewed independently.

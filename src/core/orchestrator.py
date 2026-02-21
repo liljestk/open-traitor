@@ -22,13 +22,12 @@ from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
 from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
 from src.core.exchange_client import ExchangeClient
-from src.core.coinbase_client import _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
 from src.core.ws_feed import CoinbaseWebSocketFeed
 from src.core.trailing_stop import TrailingStopManager
-from src.core.health import update_health, check_component_health, start_health_server
+from src.core.health import check_component_health, update_health, start_health_server
 from src.core.fee_manager import FeeManager
 from src.core.high_stakes import HighStakesManager
 from src.core.portfolio_rotator import PortfolioRotator
@@ -36,7 +35,6 @@ from src.core.route_finder import RouteFinder
 from src.analysis.fear_greed import FearGreedIndex
 from src.analysis.multi_timeframe import MultiTimeframeAnalyzer
 from src.analysis.sentiment import SentimentAnalyzer
-from src.analysis.technical import TechnicalAnalyzer
 from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy, PairsCorrelationMonitor
 from src.utils.tax import FIFOTracker
 from src.news.aggregator import NewsAggregator
@@ -44,7 +42,6 @@ from src.telegram_bot.chat_handler import TelegramChatHandler
 from src.utils.logger import get_logger
 from src.utils.helpers import format_currency, format_percentage
 from src.utils.rate_limiter import get_rate_limiter
-from src.utils.security import sanitize_input
 from src.utils.journal import TradeJournal
 from src.utils.audit import AuditLog
 from src.utils.stats import StatsDB
@@ -57,7 +54,6 @@ from src.core.managers.universe_scanner import UniverseScanner
 from src.core.managers.holdings_manager import HoldingsManager
 from src.core.managers.context_manager import ContextManager
 from src.core.managers.event_manager import EventManager
-from src.core.health import check_component_health, update_health
 import asyncio
 
 logger = get_logger("core.orchestrator")
@@ -468,6 +464,8 @@ class Orchestrator:
                             pass
                     # Still update health so the endpoint stays fresh
                     update_health(status="degraded", cycle_count=cycle_count)
+                    # H23 fix: sleep before continuing to avoid CPU-spinning
+                    time.sleep(min(30.0, self.interval))
                     continue
                 self._ollama_skip_count = 0
 
@@ -497,7 +495,7 @@ class Orchestrator:
 
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
-                    self._loop.run_until_complete(asyncio.gather(*tasks))
+                    self._loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
 
@@ -525,24 +523,31 @@ class Orchestrator:
                         pair, trigger_price, "trailing_stop"
                     )
                     if close_result:
-                        self.trailing_stops.remove_stop(pair)
-                        pnl = close_result.get("pnl")
-                        self.audit.log_trade(
-                            pair=pair, action="trailing_stop_exit",
-                            amount=close_result.get("close_price", trigger_price) or 0,
-                            price=close_result.get("close_price", trigger_price) or 0,
-                        )
-                        if pnl is not None and pnl < 0:
-                            self.rules.record_loss(abs(pnl))
-                        event_msg = (
-                            f"Trailing stop executed on {pair} "
-                            f"at {format_currency(trigger_price)}"
-                            + (f" — PnL: {format_currency(pnl)}" if pnl is not None else "")
-                        )
-                        if not close_result.get("success", True):
+                        if close_result.get("success", True):
+                            # C6 fix: only remove stop AFTER confirmed success
+                            self.trailing_stops.remove_stop(pair)
+                            pnl = close_result.get("pnl")
+                            self.audit.log_trade(
+                                pair=pair, action="trailing_stop_exit",
+                                amount=close_result.get("close_price", trigger_price) or 0,
+                                price=close_result.get("close_price", trigger_price) or 0,
+                            )
+                            if pnl is not None and pnl < 0:
+                                self.rules.record_loss(abs(pnl))
+                            event_msg = (
+                                f"Trailing stop executed on {pair} "
+                                f"at {format_currency(trigger_price)}"
+                                + (f" — PnL: {format_currency(pnl)}" if pnl is not None else "")
+                            )
+                        else:
+                            # Sell failed — keep the stop so it retries next cycle
                             logger.error(
                                 f"❌ Trailing stop sell FAILED for {pair} — "
-                                "position state unchanged; will retry next cycle."
+                                "stop preserved; will retry next cycle."
+                            )
+                            event_msg = (
+                                f"⚠️ Trailing stop sell FAILED for {pair} "
+                                f"at {format_currency(trigger_price)} — will retry"
                             )
                     else:
                         # No open trade found — stop is stale; remove it
@@ -677,6 +682,7 @@ class Orchestrator:
                                     with self._pairs_lock:
                                         old_count = len(self.pairs)
                                         self.pairs = list(new_pairs)  # copy-on-write
+                                        self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))  # M23 fix
                                     logger.info(
                                         f"🔄 Active pairs updated by settings advisor: "
                                         f"{old_count} → {len(new_pairs)} pairs"
@@ -765,6 +771,7 @@ class Orchestrator:
             # ─── Wait for next cycle, waking every 10 s to check early triggers ──
             # WS price-move or news pub/sub events can fire a pipeline mid-interval
             # so the agent reacts within seconds rather than waiting up to 120 s.
+            _cycle_t0 = time.monotonic()
             elapsed = 0.0
             while (
                 elapsed < self.interval
@@ -773,7 +780,7 @@ class Orchestrator:
                 and not self.state.circuit_breaker_triggered
             ):
                 time.sleep(min(10.0, self.interval - elapsed))
-                elapsed += 10.0
+                elapsed = time.monotonic() - _cycle_t0  # L16 fix: use wall clock
 
                 with self._ws_trigger_lock:
                     early_pairs = (
@@ -791,7 +798,7 @@ class Orchestrator:
                 )
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(ep) for ep in early_pairs]
-                    self._loop.run_until_complete(asyncio.gather(*tasks))
+                    self._loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
                 except Exception as _ep_err:
                     logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
                     
@@ -875,7 +882,7 @@ class Orchestrator:
                 elif proposal.priority in ("high_impact", "critical"):
                     # Escalate to owner via Telegram
                     swap_id = f"swap_{uuid.uuid4().hex[:8]}_{proposal.buy_pair}"
-                    self.rotator.pending_swaps[swap_id] = proposal
+                    self.rotator.add_pending_swap(swap_id, proposal)  # M27 fix
                     with self._pending_approvals_lock:
                         self._pending_approvals[swap_id] = {
                             "_is_swap": True,
@@ -1046,6 +1053,7 @@ class Orchestrator:
                 with self._pairs_lock:
                     if pair in self.pairs:
                         self.pairs = [p for p in self.pairs if p != pair]
+                        self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))  # M23 fix
                 msg = f"⏸️ Dashboard paused trading on {pair}"
                 logger.info(msg)
                 if self.telegram:

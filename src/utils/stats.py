@@ -17,6 +17,7 @@ Tables:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sqlite3
@@ -48,6 +49,8 @@ class StatsDB:
         self._connections: list[sqlite3.Connection] = []  # Track all thread-local connections
         self._conn_lock = threading.Lock()
         self._init_db()
+        # L18 fix: ensure connections are closed on process exit
+        atexit.register(self.close)
         logger.info(f"📊 Stats DB initialized: {db_path}")
 
     def _get_conn(self) -> sqlite3.Connection:

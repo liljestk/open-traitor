@@ -1213,7 +1213,21 @@ class TelegramChatHandler:
         ]
 
     def _execute_tool_call(self, name: str, arguments: dict) -> Any:
-        """Execute a single named tool call and return its result."""
+        """Execute a single named tool call and return its result.
+
+        C9 fix: Only tools in the safe allowlist may be invoked via the
+        tool-calling path.  Mutating tools (emergency_stop, update_rule,
+        enable_highstakes, etc.) are blocked to prevent prompt-injection
+        attacks that bypass the text-fallback ACTION: parser allowlist.
+        """
+        # Same allowlist used by the text-fallback path
+        if name not in self._TEXT_FALLBACK_SAFE_ACTIONS:
+            logger.warning(
+                f"Blocked tool-calling invocation of mutating tool: {name} "
+                f"(only read-only tools allowed via LLM tool calls)"
+            )
+            return {"error": f"Tool '{name}' is read-only restricted and cannot be called via chat"}
+
         handler = self._function_handlers.get(name)
         if not handler:
             return {"error": f"Unknown tool: {name}"}
@@ -1430,8 +1444,31 @@ class TelegramChatHandler:
         )
         return self._parse_and_execute_actions(raw)
 
+    # Actions the text-fallback ACTION: parser is allowed to invoke.
+    # Mutating actions (enable_*, disable_*, update_*, pause_*, approve_*,
+    # blacklist_*, emergency_*, etc.) are blocked from the text-fallback path
+    # to prevent prompt-injection attacks where a crafted user message tricks
+    # the LLM into emitting ACTION: lines that mutate trading state.
+    _TEXT_FALLBACK_SAFE_ACTIONS: frozenset[str] = frozenset({
+        # Read-only data retrieval
+        "get_status", "get_positions", "get_balance", "get_current_prices",
+        "get_account_holdings", "get_recent_trades", "get_recent_signals",
+        "get_news_summary", "get_fear_greed", "get_trading_rules",
+        "get_fee_info", "get_pending_swaps", "get_highstakes_status",
+        "get_rotation_analysis", "get_stats", "get_trade_history",
+        "get_pair_stats", "get_daily_summaries", "get_best_worst",
+        "get_schedules", "get_config", "get_trailing_stops",
+        "get_settings_tiers", "list_simulations",
+        # Harmless personality tweaks
+        "set_verbosity", "mute_topic", "unmute_topic",
+    })
+
     def _parse_and_execute_actions(self, raw_response: str) -> str:
-        """Extract ACTION: lines, execute them, and return clean response."""
+        """Extract ACTION: lines, execute them, and return clean response.
+
+        Only actions in _TEXT_FALLBACK_SAFE_ACTIONS are executed.  Mutating
+        actions are logged and silently dropped to prevent prompt injection.
+        """
         lines = raw_response.split("\n")
         clean_lines = []
         action_results = []
@@ -1454,7 +1491,10 @@ class TelegramChatHandler:
         return response if response else "👍 Done."
 
     def _execute_action_line(self, action_line: str) -> Optional[str]:
-        """Parse and execute an ACTION:function_name|params line."""
+        """Parse and execute an ACTION:function_name|params line.
+
+        Only safe (read-only) actions are allowed via the text-fallback path.
+        """
         try:
             action_part = action_line[7:]  # Remove "ACTION:"
             parts = action_part.split("|", 1)
@@ -1467,11 +1507,11 @@ class TelegramChatHandler:
                         k, v = kv.split("=", 1)
                         params[k.strip()] = v.strip()
 
-            # Handle verbosity changes
+            # Handle verbosity changes (safe — personality only)
             if func_name.startswith("set_verbosity"):
                 level = params.get("level", func_name.split("_")[-1] if "_" in func_name else "normal")
-                result = self.personality.set_verbosity(level)
-                return None  # Don't add confirmation, LLM already said it
+                self.personality.set_verbosity(level)
+                return None
 
             if func_name == "mute_topic":
                 self.personality.muted_topics.add(params.get("topic", ""))
@@ -1481,11 +1521,19 @@ class TelegramChatHandler:
                 self.personality.muted_topics.discard(params.get("topic", ""))
                 return None
 
-            # Execute registered function
+            # Block mutating actions from text-fallback path
+            if func_name not in self._TEXT_FALLBACK_SAFE_ACTIONS:
+                logger.warning(
+                    f"Blocked text-fallback ACTION for mutating tool: {func_name} "
+                    f"(only read-only tools allowed via ACTION: parser)"
+                )
+                return None
+
+            # Execute registered function (read-only)
             handler = self._function_handlers.get(func_name)
             if handler:
                 handler(params)
-                return None  # Actions are silent, LLM handles the response text
+                return None
             else:
                 logger.warning(f"Unknown action: {func_name}")
                 return None

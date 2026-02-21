@@ -8,6 +8,7 @@ The only way to change them is by editing the config file and restarting.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
@@ -66,13 +67,20 @@ class AbsoluteRules:
         logger.info("🔒 Absolute Rules Engine initialized")
         self._log_rules()
 
-    def seed_daily_counters(self, db_path: str = "data/stats.db") -> None:
+    def seed_daily_counters(self, db_path: str = None) -> None:
         """Seed daily counters from persisted trades to survive restarts.
 
         Should be called once during startup after the DB is known to exist.
         Safe to call even when the DB does not yet exist — logs a warning and
         continues with zero counters in that case.
+
+        Args:
+            db_path: Explicit path to the stats DB. Falls back to
+                     ``DATA_DIR/stats.db`` or ``data/stats.db``.
         """
+        if db_path is None:
+            from src.utils.stats import get_db_path
+            db_path = get_db_path()  # M8 fix: profile-aware DB path
         try:
             today_start = (
                 datetime.now(timezone.utc)
@@ -391,6 +399,19 @@ class AbsoluteRules:
         "always_use_stop_loss",
     })
 
+    _RULE_BOUNDS: dict[str, tuple[float, float]] = {
+        "max_single_trade": (1.0, 1_000_000.0),
+        "max_daily_spend": (1.0, 5_000_000.0),
+        "max_daily_loss": (0.0, 1_000_000.0),
+        "max_portfolio_risk_pct": (0.001, 1.0),
+        "require_approval_above": (0.0, 1_000_000.0),
+        "min_trade_interval_seconds": (0.0, 86_400.0),
+        "max_trades_per_day": (1.0, 10_000.0),
+        "max_cash_per_trade_pct": (0.001, 1.0),
+        "emergency_stop_portfolio": (0.0, 10_000_000.0),
+        "max_stop_loss_pct": (0.001, 0.5),
+    }
+
     def update_param(self, param: str, value: str) -> dict:
         """
         Update a single rule parameter at runtime.
@@ -411,6 +432,18 @@ class AbsoluteRules:
                     new_val = int(new_val)
             except (ValueError, TypeError) as e:
                 return {"ok": False, "error": f"Invalid numeric value: {value!r} — {e}"}
+
+            bounds = self._RULE_BOUNDS.get(param)
+            if bounds is not None:
+                min_val, max_val = bounds
+                if new_val < min_val or new_val > max_val:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Out-of-range value for {param!r}: {new_val!r}. "
+                            f"Allowed range is [{min_val}, {max_val}]"
+                        ),
+                    }
         elif param in self._BOOL_RULES:
             new_val = str(value).lower() in {"true", "1", "yes", "on"}
         else:

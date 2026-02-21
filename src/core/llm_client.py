@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date as dt_date
@@ -191,6 +192,7 @@ class LLMClient:
         self._call_count = 0
         self._total_tokens = 0
         self._last_provider = ""
+        self._providers_lock = threading.RLock()
 
         names = [p.name for p in self._providers]
         logger.info(
@@ -320,8 +322,10 @@ class LLMClient:
         temp = temperature or self.temperature
         tokens = max_tokens or self.max_tokens
         last_error: Optional[Exception] = None
+        with self._providers_lock:
+            providers = list(self._providers)
 
-        for provider in self._providers:
+        for provider in providers:
             if not self._is_provider_available(provider):
                 continue
 
@@ -431,7 +435,11 @@ class LLMClient:
         if user_message:
             chat_messages.append({"role": "user", "content": user_message})
 
-        for provider in self._providers:
+        # H25 fix: snapshot provider list under lock (mirrors chat() fix H14)
+        with self._providers_lock:
+            providers = list(self._providers)
+
+        for provider in providers:
             if not self._is_provider_available(provider):
                 continue
 
@@ -561,13 +569,15 @@ class LLMClient:
 
     def is_available(self) -> bool:
         """Check if at least one LLM provider is reachable."""
+        with self._providers_lock:
+            providers = list(self._providers)
         # Cloud providers: if we have a key and aren't in cooldown, assume available
-        for p in self._providers:
+        for p in providers:
             if not p.is_local and self._is_provider_available(p):
                 return True
 
         # Check local providers (Ollama)
-        for p in self._providers:
+        for p in providers:
             if p.is_local:
                 try:
                     import requests
@@ -584,18 +594,21 @@ class LLMClient:
 
     def reload_providers(self, new_providers: list[LLMProvider]) -> None:
         """Hot-reload the provider chain (called from dashboard settings)."""
-        self._providers = new_providers
-        if new_providers:
-            self.model = new_providers[0].model
-            self.client = new_providers[0].client
-        names = [p.name for p in self._providers]
+        with self._providers_lock:
+            self._providers = list(new_providers)
+            if self._providers:
+                self.model = self._providers[0].model
+                self.client = self._providers[0].client
+            names = [p.name for p in self._providers]
         logger.info(f"🔄 LLM providers reloaded: {' → '.join(names)}")
 
     def provider_status(self) -> list[dict]:
         """Return status of each provider for dashboard display."""
         now = time.monotonic()
         result = []
-        for p in self._providers:
+        with self._providers_lock:
+            providers = list(self._providers)
+        for p in providers:
             status: dict[str, Any] = {
                 "name": p.name,
                 "model": p.model,

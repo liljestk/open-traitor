@@ -197,11 +197,17 @@ class MarketAnalystAgent(BaseAgent):
             if strategic_context else ""
         )
 
+        # M32 fix: safe formatting for potentially missing numeric indicators
+        _rsi = indicators.get('rsi')
+        _rsi_str = f"{_rsi:.1f}" if isinstance(_rsi, (int, float)) else "N/A"
+        _macd_hist = indicators.get('macd_histogram')
+        _macd_hist_str = f"{_macd_hist:.4f}" if isinstance(_macd_hist, (int, float)) else "N/A"
+
         return f"""Analyze {pair} at current price {sym}{price:,.2f}
 
 TECHNICAL INDICATORS:
-- RSI: {indicators.get('rsi', 'N/A'):.1f} ({indicators.get('rsi_signal', 'unknown')})
-- MACD: {indicators.get('macd_signal', 'unknown')} (hist: {indicators.get('macd_histogram', 'N/A')})
+- RSI: {_rsi_str} ({indicators.get('rsi_signal', 'unknown')})
+- MACD: {indicators.get('macd_signal', 'unknown')} (hist: {_macd_hist_str})
 - Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {sym}{indicators.get('bb_upper', 0):,.2f}, lower: {sym}{indicators.get('bb_lower', 0):,.2f})
 - EMA Signal: {indicators.get('ema_signal', 'unknown')}
 - EMA 9: {sym}{indicators.get('ema_9', 0):,.2f} | EMA 21: {sym}{indicators.get('ema_21', 0):,.2f} | EMA 50: {sym}{indicators.get('ema_50', 0):,.2f}

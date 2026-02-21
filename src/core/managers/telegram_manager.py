@@ -171,7 +171,7 @@ class TelegramManager:
                     "net_gain": f"+{sp.net_gain_pct*100:.2f}%",
                     "priority": sp.priority,
                 }
-                for sid, sp in orch.rotator.pending_swaps.items()
+                for sid, sp in (orch.rotator.get_pending_swaps() if orch.rotator else {}).items()
             }
         })
 
@@ -408,22 +408,30 @@ class TelegramManager:
             pair = str(p.get("pair", "")).upper().strip()
             if not pair:
                 return {"ok": False, "error": "pair is required"}
-            if pair not in orch.pairs:
-                orch.pairs.append(pair)
-                orch.config.setdefault("trading", {}).setdefault("pairs", []).append(pair)
-                logger.info(f"📌 Pair added (runtime): {pair}. Active pairs: {orch.pairs}")
+            # H24 fix: honour _pairs_lock with copy-on-write contract
+            with orch._pairs_lock:
+                if pair not in orch.pairs:
+                    new_pairs = list(orch.pairs) + [pair]
+                    orch.pairs = new_pairs
+                    orch.all_tracked_pairs = list(set(new_pairs + orch.watchlist_pairs))
+                    orch.config.setdefault("trading", {}).setdefault("pairs", []).append(pair)
+                    logger.info(f"📌 Pair added (runtime): {pair}. Active pairs: {orch.pairs}")
             return {"ok": True, "pair": pair, "all_pairs": list(orch.pairs)}
 
         ch.register_function("add_pair", _add_pair)
 
         def _remove_pair(p: dict) -> dict:
             pair = str(p.get("pair", "")).upper().strip()
-            if pair in orch.pairs:
-                orch.pairs.remove(pair)
-                cfg_pairs = orch.config.get("trading", {}).get("pairs", [])
-                if pair in cfg_pairs:
-                    cfg_pairs.remove(pair)
-                logger.info(f"🗑️ Pair removed (runtime): {pair}. Active pairs: {orch.pairs}")
+            # H24 fix: honour _pairs_lock with copy-on-write contract
+            with orch._pairs_lock:
+                if pair in orch.pairs:
+                    new_pairs = [p2 for p2 in orch.pairs if p2 != pair]
+                    orch.pairs = new_pairs
+                    orch.all_tracked_pairs = list(set(new_pairs + orch.watchlist_pairs))
+                    cfg_pairs = orch.config.get("trading", {}).get("pairs", [])
+                    if pair in cfg_pairs:
+                        cfg_pairs.remove(pair)
+                    logger.info(f"🗑️ Pair removed (runtime): {pair}. Active pairs: {orch.pairs}")
             return {"ok": True, "pair": pair, "all_pairs": list(orch.pairs)}
 
         ch.register_function("remove_pair", _remove_pair)
@@ -443,9 +451,11 @@ class TelegramManager:
 
         # ─── Pending swap management ───────────────────────────────────
         def _cancel_swap(p: dict) -> dict:
+            if not orch.rotator:
+                return {"ok": False, "error": "Rotation disabled"}
             swap_id = str(p.get("swap_id", ""))
-            if swap_id in orch.rotator.pending_swaps:
-                del orch.rotator.pending_swaps[swap_id]
+            removed = orch.rotator.pop_pending_swap(swap_id)
+            if removed is not None:
                 return {"ok": True, "cancelled": swap_id}
             return {"ok": False, "error": f"Swap {swap_id!r} not found"}
 
@@ -599,7 +609,7 @@ class TelegramManager:
             "circuit_breaker": s.circuit_breaker_triggered,
             "fear_greed": orch.fear_greed.get_current(),
             "high_stakes_active": orch.high_stakes.is_active,
-            "pending_swaps": len(orch.rotator.pending_swaps),
+            "pending_swaps": len(orch.rotator.get_pending_swaps()) if orch.rotator else 0,
             "trailing_stops": orch.trailing_stops.get_active_count(),
             # Raw numeric data (for proactive engine calculations + stats DB)
             "raw_prices": dict(s.current_prices),
@@ -786,7 +796,7 @@ class TelegramManager:
         if approved is not None:
             # Clear needs_approval so the executor does not short-circuit again
             approved = {**approved, "needs_approval": False}
-            result = asyncio.run(orch.executor.execute({"approved_trade": approved}))
+            result = orch._loop.run_until_complete(orch.executor.execute({"approved_trade": approved}))  # M31 fix
             if result.get("executed"):
                 return "✅ Trade executed successfully!"
             return f"❌ Execution failed: {result.get('error', 'Unknown')}"
@@ -847,7 +857,9 @@ class TelegramManager:
     def cmd_swaps(self, data: dict) -> str:
         """Show pending swap proposals."""
         orch = self.orchestrator
-        pending = orch.rotator.pending_swaps
+        if not orch.rotator:
+            return "🔄 Rotation not enabled."
+        pending = orch.rotator.get_pending_swaps()
         if not pending:
             return "🔄 No pending swap proposals."
 
@@ -869,7 +881,9 @@ class TelegramManager:
         if not held_pairs:
             return "🔄 No open positions to rotate."
 
-        proposals = asyncio.run(orch.rotator.evaluate_rotation(
+        if not orch.rotator:
+            return "🔄 Rotation not enabled."
+        proposals = orch._loop.run_until_complete(orch.rotator.evaluate_rotation(
             held_pairs=held_pairs,
             all_pairs=orch.pairs,
             current_prices=orch.state.current_prices,

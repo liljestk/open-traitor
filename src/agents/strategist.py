@@ -200,7 +200,7 @@ class StrategistAgent(BaseAgent):
         tasks_text = "No active tasks."
         if tasks:
             tasks_text = "\n".join(
-                f"- {t.get('description', t)}" for t in tasks
+                f"- {t.get('description', t) if isinstance(t, dict) else t}" for t in tasks  # M33 fix
             )
 
         positions_text = "No open positions."

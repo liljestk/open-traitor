@@ -3,15 +3,27 @@ import type { LiveEvent } from './api'
 
 const MAX_EVENTS = 200
 
-/** Maps known profiles to their native currency. */
-const PROFILE_CURRENCIES: Record<string, string> = {
+/**
+ * Maps known profiles to their native currency.
+ * Override via localStorage key "auto_traitor_profile_currencies" (JSON object).
+ */
+const DEFAULT_PROFILE_CURRENCIES: Record<string, string> = {
   '': 'EUR',
   crypto: 'EUR',
   nordnet: 'SEK',
 }
 
+function loadProfileCurrencies(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem('auto_traitor_profile_currencies')
+    if (raw) return { ...DEFAULT_PROFILE_CURRENCIES, ...JSON.parse(raw) }
+  } catch { /* ignore */ }
+  return DEFAULT_PROFILE_CURRENCIES
+}
+
 function currencyForProfile(profile: string): string {
-  return PROFILE_CURRENCIES[profile.toLowerCase()] ?? 'EUR'
+  const map = loadProfileCurrencies()
+  return map[profile.toLowerCase()] ?? 'EUR'
 }
 
 export type Density = 'comfortable' | 'compact'

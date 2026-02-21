@@ -119,6 +119,8 @@ class SettingsAdvisorAgent(BaseAgent):
         self._cycles_since_review = 0
         self._total_adjustments = 0
         self._schema_summary: Optional[str] = None
+        self._schema_summary_ts: float = 0.0
+        self._SCHEMA_CACHE_TTL: float = 300.0  # L21 fix: refresh every 5 min
 
     def should_run(self) -> bool:
         """Check if enough cycles have passed for a review."""
@@ -132,7 +134,8 @@ class SettingsAdvisorAgent(BaseAgent):
 
     def _get_schema_summary(self) -> str:
         """Formatted summary of what the LLM is allowed to change."""
-        if self._schema_summary is None:
+        import time as _time
+        if self._schema_summary is None or (_time.monotonic() - self._schema_summary_ts) > self._SCHEMA_CACHE_TTL:
             schema = sm.get_autonomous_schema_summary()
             lines: list[str] = []
             for section, fields in schema.items():
@@ -148,6 +151,7 @@ class SettingsAdvisorAgent(BaseAgent):
                         range_str = f" (options: {info['enum']})"
                     lines.append(f"  {field}: {info['type']}{range_str}")
             self._schema_summary = "\n".join(lines)
+            self._schema_summary_ts = _time.monotonic()
         return self._schema_summary
 
     def _get_current_settings_summary(self) -> str:

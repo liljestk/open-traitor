@@ -1,167 +1,252 @@
 # Code Review Fix Tracker
 
-Full code review completed 2026-02-21. Findings organized by priority.
+Full code review completed 2026-02-21. Re-reviewed 2026-02-21 (second pass).
+Findings organized by priority.
 
 ---
 
-## CRITICAL
+## CRITICAL (NEW — found in second review)
 
-- [ ] **C1 — Dashboard auth bypass via `Sec-Fetch-Site`** — `src/dashboard/server.py:245`
-  Remove `Sec-Fetch-Site` trust. Require API key header for all `/api/*` and `/ws/*` requests. For browser SPA, store key in cookie or have frontend include it in `X-API-Key`.
+- [ ] **C6 — Trailing stop removed even when sell fails** — `src/core/orchestrator.py:528`
+  `remove_stop(pair)` is called *before* checking `close_result.get("success")`. If the sell order fails, the stop is gone and will never retry. Position left unprotected. Log message says "will retry next cycle" but that's false.
 
-- [ ] **C2 — Unauthenticated Redis dashboard commands** — `src/core/orchestrator.py:884`
-  Add HMAC signature or signed-token validation on `dashboard:commands_queue` messages. Reject unsigned payloads.
+- [ ] **C7 — `fee_pct` undefined → `NameError` in `estimate_swap_fees`** — `src/core/fee_manager.py:206`
+  `FeeEstimate(sell_fee_pct=fee_pct, buy_fee_pct=fee_pct, ...)` references `fee_pct` which is never assigned in this method. **All swap/rotation fee estimation is broken** — any call to `estimate_swap_fees` or `is_trade_worthwhile(..., is_swap=True)` crashes.
 
-- [ ] **C3 — Fiat-routed swap partial failure, no recovery** — `src/core/portfolio_rotator.py:788`
-  Add sell-reversal recovery for fiat-routed swaps (parity with bridged swap error handling). Notify Telegram on partial failure.
+- [ ] **C8 — `_SETTINGS_PATH` undefined → `NameError` on import** — `src/utils/settings_manager.py:1084`
+  `def get_llm_providers(path: str = _SETTINGS_PATH)` — `_SETTINGS_PATH` is never defined in this module. Python evaluates default args at definition time, so this will raise `NameError` when the module is imported. Imported by `server.py`.
 
-- [ ] **C4 — Credential injection via unprotected API endpoint** — `src/dashboard/server.py:1257`
-  Add secondary confirmation (re-prompt or Telegram approval) before `PUT /api/settings/api-keys`. Use atomic file writes for `.env`.
+- [ ] **C9 — Telegram tool-calling path has NO action allowlist** — `src/telegram_bot/chat_handler.py:1298-1370`
+  C5 only secured the text-fallback `ACTION:` parser. The **preferred** native tool-calling path (`_smart_response_with_tools`) executes *any* registered handler — `emergency_stop`, `enable_highstakes`, `update_rule`, `pause_trading`, etc. Prompt injection via the tool-calling path completely bypasses C5's allowlist.
 
-- [ ] **C5 — LLM prompt injection via `ACTION:` text parsing** — `src/telegram_bot/chat_handler.py:1432`
-  Restrict which tools the text-fallback `ACTION:` parser can invoke, or remove fallback entirely. Sanitize LLM output before parsing.
-
----
-
-## HIGH — Security
-
-- [ ] **H1 — Redis bound to 0.0.0.0** — `docker-compose.yml:59`
-  Change `6380:6379` → `127.0.0.1:6380:6379`.
-
-- [ ] **H2 — Dashboard bound to 0.0.0.0** — `docker-compose.yml:142`
-  Change `8090:8090` → `127.0.0.1:8090:8090`.
-
-- [ ] **H3 — Health/metrics bound to 0.0.0.0** — `docker-compose.yml:103`
-  Change `8080:8080` → `127.0.0.1:8080:8080`.
-
-- [ ] **H4 — API key in WebSocket query string** — `src/dashboard/server.py:227`
-  Remove `?api_key=` fallback. Use a short-lived token exchange or first-message auth instead.
-
-- [ ] **H5 — Settings mutation with no MFA/audit** — `src/dashboard/server.py:1092`
-  Add confirmation step and audit trail for `PUT /api/settings`.
-
-- [ ] **H6 — No bounds on rule parameter updates** — `src/core/rules.py:385`
-  Add min/max validation in `update_param` for safety-critical fields (`emergency_stop_portfolio`, `max_daily_loss`, etc.).
-
-- [ ] **H7 — LLM agent can modify blacklist unrestricted** — `src/utils/settings_manager.py:302`
-  Add guardrails on autonomous `never_trade_pairs`/`only_trade_pairs` modifications (e.g., LLM can only add, not clear).
-
-## HIGH — Concurrency
-
-- [ ] **H8 — `self.pairs` modified without lock** — `src/core/orchestrator.py:636`
-  Protect `self.pairs` reads/writes with a lock, or use copy-on-write pattern.
-
-- [ ] **H9 — `_handle_tighten_stop` bypasses TrailingStopManager lock** — `src/core/orchestrator.py:939`
-  Acquire `TrailingStopManager._lock` before modifying `stop.stop_price`, or add a `tighten_stop()` method to the manager.
-
-- [ ] **H10 — Paper mode `_paper_balance` no locking** — `src/core/coinbase_client.py:85`
-  Add `threading.Lock` around all `_paper_balance` reads and mutations.
-
-- [ ] **H11 — `_product_cache` is class-level mutable** — `src/core/coinbase_client.py:510`
-  Move to instance level. Add a lock around `_refresh_product_cache`.
-
-- [ ] **H12 — Rotator `_last_swap_times`/`pending_swaps` unlocked** — `src/core/portfolio_rotator.py:158`
-  Add a lock protecting both dicts.
-
-- [ ] **H13 — `TrailingStop` internal state not thread-safe** — `src/core/trailing_stop.py:87`
-  Add per-stop lock or ensure all mutations go through the manager's lock.
-
-- [ ] **H14 — `reload_providers()` hot-swap race** — `src/core/llm_client.py:585`
-  Add threading lock around `reload_providers()` and `chat()` provider iteration.
-
-- [ ] **H15 — WS `update_subscriptions` doesn't hold lock** — `src/core/ws_feed.py:241`
-  Acquire `self._lock` before reading `self.product_ids` and calling `ws.send()`.
-
-- [ ] **H16 — Settings TOCTOU (load then save)** — `src/utils/settings_manager.py:621`
-  Hold lock across the entire load-modify-save cycle in `update_section`.
-
-## HIGH — Bugs / State
-
-- [ ] **H17 — Wrong attribute in `_handle_pause_pair`** — `src/core/orchestrator.py:959`
-  Fix `self.rules._never_trade` → `self.rules.never_trade_pairs`.
-
-- [ ] **H18 — `auto_approve_up_to_usd` AttributeError** — `src/core/high_stakes.py:260`
-  Fix `self.hs_config.auto_approve_up_to_usd` → `self.hs_config.auto_approve_up_to`.
-
-- [ ] **H19 — Rotation swaps bypass daily counters** — `src/core/portfolio_rotator.py`
-  Call `rules.record_trade()` after each successful rotation swap leg.
-
-- [ ] **H20 — Positions/cash can go negative** — `src/core/state.py:289`
-  Add guard in `add_trade`: reject sells exceeding position size, reject buys exceeding cash.
-
-- [ ] **H21 — `time.sleep()` blocks async event loop** — `src/agents/executor.py:205`
-  Replace with `await asyncio.sleep()` in an async wrapper.
+- [ ] **C10 — `universe_scanner` calls non-existent `llm.generate()`** — `src/core/managers/universe_scanner.py:265`
+  `LLMClient` has no `generate()` method (only `chat`, `chat_json`, `chat_with_tools` — all async). `run_llm_screener` is synchronous. **Every screener invocation crashes with `AttributeError`.**
 
 ---
 
-## MEDIUM
+## CRITICAL (previously fixed — confirmed still fixed)
 
-- [ ] **M1 — CORS defaults to `["*"]`** — `src/dashboard/server.py:192`
+- [x] **C1 — Dashboard auth bypass via `Sec-Fetch-Site`** — `src/dashboard/server.py`
+  ✅ Removed. `/api/*` now requires explicit API key.
+
+- [x] **C2 — Unauthenticated Redis dashboard commands** — `src/core/orchestrator.py`
+  ✅ HMAC-signed payloads with timestamp validation.
+
+- [x] **C3 — Fiat-routed swap partial failure, no recovery** — `src/core/portfolio_rotator.py`
+  ✅ Buy-leg failure reversal with audit logging.
+
+- [x] **C4 — Credential injection via unprotected API endpoint** — `src/dashboard/server.py`
+  ✅ Two-step confirmation token flow.
+
+- [x] **C5 — LLM prompt injection via `ACTION:` text parsing** — `src/telegram_bot/chat_handler.py`
+  ✅ Text-fallback path secured. **But see C9 — tool-calling path is NOT secured.**
+
+---
+
+## HIGH — New findings
+
+- [ ] **H22 — `asyncio.gather` without `return_exceptions=True`** — `src/core/orchestrator.py:500,794`
+  One pair pipeline failure aborts ALL other pair pipelines in the same cycle. Both the main pipeline gather and the early-trigger gather have this problem.
+
+- [ ] **H23 — Ollama-down path spins with no sleep** — `src/core/orchestrator.py:471`
+  When `self.llm.is_available()` returns False, `continue` skips the entire cycle body including the inter-cycle sleep. The loop will hammer the Ollama check at full speed, burning CPU.
+
+- [ ] **H24 — Telegram `_add_pair`/`_remove_pair` bypass `_pairs_lock`** — `src/core/managers/telegram_manager.py:333,344`
+  Direct `orch.pairs.append()`/`.remove()` without acquiring `_pairs_lock`. H8 added the lock and a copy-on-write contract, but Telegram callbacks don't honour it. Data race.
+
+- [ ] **H25 — `chat_with_tools` iterates providers without lock** — `src/core/llm_client.py:441`
+  H14 secured `chat()` with provider-chain lock snapshots, but `chat_with_tools` iterates `self._providers` directly without snapshotting under `_providers_lock`. Same race condition H14 was meant to fix.
+
+- [ ] **H26 — Risk manager crashes on sell orders** — `src/agents/risk_manager.py:330`
+  `f"SL: {stop_loss:,.2f} | TP: {take_profit:,.2f}"` — for sell orders, `stop_loss`/`take_profit` are `None` (the ensure-SL/TP blocks only run `if action == "buy"`). Formatting `None:,.2f` raises `TypeError`. Every sell trade crashes the risk manager.
+
+- [ ] **H27 — Executor orphaned exchange orders on `add_trade` ValueError** — `src/agents/executor.py:170`
+  H20 added `ValueError` on insufficient balance. The broad `except Exception` at L126 catches it, but the exchange order is already placed/filled. The trade becomes untracked — divergent state. For limit orders (L170), the resting order is orphaned forever.
+
+- [ ] **H28 — Dashboard default-open when `DASHBOARD_API_KEY` unset** — `src/dashboard/server.py:228`
+  When the env var is unset (the common default), ALL REST endpoints including settings mutation, api-key updates, and trade commands are fully open with zero authentication. The confirmation flow is a speed bump, not security.
+
+---
+
+## HIGH — Security (previously fixed — confirmed)
+
+- [x] **H1** — Redis bound to `127.0.0.1` ✅
+- [x] **H2** — Dashboard bound to `127.0.0.1` ✅
+- [x] **H3** — Health bound to `127.0.0.1` ✅
+- [x] **H4** — WebSocket subprotocol auth ✅
+- [x] **H5** — Settings mutation confirmation flow ✅
+- [x] **H6** — Rule parameter bounds ✅
+- [x] **H7** — Autonomous append-only lists ✅
+
+## HIGH — Concurrency (previously fixed — confirmed)
+
+- [x] **H8** — `_pairs_lock` with copy-on-write ✅ (but see H24 — Telegram ignores it)
+- [x] **H9** — `tighten_to_breakeven()` routed through manager ✅
+- [x] **H10** — Paper balance locking ✅
+- [x] **H11** — Product cache instance-level with lock ✅
+- [x] **H12** — Rotator `_last_swap_times` with `_state_lock` ✅
+- [x] **H13** — Dict snapshots from `TrailingStopManager` ✅
+- [x] **H14** — Provider-chain lock for `chat()` ✅ (but see H25 — `chat_with_tools` missed)
+- [x] **H15** — WS `update_subscriptions` snapshots under lock ✅
+- [x] **H16** — Settings `update_section` under `_lock` ✅
+
+## HIGH — Bugs / State (previously fixed — confirmed)
+
+- [x] **H17** — Wrong attribute in `_handle_pause_pair` ✅
+- [x] **H18** — `auto_approve_up_to` config ✅
+- [x] **H19** — Rotation swaps record daily counters ✅
+- [x] **H20** — Positions/cash cannot go negative ✅ (but see H27 — callers not ready)
+- [x] **H21** — `_verify_fill` async with `await asyncio.sleep()` ✅
+
+---
+
+## MEDIUM — Open
+
+- [x] **M1 — CORS defaults to `["*"]`** — ✅ Fixed. Defaults to localhost origins. `allow_methods`/`allow_headers` still wildcard (low risk).
 - [ ] **M2 — Executive summary reveals DB profile names** — `src/dashboard/server.py:672`
 - [ ] **M3 — Raw exceptions in order results** — `src/core/coinbase_client.py:810`
 - [ ] **M4 — Exception class name leaked to Telegram** — `src/core/orchestrator.py:692`
-- [ ] **M5 — Prompt injection regex bypassed via Unicode** — `src/utils/security.py:30`
-- [ ] **M6 — `setattr` on rules from YAML field names** — `src/utils/settings_manager.py:806`
+- [x] **M5 — Prompt injection regex bypassed via Unicode** — ✅ Fixed (NFKC + zero-width strip). Cyrillic homoglyphs still bypass — see M22.
+- [x] **M6 — `setattr` on rules from YAML field names** — ✅ Fixed. `_RULES_SETTABLE_ATTRS` allowlist.
 - [ ] **M7 — `sync_live_holdings` overwrites cash unconditionally** — `src/core/state.py:124`
 - [ ] **M8 — `seed_daily_counters` hardcoded DB path** — `src/core/rules.py:83`
-- [ ] **M9 — `_FIAT_RATE_CACHE` no thread sync** — `src/core/coinbase_client.py:40`
-- [ ] **M10 — Emergency replan cooldown race** — `src/core/managers/event_manager.py:118`
-- [ ] **M11 — `_partial_sell` reads trade without lock** — `src/agents/executor.py:282`
-- [ ] **M12 — Executor accesses `state._lock` directly** — `src/agents/executor.py:469`
-- [ ] **M13 — No CSRF protection on mutations** — `dashboard/frontend/src/api.ts:14`
-- [ ] **M14 — WebSocket sends no auth token** — `dashboard/frontend/src/api.ts:565`
-- [ ] **M15 — LLM provider config disclosure** — `src/dashboard/server.py:1186`
-- [ ] **M16 — TOCTOU in `get_status`** — `src/core/high_stakes.py:222`
-- [ ] **M17 — Simulated trade PnL always computed as long** — `src/dashboard/server.py:600`
+- [x] **M9 — `_FIAT_RATE_CACHE` no thread sync** — ✅ Fixed. `_FIAT_RATE_LOCK` added.
+- [ ] **M10 — Emergency replan cooldown race** — `src/core/managers/event_manager.py:106`
+  Lock scope too narrow — covers only cooldown check, not the DB write + cache invalidation. If DB write fails, cooldown is set but no plan is saved.
+- [ ] **M11 — `_partial_sell` reads trade without lock** — `src/agents/executor.py:271`
+- [ ] **M12 — Executor accesses `state._lock` directly** — `src/agents/executor.py:295,553`
+- [ ] **M13 — No CSRF protection on mutations** — `dashboard/frontend/src/api.ts`
+- [x] **M14 — WebSocket sends no auth token** — ✅ Fixed via subprotocol auth.
+- [x] **M15 — LLM provider config disclosure** — ✅ Fixed. `_SAFE_PROVIDER_FIELDS` allowlist.
+  ⚠️ `provider_status()` live data is still passed unfiltered — may leak base URLs.
+- [x] **M16 — TOCTOU in `get_status`** — ✅ Fixed. Full method under `self._lock`.
+- [x] **M17 — Simulated trade PnL always computed as long** — ✅ Fixed. Direction-aware.
 - [ ] **M18 — Fee rates hardcoded to Coinbase** — `src/core/fee_manager.py:37`
 - [ ] **M19 — RouteFinder crypto-specific** — `src/core/route_finder.py:91`
+- [ ] **M20 — Signed dashboard commands no replay protection** — `src/core/orchestrator.py`
+- [ ] **M21 — `ValueError` from `add_trade` may crash orchestrator** — `src/core/state.py:280`
+  Verified: broad `except Exception` in executor catches it, but recovery is incorrect (see H27).
+
+## MEDIUM — New findings
+
+- [ ] **M22 — Cyrillic/Greek homoglyphs bypass prompt injection regex** — `src/utils/security.py:33`
+  NFKC does not map cross-script lookalikes (Cyrillic 'а' ≠ Latin 'a'). Attacker can write "ignоre previоus instructiоns" and bypass all patterns.
+
+- [ ] **M23 — `all_tracked_pairs` never updated at runtime** — `src/core/orchestrator.py:162`
+  Set once in `__init__` but never refreshed when `self.pairs` changes (via settings advisor, Telegram, or `_handle_pause_pair`).
+
+- [ ] **M24 — `_pending_confirmations` dict has no lock** — `src/dashboard/server.py:75`
+  Dashboard confirmation tokens are stored in a plain dict. FastAPI sync endpoints run in a threadpool — concurrent confirmation requests can race.
+
+- [ ] **M25 — WS `update_subscriptions` only updates `ticker` channel** — `src/core/ws_feed.py:325`
+  `_on_open` subscribes to both `ticker` and `market_trades`, but `update_subscriptions` only manages the `ticker` channel. Dynamic pair changes leave `market_trades` stale.
+
+- [ ] **M26 — `apply_preset` TOCTOU** — `src/utils/settings_manager.py:808`
+  Loads settings outside the lock, modifies in memory, then `save_settings` acquires lock internally. Concurrent `update_section` writes are silently overwritten.
+
+- [ ] **M27 — Rotator `pending_swaps` not under `_state_lock`** — `src/core/portfolio_rotator.py:169`
+  H12 added `_state_lock` for `_last_swap_times` but missed `pending_swaps`.
+
+- [ ] **M28 — Fiat-routed reversal double-counts daily spend** — `src/core/portfolio_rotator.py:760`
+  Original sell leg and reversal buy each call `_record_rotation_leg`, recording 2x spend for a net-zero position change.
+
+- [ ] **M29 — `high_stakes.get_effective_limits` can LOWER `require_approval_above`** — `src/core/high_stakes.py:249`
+  Unconditionally replaces base `require_approval_above` with `auto_approve_up_to`. If base is $1000 and HS is $500, high-stakes mode *reduces* the ceiling.
+
+- [ ] **M30 — `holdings_manager` `dict(accounts)` crashes on list input** — `src/core/managers/holdings_manager.py:83`
+  If `get_accounts()` returns `list[dict]` (per ABC), `dict(accounts)` raises. Only works with Coinbase SDK response objects.
+
+- [ ] **M31 — `telegram_manager` uses `asyncio.run()` in async context** — `src/core/managers/telegram_manager.py:774,852`
+  `cmd_approve_trade` and `cmd_rotate` call `asyncio.run()`. If called from within the Telegram bot's async handler, raises `RuntimeError: This event loop is already running`.
+
+- [ ] **M32 — Market analyst format crash on missing indicators** — `src/agents/market_analyst.py:148`
+  `f"{indicators.get('rsi', 'N/A'):.1f}"` — if RSI is absent, returns string `'N/A'` which fails `:.1f` format. `ValueError` or `TypeError`.
+
+- [ ] **M33 — Strategist crash on string tasks** — `src/agents/strategist.py:166`
+  `t.get('description', t)` — if `active_tasks` contains plain strings, `.get()` on a `str` raises `AttributeError`.
 
 ---
 
-## LOW
+## LOW — Open
 
 - [ ] **L1 — Masked secrets at INFO level** — `src/utils/security.py:99`
 - [ ] **L2 — Unbounded `_unauthorized_attempts` dict** — `src/telegram_bot/bot.py:149`
-- [ ] **L3 — `verify_chain` reads without lock** — `src/utils/audit.py:121`
-- [ ] **L4 — Audit log not fsync'd** — `src/utils/audit.py:105`
-- [ ] **L5 — `_get_last_hash` O(n) file read** — `src/utils/audit.py:55`
-- [ ] **L6 — Thread-local SQLite connections never closed** — `src/utils/stats.py:45`
+- [x] **L3 — `verify_chain` reads without lock** — ✅ Fixed. Lock held during full read.
+- [x] **L4 — Audit log not fsync'd** — ✅ Fixed. `f.flush()` + `os.fsync()`.
+- [x] **L5 — `_get_last_hash` O(n) file read** — ✅ Fixed. Reads last 4096 bytes.
+- [x] **L6 — Thread-local SQLite connections never closed** — ✅ Fixed. `close()` + tracking list.
 - [ ] **L7 — `to_summary` not atomic snapshot** — `src/core/state.py:429`
-- [ ] **L8 — `remaining_quantity` can go negative** — `src/core/trailing_stop.py:122`
+- [x] **L8 — `remaining_quantity` can go negative** — ✅ Fixed. `max(0.0, ...)` guard.
 - [ ] **L9 — Paper buy fee float rounding** — `src/core/coinbase_client.py:1028`
 - [ ] **L10 — `_running` flag no memory barrier** — `src/telegram_bot/bot.py:120`
 - [ ] **L11 — Hardcoded profile→currency mapping** — `dashboard/frontend/src/store.ts:8`
 - [ ] **L12 — Hardcoded Temporal Postgres password** — `docker-compose.yml:413`
 - [ ] **L13 — Redis subscriber no reconnect** — `src/dashboard/server.py:870`
+- [ ] **L14 — Paper order append outside balance lock** — `src/core/coinbase_client.py:1060`
+
+## LOW — New findings
+
+- [ ] **L15 — Duplicate imports in orchestrator** — `src/core/orchestrator.py:59,26`
+  `check_component_health, update_health` imported twice; `coinbase_client` symbols imported but unused.
+- [ ] **L16 — `elapsed` counter drifts** — `src/core/orchestrator.py:788`
+  Inter-cycle sleep increments `elapsed` by 10.0 regardless of actual elapsed time. Pipelines/stop-checks aren't counted, so cycles can over-sleep.
+- [ ] **L17 — `_get_sequence` at init is still O(n)** — `src/utils/audit.py:87`
+  `sum(1 for _ in f)` reads entire audit log. Slow startup on large logs.
+- [ ] **L18 — `StatsDB.close()` never called automatically** — `src/utils/stats.py`
+  No `__del__`, `__exit__`, or `atexit`. Thread pool connections leak.
+- [ ] **L19 — Journal JSONL+CSV writes in separate lock scopes** — `src/utils/journal.py:95`
+  Crash between them leaves inconsistent state.
+- [ ] **L20 — Bridge reversals don't call `_record_rotation_leg`** — `src/core/portfolio_rotator.py:700`
+  Unlike fiat reversals, bridge reversals aren't tracked in AbsoluteRules counters. Inconsistent.
+- [ ] **L21 — `_schema_summary` cached forever** — `src/agents/settings_advisor.py:127`
+  If field guards change at runtime, stale cache is served.
+- [ ] **L22 — WS subprotocol not echoed** — `src/dashboard/server.py:1030`
+  Server calls `websocket.accept()` without `subprotocol=` after auth via subprotocol. Browsers may reject per RFC 6455.
 
 ---
 
-## Cross-Asset Interference (Share vs Crypto)
+## Do not fix yet — Cross-Asset Interference (Share vs Crypto)
 
 - [ ] **X1 — Single `cash_balance` for all exchanges** — `src/core/state.py`
-  Introduce per-exchange cash balances to prevent cross-brokerage interference (EUR crypto vs SEK shares).
-
 - [ ] **X2 — Daily counters global, not per-exchange** — `src/core/rules.py`
-  Split `_daily_spend` and `_daily_trade_count` per exchange so one doesn't block the other.
-
 - [ ] **X3 — Fee manager crypto-only** — `src/core/fee_manager.py:37`
-  Add asset-class dispatch for fee calculation.
-
 - [ ] **X4 — RouteFinder crypto-only** — `src/core/route_finder.py`
-  Add stock ticker awareness or skip routing for non-crypto pairs.
-
 - [ ] **X5 — Simulated trades assume `BASE-QUOTE`** — `src/dashboard/server.py:537`
-  Handle stock ticker formats (e.g., `AAPL.ST`).
 
 ---
 
 ## Summary
 
-| Severity | Count |
-|----------|-------|
-| Critical | 5 |
-| High | 21 |
-| Medium | 19 |
-| Low | 13 |
-| Cross-asset | 5 |
-| **Total** | **63** |
+| Severity | Total | Fixed | Open |
+|----------|-------|-------|------|
+| Critical | 10 | 5 | **5** |
+| High | 28 | 21 | **7** |
+| Medium | 33 | 9 | **24** |
+| Low | 22 | 5 | **17** |
+| Cross-asset | 5 | 0 | 5 |
+| **Total** | **98** | **40** | **58** |
+
+### Priority order for open items
+
+**Must fix (crashes / data corruption / security bypass):**
+C6, C7, C8, C9, C10, H22, H23, H26, H27
+
+**Should fix (security hardening / concurrency):**
+H24, H25, H28, M20, M22, M24
+
+**Fix when convenient:**
+Everything else.
+
+## Progress Log
+
+- 2026-02-21 Batch 1 complete: C1, H10, H17, H18.
+- 2026-02-21 Batch 2 complete: H1, H2, H3, H21.
+- 2026-02-21 Batch 3 complete: H11, H16.
+- 2026-02-21 Batch 4 complete: H20.
+- 2026-02-21 Batch 5 complete: H9.
+- 2026-02-21 Batch 6 complete: H14.
+- 2026-02-21 Batch 7 complete: H12, H15, H19.
+- 2026-02-21 Batch 8 complete: C2, H6.
+- 2026-02-21 Batch 9 complete: C3.
+- 2026-02-21 Post-fix review: H4 regressed (browser WS broken), added M20, M21, L14.
+- 2026-02-21 Second full review: M1, M5, M6, M9, M14, M15, M16, M17, L3, L4, L5, L6, L8 confirmed fixed. Added C6–C10, H22–H28, M22–M33, L15–L22 (32 new findings).

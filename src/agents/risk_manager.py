@@ -325,9 +325,12 @@ class RiskManagerAgent(BaseAgent):
         }
 
         status = "✅ APPROVED" if not needs_approval else "⚠️ NEEDS TELEGRAM APPROVAL"
+        # H26 fix: stop_loss/take_profit are None for sell orders
+        sl_str = f"{stop_loss:,.2f}" if stop_loss is not None else "N/A"
+        tp_str = f"{take_profit:,.2f}" if take_profit is not None else "N/A"
         self.logger.info(
             f"{status}: {action.upper()} {quote_amount:,.2f} of {pair} | "
-            f"SL: {stop_loss:,.2f} | TP: {take_profit:,.2f}"
+            f"SL: {sl_str} | TP: {tp_str}"
         )
 
         # Persist risk decision trace (no LLM call — rule-based, so tokens=0)

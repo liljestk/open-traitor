@@ -6,6 +6,7 @@ Supports both market and limit orders based on urgency and confidence.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -181,7 +182,7 @@ class ExecutorAgent(BaseAgent):
 
                 # Verify fill status for live orders
                 if order_id and not getattr(self.exchange, "paper_mode", False):
-                    order = self._verify_fill(order_id, order)
+                    order = await self._verify_fill(order_id, order)
 
                 fill_status = order.get("status", "FILLED")
                 if fill_status == "FILLED" or getattr(self.exchange, "paper_mode", False):
@@ -216,7 +217,24 @@ class ExecutorAgent(BaseAgent):
                     )
 
                 # Record in state and rules
-                self.state.add_trade(trade)
+                # H27 fix: if add_trade raises ValueError (insufficient balance/position),
+                # the exchange order is already filled — attempt to cancel if resting,
+                # otherwise log the orphaned order for manual reconciliation.
+                try:
+                    self.state.add_trade(trade)
+                except ValueError as ve:
+                    self.logger.error(
+                        f"\u274c add_trade rejected filled order for {pair}: {ve} \u2014 "
+                        f"order_id={trade.coinbase_order_id} is orphaned on exchange. "
+                        "Manual reconciliation may be needed."
+                    )
+                    trade.status = TradeStatus.FAILED
+                    return {
+                        "executed": False,
+                        "error": f"State rejected trade: {ve}",
+                        "trade_id": trade.id,
+                        "orphaned_order_id": trade.coinbase_order_id,
+                    }
                 self.rules.record_trade(quote_amount, action=action)
 
                 self.logger.info(f"✅ Trade executed: {trade.to_summary()}")
@@ -242,7 +260,7 @@ class ExecutorAgent(BaseAgent):
             self.logger.error(f"❌ Execution error: {e}", exc_info=True)
             return {"executed": False, "error": str(e), "trade_id": trade.id}
 
-    def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
+    async def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
         """Poll order status to verify fill (for live orders).
 
         Uses a short initial poll interval (200 ms) with exponential back-off
@@ -258,7 +276,7 @@ class ExecutorAgent(BaseAgent):
                     return order
             except Exception as e:
                 self.logger.debug(f"Fill check attempt {attempt + 1} failed: {e}")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
             delay = min(delay * 2, 2.0)  # Back-off up to 2 s
         self.logger.warning(
             f"⚠️ Order {order_id} fill not confirmed after {max_attempts} attempts — "
@@ -302,12 +320,15 @@ class ExecutorAgent(BaseAgent):
             close_price = float(order.get("average_filled_price", price))
             fees = float(order.get("fee", 0))
 
-            # Reduce the trade's remaining quantity (don't close it)
-            remaining = (trade.filled_quantity or trade.quantity) - quantity
+            # Update trade state via public method (M12 fix: don't access state._lock directly)
+            remaining = max(0.0, (trade.filled_quantity or trade.quantity) - quantity)
             if remaining > 0:
-                trade.filled_quantity = remaining
+                self.state.update_partial_fill(trade.id, remaining)
             else:
                 # Position fully exited by tiers
+                pass
+
+            if remaining <= 0:
                 self.state.close_trade(trade.id, close_price, fees)
 
             pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
@@ -487,17 +508,7 @@ class ExecutorAgent(BaseAgent):
                 elif status in ("CANCELLED", "FAILED", "EXPIRED"):
                     trade.status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
                     # Reverse the position/cash booking from add_trade
-                    with self.state._lock:
-                        if trade.action == TradeAction.BUY:
-                            self.state.positions[trade.pair] = (
-                                self.state.positions.get(trade.pair, 0) - trade.quantity
-                            )
-                            self.state.cash_balance += trade.value
-                        elif trade.action == TradeAction.SELL:
-                            self.state.positions[trade.pair] = (
-                                self.state.positions.get(trade.pair, 0) + trade.quantity
-                            )
-                            self.state.cash_balance -= trade.value
+                    self.state.reverse_trade_booking(trade)
                     self.logger.info(
                         f"📋 Pending order {status}: {trade.pair} — "
                         "state booking reversed"
@@ -551,18 +562,8 @@ class ExecutorAgent(BaseAgent):
 
         if cancel_result.get("success"):
             trade.status = TradeStatus.CANCELLED
-            # Reverse the position/cash booking
-            with self.state._lock:
-                if trade.action == TradeAction.BUY:
-                    self.state.positions[trade.pair] = (
-                        self.state.positions.get(trade.pair, 0) - trade.quantity
-                    )
-                    self.state.cash_balance += trade.value
-                elif trade.action == TradeAction.SELL:
-                    self.state.positions[trade.pair] = (
-                        self.state.positions.get(trade.pair, 0) + trade.quantity
-                    )
-                    self.state.cash_balance -= trade.value
+            # Reverse the position/cash booking via public API
+            self.state.reverse_trade_booking(trade)
             self.logger.info(
                 f"✅ Stale limit order cancelled: {trade.pair} — state reversed"
             )
