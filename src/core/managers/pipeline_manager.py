@@ -126,7 +126,7 @@ class PipelineManager:
         _step_t = time.monotonic()
         await orch.rate_limiter.async_wait("coinbase_rest")
         candles = await asyncio.to_thread(
-            orch.coinbase.get_candles,
+            orch.exchange.get_candles,
             pair,
             granularity=orch.config.get("analysis", {}).get("technical", {}).get(
                 "candle_granularity", "ONE_HOUR"
@@ -137,10 +137,10 @@ class PipelineManager:
             price = orch.ws_feed.get_price(pair)
             if price <= 0:
                 await orch.rate_limiter.async_wait("coinbase_rest")
-                price = await asyncio.to_thread(orch.coinbase.get_current_price, pair)
+                price = await asyncio.to_thread(orch.exchange.get_current_price, pair)
         else:
             await orch.rate_limiter.async_wait("coinbase_rest")
-            price = await asyncio.to_thread(orch.coinbase.get_current_price, pair)
+            price = await asyncio.to_thread(orch.exchange.get_current_price, pair)
         _timings["data"] = time.monotonic() - _step_t
 
         if price <= 0:
@@ -245,7 +245,7 @@ class PipelineManager:
                     "candle_granularity", "ONE_HOUR"
                 )
                 other_results = await asyncio.gather(*[
-                    asyncio.to_thread(orch.coinbase.get_candles, p, granularity=granularity)
+                    asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
                     for p in other_pairs
                 ], return_exceptions=True)
                 for p, result in zip(other_pairs, other_results):
@@ -326,7 +326,7 @@ class PipelineManager:
         strategy_result = await orch.strategist.execute({
             "signal": signal,
             "active_tasks": [t.to_dict() for t in orch.active_tasks if not t.completed],
-            "current_balance": orch.coinbase.balance if hasattr(orch.coinbase, 'balance') else {},
+            "current_balance": orch.exchange.balance if hasattr(orch.exchange, 'balance') else {},
             "open_positions": orch.state.open_positions,
             "recent_trades": [t.to_summary() for t in orch.state.recent_trades],
             "recent_outcomes": recent_outcomes,

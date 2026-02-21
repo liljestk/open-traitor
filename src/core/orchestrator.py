@@ -20,7 +20,8 @@ from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
 from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
-from src.core.exchange_client import ExchangeClient, _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
+from src.core.exchange_client import ExchangeClient
+from src.core.coinbase_client import _KNOWN_FIAT, _USD_EQUIVALENTS, _EUR_EQUIVALENTS, _ALL_STABLECOINS, _KNOWN_QUOTES, _get_fiat_rate_usd
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
@@ -381,7 +382,7 @@ class Orchestrator:
         if self.telegram:
             self.telegram.send_message(
                 "🤖 *Auto-Traitor Online*\n\n"
-                f"Mode: {'📝 Paper' if self.coinbase.paper_mode else '💰 Live'}\n"
+                f"Mode: {'📝 Paper' if getattr(self.exchange, 'paper_mode', False) else '💰 Live'}\n"
                 f"Pairs: {', '.join(self.pairs)}\n"
                 f"Cycle: every {self.interval}s\n\n"
                 "💬 I'm in conversational mode — just talk to me naturally!\n"
@@ -595,7 +596,7 @@ class Orchestrator:
                 self.state.save_state()
 
                 # ─── Position reconciliation (live mode only) ────────────
-                if not self.coinbase.paper_mode:
+                if not getattr(self.exchange, 'paper_mode', False):
                     self._reconcile_counter += 1
                     if self._reconcile_counter >= self._reconcile_every:
                         self._reconcile_counter = 0
@@ -1015,7 +1016,7 @@ class Orchestrator:
         previous snapshot and does NOT update the timestamp, so the next
         cycle retries immediately.
         """
-        if not self._holdings_sync_enabled or self.coinbase.paper_mode:
+        if not self._holdings_sync_enabled or getattr(self.exchange, 'paper_mode', False):
             return
         now = time.time()
         if now - self.state._live_snapshot_ts < self._holdings_refresh_seconds:
@@ -1113,7 +1114,7 @@ class Orchestrator:
                 if quote in _KNOWN_QUOTES:
                     expected[base] = qty
                     base_to_pair[base] = pair
-            result = self.coinbase.reconcile_positions(expected)
+            result = self.exchange.reconcile_positions(expected)
 
             if not result["matched"]:
                 for d in result["discrepancies"]:
@@ -1244,7 +1245,7 @@ class Orchestrator:
                     native_pair = f"{currency}-{native}"
                     if tracked_pair:
                         try:
-                            price = self.coinbase.get_current_price(tracked_pair)
+                            price = self.exchange.get_current_price(tracked_pair)
                             if price > 0:
                                 prices_by_pair[tracked_pair] = price
                                 self.state.update_price(tracked_pair, price)
@@ -1253,7 +1254,7 @@ class Orchestrator:
                     elif native != "USD":
                         # Try the native pair even if not tracked
                         try:
-                            price = self.coinbase.get_current_price(native_pair)
+                            price = self.exchange.get_current_price(native_pair)
                             if price > 0:
                                 prices_by_pair[native_pair] = price
                         except Exception:
@@ -1262,7 +1263,7 @@ class Orchestrator:
                         # Fallback: USD pair → convert to native
                         usd_pair = f"{currency}-USD"
                         try:
-                            price_usd = self.coinbase.get_current_price(usd_pair)
+                            price_usd = self.exchange.get_current_price(usd_pair)
                             if price_usd > 0:
                                 prices_by_pair[usd_pair] = price_usd
                                 # Convert to native display price
@@ -1291,7 +1292,7 @@ class Orchestrator:
         for pair in self.pairs:
             if pair not in prices_by_pair:
                 try:
-                    p = self.coinbase.get_current_price(pair)
+                    p = self.exchange.get_current_price(pair)
                     if p > 0:
                         prices_by_pair[pair] = p
                         self.state.update_price(pair, p)
@@ -1393,7 +1394,7 @@ class Orchestrator:
             prices = {}
             for pair in self.pairs:
                 try:
-                    price = self.coinbase.get_current_price(pair)
+                    price = self.exchange.get_current_price(pair)
                     if price > 0:
                         prices[pair] = price
                         self.state.update_price(pair, price)
@@ -1755,7 +1756,7 @@ class Orchestrator:
 
             # Get live entry price
             try:
-                entry_price = self.coinbase.get_current_price(pair)
+                entry_price = self.exchange.get_current_price(pair)
             except Exception as e:
                 return {"ok": False, "error": f"Cannot fetch price for {pair}: {e}"}
 
@@ -1794,7 +1795,7 @@ class Orchestrator:
             for row in rows:
                 if row["status"] == "open":
                     try:
-                        current_price = self.coinbase.get_current_price(row["pair"])
+                        current_price = self.exchange.get_current_price(row["pair"])
                     except Exception:
                         current_price = row["entry_price"]
                     if current_price > 0:
@@ -1821,7 +1822,7 @@ class Orchestrator:
             if not target:
                 return {"ok": False, "error": f"No open simulation with id={sim_id}"}
             try:
-                close_price = self.coinbase.get_current_price(target["pair"])
+                close_price = self.exchange.get_current_price(target["pair"])
             except Exception:
                 close_price = target["entry_price"]
             if close_price <= 0:
@@ -2024,7 +2025,7 @@ class Orchestrator:
         return "📰 No news available."
 
     def _cmd_balance(self, data: dict) -> str:
-        balance = self.coinbase.balance
+        balance = self.exchange.balance
         lines = ["💰 *Account Balance*\n"]
         for currency, amount in balance.items():
             lines.append(f"• {currency}: {amount:,.6f}")
@@ -2093,7 +2094,7 @@ class Orchestrator:
         try:
             never_trade = self.config.get("trading", {}).get("never_trade", [])
             only_trade = self.config.get("trading", {}).get("only_trade", [])
-            products = self.coinbase.discover_all_pairs_detailed(
+            products = self.exchange.discover_all_pairs_detailed(
                 quote_currencies=None,  # use default
                 never_trade=never_trade,
                 only_trade=only_trade if only_trade else None,
@@ -2148,7 +2149,7 @@ class Orchestrator:
             pair = product["product_id"]
             try:
                 rate_limiter.wait("coinbase_rest")
-                candles = self.coinbase.get_candles(pair, granularity="ONE_HOUR", limit=200)
+                candles = self.exchange.get_candles(pair, granularity="ONE_HOUR", limit=200)
                 if not candles or len(candles) < 30:
                     continue
 
