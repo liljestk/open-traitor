@@ -68,6 +68,15 @@ _rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
 _llm_client = None        # LLMClient instance (optional, for provider status)
 
 
+def _get_config() -> dict:
+    """Return the current config, reloading from disk to pick up runtime changes."""
+    try:
+        from src.utils.settings_manager import load_settings
+        return load_settings()
+    except Exception:
+        return _config
+
+
 def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None):
     """Inject shared services.  Called from main.py before uvicorn starts."""
     global _stats_db, _redis_client, _temporal_client, _config, _exchange_client, _rules_instance, _llm_client
@@ -1201,13 +1210,13 @@ def update_llm_providers(body: _ProvidersUpdateBody):
             from src.core.llm_client import build_providers
             llm_config = _get_config().get("llm", {})
             ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            fallback_model = os.environ.get("OLLAMA_MODEL", llm_get_config().get("model", "llama3.1:8b"))
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
             new_providers = build_providers(
                 saved,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_get_config().get("timeout", 60),
-                fallback_max_retries=llm_get_config().get("max_retries", 3),
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
 
@@ -1263,13 +1272,13 @@ def update_api_keys(body: _ApiKeysUpdateBody):
             saved_providers = _sm_get_providers()
             llm_config = _get_config().get("llm", {})
             ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            fallback_model = os.environ.get("OLLAMA_MODEL", llm_get_config().get("model", "llama3.1:8b"))
+            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
             new_providers = build_providers(
                 saved_providers,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_get_config().get("timeout", 60),
-                fallback_max_retries=llm_get_config().get("max_retries", 3),
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
 
