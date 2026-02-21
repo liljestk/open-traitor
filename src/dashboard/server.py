@@ -638,7 +638,7 @@ def close_simulated_trade_route(sim_id: int):
     if close_price <= 0:
         close_price = target["entry_price"]  # Fallback to entry price
 
-        result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
+    result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
     if not result:
         raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found or already closed")
     return result

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import abc
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 
 class ExchangeClient(abc.ABC):

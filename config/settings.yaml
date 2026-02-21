@@ -68,7 +68,7 @@ llm:
   - name: gemini
     enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-    api_key_env: AIzaSyC7noaJLIlH9MPxTStIn3Rc9aAukbDyU6A
+    api_key_env: GEMINI_API_KEY
     model: gemini-2.0-flash
     timeout: 30
     rpm_limit: 14

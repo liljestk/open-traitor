@@ -141,12 +141,14 @@ class ExecutorAgent(BaseAgent):
                     f"📋 Limit BUY placed for {pair} @ {limit_price:,.2f} "
                     f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
                 )
+            elif action == "buy":
                 result = self.exchange.place_market_order(
                     pair=pair,
                     side="BUY",
                     amount=quote_amount,
                     amount_is_base=False,
                 )
+            else:
                 result = self.exchange.place_market_order(
                     pair=pair,
                     side="SELL",
