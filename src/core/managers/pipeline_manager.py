@@ -112,7 +112,7 @@ class PipelineManager:
         strategic_context = orch._get_strategic_context()
 
         # Run synchronous blocking functions in executor if necessary
-        orch._maybe_refresh_holdings()
+        await asyncio.to_thread(orch._maybe_refresh_holdings)
 
         tracer = get_llm_tracer()
         trace_ctx = tracer.start_trace(
@@ -124,7 +124,7 @@ class PipelineManager:
         # Data fetching (synchronous -> use asyncio.to_thread if we want true non-blocking,
         # but for now we let it block slightly since Coinbase REST is fast)
         _step_t = time.monotonic()
-        orch.rate_limiter.wait("coinbase_rest")
+        await orch.rate_limiter.async_wait("coinbase_rest")
         candles = await asyncio.to_thread(
             orch.coinbase.get_candles,
             pair,
@@ -136,10 +136,10 @@ class PipelineManager:
         if orch.ws_feed:
             price = orch.ws_feed.get_price(pair)
             if price <= 0:
-                orch.rate_limiter.wait("coinbase_rest")
+                await orch.rate_limiter.async_wait("coinbase_rest")
                 price = await asyncio.to_thread(orch.coinbase.get_current_price, pair)
         else:
-            orch.rate_limiter.wait("coinbase_rest")
+            await orch.rate_limiter.async_wait("coinbase_rest")
             price = await asyncio.to_thread(orch.coinbase.get_current_price, pair)
         _timings["data"] = time.monotonic() - _step_t
 
@@ -172,13 +172,13 @@ class PipelineManager:
 
         fg_prompt = ""
         try:
-            fg_prompt = orch.fear_greed.get_for_prompt()
+            fg_prompt = await asyncio.to_thread(orch.fear_greed.get_for_prompt)
         except Exception as e:
             logger.debug(f"Fear & Greed unavailable: {e}")
 
         mtf_prompt = ""
         try:
-            mtf_prompt = orch.multi_tf.get_for_prompt(pair)
+            mtf_prompt = await asyncio.to_thread(orch.multi_tf.get_for_prompt, pair)
         except Exception as e:
             logger.debug(f"Multi-TF unavailable: {e}")
 

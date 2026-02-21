@@ -1026,7 +1026,7 @@ class TelegramChatHandler:
         # ─── SMART PATH: single LLM call ───
         try:
             if self.rate_limiter:
-                self.rate_limiter.wait("ollama")
+                await self.rate_limiter.async_wait("ollama")
 
             response = await self._smart_response(text, user_name)
             self.memory.add("assistant", response)

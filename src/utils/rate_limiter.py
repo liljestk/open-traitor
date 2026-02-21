@@ -89,9 +89,49 @@ class RateLimiter:
             wait = period / max_calls
             time.sleep(min(wait, 0.1))
 
+    async def async_acquire(self, service: str, timeout: float = 30.0) -> bool:
+        """
+        Acquire a token asynchronously without blocking the event loop.
+        """
+        import asyncio
+        if service not in self._limits:
+            return True
+
+        limit = self._limits[service]
+        max_calls = limit["calls"]
+        period = limit["period"]
+        deadline = time.monotonic() + timeout
+
+        while True:
+            with self._lock:
+                now = time.monotonic()
+
+                # Remove old entries outside the window
+                self._calls[service] = [
+                    t for t in self._calls[service]
+                    if now - t < period
+                ]
+
+                if len(self._calls[service]) < max_calls:
+                    self._calls[service].append(now)
+                    return True
+
+            if time.monotonic() >= deadline:
+                logger.warning(f"Rate limit timeout for {service}")
+                return False
+
+            # Wait a bit before retrying
+            wait = period / max_calls
+            await asyncio.sleep(min(wait, 0.1))
+
     def wait(self, service: str, timeout: float = 30.0) -> None:
         """Blocking acquire — raises if timed out."""
         if not self.acquire(service, block=True, timeout=timeout):
+            raise RuntimeError(f"Rate limit timeout for {service} after {timeout}s")
+
+    async def async_wait(self, service: str, timeout: float = 30.0) -> None:
+        """Non-blocking wait for rate limit token."""
+        if not await self.async_acquire(service, timeout=timeout):
             raise RuntimeError(f"Rate limit timeout for {service} after {timeout}s")
 
     def get_status(self) -> dict:
