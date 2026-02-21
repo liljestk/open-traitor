@@ -671,6 +671,7 @@ def get_executive_summary():
                     pname = "default"
                 
                 db_path = os.path.join(data_dir, file)
+                conn = None
                 try:
                     conn = sqlite3.connect(db_path, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
@@ -695,7 +696,8 @@ def get_executive_summary():
                 except Exception as e:
                     logger.warning(f"Error reading DB {file}: {e}")
                 finally:
-                    conn.close()
+                    if conn:
+                        conn.close()
 
     return {
         "profiles": profiles,

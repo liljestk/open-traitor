@@ -149,7 +149,7 @@ class Orchestrator:
 
         # New analysis components
         self.fear_greed = FearGreedIndex()
-        self.multi_tf = MultiTimeframeAnalyzer(config, coinbase)
+        self.multi_tf = MultiTimeframeAnalyzer(config, exchange)
         self.trailing_stops = TrailingStopManager(
             default_trail_pct=config.get("risk", {}).get("trailing_stop_pct", 0.03),
             enable_tiers=config.get("risk", {}).get("enable_tiered_stops", False),
@@ -176,12 +176,12 @@ class Orchestrator:
         self.high_stakes.audit = self.audit  # Connect audit after creation
 
         # Route finder (optimal swap route discovery)
-        self.route_finder = RouteFinder(coinbase, self.fee_manager, config)
+        self.route_finder = RouteFinder(exchange, self.fee_manager, config)
 
         # Portfolio rotator (autonomous crypto-to-crypto swaps)
         self.rotator = PortfolioRotator(
             config=config,
-            coinbase_client=coinbase,
+            coinbase_client=exchange,
             llm_client=llm,
             fee_manager=self.fee_manager,
             high_stakes=self.high_stakes,
@@ -213,7 +213,7 @@ class Orchestrator:
         self._holdings_dust_threshold: float = float(trading_cfg.get("holdings_dust_threshold", 0.01))
 
         # Initial sync on startup (live mode only)
-        if self._holdings_sync_enabled and not coinbase.paper_mode:
+        if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False):
             try:
                 snapshot = self._live_coinbase_snapshot()
                 self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)
@@ -352,7 +352,7 @@ class Orchestrator:
         # Subscribe to Redis news:updates channel so fresh news triggers early pipelines
         self._start_news_subscriber()
 
-        _sync_status = '✅ Enabled' if (self._holdings_sync_enabled and not coinbase.paper_mode) else '❌ Disabled'
+        _sync_status = '✅ Enabled' if (self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False)) else '❌ Disabled'
         logger.info("═══════════════════════════════════════════")
         logger.info("  🤖 Orchestrator initialized")
         logger.info(f"  Trading pairs: {self.pairs}")
@@ -372,7 +372,7 @@ class Orchestrator:
         logger.info(f"  Kelly Criterion: ✅ Enabled")
         logger.info(f"  FIFO Tax Tracking: ✅ Enabled")
         logger.info(f"  Universe Scanner: ✅ Enabled (screener every {self._SCREENER_INTERVAL} cycles)")
-        logger.info(f"  Mode: {'📝 PAPER' if coinbase.paper_mode else '💰 LIVE'}")
+        logger.info(f"  Mode: {'📝 PAPER' if getattr(exchange, 'paper_mode', False) else '💰 LIVE'}")
         logger.info("═══════════════════════════════════════════")
 
     def run_forever(self) -> None:

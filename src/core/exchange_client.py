@@ -119,10 +119,10 @@ class ExchangeClient(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def cancel_order(self, order_id: str) -> bool:
+    def cancel_order(self, order_id: str) -> dict:
         """
         Cancel a pending order.
-        Returns True if successful.
+        Returns a dict with 'success' (bool) and optionally 'error'.
         """
         pass
 
