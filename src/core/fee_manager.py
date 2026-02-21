@@ -91,30 +91,39 @@ class FeeManager:
         self,
         quote_amount: float,
         is_maker: bool = False,
+        n_legs: int = 2,
     ) -> FeeEstimate:
         """
-        Estimate total fees for a swap (sell A → buy B).
-        This involves TWO trades.
+        Estimate total fees for a swap across N legs.
+
+        Args:
+            quote_amount: Amount in quote currency
+            is_maker: Whether using maker (limit) orders
+            n_legs: Number of trade legs (1=direct, 2=fiat-routed, 3+=bridged)
         """
         fee_pct = self.maker_fee_pct if is_maker else self.trade_fee_pct
 
-        sell_fee = quote_amount * fee_pct
-        # After selling, we have less to buy with
-        net_after_sell = quote_amount - sell_fee
-        buy_fee = net_after_sell * fee_pct
+        # Compound fees across N legs
+        remaining = quote_amount
+        total_fee = 0.0
+        leg_fees: list[float] = []
+        for _ in range(n_legs):
+            leg_fee = remaining * fee_pct
+            leg_fees.append(leg_fee)
+            total_fee += leg_fee
+            remaining -= leg_fee
 
-        total_fee = sell_fee + buy_fee
         total_fee_pct = total_fee / quote_amount if quote_amount > 0 else 0
 
-        # Breakeven: price of B needs to move this much to cover fees
+        # Breakeven: price of target needs to move this much to cover fees
         breakeven = total_fee_pct * self.fee_safety_margin
 
         return FeeEstimate(
             sell_fee_pct=fee_pct,
             buy_fee_pct=fee_pct,
             total_fee_pct=total_fee_pct,
-            sell_fee_quote=sell_fee,
-            buy_fee_quote=buy_fee,
+            sell_fee_quote=leg_fees[0] if leg_fees else 0,
+            buy_fee_quote=leg_fees[-1] if leg_fees else 0,
             total_fee_quote=total_fee,
             breakeven_move_pct=breakeven,
             is_profitable=False,  # Caller sets after comparing to expected gain
@@ -125,6 +134,7 @@ class FeeManager:
         quote_amount: float,
         expected_gain_pct: float,
         is_swap: bool = False,
+        n_legs: int | None = None,
     ) -> tuple[bool, FeeEstimate]:
         """
         Determine if a trade is worth executing after fees.
@@ -133,6 +143,7 @@ class FeeManager:
             quote_amount: Trade size in quote currency
             expected_gain_pct: Expected price movement (0.05 = 5%)
             is_swap: Whether this is a swap (2x fees)
+            n_legs: Override leg count for route-aware fee calc (None = auto)
 
         Returns:
             (is_worthwhile, fee_estimate)
@@ -148,7 +159,8 @@ class FeeManager:
             return False, estimate
 
         if is_swap:
-            estimate = self.estimate_swap_fees(quote_amount)
+            swap_legs = n_legs if n_legs is not None else 2
+            estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs)
         else:
             fee_quote = self.estimate_trade_fees(quote_amount)
             estimate = FeeEstimate(

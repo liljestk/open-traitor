@@ -30,6 +30,7 @@ from src.core.health import update_health, check_component_health, start_health_
 from src.core.fee_manager import FeeManager
 from src.core.high_stakes import HighStakesManager
 from src.core.portfolio_rotator import PortfolioRotator
+from src.core.route_finder import RouteFinder
 from src.analysis.fear_greed import FearGreedIndex
 from src.analysis.multi_timeframe import MultiTimeframeAnalyzer
 from src.analysis.sentiment import SentimentAnalyzer
@@ -171,6 +172,9 @@ class Orchestrator:
         self.audit = AuditLog()
         self.high_stakes.audit = self.audit  # Connect audit after creation
 
+        # Route finder (optimal swap route discovery)
+        self.route_finder = RouteFinder(coinbase, self.fee_manager, config)
+
         # Portfolio rotator (autonomous crypto-to-crypto swaps)
         self.rotator = PortfolioRotator(
             config=config,
@@ -182,6 +186,8 @@ class Orchestrator:
             fear_greed=self.fear_greed,
             journal=self.journal,
             audit=self.audit,
+            route_finder=self.route_finder,
+            rules=rules,
         )
 
         # Tasks
@@ -2380,13 +2386,13 @@ class Orchestrator:
             scan_pairs = list(self._scan_results.keys()) if self._scan_results else []
             all_candidate_pairs = list(set(self.pairs + scan_pairs))
 
-            proposals = self.rotator.evaluate_rotation(
+            proposals = asyncio.run(self.rotator.evaluate_rotation(
                 held_pairs=held_pairs,
                 all_pairs=all_candidate_pairs,
                 current_prices=self.state.current_prices,
                 portfolio_value=self.state.portfolio_value,
                 scan_results=self._scan_results,
-            )
+            ))
 
             if not proposals:
                 return
@@ -2398,8 +2404,18 @@ class Orchestrator:
                         f"🔄 Auto-swap: {proposal.sell_pair} → {proposal.buy_pair} "
                         f"({format_currency(proposal.quote_amount)}, net +{proposal.net_gain_pct*100:.2f}%)"
                     )
-                    result = self.rotator.execute_swap(proposal)
+                    result = self.rotator.execute_swap(
+                        proposal,
+                        portfolio_value=self.state.portfolio_value,
+                        cash_balance=self.state.cash_balance,
+                    )
                     if result.get("executed") and self.telegram:
+                        route_info = ""
+                        if result.get("route_type"):
+                            route_info = f"\nRoute: {result['route_type']}"
+                            if result.get("bridge_currency"):
+                                route_info += f" via {result['bridge_currency']}"
+                            route_info += f" ({result.get('n_legs', 2)} legs)"
                         self.telegram.send_trade_notification(
                             f"🔄 *Auto-Swap Executed*\n\n"
                             f"Sold: {proposal.sell_pair}\n"
@@ -2408,6 +2424,7 @@ class Orchestrator:
                             f"Expected net gain: +{proposal.net_gain_pct*100:.2f}%\n"
                             f"Fees: {format_currency(proposal.fee_estimate.total_fee_quote)}\n"
                             f"Confidence: {format_percentage(proposal.confidence)}"
+                            f"{route_info}"
                         )
 
                 elif proposal.priority in ("high_impact", "critical"):
@@ -2499,11 +2516,11 @@ class Orchestrator:
         if not held_pairs:
             return "🔄 No open positions to rotate."
 
-        proposals = self.rotator.evaluate_rotation(
+        proposals = asyncio.run(self.rotator.evaluate_rotation(
             held_pairs=held_pairs,
             all_pairs=self.pairs,
             current_prices=self.state.current_prices,
             portfolio_value=self.state.portfolio_value,
-        )
+        ))
 
         return self.rotator.get_rotation_summary(proposals)

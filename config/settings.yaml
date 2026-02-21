@@ -138,6 +138,9 @@ rotation:
   high_impact_confidence: 0.8
   approval_threshold: 200
   swap_cooldown_seconds: 3600
+  full_autonomy: true
+  llm_validation: true
+  llm_validation_temperature: 0.3
 fees:
   trade_fee_pct: 0.006
   maker_fee_pct: 0.004
@@ -151,3 +154,7 @@ high_stakes:
   min_confidence: 0.5
   min_swap_gain_pct: 0.01
   auto_approve_up_to: 500
+routing:
+  bridge_currencies: ["EUR", "EURC", "USDC", "BTC"]
+  min_bridge_volume_24h: 10000
+  slippage_factor: 0.001
