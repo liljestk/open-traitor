@@ -112,6 +112,7 @@ class PipelineManager:
 
         cycle_id = str(uuid.uuid4())
         strategic_context = orch.context_manager.get_strategic_context()
+        exchange_name = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
 
         # Set training data pipeline context so LLM callback knows cycle_id/pair
         tc = getattr(orch, "training_collector", None)
@@ -353,6 +354,7 @@ class PipelineManager:
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
+            "exchange": exchange_name,
         })
 
         signal = analysis_result.get("signal", {})
@@ -423,6 +425,7 @@ class PipelineManager:
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
+            "exchange": exchange_name,
         })
 
         if strategy_result.get("action") == "hold":
@@ -473,6 +476,7 @@ class PipelineManager:
             "avg_loss": kelly_stats.get("avg_loss", 0),
             "correlation_matrix": correlation_matrix,
             "atr": tech_analysis.get("atr") if tech_analysis else None,
+            "exchange": exchange_name,
         })
 
         if not risk_result.get("approved"):
@@ -536,6 +540,7 @@ class PipelineManager:
 
         if exec_result.get("executed"):
             # Persist trade to StatsDB
+            stats_trade_id = None
             try:
                 stats_trade_id = await asyncio.to_thread(
                     orch.stats_db.record_trade,
@@ -556,6 +561,17 @@ class PipelineManager:
                 )
             except Exception as e:
                 logger.debug(f"Failed to record trade in StatsDB: {e}")
+
+            # Link all agent reasoning rows for this cycle to the trade
+            if stats_trade_id and cycle_id:
+                try:
+                    await asyncio.to_thread(
+                        orch.stats_db.backfill_reasoning_trade_id,
+                        cycle_id,
+                        stats_trade_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to backfill reasoning trade_id: {e}")
 
             orch.journal.log_trade(
                 pair=risk_result.get('pair', pair),

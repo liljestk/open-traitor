@@ -682,6 +682,7 @@ class Orchestrator:
                 # Persist snapshot to stats DB (drives the Analytics dashboard)
                 try:
                     exchange_name = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    _fg_value = getattr(self.fear_greed, "last_value", None)
                     self.stats_db.record_snapshot(
                         portfolio_value=self.state.portfolio_value,
                         cash_balance=self.state.cash_balance,
@@ -690,6 +691,7 @@ class Orchestrator:
                         max_drawdown=self.state.max_drawdown,
                         open_positions=dict(self.state.positions),
                         current_prices=dict(self.state.current_prices),
+                        fear_greed_value=float(_fg_value) if _fg_value is not None else None,
                         high_stakes_active=getattr(self.state, "high_stakes_active", False),
                         exchange=exchange_name,
                     )
@@ -722,6 +724,7 @@ class Orchestrator:
                 # ─── Autonomous Settings Advisor ────────────────────
                 if self.settings_advisor.should_run():
                     try:
+                        exchange_name = self.config.get("trading", {}).get("exchange", "coinbase").lower()
                         advisor_ctx = {
                             "fear_greed": getattr(self.state, "fear_greed_summary", "unavailable"),
                             "recent_performance": self.context_manager.get_performance_summary(),
@@ -732,6 +735,7 @@ class Orchestrator:
                             "trace_ctx": self.trace_ctx if hasattr(self, "trace_ctx") else None,
                             "scan_results_summary": self.universe_scanner.get_scan_summary(),
                             "universe_size": len(self._pair_universe),
+                            "exchange": exchange_name,
                         }
                         advisor_result = self._loop.run_until_complete(
                             self.settings_advisor.execute(advisor_ctx)

@@ -175,6 +175,7 @@ class RiskManagerAgent(BaseAgent):
         cash_balance = context.get("cash_balance", 0)
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
+        exchange = context.get("exchange", "coinbase")
         win_rate = context.get("win_rate", 0)
         avg_win = context.get("avg_win", 0)
         avg_loss = context.get("avg_loss", 0)
@@ -351,6 +352,7 @@ class RiskManagerAgent(BaseAgent):
                     reasoning_json=result,
                     signal_type=action,
                     confidence=float(proposal.get("confidence", 0)),
+                    exchange=exchange,
                 )
             except Exception as e:
                 self.logger.debug(f"Failed to save risk_manager trace: {e}")

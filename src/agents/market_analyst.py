@@ -81,6 +81,7 @@ class MarketAnalystAgent(BaseAgent):
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
+        exchange = context.get("exchange", "coinbase")
 
         # Step 1: Technical analysis (no LLM needed)
         tech_analysis = self.technical.analyze(candles)
@@ -140,6 +141,7 @@ class MarketAnalystAgent(BaseAgent):
                     completion_tokens=span.completion_tokens if span else 0,
                     latency_ms=span.latency_ms if span else 0.0,
                     raw_prompt=user_message[:1000],
+                    exchange=exchange,
                 )
             except Exception as e:
                 self.logger.debug(f"Failed to save reasoning trace: {e}")

@@ -83,9 +83,10 @@ PROFILE_ALIASES: dict[str, str] = {
     "crypto": "coinbase",
 }
 
-# Profiles whose data lives in the default (injected) stats.db
-# (historical crypto data was written before per-profile DBs were introduced)
-PROFILE_USE_DEFAULT_DB: set[str] = {"coinbase", "settings"}
+# Profiles whose data lives in the default (injected) stats.db.
+# NOTE: coinbase was removed — agents now write to stats_<profile>.db,
+# so the dashboard must open the profile-specific file.
+PROFILE_USE_DEFAULT_DB: set[str] = {"settings"}
 
 # Profile → config file path
 PROFILE_CONFIG_FILES: dict[str, str] = {
@@ -228,8 +229,38 @@ async def lifespan(application: FastAPI):
     if _stats_db is None:
         try:
             from src.utils.stats import StatsDB
-            _stats_db = StatsDB()
-            logger.info("📊 Dashboard self-initialised StatsDB")
+            # Detect the most active profile DB so the "Default" profile
+            # shows real data instead of an empty stats.db shell.
+            # Try each candidate in priority order; skip files that fail to open
+            # (e.g. locked or corrupted).
+            _candidates = [
+                ("data/stats_coinbase.db", "coinbase"),
+                ("data/stats_nordnet.db", "nordnet"),
+                ("data/stats_ibkr.db", "ibkr"),
+            ]
+            _best_path = None
+            _best_size = 0
+            for _cpath, _clabel in _candidates:
+                if os.path.exists(_cpath):
+                    _sz = os.path.getsize(_cpath)
+                    if _sz > _best_size:
+                        _best_size = _sz
+                        _best_path = _cpath
+            # Try the best candidate first, then fall back to others
+            _opened = False
+            _tried = [_best_path] if _best_path else []
+            _tried += [c for c, _ in _candidates if c != _best_path and os.path.exists(c) and os.path.getsize(c) > 8192]
+            for _try_path in _tried:
+                try:
+                    _stats_db = StatsDB(db_path=_try_path)
+                    logger.info(f"📊 Dashboard self-initialised StatsDB from {_try_path}")
+                    _opened = True
+                    break
+                except Exception as _db_err:
+                    logger.warning(f"⚠️ Could not open {_try_path}: {_db_err}")
+            if not _opened:
+                _stats_db = StatsDB()
+                logger.info("📊 Dashboard self-initialised StatsDB (default)")
         except Exception as e:
             logger.error(f"❌ Could not initialise StatsDB: {e}")
 
@@ -370,8 +401,8 @@ def _require_db(profile: str = ""):
     Resolution order:
     1. Resolve aliases (e.g. crypto → coinbase).
     2. If the resolved profile is in PROFILE_USE_DEFAULT_DB, return the
-       injected default DB (stats.db — contains historical crypto data).
-    3. Otherwise look up / open stats_{resolved}.db.
+       injected default DB.
+    3. Otherwise look up / open stats_{resolved}.db from the profile cache.
     4. If the profile-specific DB doesn't exist or is tiny (<8 KB, empty
        shell), fall back to the default DB gracefully.
     """
