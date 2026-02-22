@@ -211,7 +211,7 @@ class MultiTimeframeAnalyzer:
                     "open": group[0].get("open", "0"),
                     "close": group[-1].get("close", "0"),
                     "high": str(max(float(c.get("high", 0)) for c in group)),
-                    "low": str(min(float(c.get("low", 0)) for c in group if float(c.get("low", 0)) > 0) or 0),
+                    "low": str(min((float(c.get("low", 0)) for c in group if float(c.get("low", 0)) > 0), default=0)),
                     "volume": str(sum(float(c.get("volume", 0)) for c in group)),
                 }
                 aggregated.append(agg)
@@ -300,8 +300,10 @@ class MultiTimeframeAnalyzer:
         ]
         for tf_name, tf_data in result["timeframes"].items():
             if "score" in tf_data:
+                rsi_val = tf_data.get('rsi')
+                rsi_str = f"{rsi_val:.0f}" if rsi_val is not None else "N/A"
                 lines.append(
-                    f"  {tf_name}: {tf_data['signal']} | RSI: {tf_data.get('rsi', 'N/A'):.0f} | "
+                    f"  {tf_name}: {tf_data['signal']} | RSI: {rsi_str} | "
                     f"MACD: {tf_data.get('macd_signal', 'N/A')} | EMA: {tf_data.get('ema_signal', 'N/A')}"
                 )
         return "\n".join(lines)

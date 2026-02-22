@@ -327,7 +327,7 @@ class TechnicalAnalyzer:
 
         logger.debug(
             f"Technical analysis complete | Price: ${current_price:,.2f} | "
-            f"RSI: {current_rsi:.1f} ({rsi_signal}) | "
+            f"RSI: {current_rsi if current_rsi is not None else 0:.1f} ({rsi_signal}) | "
             f"MACD: {macd_signal_text} | BB: {bb_signal}"
         )
 
@@ -396,12 +396,12 @@ class TechnicalAnalyzer:
 
         if above_count == total:
             return "strongly_bullish"
+        if above_count == 0:
+            return "strongly_bearish"
         if above_count >= total * 0.75:
             return "bullish"
         if above_count <= total * 0.25:
             return "bearish"
-        if above_count == 0:
-            return "strongly_bearish"
         return "neutral"
 
     def _interpret_volume(self, volume_ratio: float) -> str:

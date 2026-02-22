@@ -234,12 +234,15 @@ class UniverseScanner:
         table_lines = ["Pair | Price | RSI | ADX | Vol24h | MACDh | EMA | BB | Score | Chg24h%"]
         table_lines.append("-" * 90)
         for pair, d in ranked:
+            rsi = d.get('rsi')
+            adx = d.get('adx')
+            macd_h = d.get('macd_histogram')
             table_lines.append(
                 f"{pair} | {d.get('current_price', '?'):.6g} | "
-                f"{d.get('rsi', '?'):.1f} | "
-                f"{d.get('adx', '?'):.1f} | "
+                f"{rsi:.1f if rsi is not None else '?'} | "
+                f"{adx:.1f if adx is not None else '?'} | "
                 f"{d.get('volume_24h', 0):.0f} | "
-                f"{d.get('macd_histogram', '?'):.4f} | "
+                f"{macd_h:.4f if macd_h is not None else '?'} | "
                 f"{d.get('ema_signal', '?')}({d.get('ema_confidence', 0):.2f}) | "
                 f"{d.get('bb_signal', '?')}({d.get('bb_confidence', 0):.2f}) | "
                 f"{d.get('composite_score', 0):.3f} | "

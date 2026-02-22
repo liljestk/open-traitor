@@ -1324,9 +1324,23 @@ def setup_config(body: _SetupConfigBody, request: Request):
         for d in ["data", "data/trades", "data/news", "data/journal", "data/audit", "logs"]:
             os.makedirs(d, exist_ok=True)
 
-        # 5. Update os.environ with new values
+        # 5. Update os.environ with new values (allowlisted keys only)
+        _ALLOWED_ENV_KEYS = {
+            "COINBASE_API_KEY", "COINBASE_API_SECRET", "COINBASE_KEY_FILE",
+            "REDIS_URL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_AUTHORIZED_USERS",
+            "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
+            "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",
+            "DASHBOARD_API_KEY", "DASHBOARD_COMMAND_SIGNING_KEY",
+            "LOG_LEVEL", "PAPER_MODE",
+            "NORDNET_USERNAME", "NORDNET_PASSWORD",
+        }
         for key, value in body.config_env.items():
-            os.environ[key] = value
+            if key in _ALLOWED_ENV_KEYS:
+                os.environ[key] = value
+            else:
+                logger.warning(f"Setup wizard: rejected unknown env key {key!r}")
 
         logger.warning(
             f"⚙️ Setup wizard config saved: {len(body.config_env)} env vars, "

@@ -310,7 +310,7 @@ class TradingState:
             logger.info(f"Trade recorded: {trade.to_summary()}")
 
     def close_trade(self, trade_id: str, close_price: float, fees: float = 0.0) -> Optional[Trade]:
-        """Close an existing trade and update PnL."""
+        """Close an existing trade and update PnL, positions, and cash."""
         with self._lock:
             for trade in self.trades:
                 if trade.id == trade_id and trade.is_open:
@@ -322,6 +322,17 @@ class TradingState:
                             self.winning_trades += 1
                         else:
                             self.losing_trades += 1
+
+                    # Update positions and cash (close reverses the original booking)
+                    qty = trade.filled_quantity or trade.quantity
+                    if trade.action.value == "buy":
+                        # Closing a buy = selling the position
+                        self.positions[trade.pair] = max(0.0, self.positions.get(trade.pair, 0) - qty)
+                        self.cash_balance += (close_price * qty) - fees
+                    elif trade.action.value == "sell":
+                        # Closing a sell = buying back
+                        self.positions[trade.pair] = self.positions.get(trade.pair, 0) + qty
+                        self.cash_balance -= (close_price * qty) + fees
 
                     logger.info(f"Trade closed: {trade.to_summary()}")
                     return trade

@@ -177,43 +177,43 @@ class AuditLog:
         Verify the integrity of the entire audit chain.
         Returns verification result.
         """
-        with self._lock:
-            if not os.path.exists(self._log_file):
-                return {"valid": True, "entries": 0}
-
         prev_hash = "genesis"
         count = 0
         broken_at = None
 
         try:
-            with self._lock, open(self._log_file, "r") as f:
-                for line_num, line in enumerate(f, 1):
-                    try:
-                        entry = json.loads(line.strip())
-                        stored_prev = entry.get("prev_hash", "")
-                        stored_hash = entry.get("hash", "")
+            with self._lock:
+                if not os.path.exists(self._log_file):
+                    return {"valid": True, "entries": 0}
 
-                        # Verify chain
-                        if stored_prev != prev_hash:
+                with open(self._log_file, "r") as f:
+                    for line_num, line in enumerate(f, 1):
+                        try:
+                            entry = json.loads(line.strip())
+                            stored_prev = entry.get("prev_hash", "")
+                            stored_hash = entry.get("hash", "")
+
+                            # Verify chain
+                            if stored_prev != prev_hash:
+                                broken_at = line_num
+                                break
+
+                            # Verify entry hash
+                            entry_copy = {k: v for k, v in entry.items()
+                                          if k not in ("prev_hash", "hash")}
+                            entry_data = json.dumps(entry_copy, default=str, separators=(",", ":"))
+                            expected_hash = self._compute_hash(entry_data, prev_hash)
+
+                            if expected_hash != stored_hash:
+                                broken_at = line_num
+                                break
+
+                            prev_hash = stored_hash
+                            count += 1
+
+                        except json.JSONDecodeError:
                             broken_at = line_num
                             break
-
-                        # Verify entry hash
-                        entry_copy = {k: v for k, v in entry.items()
-                                      if k not in ("prev_hash", "hash")}
-                        entry_data = json.dumps(entry_copy, default=str, separators=(",", ":"))
-                        expected_hash = self._compute_hash(entry_data, prev_hash)
-
-                        if expected_hash != stored_hash:
-                            broken_at = line_num
-                            break
-
-                        prev_hash = stored_hash
-                        count += 1
-
-                    except json.JSONDecodeError:
-                        broken_at = line_num
-                        break
 
         except Exception as e:
             return {"valid": False, "error": str(e)}

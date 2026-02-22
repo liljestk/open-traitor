@@ -38,6 +38,7 @@ class BacktestPosition:
     exit_reason: str = ""
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    entry_fee: float = 0.0
 
 
 @dataclass
@@ -183,7 +184,7 @@ class BacktestEngine:
                     # Apply slippage to exit (selling slightly lower)
                     exit_price *= (1 - self.slippage_pct)
                     fee = exit_price * pos.quantity * self.fee_pct
-                    pnl = (exit_price - pos.entry_price) * pos.quantity - fee
+                    pnl = (exit_price - pos.entry_price) * pos.quantity - pos.entry_fee - fee
                     pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
 
                     pos.closed = True
@@ -234,6 +235,7 @@ class BacktestEngine:
                         take_profit=take_profit,
                         trailing_pct=self.trailing_stop_pct,
                         highest_price=current_price,
+                        entry_fee=fee,
                     )
                     positions.append(pos)
 

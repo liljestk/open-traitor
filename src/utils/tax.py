@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -104,6 +105,7 @@ class FIFOTracker:
     def __init__(self):
         self._lots: dict[str, list[TaxLot]] = {}  # asset → [lots in FIFO order]
         self._disposals: list[TaxDisposal] = []
+        self._lock = threading.Lock()
 
     def record_buy(
         self,
@@ -129,9 +131,10 @@ class FIFOTracker:
             fees=fees,
         )
 
-        if asset not in self._lots:
-            self._lots[asset] = []
-        self._lots[asset].append(lot)
+        with self._lock:
+            if asset not in self._lots:
+                self._lots[asset] = []
+            self._lots[asset].append(lot)
 
         logger.debug(
             f"Tax lot added: {quantity:.8f} {asset} @ {price_per_unit:,.2f} {quote_currency}"
@@ -156,6 +159,13 @@ class FIFOTracker:
         if not date:
             date = datetime.now(timezone.utc).isoformat()
 
+        with self._lock:
+            return self._record_sell_locked(asset, quantity, price_per_unit,
+                                            quote_currency, date, order_id, fees)
+
+    def _record_sell_locked(self, asset, quantity, price_per_unit,
+                            quote_currency, date, order_id, fees):
+        """Inner sell logic, called under self._lock."""
         lots = self._lots.get(asset, [])
         if not lots:
             logger.warning(

@@ -843,6 +843,18 @@ def apply_preset(
 # Runtime push — hot-reload without restart
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Allowlist of rule attributes that may be hot-reloaded via setattr.
+# Prevents YAML field names from setting arbitrary attributes.
+_RULES_SETTABLE_ATTRS = frozenset({
+    "max_single_trade", "max_daily_spend", "max_daily_loss",
+    "max_portfolio_risk_pct", "require_approval_above",
+    "never_trade_pairs", "only_trade_pairs",
+    "min_trade_interval_seconds", "max_trades_per_day",
+    "max_cash_per_trade_pct", "emergency_stop_portfolio",
+    "always_use_stop_loss", "max_stop_loss_pct",
+})
+
+
 def push_to_runtime(
     rules_instance,
     config: dict,
@@ -861,16 +873,6 @@ def push_to_runtime(
         else:
             section, attr = "absolute_rules", key
 
-        # Allowlist of rule attributes that may be hot-reloaded via setattr.
-        # Prevents YAML field names from setting arbitrary attributes.
-        _RULES_SETTABLE_ATTRS = frozenset({
-            "max_single_trade", "max_daily_spend", "max_daily_loss",
-            "max_portfolio_risk_pct", "require_approval_above",
-            "never_trade_pairs", "only_trade_pairs",
-            "min_trade_interval_seconds", "max_trades_per_day",
-            "max_cash_per_trade_pct", "emergency_stop_portfolio",
-            "always_use_stop_loss", "max_stop_loss_pct",
-        })
         if section == "absolute_rules":
             if rules_instance and attr in _RULES_SETTABLE_ATTRS and hasattr(rules_instance, attr):
                 with rules_instance._lock:

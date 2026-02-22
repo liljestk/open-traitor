@@ -74,6 +74,8 @@ class StatsDB:
                 except Exception:
                     pass
             self._connections.clear()
+        # Null the current thread's connection so _get_conn() re-opens if needed
+        self._local.conn = None
 
     def _init_db(self) -> None:
         """Create tables if they don't exist."""

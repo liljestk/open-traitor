@@ -141,6 +141,7 @@ class HoldingsManager:
                         # Fallback: USD pair → convert to native
                         usd_pair = f"{currency}-USD"
                         try:
+                            _get_rate_limiter().wait("coinbase_rest")  # M8
                             price_usd = orch.exchange.get_current_price(usd_pair)
                             if price_usd > 0:
                                 prices_by_pair[usd_pair] = price_usd
@@ -169,6 +170,7 @@ class HoldingsManager:
         for pair in orch.pairs:
             if pair not in prices_by_pair:
                 try:
+                    _get_rate_limiter().wait("coinbase_rest")  # M8
                     p = orch.exchange.get_current_price(pair)
                     if p > 0:
                         prices_by_pair[pair] = p

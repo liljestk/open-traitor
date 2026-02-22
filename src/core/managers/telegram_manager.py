@@ -492,7 +492,7 @@ class TelegramManager:
             if entry_price <= 0:
                 return {"ok": False, "error": f"No live price available for {pair}"}
 
-            quantity = from_amount / entry_price if from_currency == quote else from_amount * entry_price
+            quantity = from_amount / entry_price if from_currency == quote else from_amount
 
             sim_id = orch.stats_db.record_simulated_trade(
                 pair=pair,
@@ -528,8 +528,14 @@ class TelegramManager:
                     except Exception:
                         current_price = row["entry_price"]
                     if current_price > 0:
-                        pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
+                        is_long = row.get("from_currency") != row["pair"].split("-")[0]
+                        if is_long:
+                            pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
+                        else:
+                            pnl_abs = (row["entry_price"] - current_price) * row["quantity"]
                         pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
+                        if not is_long:
+                            pnl_pct = -pnl_pct
                     else:
                         pnl_abs = 0.0
                         pnl_pct = 0.0

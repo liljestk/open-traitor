@@ -205,6 +205,7 @@ class ExecutorAgent(BaseAgent):
                 trade.fees = float(order.get("fee", 0))
 
                 # Slippage measurement
+                slippage_pct = 0.0
                 if expected_price > 0 and trade.filled_price > 0:
                     slippage_pct = (trade.filled_price - expected_price) / expected_price * 100
                     if action == "sell":
@@ -570,7 +571,7 @@ class ExecutorAgent(BaseAgent):
         cancel_result = self.exchange.cancel_order(trade.coinbase_order_id)
 
         if cancel_result.get("success"):
-            trade.status = TradeStatus.CANCELLED
+            self.state.mark_trade_status(trade.id, TradeStatus.CANCELLED)
             # Reverse the position/cash booking via public API
             self.state.reverse_trade_booking(trade)
             self.logger.info(

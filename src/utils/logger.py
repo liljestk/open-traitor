@@ -4,6 +4,7 @@ Logging configuration for Auto-Traitor.
 
 import logging
 import os
+import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -16,6 +17,7 @@ from src.utils.helpers import get_log_dir
 
 _loggers: dict[str, logging.Logger] = {}
 _initialized = False
+_init_lock = threading.Lock()
 
 console = Console()
 
@@ -29,8 +31,9 @@ def setup_logger(
 ) -> None:
     """Initialize the logging system."""
     global _initialized
-    if _initialized:
-        return
+    with _init_lock:
+        if _initialized:
+            return
 
     level = getattr(logging, log_level.upper(), logging.INFO)
 

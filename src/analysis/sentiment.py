@@ -281,17 +281,19 @@ class SentimentAnalyzer:
             results.append(self.analyze_text(text, source))
 
         scores = [r.score for r in results]
+
+        # Recency-weighted: more recent items get higher weight
+        # (items are ordered newest-first from input)
+        weights = [1.0 / (i + 1) for i in range(len(scores))]
+        weight_sum = sum(weights)
+        weighted_score = sum(s * w for s, w in zip(scores, weights)) / weight_sum if weight_sum > 0 else 0.0
+
+        # Sort scores for median calculation (after weighted score is computed)
         scores.sort()
 
         # Median
         n = len(scores)
         median = scores[n // 2] if n % 2 else (scores[n // 2 - 1] + scores[n // 2]) / 2
-
-        # Recency-weighted: more recent items get higher weight
-        # (assumes items are ordered newest-first)
-        weights = [1.0 / (i + 1) for i in range(len(scores))]
-        weight_sum = sum(weights)
-        weighted_score = sum(s * w for s, w in zip(scores, weights)) / weight_sum if weight_sum > 0 else 0.0
 
         # Counts
         bullish = sum(1 for r in results if r.label in ("bullish", "very_bullish"))

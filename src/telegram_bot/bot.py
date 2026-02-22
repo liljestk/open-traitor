@@ -55,6 +55,7 @@ class TelegramBot:
         self._thread: Optional[threading.Thread] = None
         self._running_event = threading.Event()
         self._outbound_bot = None  # H8: reuse Bot instance for outbound messages
+        self._outbound_bot_lock = threading.Lock()
 
         # =====================================================================
         # AUTHORIZATION — STRICT USER ID ALLOWLIST
@@ -335,8 +336,10 @@ class TelegramBot:
     def _get_outbound_bot(self):
         """Return a reusable Bot instance for outbound messages (H8)."""
         if self._outbound_bot is None:
-            from telegram import Bot
-            self._outbound_bot = Bot(token=self.bot_token)
+            with self._outbound_bot_lock:
+                if self._outbound_bot is None:
+                    from telegram import Bot
+                    self._outbound_bot = Bot(token=self.bot_token)
         return self._outbound_bot
 
     def send_message(self, text: str) -> None:

@@ -155,15 +155,18 @@ class EventManager:
                 # Invalidate the cache so the next cycle picks up the emergency plan
                 orch._strategic_context_ts = 0.0
 
-                if orch.telegram:
-                    orch.telegram.send_alert(
-                        f"🚨 *Emergency Replan*\n\n"
-                        f"Reason: {reason}\n"
-                        f"Action: Switched to conservative posture, all pairs on avoid.\n"
-                        f"Next scheduled plan will re-evaluate."
-                    )
+                try:
+                    if orch.telegram:
+                        orch.telegram.send_alert(
+                            f"🚨 *Emergency Replan*\n\n"
+                            f"Reason: {reason}\n"
+                            f"Action: Switched to conservative posture, all pairs on avoid.\n"
+                            f"Next scheduled plan will re-evaluate."
+                        )
+                except Exception as te:
+                    logger.warning(f"Failed to send emergency replan alert: {te}")
             except Exception as e:
-                # M10 fix: reset cooldown so next attempt can try again
+                # Reset cooldown so next attempt can try again (DB write failed)
                 self._replan_last_ts = 0.0
                 logger.error(f"Failed to write emergency context: {e}")
 
