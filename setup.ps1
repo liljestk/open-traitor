@@ -1,7 +1,7 @@
 # ===========================================================================
 #  Auto-Traitor Setup Script
 #  Interactive setup that creates config/.env and guides through everything.
-#  Supports multi-exchange (Coinbase crypto + Nordnet equities) architecture.
+#  Supports multi-exchange (Coinbase crypto + Nordnet/IBKR equities) architecture.
 # ===========================================================================
 
 param(
@@ -191,16 +191,19 @@ catch {
 
 Write-Step -Num 2 -Title "EXCHANGE SELECTION"
 
-Write-Host "  Which exchanges do you want to trade on?" -ForegroundColor White
-Write-Host "    1. 🪙 Coinbase only (crypto: BTC, ETH, etc.)" -ForegroundColor Cyan
-Write-Host "    2. 📈 Nordnet only (equities: OMX Stockholm)" -ForegroundColor Green
-Write-Host "    3. 🔀 Both Coinbase + Nordnet (multi-asset)" -ForegroundColor Yellow
+Write-Host "  Which exchange do you want to trade on?" -ForegroundColor White
+Write-Host "    1. 🪙 Coinbase (crypto: BTC, ETH, etc.)" -ForegroundColor Cyan
+Write-Host "    2. 📈 Nordnet (equities: OMX Stockholm)" -ForegroundColor Green
+Write-Host "    3. 🏦 Interactive Brokers (equities: US/EU markets)" -ForegroundColor Magenta
+Write-Host ""
+Write-Host "  Note: Only one exchange can be active at a time." -ForegroundColor DarkGray
 Write-Host ""
 
-$exchangeChoice = Prompt-Required -Prompt "Select exchange(s) (1-3)" -Default "1"
+$exchangeChoice = Prompt-Required -Prompt "Select exchange (1-3)" -Default "1"
 
 $setupCoinbaseExchange = $false
 $setupNordnetExchange = $false
+$setupIBKRExchange = $false
 
 switch ($exchangeChoice) {
     "1" {
@@ -212,9 +215,8 @@ switch ($exchangeChoice) {
         Write-OK "Nordnet (equities) selected."
     }
     "3" {
-        $setupCoinbaseExchange = $true
-        $setupNordnetExchange = $true
-        Write-OK "Both exchanges selected (multi-asset mode)."
+        $setupIBKRExchange = $true
+        Write-OK "Interactive Brokers (equities) selected."
     }
     default {
         $setupCoinbaseExchange = $true
@@ -328,6 +330,59 @@ if ($setupNordnetExchange) {
     Write-Host "    • Default pairs: VOLV-B.ST, ERIC-B.ST, ABB.ST" -ForegroundColor DarkGray
     Write-Host ""
     Write-OK "Nordnet config will be active via config/nordnet.yaml"
+    Append-EnvBlank
+}
+
+# ===========================================================================
+# STEP 4c: Interactive Brokers Info (if selected)
+# ===========================================================================
+
+if ($setupIBKRExchange) {
+    Write-Step -Num 4 -Title "INTERACTIVE BROKERS EXCHANGE"
+
+    Write-Info "Interactive Brokers trading is currently paper-mode only."
+    Write-Info "Live trading requires IB Gateway / TWS running locally."
+    Write-Host ""
+    Write-Host "  Interactive Brokers configuration:" -ForegroundColor White
+    Write-Host "    • Config file: config/ibkr.yaml" -ForegroundColor DarkGray
+    Write-Host "    • Markets: US/EU equities (USD-denominated by default)" -ForegroundColor DarkGray
+    Write-Host "    • Fee model: $0.0035/share, min $0.35 (US Tiered)" -ForegroundColor DarkGray
+    Write-Host "    • Default pairs: AAPL, MSFT, GOOGL, AMZN, NVDA" -ForegroundColor DarkGray
+    Write-Host ""
+
+    Write-Host "  For live trading you will need:" -ForegroundColor Yellow
+    Write-Host "    1. IB Gateway or Trader Workstation (TWS) running" -ForegroundColor DarkGray
+    Write-Host "    2. API connections enabled in TWS/Gateway settings" -ForegroundColor DarkGray
+    Write-Host "    3. Paper trading account (for testing) or funded live account" -ForegroundColor DarkGray
+    Write-Host ""
+
+    $ibkrHost = Prompt-Required -Prompt "IB Gateway/TWS host" -Default "127.0.0.1"
+    $ibkrPort = Prompt-Required -Prompt "IB Gateway/TWS port (4001=live, 4002=paper)" -Default "4002"
+    $ibkrClientId = Prompt-Required -Prompt "IB client ID" -Default "1"
+
+    Write-Host ""
+    Write-Host "  Which base currency for your IB account?" -ForegroundColor White
+    Write-Host "    1. USD (US Dollar)" -ForegroundColor DarkGray
+    Write-Host "    2. EUR (Euro)" -ForegroundColor DarkGray
+    Write-Host "    3. GBP (British Pound)" -ForegroundColor DarkGray
+    Write-Host "    4. CHF (Swiss Franc)" -ForegroundColor DarkGray
+    Write-Host ""
+    $currChoice = Prompt-Required -Prompt "Select currency (1-4)" -Default "1"
+    $ibkrCurrency = switch ($currChoice) {
+        "1" { "USD" }
+        "2" { "EUR" }
+        "3" { "GBP" }
+        "4" { "CHF" }
+        default { "USD" }
+    }
+
+    Append-Env -Key "IBKR_HOST" -Value $ibkrHost -Comment "Interactive Brokers — Gateway/TWS connection"
+    Append-Env -Key "IBKR_PORT" -Value $ibkrPort
+    Append-Env -Key "IBKR_CLIENT_ID" -Value $ibkrClientId
+    Append-Env -Key "IBKR_CURRENCY" -Value $ibkrCurrency -Comment "IB base currency"
+    Append-EnvBlank
+
+    Write-OK "Interactive Brokers config will be active via config/ibkr.yaml"
     Append-EnvBlank
 }
 
@@ -575,6 +630,40 @@ if ($setupTelegram -and -not $SkipTelegram) {
         Append-EnvBlank
     }
 
+    if ($setupIBKRExchange) {
+        Write-Host ""
+        Write-Host "  ─── Step 6c: Interactive Brokers Telegram Bot ───" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Create a bot for the Interactive Brokers agent." -ForegroundColor White
+        Write-Host ""
+        Write-Host "  1. @BotFather → /newbot" -ForegroundColor White
+        Write-Host "  2. Name: e.g. 'Auto-Traitor IBKR'" -ForegroundColor White
+        Write-Host "  3. Username: e.g. 'my_at_ibkr_bot'" -ForegroundColor White
+        Write-Host ""
+
+        $ibBotToken = Prompt-Required -Prompt "IBKR Bot Token"
+
+        if ($ibBotToken -notmatch '^\d+:[A-Za-z0-9_-]+$') {
+            Write-Warn "Token format looks unusual. Double-check with BotFather."
+        }
+        else {
+            Write-OK "Token format looks valid."
+        }
+
+        Write-Host ""
+        $ibChatId = Prompt-Required -Prompt "IBKR Chat ID (press Enter to use your User ID)" -Default $userId
+
+        Append-Env -Key "TELEGRAM_BOT_TOKEN_IBKR" -Value $ibBotToken -Comment "Telegram Bot — Interactive Brokers agent"
+        Append-Env -Key "TELEGRAM_CHAT_ID_IBKR" -Value $ibChatId
+
+        # Set generic fallback if neither Coinbase nor Nordnet was configured
+        if (-not $setupCoinbaseExchange -and -not $setupNordnetExchange) {
+            Append-Env -Key "TELEGRAM_BOT_TOKEN" -Value $ibBotToken -Comment "Generic fallback (same as IBKR)"
+            Append-Env -Key "TELEGRAM_CHAT_ID" -Value $ibChatId
+        }
+        Append-EnvBlank
+    }
+
     Write-Host ""
     Write-Host "  ─── Step 6d: Bot Privacy Settings ───────────────" -ForegroundColor Yellow
     Write-Host ""
@@ -766,6 +855,9 @@ if ($setupCoinbaseExchange) {
 if ($setupNordnetExchange) {
     Write-Host "    • agent-nordnet (equity trading)" -ForegroundColor DarkGray
 }
+if ($setupIBKRExchange) {
+    Write-Host "    • agent-ibkr (equity trading via Interactive Brokers)" -ForegroundColor DarkGray
+}
 Write-Host "    • dashboard (web UI on port 8090)" -ForegroundColor DarkGray
 Write-Host "    • news-worker (background news aggregation)" -ForegroundColor DarkGray
 Write-Host "    • Temporal (workflow engine + planning worker)" -ForegroundColor DarkGray
@@ -875,6 +967,9 @@ if ($setupCoinbaseExchange) {
 if ($setupNordnetExchange) {
     Write-Host "     Nordnet:   config/nordnet.yaml   (port 8081)" -ForegroundColor DarkGray
 }
+if ($setupIBKRExchange) {
+    Write-Host "     IBKR:      config/ibkr.yaml      (port 8082)" -ForegroundColor DarkGray
+}
 Write-Host ""
 
 # LLM providers summary
@@ -923,6 +1018,9 @@ if ($setupCoinbaseExchange) {
 if ($setupNordnetExchange) {
     Write-Host "     Equity health: curl http://localhost:8081/health" -ForegroundColor DarkGray
 }
+if ($setupIBKRExchange) {
+    Write-Host "     IBKR health:   curl http://localhost:8082/health" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "  🌐 Web UIs (once stack is running):" -ForegroundColor Yellow
 Write-Host "     Dashboard:    http://localhost:8090" -ForegroundColor DarkGray
@@ -953,6 +1051,11 @@ if ($setupNordnetExchange) {
     Write-Host "     config/nordnet.yaml:" -ForegroundColor DarkGray
     Write-Host "       • Trade limits (SEK), Courtage Mini fee model" -ForegroundColor DarkGray
     Write-Host "       • Equity-specific risk parameters (wider stops)" -ForegroundColor DarkGray
+}
+if ($setupIBKRExchange) {
+    Write-Host "     config/ibkr.yaml:" -ForegroundColor DarkGray
+    Write-Host "       • Trade limits (USD), IBKR tiered commission" -ForegroundColor DarkGray
+    Write-Host "       • Equity-specific risk parameters, IB Gateway settings" -ForegroundColor DarkGray
 }
 Write-Host "     Common settings:" -ForegroundColor DarkGray
 Write-Host "       • High-stakes mode multipliers" -ForegroundColor DarkGray

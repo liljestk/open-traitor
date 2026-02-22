@@ -243,6 +243,19 @@ def main():
         except ImportError:
             logger.error("NordnetClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
             exchange = CoinbaseClient(paper_mode=True)
+    elif exchange_type == "ibkr":
+        try:
+            from src.core.ib_client import IBClient
+            exchange: ExchangeClient = IBClient(
+                paper_mode=paper_mode,
+                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            )
+        except ImportError:
+            logger.error("IBClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
+            exchange = CoinbaseClient(paper_mode=True)
     else:
         exchange: ExchangeClient = CoinbaseClient(
             api_key=os.environ.get("COINBASE_API_KEY"),

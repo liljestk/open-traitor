@@ -1215,7 +1215,7 @@ def _serialize_event_attrs(event) -> dict:
 class _SetupConfigBody(_BaseModel):
     config_env: dict[str, str]  # env vars for config/.env
     root_env: dict[str, str]  # env vars for root .env (Docker Compose)
-    assets: dict | None = None  # {coinbase_pairs: [...], nordnet_pairs: [...]}
+    assets: dict | None = None  # {coinbase_pairs: [...], nordnet_pairs: [...], ibkr_pairs: [...]}
 
 
 @app.post("/api/setup", summary="Save initial configuration from setup wizard")
@@ -1320,6 +1320,18 @@ def setup_config(body: _SetupConfigBody, request: Request):
                         yaml.dump(nn_cfg, f, default_flow_style=False, allow_unicode=True)
                     updated_yamls.append("nordnet.yaml")
 
+            ibkr_pairs = body.assets.get("ibkr_pairs")
+            if ibkr_pairs and isinstance(ibkr_pairs, list):
+                ib_path = os.path.join("config", "ibkr.yaml")
+                if os.path.exists(ib_path):
+                    with open(ib_path, "r", encoding="utf-8") as f:
+                        ib_cfg = yaml.safe_load(f) or {}
+                    if "trading" in ib_cfg:
+                        ib_cfg["trading"]["pairs"] = ibkr_pairs
+                    with open(ib_path, "w", encoding="utf-8") as f:
+                        yaml.dump(ib_cfg, f, default_flow_style=False, allow_unicode=True)
+                    updated_yamls.append("ibkr.yaml")
+
         # 4. Create data directories
         for d in ["data", "data/trades", "data/news", "data/journal", "data/audit", "logs"]:
             os.makedirs(d, exist_ok=True)
@@ -1335,6 +1347,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "DASHBOARD_API_KEY", "DASHBOARD_COMMAND_SIGNING_KEY",
             "LOG_LEVEL", "PAPER_MODE",
             "NORDNET_USERNAME", "NORDNET_PASSWORD",
+            "IBKR_HOST", "IBKR_PORT", "IBKR_CLIENT_ID", "IBKR_CURRENCY",
         }
         for key, value in body.config_env.items():
             if key in _ALLOWED_ENV_KEYS:
