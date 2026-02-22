@@ -1195,8 +1195,10 @@ class CoinbaseClient(ExchangeClient):
                     "error": f"Insufficient {quote_currency} balance for limit buy",
                 }
 
-            self._paper_balance[quote_currency] = quote_bal - quote_amount - fee
-            self._paper_balance[base_currency] = self._paper_balance.get(base_currency, 0) + quantity
+            self._paper_balance[quote_currency] = round(quote_bal - quote_amount - fee, 8)
+            self._paper_balance[base_currency] = round(
+                self._paper_balance.get(base_currency, 0) + quantity, 8
+            )
 
             order_id = str(uuid.uuid4())
             order = {
@@ -1269,8 +1271,12 @@ class CoinbaseClient(ExchangeClient):
             maker_fee_pct = self._paper_fee_pct * 0.5
             fee = round(quote_amount * maker_fee_pct, 8)
 
-            self._paper_balance[base_currency] -= quantity
-            self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount - fee
+            self._paper_balance[base_currency] = round(
+                self._paper_balance[base_currency] - quantity, 8
+            )
+            self._paper_balance[quote_currency] = round(
+                self._paper_balance.get(quote_currency, 0) + quote_amount - fee, 8
+            )
 
             order_id = str(uuid.uuid4())
             order = {

@@ -298,6 +298,9 @@ class ExecutorAgent(BaseAgent):
         """
         for trade in self.state.get_open_trades():
             if trade.pair == pair and trade.action == TradeAction.BUY:
+                # Cycle-4 fix: skip PENDING trades that haven't filled yet
+                if trade.status not in (TradeStatus.FILLED, TradeStatus.PARTIALLY_FILLED):
+                    continue
                 if quantity > 0:
                     return self._partial_sell(trade, quantity, price, reason)
                 return self._close_position(trade, price, reason)
@@ -361,6 +364,9 @@ class ExecutorAgent(BaseAgent):
 
         for trade in self.state.get_open_trades():
             if trade.action != TradeAction.BUY:
+                continue
+            # Cycle-4 fix: skip trades that haven't filled yet
+            if trade.status not in (TradeStatus.FILLED, TradeStatus.PARTIALLY_FILLED):
                 continue
 
             current_price = self.state.current_prices.get(trade.pair, 0)

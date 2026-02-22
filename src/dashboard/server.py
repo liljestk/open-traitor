@@ -1248,7 +1248,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "",
         ]
         for key, value in body.config_env.items():
-            config_lines.append(f"{key}={value}")
+            config_lines.append(f"{key}={str(value).replace(chr(10), '').replace(chr(13), '')}")
         config_lines.append("")
 
         env_dir = os.path.dirname(os.path.abspath(config_env_path))
@@ -1273,7 +1273,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "",
         ]
         for key, value in body.root_env.items():
-            root_lines.append(f"{key}={value}")
+            root_lines.append(f"{key}={str(value).replace(chr(10), '').replace(chr(13), '')}")
         root_lines.append("")
 
         root_dir = os.path.dirname(os.path.abspath(root_env_path)) or "."
@@ -2087,7 +2087,9 @@ def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
             if key in updates:
-                new_lines.append(f"{key}={updates[key]}\n")
+                # Cycle-4 fix: strip newlines to prevent .env injection
+                safe_val = str(updates[key]).replace("\n", "").replace("\r", "")
+                new_lines.append(f"{key}={safe_val}\n")
                 updated_keys.add(key)
                 continue
         new_lines.append(line)
@@ -2099,7 +2101,8 @@ def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
             new_lines.append("\n")
         new_lines.append("\n# LLM Provider API Keys (added by dashboard)\n")
         for key in sorted(remaining):
-            new_lines.append(f"{key}={updates[key]}\n")
+            safe_val = str(updates[key]).replace("\n", "").replace("\r", "")
+            new_lines.append(f"{key}={safe_val}\n")
 
     # Atomic write: write to temp file in same directory, then rename
     env_dir = os.path.dirname(os.path.abspath(env_path))
