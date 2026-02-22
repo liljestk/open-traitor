@@ -122,7 +122,7 @@ class AbsoluteRules:
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning(f"⚠️ Could not seed daily counters from DB (using zeros): {e}")
+            logger.error(f"❌ Could not seed daily counters from DB — trading with zero counters (risk of exceeding daily limits): {e}")
 
     def _log_rules(self) -> None:
         """Log all active rules."""

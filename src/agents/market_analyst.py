@@ -203,21 +203,46 @@ class MarketAnalystAgent(BaseAgent):
         _macd_hist = indicators.get('macd_histogram')
         _macd_hist_str = f"{_macd_hist:.4f}" if isinstance(_macd_hist, (int, float)) else "N/A"
 
+        # None-safe formatting for BB, EMA, support/resistance, ATR
+        _bb_upper = indicators.get('bb_upper')
+        _bb_upper_str = f"{sym}{_bb_upper:,.2f}" if isinstance(_bb_upper, (int, float)) else "N/A"
+        _bb_lower = indicators.get('bb_lower')
+        _bb_lower_str = f"{sym}{_bb_lower:,.2f}" if isinstance(_bb_lower, (int, float)) else "N/A"
+        _ema_9 = indicators.get('ema_9')
+        _ema_9_str = f"{sym}{_ema_9:,.2f}" if isinstance(_ema_9, (int, float)) else "N/A"
+        _ema_21 = indicators.get('ema_21')
+        _ema_21_str = f"{sym}{_ema_21:,.2f}" if isinstance(_ema_21, (int, float)) else "N/A"
+        _ema_50 = indicators.get('ema_50')
+        _ema_50_str = f"{sym}{_ema_50:,.2f}" if isinstance(_ema_50, (int, float)) else "N/A"
+        _support = indicators.get('support')
+        _support_str = f"{sym}{_support:,.2f}" if isinstance(_support, (int, float)) else "N/A"
+        _resistance = indicators.get('resistance')
+        _resistance_str = f"{sym}{_resistance:,.2f}" if isinstance(_resistance, (int, float)) else "N/A"
+        _atr = indicators.get('atr')
+        _atr_str = f"{sym}{_atr:,.2f}" if isinstance(_atr, (int, float)) else "N/A"
+        _vol_ratio = indicators.get('volume_ratio')
+        _vol_ratio_str = f"{_vol_ratio:.2f}" if isinstance(_vol_ratio, (int, float)) else "N/A"
+
+        _1h = price_changes.get('1h')
+        _1h_str = f"{_1h:+.2%}" if isinstance(_1h, (int, float)) else "N/A"
+        _24h = price_changes.get('24h')
+        _24h_str = f"{_24h:+.2%}" if isinstance(_24h, (int, float)) else "N/A"
+
         return f"""Analyze {pair} at current price {sym}{price:,.2f}
 
 TECHNICAL INDICATORS:
 - RSI: {_rsi_str} ({indicators.get('rsi_signal', 'unknown')})
 - MACD: {indicators.get('macd_signal', 'unknown')} (hist: {_macd_hist_str})
-- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {sym}{indicators.get('bb_upper', 0):,.2f}, lower: {sym}{indicators.get('bb_lower', 0):,.2f})
+- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {_bb_upper_str}, lower: {_bb_lower_str})
 - EMA Signal: {indicators.get('ema_signal', 'unknown')}
-- EMA 9: {sym}{indicators.get('ema_9', 0):,.2f} | EMA 21: {sym}{indicators.get('ema_21', 0):,.2f} | EMA 50: {sym}{indicators.get('ema_50', 0):,.2f}
-- Volume: {indicators.get('volume_signal', 'unknown')} (ratio: {indicators.get('volume_ratio', 1):.2f}x average)
-- Support: {sym}{indicators.get('support', 0):,.2f} | Resistance: {sym}{indicators.get('resistance', 0):,.2f}
-- ATR: {sym}{indicators.get('atr', 0):,.2f}
+- EMA 9: {_ema_9_str} | EMA 21: {_ema_21_str} | EMA 50: {_ema_50_str}
+- Volume: {indicators.get('volume_signal', 'unknown')} (ratio: {_vol_ratio_str}x average)
+- Support: {_support_str} | Resistance: {_resistance_str}
+- ATR: {_atr_str}
 
 PRICE CHANGES:
-- 1 hour: {price_changes.get('1h', 0):+.2%}
-- 24 hours: {price_changes.get('24h', 0):+.2%}
+- 1 hour: {_1h_str}
+- 24 hours: {_24h_str}
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
 RECENT CRYPTO NEWS:
 {news}

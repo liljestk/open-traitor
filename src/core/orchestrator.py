@@ -862,6 +862,7 @@ class Orchestrator:
                 current_prices=self.state.current_prices,
                 portfolio_value=self.state.portfolio_value,
                 scan_results=self._scan_results,
+                open_positions=self.state.open_positions,
             ))
 
             if not proposals:

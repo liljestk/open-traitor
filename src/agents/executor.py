@@ -425,6 +425,7 @@ class ExecutorAgent(BaseAgent):
         success = result.get("success", True) and "error" not in result
         close_price = price
         fees = 0.0
+        closed = None  # Initialize before conditional assignment
 
         if success:
             order = result.get("order", result)
@@ -466,7 +467,7 @@ class ExecutorAgent(BaseAgent):
             "trade_id": trade.id,
             "pair": trade.pair,
             "close_price": close_price,
-            "pnl": trade.pnl if success else None,
+            "pnl": closed.pnl if (success and closed) else (trade.pnl if success else None),
             "reason": reason,
             "success": success,
         }

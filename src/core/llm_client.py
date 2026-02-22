@@ -660,11 +660,15 @@ class LLMClient:
             except json.JSONDecodeError:
                 pass
 
-        # Try to find JSON object pattern (M2 fix: brace-balanced extraction)
-        # Find all { positions and try parsing from each one
+        # Try to find JSON object pattern (brace-balanced extraction)
+        # Find opening braces and try to parse balanced substrings
+        # Limit to first 10 opening braces to avoid O(n²) on malformed output
+        brace_attempts = 0
         for i, ch in enumerate(text):
             if ch == '{':
-                # Try progressively larger substrings from this brace
+                brace_attempts += 1
+                if brace_attempts > 10:
+                    break
                 depth = 0
                 for j in range(i, len(text)):
                     if text[j] == '{':
@@ -676,7 +680,6 @@ class LLMClient:
                             return json.loads(text[i:j+1])
                         except json.JSONDecodeError:
                             break  # try next opening brace
-                        break
 
         logger.error(f"Could not extract JSON from response: {text[:300]}")
         return {"error": "Failed to parse LLM response", "raw": text[:500]}

@@ -139,8 +139,13 @@ class RiskManagerAgent(BaseAgent):
 
         if max_corr >= self.correlation_threshold:
             # High correlation: reduce position by up to 50%
-            penalty = 1.0 - (max_corr - self.correlation_threshold) / (1.0 - self.correlation_threshold) * 0.5
-            penalty = max(0.5, min(1.0, penalty))
+            denom = 1.0 - self.correlation_threshold
+            if denom <= 0:
+                # correlation_threshold >= 1.0: treat as max penalty
+                penalty = 0.5
+            else:
+                penalty = 1.0 - (max_corr - self.correlation_threshold) / denom * 0.5
+                penalty = max(0.5, min(1.0, penalty))
             self.logger.info(
                 f"Correlation penalty: {pair} has {max_corr:.2f} corr with open positions → "
                 f"size multiplier={penalty:.2f}"
@@ -229,7 +234,7 @@ class RiskManagerAgent(BaseAgent):
             if atr:
                 # Use 2x ATR for stop loss
                 float_atr = float(atr)
-                stop_loss = price - (2 * float_atr)
+                stop_loss = max(price - (2 * float_atr), 0.0)
                 self.logger.info(f"Added ATR-based stop-loss (2x ATR={float_atr:.2f}): {stop_loss:,.2f}")
             else:
                 stop_loss = price * (1 - self.stop_loss_pct)

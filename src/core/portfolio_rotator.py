@@ -221,6 +221,7 @@ class PortfolioRotator:
         current_prices: dict[str, float],
         portfolio_value: float,
         scan_results: dict[str, dict] | None = None,
+        open_positions: dict[str, float] | None = None,
     ) -> list[SwapProposal]:
         """
         Evaluate whether any portfolio rotations are beneficial.
@@ -231,10 +232,13 @@ class PortfolioRotator:
             current_prices: Current prices for all pairs
             portfolio_value: Total portfolio value in USD
             scan_results: Optional universe scan data (pair → score dict) for ranking boost
+            open_positions: Pair → held quantity (from TradingState.open_positions)
 
         Returns:
             List of SwapProposals (ranked by expected net gain)
         """
+        if open_positions is None:
+            open_positions = {}
         if not self.enabled:
             return []
 
@@ -314,9 +318,12 @@ class PortfolioRotator:
                     continue
 
                 # Check if gain exceeds fees
+                # Use actual held quantity × current price for position value
+                held_qty = open_positions.get(held_pair, 0)
+                position_value = current_prices.get(held_pair, 0) * held_qty
                 swap_quote = min(
                     max_swap_quote,
-                    current_prices.get(held_pair, 0) * 1.0,  # Position value
+                    position_value,
                 )
 
                 if swap_quote < self.fee_manager.min_trade_quote:
@@ -1115,6 +1122,15 @@ class PortfolioRotator:
         """
         rankings = []
 
+        # Hoist Fear & Greed fetch outside loop to avoid N redundant API calls
+        fg_value = 50
+        if self.fear_greed:
+            try:
+                fg_data = self.fear_greed.fetch()
+                fg_value = fg_data.get("value", 50)
+            except Exception as e:
+                logger.debug(f"Fear & Greed fetch failed: {e}")
+
         for pair in pairs:
             try:
                 # Get multi-timeframe score
@@ -1137,8 +1153,6 @@ class PortfolioRotator:
                 # Factor in Fear & Greed
                 signals = {"confluence": confluence_score, "aligned": aligned}
                 if self.fear_greed:
-                    fg_data = self.fear_greed.fetch()
-                    fg_value = fg_data.get("value", 50)
                     signals["fear_greed"] = fg_value
 
                     # Extreme fear + bullish technical = stronger buy signal

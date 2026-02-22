@@ -904,6 +904,7 @@ class TelegramManager:
                 all_pairs=orch.pairs,
                 current_prices=orch.state.current_prices,
                 portfolio_value=orch.state.portfolio_value,
+                open_positions=orch.state.open_positions,
             ),
             orch._loop,
         )

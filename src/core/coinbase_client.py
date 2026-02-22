@@ -1405,8 +1405,10 @@ class CoinbaseClient(ExchangeClient):
         discrepancies = []
 
         all_currencies = set(list(expected.keys()) + list(actual.keys()))
+        # Skip fiat currencies — only reconcile crypto holdings
+        fiat_currencies = {"USD", "EUR", "GBP", "CHF", "SEK", "NOK", "DKK", "CAD", "AUD", "JPY", "USDC", "USDT"}
         for currency in all_currencies:
-            if currency == "USD":
+            if currency in fiat_currencies:
                 continue
             exp = expected.get(currency, 0.0)
             act = actual.get(currency, 0.0)

@@ -130,13 +130,17 @@ class PipelineManager:
         # but for now we let it block slightly since Coinbase REST is fast)
         _step_t = time.monotonic()
         await orch.rate_limiter.async_wait("coinbase_rest")
-        candles = await asyncio.to_thread(
-            orch.exchange.get_candles,
-            pair,
-            granularity=orch.config.get("analysis", {}).get("technical", {}).get(
-                "candle_granularity", "ONE_HOUR"
-            ),
-        )
+        try:
+            candles = await asyncio.to_thread(
+                orch.exchange.get_candles,
+                pair,
+                granularity=orch.config.get("analysis", {}).get("technical", {}).get(
+                    "candle_granularity", "ONE_HOUR"
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Skipping pipeline for {pair}: get_candles failed: {e}")
+            return
 
         if orch.ws_feed:
             price = orch.ws_feed.get_price(pair)
@@ -191,18 +195,19 @@ class PipelineManager:
         sentiment_prompt = ""
         sentiment_data = {}
         try:
-            news_items = []
-            if orch.redis:
-                cached = orch.redis.get("news:latest")
-                if cached:
-                    news_items = json.loads(cached)
-            sentiment_data = orch.sentiment.score_for_pair(pair, news_items)
-            if sentiment_data.get("total_articles", 0) > 0:
-                sentiment_prompt = (
-                    f"Sentiment ({pair}): {sentiment_data.get('sentiment_label', 'neutral')} "
-                    f"(score={sentiment_data.get('sentiment_score', 0):.2f}, "
-                    f"n={sentiment_data.get('total_articles', 0)})"
-                )
+            if orch.sentiment:
+                news_items = []
+                if orch.redis:
+                    cached = orch.redis.get("news:latest")
+                    if cached:
+                        news_items = json.loads(cached)
+                sentiment_data = orch.sentiment.score_for_pair(pair, news_items)
+                if sentiment_data.get("total_articles", 0) > 0:
+                    sentiment_prompt = (
+                        f"Sentiment ({pair}): {sentiment_data.get('sentiment_label', 'neutral')} "
+                        f"(score={sentiment_data.get('sentiment_score', 0):.2f}, "
+                        f"n={sentiment_data.get('total_articles', 0)})"
+                    )
         except Exception as e:
             logger.debug(f"Sentiment analysis unavailable: {e}")
 
@@ -647,6 +652,27 @@ class PipelineManager:
                         "action": risk_result.get("action"),
                         "quote_amount": risk_result.get("quote_amount"),
                         "confidence": risk_result.get("confidence"),
+                    })
+                except Exception:
+                    pass
+
+        else:
+            # Execution failed — log details for debugging
+            exec_error = exec_result.get("error", exec_result.get("reason", "unknown"))
+            logger.warning(
+                f"⚠️ Trade execution FAILED for {pair}: {exec_error} | "
+                f"action={risk_result.get('action')} amount={risk_result.get('quote_amount')}"
+            )
+            _timings["exec"] = time.monotonic() - _step_t
+            _total = time.monotonic() - _t0
+            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [NOT executed]")
+
+            if trace_ctx is not None:
+                try:
+                    trace_ctx.finish(metadata={
+                        "trade_executed": False,
+                        "exec_error": str(exec_error),
                     })
                 except Exception:
                     pass

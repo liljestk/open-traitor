@@ -81,7 +81,7 @@ llm:
     model: gemini-2.0-flash
     name: gemini
     rpm_limit: 14
-    tier: free          # change to 'paid' when on a paid Gemini plan
+    tier: free
     timeout: 30
   - api_key_env: OPENAI_API_KEY
     api_key_set: false
@@ -92,7 +92,7 @@ llm:
     model: gpt-4o-mini
     name: openai
     rpm_limit: 450
-    tier: free          # change to 'paid' when on a paid OpenAI plan
+    tier: free
     timeout: 45
   - api_key_set: true
     base_url_env: OLLAMA_BASE_URL
@@ -134,7 +134,7 @@ risk:
   max_position_pct: 0.05
   max_total_exposure_pct: 0.2
   max_trades_per_hour: 10
-  stop_loss_pct: 0.04
+  stop_loss_pct: 0.045
   take_profit_pct: 0.06
   trailing_stop_pct: 0.03
 rotation:
