@@ -662,6 +662,15 @@ def validate_field(section: str, key: str, value: Any) -> tuple[bool, str, Any]:
 
     field_schema = schema_dict.get(key)
     if field_schema is None:
+        # M4 fix: warn on unknown fields so typos are visible in logs
+        _logger = None
+        try:
+            from src.utils.logger import get_logger
+            _logger = get_logger("settings")
+        except Exception:
+            pass
+        if _logger:
+            _logger.warning(f"Unknown settings field '{section}.{key}' — passing through without validation")
         return True, "", value  # unknown fields pass through
 
     expected_type = field_schema["type"]

@@ -6,8 +6,10 @@ Handles both REST and WebSocket connections with paper trading support.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -814,7 +816,6 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                import uuid
 
                 order = self._rest_client.market_order_buy(
                     client_order_id=str(uuid.uuid4()),
@@ -854,7 +855,6 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                import uuid
 
                 order = self._rest_client.limit_order_gtc_buy(
                     client_order_id=str(uuid.uuid4()),
@@ -898,7 +898,6 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                import uuid
 
                 order = self._rest_client.limit_order_gtc_sell(
                     client_order_id=str(uuid.uuid4()),
@@ -953,7 +952,6 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                import uuid
 
                 order = self._rest_client.market_order_sell(
                     client_order_id=str(uuid.uuid4()),
@@ -1028,7 +1026,6 @@ class CoinbaseClient(ExchangeClient):
         base_size: Optional[str] = None,
     ) -> dict:
         """Execute a paper trading market buy."""
-        import uuid
 
         price = self.get_current_price(product_id)
         parts = product_id.split("-")
@@ -1093,7 +1090,6 @@ class CoinbaseClient(ExchangeClient):
 
     def _paper_market_sell(self, product_id: str, base_size: str) -> dict:
         """Execute a paper trading market sell."""
-        import uuid
 
         price = self.get_current_price(product_id)
         parts = product_id.split("-")
@@ -1150,7 +1146,6 @@ class CoinbaseClient(ExchangeClient):
         limit_price: str,
     ) -> dict:
         """Simulate a paper limit buy (fills immediately at limit or better)."""
-        import uuid
 
         price = self.get_current_price(product_id)
         parts = product_id.split("-")
@@ -1230,7 +1225,6 @@ class CoinbaseClient(ExchangeClient):
         limit_price: str,
     ) -> dict:
         """Simulate a paper limit sell (fills immediately at limit or better)."""
-        import uuid
 
         price = self.get_current_price(product_id)
         parts = product_id.split("-")
@@ -1304,7 +1298,6 @@ class CoinbaseClient(ExchangeClient):
 
     def _mock_product(self, product_id: str) -> dict:
         """Generate mock product data."""
-        import random
 
         mock_prices = {
             "BTC-USD": 97500.0,
@@ -1328,9 +1321,15 @@ class CoinbaseClient(ExchangeClient):
             "status": "online",
         }
 
-    def _mock_candles(self, product_id: str, count: int = 200) -> list[dict]:
-        """Generate mock candle data for testing."""
-        import random
+    def _mock_candles(self, product_id: str, count: int = 200, seed: int | None = None) -> list[dict]:
+        """Generate mock candle data for testing.
+
+        Args:
+            product_id: Trading pair.
+            count: Number of candles to generate.
+            seed: Optional RNG seed for reproducible test data (L7 fix).
+        """
+        rng = random.Random(seed)
 
         mock_prices = {
             "BTC-USD": 97500.0,
@@ -1345,15 +1344,15 @@ class CoinbaseClient(ExchangeClient):
 
         for i in range(count):
             # Random walk
-            change = random.gauss(0, base_price * 0.005)
+            change = rng.gauss(0, base_price * 0.005)
             current_price += change
             current_price = max(current_price, base_price * 0.5)
 
-            high = current_price * (1 + random.uniform(0, 0.01))
-            low = current_price * (1 - random.uniform(0, 0.01))
-            open_price = current_price + random.gauss(0, base_price * 0.002)
+            high = current_price * (1 + rng.uniform(0, 0.01))
+            low = current_price * (1 - rng.uniform(0, 0.01))
+            open_price = current_price + rng.gauss(0, base_price * 0.002)
             close_price = current_price
-            volume = random.uniform(100, 10000)
+            volume = rng.uniform(100, 10000)
 
             candles.append({
                 "start": str(now - (count - i) * 3600),

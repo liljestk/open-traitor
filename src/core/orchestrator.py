@@ -127,6 +127,9 @@ class Orchestrator:
         self._dashboard_command_max_age_seconds = int(
             config.get("dashboard", {}).get("command_max_age_seconds", 120)
         )
+        # M20 fix: nonce replay protection — track recently used nonces
+        self._used_nonces: dict[str, float] = {}  # nonce → monotonic timestamp
+        self._nonce_lock = threading.Lock()
         if not self._dashboard_command_signing_key:
             logger.warning(
                 "⚠️ DASHBOARD_COMMAND_SIGNING_KEY not configured; unsigned dashboard "
@@ -1003,6 +1006,18 @@ class Orchestrator:
 
         if not hmac.compare_digest(signature, expected):
             return False, "invalid signature"
+
+        # M20 fix: reject replayed nonces
+        now = time.monotonic()
+        with self._nonce_lock:
+            # Prune nonces older than the max command age + 30s grace
+            cutoff = now - self._dashboard_command_max_age_seconds - 30
+            stale = [n for n, t in self._used_nonces.items() if t < cutoff]
+            for n in stale:
+                del self._used_nonces[n]
+            if nonce in self._used_nonces:
+                return False, "nonce already used (replay detected)"
+            self._used_nonces[nonce] = now
 
         return True, "ok"
 

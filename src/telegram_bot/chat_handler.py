@@ -18,6 +18,7 @@ The bot should feel INSTANT for data queries and THOUGHTFUL for complex ones.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -580,14 +581,16 @@ class ProactiveEngine:
 
     def _check_big_result(self, event: str) -> None:
         """Detect big wins or losses in trade events and react."""
-        import re as _re
-        # Try to extract PnL from event text
-        pnl_match = _re.search(r'PnL:\s*\$?([-+]?[\d,]+\.?\d*)', event)
+        # M6 fix: handle -$50.00, +$50.00, currency symbols, and PnL in various formats
+        pnl_match = re.search(r'PnL:\s*([+-]?)\s*[^\d]*([\d,]+\.?\d*)', event)
         if not pnl_match:
             return
 
         try:
-            pnl = float(pnl_match.group(1).replace(",", ""))
+            sign = pnl_match.group(1)
+            pnl = float(pnl_match.group(2).replace(",", ""))
+            if sign == "-":
+                pnl = -pnl
         except ValueError:
             return
 
@@ -613,11 +616,9 @@ class ProactiveEngine:
         self._running = False
 
     def _run_loop_thread(self) -> None:
-        import asyncio
         asyncio.run(self._run_loop())
 
     async def _run_loop(self) -> None:
-        import asyncio
         while self._running:
             try:
                 await self._tick()

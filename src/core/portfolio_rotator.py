@@ -742,6 +742,8 @@ class PortfolioRotator:
                     logger.info(f"✅ Bridge reversal succeeded: recovered to {sell_base}")
                     result["reversal"] = "success"
                     result["reversal_result"] = rev_result
+                    # L20 fix: track the reversal leg in daily counters
+                    self._record_rotation_leg(bridge_amount, "sell", "bridge_reversal")
                     return
 
             logger.warning(

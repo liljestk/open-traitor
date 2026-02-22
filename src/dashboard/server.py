@@ -27,6 +27,7 @@ Or programmatically:
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import hmac
 import json
@@ -295,7 +296,9 @@ async def _api_key_middleware(request: Request, call_next):
 # ---------------------------------------------------------------------------
 
 # Per-profile StatsDB cache — avoids re-opening the same DB file on every request
-_profile_db_cache: dict[str, Any] = {}
+# Uses OrderedDict for LRU eviction when the cache reaches max size (H4 fix)
+_MAX_PROFILE_DBS = 16
+_profile_db_cache: collections.OrderedDict[str, Any] = collections.OrderedDict()
 _profile_db_lock = threading.Lock()
 
 
@@ -313,6 +316,7 @@ def _require_db(profile: str = ""):
 
     with _profile_db_lock:
         if safe in _profile_db_cache:
+            _profile_db_cache.move_to_end(safe)  # LRU: mark as recently used
             return _profile_db_cache[safe]
         try:
             from src.utils.stats import StatsDB
@@ -322,6 +326,14 @@ def _require_db(profile: str = ""):
                     status_code=404,
                     detail=f"Stats DB for profile '{safe}' not found ({db_path})",
                 )
+            # Evict oldest entry if cache is at capacity (H4 fix)
+            if len(_profile_db_cache) >= _MAX_PROFILE_DBS:
+                evicted_key, evicted_db = _profile_db_cache.popitem(last=False)
+                try:
+                    evicted_db.close()
+                except Exception:
+                    pass
+                logger.debug(f"Evicted profile DB cache entry: {evicted_key}")
             db = StatsDB(db_path=db_path)
             _profile_db_cache[safe] = db
             logger.info(f"📊 Loaded StatsDB for profile '{safe}': {db_path}")
@@ -356,17 +368,21 @@ def _sign_dashboard_command(action: str, pair: str, ts: str, source: str, nonce:
     ).hexdigest()
 
 
-def _fresh_conn(profile: str = "") -> sqlite3.Connection:
-    """Open a fresh SQLite connection for this request.
+def _open_conn(db) -> sqlite3.Connection:
+    """Open a fresh SQLite connection for the given StatsDB instance.
 
     Avoids relying on the thread-local connection inside StatsDB, which is
     not safe to share across FastAPI's async threadpool workers.
     """
-    db = _require_db(profile)
     conn = sqlite3.connect(db._db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+
+def _fresh_conn(profile: str = "") -> sqlite3.Connection:
+    """Open a fresh SQLite connection for the given profile."""
+    return _open_conn(_require_db(profile))
 
 
 def _get_profile_db(
@@ -491,9 +507,7 @@ def list_events(
 @app.get("/api/stats/summary", summary="Portfolio and trade stats overview")
 def get_stats_summary(db=Depends(_get_profile_db)):
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
-    conn = sqlite3.connect(db._db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = _open_conn(db)
     try:
         # Overall trade stats
         trade_row = conn.execute(
@@ -815,9 +829,7 @@ def get_strategic(
     db=Depends(_get_profile_db),
 ):
     """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    conn = sqlite3.connect(db._db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = _open_conn(db)
     try:
         if horizon:
             rows = conn.execute(
@@ -1256,6 +1268,8 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
         if body.preset:
             # Presets always require confirmation
             if not body.confirmation_token:
+                if not _check_confirmation_rate(source_ip):
+                    raise HTTPException(status_code=429, detail="Too many confirmation requests")
                 token = secrets.token_urlsafe(32)
                 _store_confirmation(token, {
                     "action": "settings-preset",
@@ -1301,6 +1315,8 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
         # Require confirmation for sensitive sections
         needs_confirm = body.section in _SETTINGS_CONFIRM_SECTIONS
         if needs_confirm and not body.confirmation_token:
+            if not _check_confirmation_rate(source_ip):
+                raise HTTPException(status_code=429, detail="Too many confirmation requests")
             token = secrets.token_urlsafe(32)
             _store_confirmation(token, {
                 "action": "settings-section",
@@ -1456,11 +1472,39 @@ def _prune_expired_confirmations() -> None:
     _expire_confirmations()  # M24 fix: delegate to thread-safe helper
 
 
+# M7 fix: Rate limit confirmation token generation (max 10 per IP per 60s)
+_confirmation_rate: dict[str, list[float]] = {}
+_confirmation_rate_lock = threading.Lock()
+_CONFIRM_RATE_LIMIT = 10
+_CONFIRM_RATE_WINDOW = 60.0  # seconds
+
+
+def _check_confirmation_rate(ip: str) -> bool:
+    """Return True if the IP is within rate limits for confirmation token generation."""
+    now = time.monotonic()
+    with _confirmation_rate_lock:
+        timestamps = _confirmation_rate.get(ip, [])
+        # Prune old entries
+        timestamps = [t for t in timestamps if now - t < _CONFIRM_RATE_WINDOW]
+        if len(timestamps) >= _CONFIRM_RATE_LIMIT:
+            _confirmation_rate[ip] = timestamps
+            return False
+        timestamps.append(now)
+        _confirmation_rate[ip] = timestamps
+        # Evict stale IPs to prevent unbounded growth
+        if len(_confirmation_rate) > 1000:
+            stale = [k for k, v in _confirmation_rate.items()
+                     if not v or now - v[-1] > _CONFIRM_RATE_WINDOW]
+            for k in stale:
+                del _confirmation_rate[k]
+        return True
+
+
 _CONFIRM_TTL_SECONDS = 120  # 2-minute window to confirm
 
 
 @app.put("/api/settings/api-keys", summary="Update API keys for LLM providers")
-def update_api_keys(body: _ApiKeysUpdateBody):
+def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
     """
     Two-step confirmation flow for credential updates:
 
@@ -1472,6 +1516,7 @@ def update_api_keys(body: _ApiKeysUpdateBody):
     """
     try:
         _prune_expired_confirmations()
+        source_ip = request.client.host if request.client else "unknown"
 
         # Validate: only allow env vars referenced by providers' api_key_env
         providers_config = _sm_get_providers()
@@ -1493,6 +1538,8 @@ def update_api_keys(body: _ApiKeysUpdateBody):
 
         # ── Step 1: issue confirmation token ──────────────────────────
         if not body.confirmation_token:
+            if not _check_confirmation_rate(source_ip):
+                raise HTTPException(status_code=429, detail="Too many confirmation requests")
             token = secrets.token_urlsafe(32)
             _store_confirmation(token, {
                 "action": "api-keys",
@@ -1603,9 +1650,7 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760), db=Depends(_get_profil
 @app.get("/api/portfolio/exposure", summary="Current portfolio position concentration")
 def get_portfolio_exposure(db=Depends(_get_profile_db)):
     """Returns the latest portfolio snapshot with position breakdown."""
-    conn = sqlite3.connect(db._db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = _open_conn(db)
     try:
         row = conn.execute(
             """SELECT portfolio_value, cash_balance, return_pct, total_pnl,
@@ -1914,6 +1959,9 @@ if _STATIC_DIR.is_dir():
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
         """Catch-all: return index.html so React Router handles client-side paths."""
+        # M5 fix: don't serve SPA HTML for missing API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))
