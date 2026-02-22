@@ -95,13 +95,14 @@ _OPENROUTER_HEADERS = {
 }
 
 # Free-tier models on OpenRouter (suffix :free). Ordered by preference.
+# Last verified: 2026-02-22. Check https://openrouter.ai/models?q=:free
 OPENROUTER_FREE_MODELS: list[str] = [
-    "google/gemini-2.0-flash-exp:free",
-    "google/gemini-2.5-flash-preview-05-20:free",
-    "meta-llama/llama-4-maverick:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen3-235b-a22b:free",
-    "meta-llama/llama-4-scout:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-r1-0528:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "qwen/qwen3-coder:free",
 ]
 
 

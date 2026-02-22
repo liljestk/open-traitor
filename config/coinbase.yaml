@@ -84,12 +84,12 @@ llm:
     tier: free
     timeout: 30
   - api_key_env: OPENROUTER_API_KEY
-    api_key_set: false
+    api_key_set: true
     base_url: https://openrouter.ai/api/v1
     cooldown_seconds: 30
     daily_token_limit: 0
     enabled: true
-    model: google/gemini-2.0-flash-exp:free
+    model: meta-llama/llama-3.3-70b-instruct:free
     name: openrouter
     rpm_limit: 20
     tier: free

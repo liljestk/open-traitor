@@ -523,7 +523,10 @@ class Orchestrator:
                     self.universe_scanner.run_universe_scan()
 
                     self._screener_cycle_counter += 1
-                    if self._screener_cycle_counter >= self._SCREENER_INTERVAL:
+                    # Run screener immediately when no pairs are active (cold start)
+                    # or on the regular interval
+                    no_pairs = not self._screener_active_pairs and not self.pairs
+                    if no_pairs or self._screener_cycle_counter >= self._SCREENER_INTERVAL:
                         self._screener_cycle_counter = 0
                         self.universe_scanner.run_llm_screener()
                 except Exception as _uf_err:
