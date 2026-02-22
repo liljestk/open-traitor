@@ -2,13 +2,17 @@ import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield, Crosshair } from 'lucide-react'
 import { useLiveStore } from '../store'
-import { openLiveSocket } from '../api'
+import { openLiveSocket, fetchSetupConfig } from '../api'
 
-const PROFILES = [
-  { id: '', label: 'Default', sub: 'All Systems' },
-  { id: 'crypto', label: 'Crypto', sub: 'EUR' },
-  { id: 'nordnet', label: 'Equities', sub: 'SEK' },
-  { id: 'ibkr', label: 'Equities', sub: 'USD' },
+/**
+ * All possible profiles.  Filtered at render-time to only show
+ * exchanges that are actually configured on the backend.
+ */
+const ALL_PROFILES = [
+  { id: '', label: 'Default', sub: 'All Systems', exchange: null },
+  { id: 'crypto', label: 'Crypto', sub: 'EUR', exchange: 'coinbase' },
+  { id: 'nordnet', label: 'Equities', sub: 'SEK', exchange: 'nordnet' },
+  { id: 'ibkr', label: 'Equities', sub: 'USD', exchange: 'ibkr' },
 ]
 
 const NAV = [
@@ -54,9 +58,17 @@ const PAGE_TITLES: Record<string, string> = {
 export default function Layout() {
   const connected = useLiveStore((s) => s.connected)
   const density = useLiveStore((s) => s.density)
-  const { setConnected, addEvent } = useLiveStore()
+  const availableExchanges = useLiveStore((s) => s.availableExchanges)
+  const { setConnected, addEvent, setAvailableExchanges } = useLiveStore()
   const wsRef = useRef<WebSocket | null>(null)
   const location = useLocation()
+
+  // Fetch configured exchanges once on mount
+  useEffect(() => {
+    fetchSetupConfig().then((cfg) => {
+      if (cfg?.exchanges) setAvailableExchanges(cfg.exchanges)
+    }).catch(() => { /* keep defaults */ })
+  }, [])
 
   // App-wide WebSocket connection so sidebar always shows live status
   useEffect(() => {
@@ -135,7 +147,9 @@ export default function Layout() {
                 fontFamily: 'inherit',
               }}
             >
-              {PROFILES.map((p) => (
+              {ALL_PROFILES
+                .filter((p) => p.exchange === null || availableExchanges[p.exchange])
+                .map((p) => (
                 <option key={p.id} value={p.id} style={{ background: '#161b22', color: '#e6edf3' }}>
                   {p.label} ({p.sub})
                 </option>

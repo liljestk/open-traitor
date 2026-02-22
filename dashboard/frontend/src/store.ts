@@ -33,8 +33,10 @@ interface LiveStore {
   profile: string
   currency: string
   density: Density
+  availableExchanges: Record<string, boolean>
   setProfile: (p: string) => void
   setDensity: (d: Density) => void
+  setAvailableExchanges: (e: Record<string, boolean>) => void
   events: LiveEvent[]
   connected: boolean
   setConnected: (v: boolean) => void
@@ -49,6 +51,7 @@ export const useLiveStore = create<LiveStore>((set) => ({
   profile: initialProfile,
   currency: currencyForProfile(initialProfile),
   density: initialDensity,
+  availableExchanges: { coinbase: true, nordnet: true, ibkr: true },
   setProfile: (profile) => {
     localStorage.setItem('auto_traitor_profile', profile)
     set({ profile, currency: currencyForProfile(profile) })
@@ -57,6 +60,7 @@ export const useLiveStore = create<LiveStore>((set) => ({
     localStorage.setItem('auto_traitor_density', density)
     set({ density })
   },
+  setAvailableExchanges: (availableExchanges) => set({ availableExchanges }),
   events: [],
   connected: false,
   setConnected: (connected) => set({ connected }),
