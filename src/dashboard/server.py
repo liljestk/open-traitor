@@ -2100,6 +2100,21 @@ def get_watchlist(db=Depends(_get_profile_db)):
 
 
 # ---------------------------------------------------------------------------
+# REST — Prediction Accuracy (Predictions vs Actuals)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/predictions/accuracy", summary="Signal prediction accuracy vs actual price movements")
+def get_prediction_accuracy(days: int = Query(30, ge=1, le=365), db=Depends(_get_profile_db)):
+    """Compare market analyst signal predictions with actual price outcomes."""
+    try:
+        result = db.get_prediction_accuracy(days=days)
+        return _sanitize_floats(result)
+    except Exception as exc:
+        logger.exception("prediction accuracy error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # REST — Candle data for charts
 # ---------------------------------------------------------------------------
 

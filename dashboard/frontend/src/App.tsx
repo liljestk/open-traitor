@@ -13,6 +13,7 @@ import Analytics from './pages/Analytics'
 import NewsFeed from './pages/NewsFeed'
 import Watchlist from './pages/Watchlist'
 import RiskExposure from './pages/RiskExposure'
+import Predictions from './pages/Predictions'
 import SetupWizard from './pages/SetupWizard'
 
 const queryClient = new QueryClient({
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="/cycle/:cycleId" element={<CyclePlayback />} />
             <Route path="/trades" element={<TradesLog />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/predictions" element={<Predictions />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/simulations" element={<SimulatedTrades />} />
             <Route path="/logs" element={<SystemLogs />} />

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield, Crosshair } from 'lucide-react'
 import { useLiveStore } from '../store'
 import { openLiveSocket } from '../api'
 
@@ -18,6 +18,7 @@ const NAV = [
       { to: '/', icon: <BarChart2 size={16} />, label: 'Cycle Explorer' },
       { to: '/trades', icon: <List size={16} />, label: 'Trades Log' },
       { to: '/analytics', icon: <TrendingUp size={16} />, label: 'Analytics' },
+      { to: '/predictions', icon: <Crosshair size={16} />, label: 'Predictions' },
       { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
     ]
@@ -39,6 +40,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/': 'Cycle Explorer',
   '/trades': 'Trades Log',
   '/analytics': 'Analytics',
+  '/predictions': 'Predictions',
   '/watchlist': 'Watchlist',
   '/simulations': 'Simulate Trade',
   '/logs': 'System Logs',

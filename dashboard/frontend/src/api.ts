@@ -462,6 +462,71 @@ export const fetchPortfolioHistory = (hours = 720) =>
 export const fetchAnalytics = (hours = 720) =>
   apiFetch<AnalyticsData>(`/analytics?hours=${hours}`)
 
+// ─── Prediction Accuracy ───────────────────────────────────────────────────
+
+export interface PredictionOutcome {
+  actual_price: number
+  pct_change: number
+  correct: boolean
+}
+
+export interface PredictionRecord {
+  ts: string
+  pair: string
+  signal_type: string
+  confidence: number
+  entry_price: number
+  suggested_tp: number | null
+  suggested_sl: number | null
+  outcomes: Record<string, PredictionOutcome | null>
+}
+
+export interface PairAccuracy {
+  total: number
+  correct_24h: number
+  correct_1h: number
+  evaluated_24h: number
+  evaluated_1h: number
+  accuracy_24h_pct: number | null
+  accuracy_1h_pct: number | null
+}
+
+export interface ConfidenceBucket {
+  confidence_range: string
+  total: number
+  correct: number
+  evaluated: number
+  accuracy_pct: number | null
+}
+
+export interface DailyAccuracy {
+  date: string
+  total: number
+  correct: number
+  evaluated: number
+  accuracy_pct: number | null
+}
+
+export interface PredictionAccuracyData {
+  predictions: PredictionRecord[]
+  per_pair: Record<string, PairAccuracy>
+  overall: {
+    total: number
+    correct_24h: number
+    evaluated_24h: number
+    correct_1h: number
+    evaluated_1h: number
+    accuracy_24h_pct: number | null
+    accuracy_1h_pct: number | null
+  }
+  by_signal_type: Record<string, { total: number; correct_24h: number; evaluated_24h: number; accuracy_pct: number | null }>
+  confidence_calibration: ConfidenceBucket[]
+  daily_accuracy: DailyAccuracy[]
+}
+
+export const fetchPredictionAccuracy = (days = 30) =>
+  apiFetch<PredictionAccuracyData>(`/predictions/accuracy?days=${days}`)
+
 // ─── Portfolio Exposure ────────────────────────────────────────────────────
 
 export interface ExposureBreakdown {

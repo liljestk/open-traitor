@@ -117,8 +117,10 @@ services:
 
   # =========================================================================
   # Trading Agent — Nordnet (Equities / OMX Stockholm)
+  # Only starts with: docker compose --profile nordnet up
   # =========================================================================
   agent-nordnet:
+    profiles: ["nordnet"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -163,8 +165,10 @@ services:
 
   # =========================================================================
   # Trading Agent — Interactive Brokers (US/EU Equities)
+  # Only starts with: docker compose --profile ibkr up
   # =========================================================================
   agent-ibkr:
+    profiles: ["ibkr"]
     build:
       context: .
       dockerfile: Dockerfile

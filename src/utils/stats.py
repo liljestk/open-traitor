@@ -1110,3 +1110,229 @@ class StatsDB:
             result["top_movers"] = []
         return result
 
+    # ─── Prediction Accuracy ───────────────────────────────────────────────
+
+    def get_prediction_accuracy(self, days: int = 30) -> dict:
+        """
+        Compute signal prediction accuracy by comparing market_analyst signals
+        with actual price movements over subsequent hours.
+
+        Uses the current_prices stored in portfolio_snapshots to determine what
+        actually happened after each prediction.
+        """
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        # 1. Get all market_analyst predictions with signal details
+        predictions = conn.execute(
+            """SELECT
+                ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                ar.reasoning_json, ar.cycle_id
+               FROM agent_reasoning ar
+               WHERE ar.agent_name = 'market_analyst'
+                 AND ar.ts >= ?
+               ORDER BY ar.ts ASC""",
+            (cutoff,),
+        ).fetchall()
+
+        if not predictions:
+            return {
+                "predictions": [],
+                "per_pair": {},
+                "overall": {"total": 0, "correct": 0, "accuracy_pct": 0},
+                "by_signal_type": {},
+                "confidence_calibration": [],
+                "daily_accuracy": [],
+            }
+
+        # 2. Build a price lookup from portfolio snapshots (current_prices JSON)
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
+
+        # Parse into list of (ts, prices_dict) — sample every ~5 min
+        price_timeline: list[tuple[str, dict]] = []
+        for snap in snapshots:
+            try:
+                prices = json.loads(snap["current_prices"] or "{}")
+                if prices:
+                    price_timeline.append((snap["ts"], prices))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        def _find_price(pair: str, target_ts: str) -> float | None:
+            """Find the closest price for a pair at or after target_ts."""
+            for ts, prices in price_timeline:
+                if ts >= target_ts:
+                    # Try exact pair, then common variants
+                    for key in [pair, pair.replace("-", "/"), pair.replace("/", "-")]:
+                        if key in prices:
+                            val = prices[key]
+                            return float(val) if val else None
+                    return None
+            return None
+
+        def _ts_plus_hours(ts_str: str, hours: int) -> str:
+            """Add hours to an ISO timestamp string."""
+            from datetime import datetime, timedelta
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                return (dt + timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+            except Exception:
+                return ts_str
+
+        # 3. Evaluate each prediction
+        results: list[dict] = []
+        for pred in predictions:
+            try:
+                reasoning = json.loads(pred["reasoning_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                reasoning = {}
+
+            signal = pred["signal_type"] or "neutral"
+            confidence = pred["confidence"] or 0.0
+            pair = pred["pair"]
+            pred_ts = pred["ts"]
+
+            # Price at prediction time
+            price_at_signal = None
+            for key in ["suggested_entry", "current_price"]:
+                val = reasoning.get(key)
+                if val and float(val) > 0:
+                    price_at_signal = float(val)
+                    break
+            if not price_at_signal:
+                price_at_signal = _find_price(pair, pred_ts)
+
+            if not price_at_signal:
+                continue
+
+            # Direction the bot predicted
+            is_bullish = signal in ("strong_buy", "buy", "weak_buy")
+            is_bearish = signal in ("strong_sell", "sell", "weak_sell")
+            if not is_bullish and not is_bearish:
+                continue  # neutral predictions can't be evaluated
+
+            # Check outcome at multiple horizons
+            horizons = {"1h": 1, "4h": 4, "24h": 24, "7d": 168}
+            outcomes: dict[str, dict | None] = {}
+            for label, hours in horizons.items():
+                future_ts = _ts_plus_hours(pred_ts, hours)
+                actual_price = _find_price(pair, future_ts)
+                if actual_price and actual_price > 0:
+                    pct_change = (actual_price - price_at_signal) / price_at_signal * 100
+                    price_went_up = actual_price > price_at_signal
+                    correct = (is_bullish and price_went_up) or (is_bearish and not price_went_up)
+                    outcomes[label] = {
+                        "actual_price": round(actual_price, 6),
+                        "pct_change": round(pct_change, 4),
+                        "correct": correct,
+                    }
+                else:
+                    outcomes[label] = None
+
+            results.append({
+                "ts": pred_ts,
+                "pair": pair,
+                "signal_type": signal,
+                "confidence": round(confidence, 3),
+                "entry_price": round(price_at_signal, 6),
+                "suggested_tp": reasoning.get("suggested_take_profit"),
+                "suggested_sl": reasoning.get("suggested_stop_loss"),
+                "outcomes": outcomes,
+            })
+
+        # 4. Aggregate per-pair accuracy
+        per_pair: dict[str, dict] = {}
+        for r in results:
+            p = r["pair"]
+            if p not in per_pair:
+                per_pair[p] = {"total": 0, "correct_24h": 0, "correct_1h": 0, "evaluated_24h": 0, "evaluated_1h": 0}
+            per_pair[p]["total"] += 1
+            if r["outcomes"].get("24h"):
+                per_pair[p]["evaluated_24h"] += 1
+                if r["outcomes"]["24h"]["correct"]:
+                    per_pair[p]["correct_24h"] += 1
+            if r["outcomes"].get("1h"):
+                per_pair[p]["evaluated_1h"] += 1
+                if r["outcomes"]["1h"]["correct"]:
+                    per_pair[p]["correct_1h"] += 1
+        for p in per_pair:
+            s = per_pair[p]
+            s["accuracy_24h_pct"] = round(s["correct_24h"] / s["evaluated_24h"] * 100, 1) if s["evaluated_24h"] else None
+            s["accuracy_1h_pct"] = round(s["correct_1h"] / s["evaluated_1h"] * 100, 1) if s["evaluated_1h"] else None
+
+        # 5. Overall accuracy
+        overall = {"total": len(results), "correct_24h": 0, "evaluated_24h": 0, "correct_1h": 0, "evaluated_1h": 0}
+        for r in results:
+            if r["outcomes"].get("24h"):
+                overall["evaluated_24h"] += 1
+                if r["outcomes"]["24h"]["correct"]:
+                    overall["correct_24h"] += 1
+            if r["outcomes"].get("1h"):
+                overall["evaluated_1h"] += 1
+                if r["outcomes"]["1h"]["correct"]:
+                    overall["correct_1h"] += 1
+        overall["accuracy_24h_pct"] = round(overall["correct_24h"] / overall["evaluated_24h"] * 100, 1) if overall["evaluated_24h"] else None
+        overall["accuracy_1h_pct"] = round(overall["correct_1h"] / overall["evaluated_1h"] * 100, 1) if overall["evaluated_1h"] else None
+
+        # 6. By signal type
+        by_signal: dict[str, dict] = {}
+        for r in results:
+            st = r["signal_type"]
+            if st not in by_signal:
+                by_signal[st] = {"total": 0, "correct_24h": 0, "evaluated_24h": 0}
+            by_signal[st]["total"] += 1
+            if r["outcomes"].get("24h"):
+                by_signal[st]["evaluated_24h"] += 1
+                if r["outcomes"]["24h"]["correct"]:
+                    by_signal[st]["correct_24h"] += 1
+        for st in by_signal:
+            s = by_signal[st]
+            s["accuracy_pct"] = round(s["correct_24h"] / s["evaluated_24h"] * 100, 1) if s["evaluated_24h"] else None
+
+        # 7. Confidence calibration buckets (0-20%, 20-40%, …, 80-100%)
+        buckets: dict[str, dict] = {}
+        for r in results:
+            bucket = f"{int(r['confidence'] * 100 // 20) * 20}-{int(r['confidence'] * 100 // 20) * 20 + 20}%"
+            if bucket not in buckets:
+                buckets[bucket] = {"confidence_range": bucket, "total": 0, "correct": 0, "evaluated": 0}
+            buckets[bucket]["total"] += 1
+            if r["outcomes"].get("24h"):
+                buckets[bucket]["evaluated"] += 1
+                if r["outcomes"]["24h"]["correct"]:
+                    buckets[bucket]["correct"] += 1
+        calibration = []
+        for b in sorted(buckets.values(), key=lambda x: x["confidence_range"]):
+            b["accuracy_pct"] = round(b["correct"] / b["evaluated"] * 100, 1) if b["evaluated"] else None
+            calibration.append(b)
+
+        # 8. Daily accuracy time-series
+        from collections import defaultdict
+        daily: dict[str, dict] = defaultdict(lambda: {"date": "", "total": 0, "correct": 0, "evaluated": 0})
+        for r in results:
+            date = r["ts"][:10]
+            daily[date]["date"] = date
+            daily[date]["total"] += 1
+            if r["outcomes"].get("24h"):
+                daily[date]["evaluated"] += 1
+                if r["outcomes"]["24h"]["correct"]:
+                    daily[date]["correct"] += 1
+        daily_list = []
+        for d in sorted(daily.values(), key=lambda x: x["date"]):
+            d["accuracy_pct"] = round(d["correct"] / d["evaluated"] * 100, 1) if d["evaluated"] else None
+            daily_list.append(d)
+
+        return {
+            "predictions": results[-200:],  # last 200 for detail view
+            "per_pair": per_pair,
+            "overall": overall,
+            "by_signal_type": by_signal,
+            "confidence_calibration": calibration,
+            "daily_accuracy": daily_list,
+        }
+
