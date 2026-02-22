@@ -487,7 +487,7 @@ function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {[
-            { icon: <BarChart3 size={14} />, text: 'Coinbase or Nordnet account', required: true },
+            { icon: <BarChart3 size={14} />, text: 'Exchange account (Coinbase / Nordnet / IBKR)', required: true },
             { icon: <Sparkles size={14} />, text: 'LLM API key (or use local Ollama)', required: false },
             { icon: <MessageSquare size={14} />, text: 'Telegram account (for alerts)', required: false },
             { icon: <Shield size={14} />, text: 'Docker Desktop installed', required: true },
@@ -513,7 +513,7 @@ function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {[
-            ['Exchange connection', 'Coinbase crypto + Nordnet equities'],
+            ['Exchange connection', 'Coinbase crypto / Nordnet / IBKR equities'],
             ['Trading mode', 'Paper (simulated) or Live (real money)'],
             ['Asset universe', 'Which crypto & stocks the agent monitors'],
             ['AI brain', 'Multi-provider LLM chain (Gemini / OpenAI / Ollama)'],
@@ -722,10 +722,10 @@ function StepTradingMode({ state, update }: { state: WizardState; update: (p: Pa
   )
 }
 
-function StepAssets({ state, update, onSkip }: { state: WizardState; update: (p: Partial<WizardState>) => void; onSkip: () => void }) {
+function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardState; update: (p: Partial<WizardState>) => void; onSkip: () => void }) {
   const toggle = (list: string[], id: string) =>
     list.includes(id) ? list.filter(p => p !== id) : [...list, id]
-  const addCustom = (field: 'cryptoPairs' | 'stockPairs', inputField: 'customCryptoPair' | 'customStockPair') => {
+  const addCustom = (field: 'cryptoPairs' | 'stockPairs' | 'ibkrPairs', inputField: 'customCryptoPair' | 'customStockPair' | 'customIbkrPair') => {
     const v = (state[inputField] as string).trim().toUpperCase()
     if (v && !(state[field] as string[]).includes(v)) {
       update({ [field]: [...(state[field] as string[]), v], [inputField]: '' })
@@ -735,8 +735,8 @@ function StepAssets({ state, update, onSkip }: { state: WizardState; update: (p:
   const renderPairSection = (opts: {
     title: string; icon: ReactNode; color: string;
     items: { id: string; name: string; symbol?: string; sector?: string }[];
-    pairs: string[]; pairsKey: 'cryptoPairs' | 'stockPairs';
-    custom: string; customKey: 'customCryptoPair' | 'customStockPair';
+    pairs: string[]; pairsKey: 'cryptoPairs' | 'stockPairs' | 'ibkrPairs';
+    custom: string; customKey: 'customCryptoPair' | 'customStockPair' | 'customIbkrPair';
     placeholder: string; subtitle: string;
   }) => (
     <div style={{ ...card, marginBottom: 16 }}>
@@ -1080,7 +1080,7 @@ function StepTelegram({ state, update, onSkip }: { state: WizardState; update: (
           {state.exchanges.nordnet && (
             <div style={card}>
               <h3 style={{ margin: '0 0 6px 0', fontSize: 15, fontWeight: 700, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Bot size={16} /> Nordnet Bot
+                <Bot size={16} /> Equities Bot (Nordnet)
                 {state.telegramNordnetBotToken && (
                   <span style={{ marginLeft: 'auto' }}>
                     <ValidationBadge valid={tokenValid(state.telegramNordnetBotToken)} label={isValidTelegramToken(state.telegramNordnetBotToken) ? 'Valid format' : 'Invalid format'} />
@@ -1176,7 +1176,7 @@ function StepNews({ state, update, onSkip }: { state: WizardState; update: (p: P
   )
 }
 
-function StepReview({ state, stepsWithValidation }: { state: WizardState; stepsWithValidation: { id: string; title: string; validation: StepValidation }[] }) {
+function StepReview({ state, stepsWithValidation: _stepsWithValidation }: { state: WizardState; stepsWithValidation: { id: string; title: string; validation: StepValidation }[] }) {
   const [expandedEnv, setExpandedEnv] = useState(false)
   const envPreview = useMemo(() => generateEnvContent(state), [state])
 

@@ -11,6 +11,7 @@ const DEFAULT_PROFILE_CURRENCIES: Record<string, string> = {
   '': 'EUR',
   crypto: 'EUR',
   nordnet: 'SEK',
+  ibkr: 'USD',
 }
 
 function loadProfileCurrencies(): Record<string, string> {

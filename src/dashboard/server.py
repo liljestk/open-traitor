@@ -386,7 +386,7 @@ def _fresh_conn(profile: str = "") -> sqlite3.Connection:
 
 
 def _get_profile_db(
-    profile: str = Query("", description="Exchange profile (e.g. 'coinbase', 'nordnet')"),
+    profile: str = Query("", description="Exchange profile (e.g. 'coinbase', 'nordnet', 'ibkr')"),
 ):
     """FastAPI dependency — resolves the StatsDB for the requested profile."""
     return _require_db(profile)

@@ -7,7 +7,8 @@ import { openLiveSocket } from '../api'
 const PROFILES = [
   { id: '', label: 'Default', sub: 'All Systems' },
   { id: 'crypto', label: 'Crypto', sub: 'EUR' },
-  { id: 'nordnet', label: 'Nordnet Shares', sub: 'SEK' },
+  { id: 'nordnet', label: 'Equities', sub: 'SEK' },
+  { id: 'ibkr', label: 'Equities', sub: 'USD' },
 ]
 
 const NAV = [
@@ -133,7 +134,7 @@ export default function Layout() {
               }}
             >
               {PROFILES.map((p) => (
-                <option key={p.id} value={p.id}>
+                <option key={p.id} value={p.id} style={{ background: '#161b22', color: '#e6edf3' }}>
                   {p.label} ({p.sub})
                 </option>
               ))}

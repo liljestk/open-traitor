@@ -82,6 +82,13 @@ input, select, textarea {
   font-family: var(--font-sans);
 }
 
+/* Fix native <select>/<option> on Windows — force dark background */
+select,
+select option {
+  background-color: var(--color-surface-800);
+  color: var(--color-gray-100);
+}
+
 /* Mono font utility */
 .font-mono {
   font-family: var(--font-mono) !important;

@@ -34,7 +34,7 @@ from src.utils.tracer import LLMTracer, get_llm_tracer
 
 def load_config() -> dict:
     """Load configuration from settings.yaml."""
-    config_path = os.path.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
+    config_path = os.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
     if not os.path.exists(config_path):
         print(f"❌ Config file not found: {config_path}")
         sys.exit(1)
