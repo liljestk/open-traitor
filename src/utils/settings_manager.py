@@ -69,7 +69,7 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "invalidate_strategic_context": {"type": bool},
     "watchlist_pairs":               {"type": list},
     "pair_universe_refresh_seconds": {"type": int,   "min": 300, "max": 86400},
-    "max_active_pairs":              {"type": int,   "min": 1, "max": 50},
+    "max_active_pairs":              {"type": int,   "min": 1, "max": 30},
     "include_crypto_quotes":         {"type": bool},
     "scan_volume_threshold":         {"type": float, "min": 0, "max": 1_000_000_000},
     "scan_movement_threshold_pct":   {"type": float, "min": 0.0, "max": 100.0},
@@ -337,7 +337,6 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "pairs":                       {},                            # LLM can add/remove pairs
         "pair_discovery":              {},                            # LLM can switch discovery mode
         "quote_currencies":            {},                            # LLM can adjust quote currencies
-        "max_active_pairs":            {"min": 3, "max": 30},
         "include_crypto_quotes":       {},
         "scan_volume_threshold":       {},
         "scan_movement_threshold_pct": {},
@@ -393,6 +392,7 @@ AUTONOMOUS_BLOCKED_FIELDS = frozenset({
     ("trading", "reconcile_every_cycles"),
     ("trading", "invalidate_strategic_context"),
     ("trading", "pair_universe_refresh_seconds"),
+    ("trading", "max_active_pairs"),          # human-only: RPM guardrail enforces upper bound
     ("fees", "trade_fee_pct"),
     ("fees", "maker_fee_pct"),
     ("fees", "swap_cooldown_seconds"),

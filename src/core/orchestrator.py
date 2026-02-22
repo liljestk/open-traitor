@@ -48,6 +48,7 @@ from src.utils.stats import StatsDB
 from src.utils.tracer import get_llm_tracer
 from src.utils.training_data import TrainingDataCollector
 from src.utils import settings_manager as sm
+from src.utils.rpm_budget import compute_rpm_entity_cap
 from src.core.managers.pipeline_manager import PipelineManager
 from src.core.managers.state_manager import StateManager
 from src.core.managers.telegram_manager import TelegramManager
@@ -340,9 +341,21 @@ class Orchestrator:
         self._SCREENER_INTERVAL: int = int(
             trading_cfg.get("screener_interval_cycles", 5)
         )
-        self._max_active_pairs: int = int(
-            trading_cfg.get("max_active_pairs", 5)
+        configured_max_pairs = int(trading_cfg.get("max_active_pairs", 5))
+        rpm_max, rpm_breakdown = compute_rpm_entity_cap(
+            config.get("llm_providers", []),
+            int(trading_cfg.get("interval", 120)),
         )
+        self._rpm_entity_cap: int = rpm_max
+        self._rpm_breakdown: dict = rpm_breakdown
+        if configured_max_pairs > rpm_max:
+            logger.warning(
+                f"⚠️ max_active_pairs clamped from {configured_max_pairs} to {rpm_max} "
+                f"— primary provider '{rpm_breakdown.get('provider', '?')}' has "
+                f"{rpm_breakdown.get('rpm', '?')} RPM, cycle interval "
+                f"{rpm_breakdown.get('interval', '?')}s"
+            )
+        self._max_active_pairs: int = min(configured_max_pairs, rpm_max)
         self._scan_volume_threshold: float = float(
             trading_cfg.get("scan_volume_threshold", 1000)
         )
@@ -351,6 +364,18 @@ class Orchestrator:
         )
         self._include_crypto_quotes: bool = bool(
             trading_cfg.get("include_crypto_quotes", True)
+        )
+
+        # ─── RPM Budget Startup Banner ────────────────────────────────────
+        _prov = rpm_breakdown.get('provider', 'local-only')
+        _rpm = rpm_breakdown.get('rpm', 0)
+        _headroom = rpm_max - self._max_active_pairs
+        _headroom_pct = round(_headroom / rpm_max * 100) if rpm_max > 0 else 100
+        logger.info(
+            f"📊 Entity tracking: {self._max_active_pairs} active pairs | "
+            f"RPM budget: {_prov} @ {_rpm} RPM | "
+            f"theoretical max: {rpm_max} entities | "
+            f"headroom: {_headroom} ({_headroom_pct}%)"
         )
 
         # ─── Asyncio helper ───────────────────────────────────────────────
@@ -511,6 +536,16 @@ class Orchestrator:
                     effective_pairs,
                     key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
                 )
+
+                # ─── RPM utilisation log (every 10 cycles) ────────────
+                if cycle_count % 10 == 0:
+                    _n_pairs = len(sorted_pairs)
+                    _worst_calls = _n_pairs * 2 + self._rpm_breakdown.get('overhead', 2)
+                    _budget = self._rpm_breakdown.get('available_per_cycle', 0)
+                    logger.info(
+                        f"📈 RPM utilisation: {_n_pairs}/{self._max_active_pairs} entities, "
+                        f"est. {_worst_calls} calls/cycle (budget: {_budget})"
+                    )
 
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
@@ -706,6 +741,48 @@ class Orchestrator:
                                         f"🔄 Active pairs updated by settings advisor: "
                                         f"{old_count} → {len(new_pairs)} pairs"
                                     )
+
+                            # Refresh max_active_pairs if changed (e.g. human edit via Telegram/YAML)
+                            if ("trading", "max_active_pairs") in changed_fields:
+                                new_cap = int(self.config.get("trading", {}).get(
+                                    "max_active_pairs", self._max_active_pairs
+                                ))
+                                clamped = min(new_cap, self._rpm_entity_cap)
+                                if clamped != new_cap:
+                                    logger.warning(
+                                        f"⚠️ max_active_pairs {new_cap} clamped to "
+                                        f"{clamped} by RPM guardrail"
+                                    )
+                                old_cap = self._max_active_pairs
+                                self._max_active_pairs = clamped
+                                logger.info(
+                                    f"🔄 max_active_pairs updated: {old_cap} → {clamped}"
+                                )
+
+                            # Refresh interval if changed (affects RPM budget)
+                            if ("trading", "interval") in changed_fields:
+                                new_interval = int(self.config.get("trading", {}).get(
+                                    "interval", self.interval
+                                ))
+                                self.interval = new_interval
+                                # Recompute RPM budget with new interval
+                                rpm_max, rpm_bd = compute_rpm_entity_cap(
+                                    self.config.get("llm_providers", []),
+                                    new_interval,
+                                )
+                                self._rpm_entity_cap = rpm_max
+                                self._rpm_breakdown = rpm_bd
+                                if self._max_active_pairs > rpm_max:
+                                    logger.warning(
+                                        f"⚠️ After interval change to {new_interval}s, "
+                                        f"max_active_pairs clamped from "
+                                        f"{self._max_active_pairs} to {rpm_max}"
+                                    )
+                                    self._max_active_pairs = rpm_max
+                                logger.info(
+                                    f"🔄 Interval updated to {new_interval}s, "
+                                    f"RPM entity cap recalculated: {rpm_max}"
+                                )
                             # Notify via Telegram
                             notif = format_advisor_notification(advisor_result)
                             if notif:

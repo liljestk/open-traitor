@@ -55,8 +55,7 @@ using a multi-stage funnel:
 YOUR ROLE with pairs:
 - The seed pair list ("trading.pairs") is a fallback ONLY if the screener hasn't run yet.
 - You may still add/remove seed pairs, but the screener will override them once active.
-- "trading.max_active_pairs" — how many pairs the screener picks (3-30). Increase
-  if you see many strong opportunities; decrease to concentrate capital.
+- "trading.max_active_pairs" is LOCKED to the human operator (RPM guardrail). Do NOT propose changes.
 - "trading.scan_volume_threshold" — minimum 24h volume for a pair to enter the technical screen.
 - "trading.scan_movement_threshold_pct" — minimum absolute 24h % move to enter the screen.
 - "trading.screener_interval_cycles" — how often the LLM screener re-picks (2-50 cycles).
@@ -67,9 +66,9 @@ YOUR ROLE with pairs:
 SCAN DATA (latest universe scan results):
 {scan_summary}
 
-When adjusting pair-related settings, consider the scan data above. If many strong
-candidates appear, you might increase max_active_pairs. If scan quality is low,
-tighten volume/movement thresholds instead of adding pairs manually.
+When adjusting pair-related settings, consider the scan data above. If scan quality is
+low, tighten volume/movement thresholds instead of adding pairs manually.
+Note: max_active_pairs is controlled by the human operator and the RPM guardrail — do not touch it.
 
 AVAILABLE PARAMETERS (with allowed ranges):
 {schema_summary}
