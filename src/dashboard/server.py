@@ -110,6 +110,14 @@ def _resolve_profile(profile: str) -> str:
     return PROFILE_ALIASES.get(p, p)
 
 
+def _quote_currency_for(profile: str) -> str | None:
+    """Return the quote currency for a profile, or None for 'Default / All'."""
+    resolved = _resolve_profile(profile)
+    if not resolved:
+        return None  # Default profile → show all currencies
+    return PROFILE_CURRENCIES.get(resolved)
+
+
 def _get_config_for_profile(profile: str = "") -> dict:
     """Load the config for a specific profile, falling back to the default config."""
     resolved = _resolve_profile(profile)
@@ -461,13 +469,15 @@ def list_cycles(
     pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    profile: str = Query(""),
     db=Depends(_get_profile_db),
 ):
     """
     Returns a paginated list of trading cycles with outcome summary.
     Each item represents one unique `cycle_id` across all agent spans.
     """
-    cycles = db.get_cycles(pair=pair, limit=limit, offset=offset)
+    qc = _quote_currency_for(profile)
+    cycles = db.get_cycles(pair=pair, limit=limit, offset=offset, quote_currency=qc)
     for c in cycles:
         c["langfuse_url"] = _langfuse_url(c.get("langfuse_trace_id"))
         # Compute wall-clock duration from first→last agent span timestamps
@@ -507,16 +517,19 @@ def list_trades(
     pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
     hours: int = Query(24 * 7, ge=1, description="Hours of history to fetch"),
     limit: int = Query(500, ge=1, le=5000),
+    profile: str = Query(""),
     db=Depends(_get_profile_db),
 ):
     """Returns a list of raw trades from the database, newest first."""
-    trades = db.get_trades(hours=hours, pair=pair, limit=limit)
+    qc = _quote_currency_for(profile)
+    trades = db.get_trades(hours=hours, pair=pair, limit=limit, quote_currency=qc)
     return {"trades": trades, "count": len(trades)}
 
 @app.get("/api/trades/export", summary="Export trades to CSV")
-def export_trades(hours: int = Query(24 * 30, ge=1), db=Depends(_get_profile_db)):
+def export_trades(hours: int = Query(24 * 30, ge=1), profile: str = Query(""), db=Depends(_get_profile_db)):
     """Exports raw trades to a downloadable CSV file."""
-    trades = db.get_trades(hours=hours, limit=100000)
+    qc = _quote_currency_for(profile)
+    trades = db.get_trades(hours=hours, limit=100000, quote_currency=qc)
     
     if not trades:
         return Response(
@@ -571,10 +584,10 @@ def get_stats_summary(
 ):
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
     conn = _open_conn(db)
+    qc = _quote_currency_for(profile)
     try:
         # Overall trade stats
-        trade_row = conn.execute(
-            """SELECT
+        trade_sql = """SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
@@ -584,30 +597,36 @@ def get_stats_summary(
                 ROUND(MIN(pnl), 2) as worst_trade
                FROM trades
                WHERE pnl IS NOT NULL"""
-        ).fetchone()
+        if qc:
+            trade_row = conn.execute(trade_sql + " AND UPPER(pair) LIKE ?", (f"%-{qc.upper()}",)).fetchone()
+        else:
+            trade_row = conn.execute(trade_sql).fetchone()
 
         # Last 24h
         cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        recent_row = conn.execute(
-            """SELECT
+        recent_sql = """SELECT
                 COUNT(*) as trades_24h,
                 ROUND(SUM(pnl), 2) as pnl_24h
                FROM trades
-               WHERE ts >= ? AND pnl IS NOT NULL""",
-            (cutoff_24h,),
-        ).fetchone()
+               WHERE ts >= ? AND pnl IS NOT NULL"""
+        if qc:
+            recent_row = conn.execute(recent_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
+        else:
+            recent_row = conn.execute(recent_sql, (cutoff_24h,)).fetchone()
 
         # Active pairs
-        pairs_row = conn.execute(
-            "SELECT COUNT(DISTINCT pair) as active_pairs FROM agent_reasoning WHERE ts >= ?",
-            (cutoff_24h,),
-        ).fetchone()
+        pairs_sql = "SELECT COUNT(DISTINCT pair) as active_pairs FROM agent_reasoning WHERE ts >= ?"
+        if qc:
+            pairs_row = conn.execute(pairs_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
+        else:
+            pairs_row = conn.execute(pairs_sql, (cutoff_24h,)).fetchone()
 
         # Cycle count last 24h
-        cycle_row = conn.execute(
-            "SELECT COUNT(DISTINCT cycle_id) as cycles_24h FROM agent_reasoning WHERE ts >= ?",
-            (cutoff_24h,),
-        ).fetchone()
+        cycle_sql = "SELECT COUNT(DISTINCT cycle_id) as cycles_24h FROM agent_reasoning WHERE ts >= ?"
+        if qc:
+            cycle_row = conn.execute(cycle_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
+        else:
+            cycle_row = conn.execute(cycle_sql, (cutoff_24h,)).fetchone()
 
         # Latest portfolio snapshot
         snapshot = conn.execute(
@@ -766,13 +785,15 @@ def create_simulated_trade(body: SimulatedTradeCreate, db=Depends(_get_profile_d
 @app.get("/api/simulated-trades", summary="List simulated trades with live PnL")
 def list_simulated_trades(
     include_closed: bool = Query(False, description="Include closed simulations"),
+    profile: str = Query(""),
     db=Depends(_get_profile_db),
 ):
     """
     Returns all simulated trades. For open ones, the current price is fetched
     live and PnL (absolute + %) is computed on the fly.
     """
-    rows = db.get_simulated_trades(include_closed=include_closed)
+    qc = _quote_currency_for(profile)
+    rows = db.get_simulated_trades(include_closed=include_closed, quote_currency=qc)
 
     # Enrich open rows with live PnL
     for row in rows:
@@ -2061,14 +2082,15 @@ def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), db=Depends(_ge
 
 
 @app.get("/api/analytics", summary="Comprehensive performance analytics")
-def get_analytics(hours: int = Query(720, ge=1, le=8760), db=Depends(_get_profile_db)):
+def get_analytics(hours: int = Query(720, ge=1, le=8760), profile: str = Query(""), db=Depends(_get_profile_db)):
     """Combined analytics dashboard data: performance, best/worst, daily summaries, win/loss stats."""
     try:
-        perf = db.get_performance_summary(hours=hours)
-        best_worst = db.get_best_worst_trades(hours=hours)
+        qc = _quote_currency_for(profile)
+        perf = db.get_performance_summary(hours=hours, quote_currency=qc)
+        best_worst = db.get_best_worst_trades(hours=hours, quote_currency=qc)
         days = max(1, hours // 24)
         summaries = db.get_daily_summaries(days=days)
-        win_loss = db.get_win_loss_stats(hours=hours)
+        win_loss = db.get_win_loss_stats(hours=hours, quote_currency=qc)
         portfolio_range = db.get_portfolio_range(hours=hours)
 
         return _sanitize_floats({
@@ -2242,6 +2264,7 @@ def get_watchlist(
 ):
     """Returns the latest universe scan results + active pair configuration."""
     config = _get_config_for_profile(profile)
+    qc = _quote_currency_for(profile)
     try:
         scan = db.get_latest_scan_results()
         pairs = config.get("trading", {}).get("pairs", [])
@@ -2269,6 +2292,26 @@ def get_watchlist(
             if not isinstance(scan_data.get("top_movers"), list):
                 scan_data["top_movers"] = []
 
+            # Filter scan results by quote currency if a specific profile is selected
+            if qc:
+                suffix = f"-{qc.upper()}"
+                if isinstance(scan_data.get("results_json"), dict):
+                    scan_data["results_json"] = {
+                        k: v for k, v in scan_data["results_json"].items()
+                        if k.upper().endswith(suffix)
+                    }
+                if isinstance(scan_data.get("top_movers"), list):
+                    scan_data["top_movers"] = [
+                        m for m in scan_data["top_movers"]
+                        if isinstance(m, dict) and m.get("pair", "").upper().endswith(suffix)
+                    ]
+
+        # Filter active pairs by quote currency
+        if qc:
+            suffix = f"-{qc.upper()}"
+            pairs = [p for p in pairs if p.upper().endswith(suffix)]
+            live_prices = {k: v for k, v in live_prices.items() if k.upper().endswith(suffix)}
+
         return _sanitize_floats({
             "active_pairs": pairs,
             "live_prices": live_prices,
@@ -2285,10 +2328,19 @@ def get_watchlist(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/predictions/accuracy", summary="Signal prediction accuracy vs actual price movements")
-def get_prediction_accuracy(days: int = Query(30, ge=1, le=365), db=Depends(_get_profile_db)):
-    """Compare market analyst signal predictions with actual price outcomes."""
+def get_prediction_accuracy(
+    days: int = Query(30, ge=1, le=365),
+    profile: str = Query(""),
+    db=Depends(_get_profile_db),
+):
+    """Compare market analyst signal predictions with actual price outcomes.
+
+    Automatically filters by the profile's quote currency so that, e.g.,
+    the crypto/EUR profile only shows -EUR pairs.
+    """
     try:
-        result = db.get_prediction_accuracy(days=days)
+        qc = _quote_currency_for(profile)
+        result = db.get_prediction_accuracy(days=days, quote_currency=qc)
         return _sanitize_floats(result)
     except Exception as exc:
         logger.exception("prediction accuracy error")
@@ -2296,10 +2348,14 @@ def get_prediction_accuracy(days: int = Query(30, ge=1, le=365), db=Depends(_get
 
 
 @app.get("/api/predictions/tracked-pairs", summary="Pairs the LLM system actively tracks")
-def get_tracked_pairs(db=Depends(_get_profile_db)):
-    """Return pairs the LLM has analyzed recently, grouped by asset class."""
+def get_tracked_pairs(profile: str = Query(""), db=Depends(_get_profile_db)):
+    """Return pairs the LLM has analyzed recently, grouped by asset class.
+
+    Automatically filters by the profile's quote currency.
+    """
     try:
-        return db.get_tracked_pairs()
+        qc = _quote_currency_for(profile)
+        return db.get_tracked_pairs(quote_currency=qc)
     except Exception as exc:
         logger.exception("tracked pairs error")
         raise HTTPException(status_code=500, detail=str(exc))

@@ -375,13 +375,19 @@ class StatsDB:
         conn.commit()
         return cursor.lastrowid
 
-    def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50, quote_currency: str | None = None) -> list[dict]:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         if pair:
             rows = conn.execute(
                 "SELECT * FROM trades WHERE ts >= ? AND pair = ? ORDER BY ts DESC LIMIT ?",
                 (cutoff, pair, limit),
+            ).fetchall()
+        elif quote_currency:
+            suffix = f"%-{quote_currency.upper()}"
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE ts >= ? AND UPPER(pair) LIKE ? ORDER BY ts DESC LIMIT ?",
+                (cutoff, suffix, limit),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -390,12 +396,11 @@ class StatsDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_trade_stats(self, hours: int = 24) -> dict:
+    def get_trade_stats(self, hours: int = 24, quote_currency: str | None = None) -> dict:
         """Get aggregate trade statistics."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        row = conn.execute(
-            """SELECT
+        base_sql = """SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning,
                 SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing,
@@ -407,9 +412,11 @@ class StatsDB:
                 COALESCE(SUM(quote_amount), 0) as total_volume,
                 COALESCE(SUM(fee_quote), 0) as total_fees,
                 COALESCE(AVG(confidence), 0) as avg_confidence
-               FROM trades WHERE ts >= ?""",
-            (cutoff,),
-        ).fetchone()
+               FROM trades WHERE ts >= ?"""
+        if quote_currency:
+            row = conn.execute(base_sql + " AND UPPER(pair) LIKE ?", (cutoff, f"%-{quote_currency.upper()}")).fetchone()
+        else:
+            row = conn.execute(base_sql, (cutoff,)).fetchone()
         return dict(row) if row else {}
 
     def get_pair_stats(self, pair: str, hours: int = 168) -> dict:
@@ -429,7 +436,7 @@ class StatsDB:
         ).fetchone()
         return dict(row) if row else {}
 
-    def get_win_loss_stats(self, hours: int = 720) -> dict:
+    def get_win_loss_stats(self, hours: int = 720, quote_currency: str | None = None) -> dict:
         """
         Get win rate and average win/loss for Kelly Criterion position sizing.
         Default look-back: 30 days (720 hours).
@@ -442,15 +449,16 @@ class StatsDB:
         """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        row = conn.execute(
-            """SELECT
+        base_sql = """SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
                 COALESCE(AVG(CASE WHEN pnl < 0 THEN ABS(pnl) END), 0) as avg_loss
-               FROM trades WHERE ts >= ? AND pnl IS NOT NULL AND pnl != 0""",
-            (cutoff,),
-        ).fetchone()
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL AND pnl != 0"""
+        if quote_currency:
+            row = conn.execute(base_sql + " AND UPPER(pair) LIKE ?", (cutoff, f"%-{quote_currency.upper()}")).fetchone()
+        else:
+            row = conn.execute(base_sql, (cutoff,)).fetchone()
         if not row or row["total"] == 0:
             return {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
         return {
@@ -602,13 +610,13 @@ class StatsDB:
 
     # ─── Analytics Queries ─────────────────────────────────────────────────
 
-    def get_performance_summary(self, hours: int = 24) -> dict:
+    def get_performance_summary(self, hours: int = 24, quote_currency: str | None = None) -> dict:
         """Get a comprehensive performance summary for the LLM."""
         return {
-            "trade_stats": self.get_trade_stats(hours),
+            "trade_stats": self.get_trade_stats(hours, quote_currency=quote_currency),
             "portfolio_range": self.get_portfolio_range(hours),
             "event_counts": self.get_event_counts(hours),
-            "recent_trades": self.get_trades(hours, limit=10),
+            "recent_trades": self.get_trades(hours, limit=10, quote_currency=quote_currency),
         }
 
     def get_portfolio_history(self, hours: int = 24) -> list[dict]:
@@ -643,22 +651,21 @@ class StatsDB:
 
         return [dict(r) for r in rows]
 
-    def get_best_worst_trades(self, hours: int = 168) -> dict:
+    def get_best_worst_trades(self, hours: int = 168, quote_currency: str | None = None) -> dict:
         """Get best and worst trades in a period."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        best = conn.execute(
-            """SELECT pair, action, pnl, price, quote_amount, ts
-               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
-               ORDER BY pnl DESC LIMIT 3""",
-            (cutoff,),
-        ).fetchall()
-        worst = conn.execute(
-            """SELECT pair, action, pnl, price, quote_amount, ts
-               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
-               ORDER BY pnl ASC LIMIT 3""",
-            (cutoff,),
-        ).fetchall()
+        base_best = """SELECT pair, action, pnl, price, quote_amount, ts
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL"""
+        base_worst = base_best  # same WHERE clause
+        if quote_currency:
+            currency_filter = " AND UPPER(pair) LIKE ?"
+            suffix = f"%-{quote_currency.upper()}"
+            best = conn.execute(base_best + currency_filter + " ORDER BY pnl DESC LIMIT 3", (cutoff, suffix)).fetchall()
+            worst = conn.execute(base_worst + currency_filter + " ORDER BY pnl ASC LIMIT 3", (cutoff, suffix)).fetchall()
+        else:
+            best = conn.execute(base_best + " ORDER BY pnl DESC LIMIT 3", (cutoff,)).fetchall()
+            worst = conn.execute(base_worst + " ORDER BY pnl ASC LIMIT 3", (cutoff,)).fetchall()
         return {
             "best": [dict(r) for r in best],
             "worst": [dict(r) for r in worst],
@@ -761,6 +768,7 @@ class StatsDB:
         pair: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        quote_currency: str | None = None,
     ) -> list[dict]:
         """
         Return a paginated list of trading cycles with outcome summary.
@@ -795,6 +803,35 @@ class StatsDB:
                    ORDER BY started_at DESC
                    LIMIT ? OFFSET ?""",
                 (pair, limit, offset),
+            ).fetchall()
+        elif quote_currency:
+            suffix = f"%-{quote_currency.upper()}"
+            rows = conn.execute(
+                """SELECT
+                    ar.cycle_id,
+                    ar.pair,
+                    MIN(ar.ts) as started_at,
+                    MAX(ar.ts) as finished_at,
+                    COUNT(DISTINCT ar.agent_name) as agent_count,
+                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.signal_type END) as signal_type,
+                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.confidence END) as confidence,
+                    MAX(CASE WHEN ar.agent_name='strategist' THEN
+                        json_extract(ar.reasoning_json, '$.action') END) as action,
+                    t.id as trade_id,
+                    t.pnl,
+                    t.quote_amount,
+                    t.price,
+                    ar.langfuse_trace_id,
+                    SUM(ar.prompt_tokens) as total_prompt_tokens,
+                    SUM(ar.completion_tokens) as total_completion_tokens,
+                    SUM(ar.latency_ms) as total_latency_ms
+                   FROM agent_reasoning ar
+                   LEFT JOIN trades t ON t.id = ar.trade_id
+                   WHERE UPPER(ar.pair) LIKE ?
+                   GROUP BY ar.cycle_id
+                   ORDER BY started_at DESC
+                   LIMIT ? OFFSET ?""",
+                (suffix, limit, offset),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -1026,17 +1063,29 @@ class StatsDB:
         conn.commit()
         return cursor.lastrowid
 
-    def get_simulated_trades(self, include_closed: bool = False) -> list[dict]:
+    def get_simulated_trades(self, include_closed: bool = False, quote_currency: str | None = None) -> list[dict]:
         """Return all (open, or all including closed) simulated trades."""
         conn = self._get_conn()
         if include_closed:
-            rows = conn.execute(
-                "SELECT * FROM simulated_trades ORDER BY ts DESC"
-            ).fetchall()
+            if quote_currency:
+                rows = conn.execute(
+                    "SELECT * FROM simulated_trades WHERE UPPER(pair) LIKE ? ORDER BY ts DESC",
+                    (f"%-{quote_currency.upper()}",),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM simulated_trades ORDER BY ts DESC"
+                ).fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM simulated_trades WHERE status = 'open' ORDER BY ts DESC"
-            ).fetchall()
+            if quote_currency:
+                rows = conn.execute(
+                    "SELECT * FROM simulated_trades WHERE status = 'open' AND UPPER(pair) LIKE ? ORDER BY ts DESC",
+                    (f"%-{quote_currency.upper()}",),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM simulated_trades WHERE status = 'open' ORDER BY ts DESC"
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def close_simulated_trade(
@@ -1137,28 +1186,45 @@ class StatsDB:
 
     # ─── Prediction Accuracy ───────────────────────────────────────────────
 
-    def get_prediction_accuracy(self, days: int = 30) -> dict:
+    def get_prediction_accuracy(self, days: int = 30, quote_currency: str | None = None) -> dict:
         """
         Compute signal prediction accuracy by comparing market_analyst signals
         with actual price movements over subsequent hours.
 
         Uses the current_prices stored in portfolio_snapshots to determine what
         actually happened after each prediction.
+
+        If *quote_currency* is given (e.g. "EUR"), only pairs ending in
+        "-EUR" are included.
         """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         # 1. Get all market_analyst predictions with signal details
-        predictions = conn.execute(
-            """SELECT
-                ar.ts, ar.pair, ar.signal_type, ar.confidence,
-                ar.reasoning_json, ar.cycle_id
-               FROM agent_reasoning ar
-               WHERE ar.agent_name = 'market_analyst'
-                 AND ar.ts >= ?
-               ORDER BY ar.ts ASC""",
-            (cutoff,),
-        ).fetchall()
+        if quote_currency:
+            suffix = f"-{quote_currency.upper()}"
+            predictions = conn.execute(
+                """SELECT
+                    ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                    ar.reasoning_json, ar.cycle_id
+                   FROM agent_reasoning ar
+                   WHERE ar.agent_name = 'market_analyst'
+                     AND ar.ts >= ?
+                     AND UPPER(ar.pair) LIKE ?
+                   ORDER BY ar.ts ASC""",
+                (cutoff, f"%{suffix}"),
+            ).fetchall()
+        else:
+            predictions = conn.execute(
+                """SELECT
+                    ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                    ar.reasoning_json, ar.cycle_id
+                   FROM agent_reasoning ar
+                   WHERE ar.agent_name = 'market_analyst'
+                     AND ar.ts >= ?
+                   ORDER BY ar.ts ASC""",
+                (cutoff,),
+            ).fetchall()
 
         if not predictions:
             return {
@@ -1397,26 +1463,43 @@ class StatsDB:
         logger.info(f"Cleaned up {deleted} bad portfolio snapshots (threshold={threshold:.2f})")
         return deleted
 
-    def get_tracked_pairs(self) -> dict:
+    def get_tracked_pairs(self, quote_currency: str | None = None) -> dict:
         """Return pairs the LLM system has analyzed, grouped by asset class.
 
         Looks at agent_reasoning entries to see what pairs were actually
         predicted on, and classifies them as crypto or equity.
+
+        If *quote_currency* is given (e.g. "EUR"), only pairs ending in
+        that currency suffix are returned.
         """
         conn = self._get_conn()
 
         # Get all pairs with prediction counts from last 7 days
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        rows = conn.execute(
-            """SELECT pair, COUNT(*) as prediction_count,
-                      MAX(ts) as last_predicted,
-                      GROUP_CONCAT(DISTINCT signal_type) as signal_types
-               FROM agent_reasoning
-               WHERE agent_name = 'market_analyst' AND ts >= ?
-               GROUP BY pair
-               ORDER BY prediction_count DESC""",
-            (cutoff,),
-        ).fetchall()
+        if quote_currency:
+            suffix = f"-{quote_currency.upper()}"
+            rows = conn.execute(
+                """SELECT pair, COUNT(*) as prediction_count,
+                          MAX(ts) as last_predicted,
+                          GROUP_CONCAT(DISTINCT signal_type) as signal_types
+                   FROM agent_reasoning
+                   WHERE agent_name = 'market_analyst' AND ts >= ?
+                     AND UPPER(pair) LIKE ?
+                   GROUP BY pair
+                   ORDER BY prediction_count DESC""",
+                (cutoff, f"%{suffix}"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT pair, COUNT(*) as prediction_count,
+                          MAX(ts) as last_predicted,
+                          GROUP_CONCAT(DISTINCT signal_type) as signal_types
+                   FROM agent_reasoning
+                   WHERE agent_name = 'market_analyst' AND ts >= ?
+                   GROUP BY pair
+                   ORDER BY prediction_count DESC""",
+                (cutoff,),
+            ).fetchall()
 
         # Classify pairs
         crypto_suffixes = {"-USD", "-EUR", "-BTC", "-ETH", "-USDT", "-USDC", "-GBP"}
