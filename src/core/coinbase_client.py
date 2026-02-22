@@ -358,6 +358,7 @@ class CoinbaseClient(ExchangeClient):
                 return account_list
             except Exception as e:
                 logger.error(f"Error fetching accounts: {e}")
+                raise
         else:
             logger.warning("⚠️ get_accounts: No Coinbase REST client available")
 

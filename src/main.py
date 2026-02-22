@@ -1,5 +1,4 @@
-"""
-Auto-Traitor Main Entry Point — Autonomous LLM Crypto Trading Agent.
+"""Auto-Traitor Main Entry Point - Autonomous LLM Trading Agent.
 
 Usage:
     python -m src.main --mode daemon     # Run as background daemon
@@ -43,9 +42,16 @@ def load_config() -> dict:
         return yaml.safe_load(f) or {}
 
 
-def print_banner(mode: str) -> None:
+def print_banner(mode: str, exchange_type: str = "") -> None:
     """Print a beautiful startup banner."""
-    banner = """
+    # Determine agent label based on exchange type
+    exchange_labels = {
+        "coinbase": "Crypto",
+        "ibkr": "Equities",
+        "nordnet": "Equities",
+    }
+    agent_label = exchange_labels.get(exchange_type.lower(), "Trading")
+    banner = f"""
     ╔═══════════════════════════════════════════════════════╗
     ║                                                       ║
     ║   █████╗ ██╗   ██╗████████╗ ██████╗                   ║
@@ -62,7 +68,7 @@ def print_banner(mode: str) -> None:
     ║     ██║   ██║  ██║██║  ██║██║   ██║   ╚██████╔╝██║  ██║║
     ║     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝║
     ║                                                       ║
-    ║   🤖 Autonomous LLM Crypto Trading Agent              ║
+    ║   🤖 Autonomous LLM {agent_label} Trading Agent{' ' * (14 - len(agent_label))}║
     ║   📡 Powered by Ollama (Local LLM)                    ║
     ║                                                       ║
     ╚═══════════════════════════════════════════════════════╝
@@ -98,6 +104,14 @@ def main():
     # Load environment
     load_dotenv(os.path.join("config", ".env"))
 
+    # Smart override: If profile is nordnet but nordnet bot is not configured, and IBKR is, switch to IBKR
+    if profile == "nordnet" and not os.environ.get("TELEGRAM_BOT_TOKEN_NORDNET") and os.environ.get("TELEGRAM_BOT_TOKEN_IBKR"):
+        print("💡 Nordnet API not configured but IBKR is. Auto-switching profile to IBKR...")
+        args.config = args.config.replace("nordnet", "ibkr")
+        profile = "ibkr"
+        os.environ["AUTO_TRAITOR_PROFILE"] = profile
+        os.environ["AUTO_TRAITOR_CONFIG"] = args.config
+
     # Load config
     config = load_config()
 
@@ -117,7 +131,8 @@ def main():
     )
 
     logger = get_logger("main")
-    print_banner(mode)
+    exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
+    print_banner(mode, exchange_type=exchange_type)
 
     # Safety confirmation for live mode
     if not paper_mode:
@@ -250,6 +265,10 @@ def main():
                 paper_mode=paper_mode,
                 paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
             )
+        except NotImplementedError as e:
+            logger.warning(f"⚠️ Live trading not supported for Nordnet yet: {e}. Forcing paper mode.")
+            paper_mode = True
+            exchange = NordnetClient(paper_mode=True, paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005))
         except ImportError:
             logger.error("NordnetClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
             exchange = CoinbaseClient(paper_mode=True)
@@ -258,6 +277,16 @@ def main():
             from src.core.ib_client import IBClient
             exchange: ExchangeClient = IBClient(
                 paper_mode=paper_mode,
+                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            )
+        except NotImplementedError as e:
+            logger.warning(f"⚠️ Live trading not supported for IBKR yet: {e}. Forcing paper mode.")
+            paper_mode = True
+            exchange = IBClient(
+                paper_mode=True,
                 paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
                 ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
                 ib_port=int(os.environ.get("IBKR_PORT", "4002")),
@@ -446,6 +475,7 @@ def main():
             chat_id=telegram_chat_id,
             authorized_users=authorized_list,
             mode=_bot_mode,
+            exchange_name=_exchange_name,
         )
         telegram_bot.start()
         logger.info(f"📱 Telegram bot started (mode={_bot_mode}, exchange={_exchange_name})")

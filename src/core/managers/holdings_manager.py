@@ -68,7 +68,7 @@ class HoldingsManager:
             accounts = orch.exchange.get_accounts()
         except Exception as e:
             logger.warning(f"live_coinbase_snapshot: get_accounts failed: {e}")
-            accounts = []
+            raise
 
         holdings = []
         prices_by_pair: dict[str, float] = {}

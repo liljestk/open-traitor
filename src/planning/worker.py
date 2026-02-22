@@ -33,6 +33,7 @@ import temporalio.exceptions
 import temporalio.worker
 
 from src.planning.activities import (
+    evaluate_previous_plan,
     fetch_trade_history,
     fetch_portfolio_history,
     call_planning_llm,
@@ -112,6 +113,7 @@ async def main() -> None:
         task_queue=TASK_QUEUE,
         workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow],
         activities=[
+            evaluate_previous_plan,
             fetch_trade_history,
             fetch_portfolio_history,
             call_planning_llm,

@@ -2444,6 +2444,18 @@ def get_watchlist(
         scan = db.get_latest_scan_results()
         pairs = config.get("trading", {}).get("pairs", [])
 
+        # Also include LLM-followed pairs from the DB (runtime-discovered by the screener)
+        llm_follows = db.get_pair_follows(quote_currency=qc)
+        llm_db_pairs = [
+            f["pair"] for f in llm_follows if f.get("followed_by") == "llm"
+        ]
+        # Merge: config pairs + DB LLM pairs (dedup, preserve order)
+        seen = {p.upper() for p in pairs}
+        for lp in llm_db_pairs:
+            if lp.upper() not in seen:
+                pairs.append(lp)
+                seen.add(lp.upper())
+
         # Get live prices for active pairs (filled after we know human-followed too)
         live_prices = {}
 

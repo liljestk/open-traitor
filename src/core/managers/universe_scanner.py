@@ -311,6 +311,17 @@ class UniverseScanner:
                                 f"{valid} | changes: {' '.join(changes)}"
                             )
 
+                            # Persist LLM-selected pairs to DB so the dashboard watchlist can read them
+                            try:
+                                exchange_name = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+                                # Remove old LLM follows, then add new ones
+                                for rp in removed:
+                                    orch.stats_db.unfollow_pair(rp, followed_by="llm")
+                                for ap in added:
+                                    orch.stats_db.follow_pair(ap, followed_by="llm", exchange=exchange_name)
+                            except Exception as db_err:
+                                logger.debug(f"Failed to persist LLM pair follows: {db_err}")
+
                             # Update WebSocket subscriptions
                             try:
                                 if orch.ws_feed:

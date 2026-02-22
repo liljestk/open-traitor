@@ -679,6 +679,23 @@ class Orchestrator:
                 # Take portfolio snapshot
                 self.state.take_portfolio_snapshot()
 
+                # Persist snapshot to stats DB (drives the Analytics dashboard)
+                try:
+                    exchange_name = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    self.stats_db.record_snapshot(
+                        portfolio_value=self.state.portfolio_value,
+                        cash_balance=self.state.cash_balance,
+                        return_pct=self.state.return_pct,
+                        total_pnl=self.state.total_pnl,
+                        max_drawdown=self.state.max_drawdown,
+                        open_positions=dict(self.state.positions),
+                        current_prices=dict(self.state.current_prices),
+                        high_stakes_active=getattr(self.state, "high_stakes_active", False),
+                        exchange=exchange_name,
+                    )
+                except Exception as _snap_err:
+                    logger.debug(f"Portfolio snapshot persistence failed: {_snap_err}")
+
                 # Check circuit breaker
                 if self.state.max_drawdown >= self.config.get("risk", {}).get("max_drawdown_pct", 0.10):
                     self.state.circuit_breaker_triggered = True

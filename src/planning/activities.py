@@ -281,16 +281,16 @@ Respond ONLY with JSON:
     pairs = review_data.get("pair_breakdown", [])
     port = review_data.get("portfolio_range", {})
 
-    total = stats.get("total_trades", 0)
-    wins = stats.get("winning", 0)
+    total = stats.get("total_trades") or 0
+    wins = stats.get("winning") or 0
     win_rate = (wins / total * 100) if total > 0 else 0
 
     # Dynamic currency symbol — passed through review_data or defaults to '$'
-    sym = review_data.get("currency_symbol", "$")
-    native = review_data.get("native_currency", "USD")
+    sym = review_data.get("currency_symbol") or "$"
+    native = review_data.get("native_currency") or "USD"
 
     pairs_text = "\n".join(
-        f"  {p['pair']}: {p['trades']} trades, {p['wins']} wins, PnL {sym}{p['pnl']:.2f}"
+        f"  {p['pair']}: {p.get('trades', 0)} trades, {p.get('wins', 0)} wins, PnL {sym}{(p.get('pnl') or 0):.2f}"
         for p in pairs[:10]
     ) or "  No data"
 
@@ -302,8 +302,8 @@ Respond ONLY with JSON:
                 rj = json.loads(r.get("reasoning_json") or "{}")
                 factors = rj.get("key_factors", [])[:2]
                 loss_reasoning.append(
-                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r['signal_type']} "
-                    f"conf={r['confidence']:.0%} factors={factors}"
+                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r.get('signal_type', '?')} "
+                    f"conf={(r.get('confidence') or 0):.0%} factors={factors}"
                 )
             except Exception:
                 pass
@@ -343,22 +343,22 @@ PREVIOUS PLAN EVALUATION:
 {correction_note}{eval_block}
 TRADE STATISTICS:
   Total trades: {total}
-  Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing', 0)} losses)
-  Total PnL: {sym}{stats.get('total_pnl', 0):.2f}
-  Avg PnL per trade: {sym}{stats.get('avg_pnl', 0):.2f}
-  Best trade: {sym}{stats.get('best_pnl', 0):.2f}
-  Worst trade: {sym}{stats.get('worst_pnl', 0):.2f}
-  Avg confidence: {stats.get('avg_confidence', 0):.0%}
-  Total volume: {sym}{stats.get('total_volume', 0):,.2f}
-  Total fees: {sym}{stats.get('total_fees', 0):.2f}
+  Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing') or 0} losses)
+  Total PnL: {sym}{stats.get('total_pnl') or 0:.2f}
+  Avg PnL per trade: {sym}{stats.get('avg_pnl') or 0:.2f}
+  Best trade: {sym}{stats.get('best_pnl') or 0:.2f}
+  Worst trade: {sym}{stats.get('worst_pnl') or 0:.2f}
+  Avg confidence: {(stats.get('avg_confidence') or 0):.0%}
+  Total volume: {sym}{stats.get('total_volume') or 0:,.2f}
+  Total fees: {sym}{stats.get('total_fees') or 0:.2f}
 
 PAIR BREAKDOWN:
 {pairs_text}
 
 PORTFOLIO VALUE RANGE ({native}):
-  Low: {sym}{port.get('low', 0):,.2f}
-  High: {sym}{port.get('high', 0):,.2f}
-  Avg: {sym}{port.get('avg', 0):,.2f}
+  Low: {sym}{port.get('low') or 0:,.2f}
+  High: {sym}{port.get('high') or 0:,.2f}
+  Avg: {sym}{port.get('avg') or 0:,.2f}
 
 RECENT LOSS ANALYSIS (signal reasoning that led to losses):
 {loss_text}

@@ -107,7 +107,7 @@ class Signal(BaseModel):
             SignalType.WEAK_SELL,
         )
 
-    def to_summary(self) -> str:
+    def to_summary(self, currency_symbol: str = "") -> str:
         """Human-readable signal summary."""
         signal_emoji = {
             SignalType.STRONG_BUY: "🟢🟢",
@@ -119,9 +119,16 @@ class Signal(BaseModel):
             SignalType.STRONG_SELL: "🔴🔴",
         }
         emoji = signal_emoji.get(self.signal_type, "❓")
+        # Infer currency symbol from pair if not provided
+        if not currency_symbol and self.pair and "-" in self.pair:
+            _known_symbols = {"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF ", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
+            quote = self.pair.rsplit("-", 1)[-1].upper()
+            currency_symbol = _known_symbols.get(quote, "$")
+        elif not currency_symbol:
+            currency_symbol = "$"
         return (
             f"{emoji} {self.pair} | Signal: {self.signal_type.value} | "
             f"Confidence: {self.confidence:.0%} | "
-            f"Price: ${self.current_price:,.2f} | "
+            f"Price: {currency_symbol}{self.current_price:,.2f} | "
             f"Market: {self.market_condition.value}"
         )

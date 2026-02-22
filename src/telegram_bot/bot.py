@@ -45,12 +45,14 @@ class TelegramBot:
         chat_handler=None,
         on_command: Optional[Callable] = None,
         mode: str = "controller",
+        exchange_name: str = "",
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.chat_handler = chat_handler  # TelegramChatHandler
         self.on_command = on_command  # Legacy fallback
         self.mode = mode
+        self.exchange_name = exchange_name  # e.g. "COINBASE", "IBKR"
         self._app = None
         self._thread: Optional[threading.Thread] = None
         self._running_event = threading.Event()
@@ -393,15 +395,18 @@ class TelegramBot:
 
     def send_trade_notification(self, trade_summary: str) -> None:
         """Send a trade notification."""
-        self.send_message(f"📊 *Trade Executed*\n\n{trade_summary}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"📊 *{tag}Trade Executed*\n\n{trade_summary}")
 
     def send_signal_notification(self, signal_summary: str) -> None:
         """Send a signal notification."""
-        self.send_message(f"📡 *Signal Detected*\n\n{signal_summary}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"📡 *{tag}Signal Detected*\n\n{signal_summary}")
 
     def send_alert(self, alert: str) -> None:
         """Send an important alert (always sent, even in silent mode)."""
-        self.send_message(f"🚨 *ALERT*\n\n{alert}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"🚨 *{tag}ALERT*\n\n{alert}")
 
     def send_daily_summary(self, summary: str) -> None:
         """Send a daily summary."""
