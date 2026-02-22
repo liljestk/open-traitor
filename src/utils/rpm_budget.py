@@ -74,9 +74,9 @@ def compute_rpm_entity_cap(
             "provider": "local-only",
             "rpm": 0,
             "interval": interval_seconds,
-            "available_per_cycle": float("inf"),
+            "available_per_cycle": None,
             "overhead": overhead_per_cycle,
-            "entity_budget": float("inf"),
+            "entity_budget": None,
             "max_entities": 30,
             "note": "No cloud RPM limit — local models only, cap set to schema max.",
         }
@@ -88,9 +88,9 @@ def compute_rpm_entity_cap(
             "provider": primary.get("name", "unknown"),
             "rpm": 0,
             "interval": interval_seconds,
-            "available_per_cycle": float("inf"),
+            "available_per_cycle": None,
             "overhead": overhead_per_cycle,
-            "entity_budget": float("inf"),
+            "entity_budget": None,
             "max_entities": 30,
             "note": "Primary provider has no RPM limit configured.",
         }
