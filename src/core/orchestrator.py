@@ -439,6 +439,10 @@ class Orchestrator:
         consecutive_errors = 0
         _MAX_CONSECUTIVE_ERRORS = 3
 
+        # Start LLM provider recovery polling on the orchestrator's event loop
+        recovery_interval = self.config.get("llm", {}).get("recovery_check_interval", 120)
+        self.llm.start_recovery_polling(loop=self._loop, interval=recovery_interval)
+
         while self.state.is_running:
             if self.state.is_paused:
                 logger.debug("Trading paused, waiting...")
@@ -455,6 +459,13 @@ class Orchestrator:
             _cycle_t0 = time.monotonic()
 
             try:
+                # ─── LLM provider recovery check ─────────────────────
+                # Lightweight: detects cooldown expiry, daily token resets,
+                # and newly-added API keys — no restart needed.
+                if cycle_count % 5 == 1:  # every 5th cycle
+                    self.llm.check_provider_recovery()
+                    self.llm.rescan_and_reload()
+
                 # ─── Ollama pre-check ─────────────────────────────────
                 # Avoid burning minutes on retries if Ollama is down.
                 if not self.llm.is_available():
@@ -819,6 +830,8 @@ class Orchestrator:
                 break  # restart the full interval after an early trigger
 
         logger.info("Orchestrator stopped.")
+        # Stop LLM recovery poller
+        self.llm.stop_recovery_polling()
         # H2 fix: close the asyncio event loop to release resources
         try:
             self._loop.close()

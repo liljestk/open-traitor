@@ -202,6 +202,16 @@ def main():
         providers=providers,
     )
 
+    # Store providers config for recovery polling / rescan
+    if providers_config:
+        llm.update_providers_config(
+            providers_config,
+            fallback_base_url=ollama_url,
+            fallback_model=fallback_model,
+            fallback_timeout=llm_config.get("timeout", 60),
+            fallback_max_retries=llm_config.get("max_retries", 3),
+        )
+
     # Wait for at least one LLM provider to be ready
     has_cloud = any(not p.is_local for p in llm._providers)
     if has_cloud:

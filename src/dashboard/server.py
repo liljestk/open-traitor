@@ -1879,6 +1879,13 @@ def update_llm_providers(body: _ProvidersUpdateBody):
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
+            _llm_client.update_providers_config(
+                saved,
+                fallback_base_url=ollama_url,
+                fallback_model=fallback_model,
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
+            )
 
         return {"ok": True, "providers": saved}
     except HTTPException:
@@ -2017,6 +2024,13 @@ def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
             _llm_client.reload_providers(new_providers)
+            _llm_client.update_providers_config(
+                saved_providers,
+                fallback_base_url=ollama_url,
+                fallback_model=fallback_model,
+                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_max_retries=llm_config.get("max_retries", 3),
+            )
 
         logger.warning(f"🔑 API keys updated (confirmed): {key_names}")
         return {"ok": True, "updated": key_names}
