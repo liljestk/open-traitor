@@ -3,8 +3,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
   fetchLLMProviders, updateLLMProviders, updateApiKeys,
+  fetchOpenRouterCredits,
   type SectionSchema, type FieldSchema, type PresetInfo,
-  type LLMProviderConfig,
+  type LLMProviderConfig, type OpenRouterCreditsInfo,
 } from '../api'
 import {
   Shield, ShieldAlert, ShieldOff, ToggleLeft, ToggleRight,
@@ -677,6 +678,12 @@ function LLMProvidersSection() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
+  const { data: orCredits } = useQuery<OpenRouterCreditsInfo>({
+    queryKey: ['openrouter-credits'],
+    queryFn: fetchOpenRouterCredits,
+    refetchInterval: 300_000,
+    enabled: providers.some(p => p.enabled && p.name.toLowerCase().includes('openrouter')),
+  })
 
   const mutation = useMutation({ mutationFn: updateLLMProviders, onSuccess: () => {
     queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
@@ -808,9 +815,17 @@ function LLMProvidersSection() {
                     fontSize: 11, fontWeight: 700, color: '#e6edf3',
                   }}>{idx + 1}</span>
                   {provIcon}
-                  <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3', flex: 1 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3', flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
                     {p.name}
-                    {p.is_local && <span style={{ fontSize: 10, color: '#6e7681', marginLeft: 6, fontWeight: 400 }}>local</span>}
+                    {p.is_local && <span style={{ fontSize: 10, color: '#6e7681', fontWeight: 400 }}>local</span>}
+                    {(p.tier || p.live_status?.tier) && (
+                      <span style={{
+                        fontSize: 9, padding: '1px 7px', borderRadius: 10, fontWeight: 600,
+                        background: (p.tier || p.live_status?.tier) === 'free' ? '#22c55e12' : '#58a6ff12',
+                        color: (p.tier || p.live_status?.tier) === 'free' ? '#22c55e' : '#58a6ff',
+                        border: `1px solid ${(p.tier || p.live_status?.tier) === 'free' ? '#22c55e22' : '#58a6ff22'}`,
+                      }}>{(p.tier || p.live_status?.tier)?.toUpperCase()}</span>
+                    )}
                   </span>
                   <span style={{
                     fontSize: 10, padding: '3px 10px', borderRadius: 12,
@@ -889,6 +904,48 @@ function LLMProvidersSection() {
                           {p.api_key_set ? <><Check size={11} /> Configured</> : <><AlertTriangle size={11} /> Not set</>}
                         </span>
                       )}
+                    </div>
+                  )}
+
+                  {/* Tier (edit mode) */}
+                  {editing && !p.is_local && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
+                      <span style={{ color: '#8b949e' }}>Tier</span>
+                      <select
+                        value={p.tier || ''}
+                        onChange={e => updateField(idx, 'tier', e.target.value || undefined)}
+                        style={{ ...inputBase, width: 90, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
+                      >
+                        <option value="">—</option>
+                        <option value="free">Free</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* OpenRouter Credits */}
+                  {!editing && p.name.toLowerCase().includes('openrouter') && p.enabled && orCredits?.ok && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
+                      <span style={{ color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <DollarSign size={11} /> Credits
+                      </span>
+                      <span style={{ color: orCredits.is_free_tier ? '#22c55e' : '#e6edf3', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {orCredits.is_free_tier
+                          ? <><Sparkles size={10} /> Free tier</>
+                          : orCredits.credits_remaining != null
+                            ? `$${orCredits.credits_remaining.toFixed(4)}`
+                            : 'Unknown'}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Free model indicator */}
+                  {!editing && p.live_status?.is_free_model && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
+                      <span style={{ color: '#8b949e' }}>Model Type</span>
+                      <span style={{ color: '#22c55e', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Sparkles size={10} /> Free model
+                      </span>
                     </div>
                   )}
 

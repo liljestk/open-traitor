@@ -949,7 +949,7 @@ function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<Wi
         <span style={{ fontSize: 12, fontWeight: 400, color: '#484f58' }}>Optional &mdash; faster than local</span>
       </h3>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 28 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 28 }}>
         {([
           { key: 'gemini' as const, enabled: state.geminiEnabled, apiKey: state.geminiApiKey,
             enabledKey: 'geminiEnabled', apiKeyKey: 'geminiApiKey',
@@ -1237,6 +1237,7 @@ function StepReview({ state, stepsWithValidation: _stepsWithValidation }: { stat
 
     const llm: { label: string; value: string; ok: boolean }[] = []
     if (state.geminiEnabled) llm.push({ label: 'Gemini', value: state.geminiApiKey ? 'Configured' : 'Key missing', ok: !!state.geminiApiKey })
+    if (state.openrouterEnabled) llm.push({ label: 'OpenRouter', value: state.openrouterApiKey ? 'Configured' : 'Key missing', ok: !!state.openrouterApiKey })
     if (state.openaiEnabled) llm.push({ label: 'OpenAI', value: state.openaiApiKey ? 'Configured' : 'Key missing', ok: !!state.openaiApiKey })
     llm.push({ label: 'Ollama', value: state.ollamaModel, ok: true })
     s.push({ title: 'LLM Providers', icon: <Sparkles size={14} />, items: llm })
@@ -1503,7 +1504,7 @@ export default function SetupWizard() {
 
   // Auto-save to localStorage (skip secrets and infraSecrets)
   useEffect(() => {
-    const { coinbaseApiKey, coinbaseApiSecret, geminiApiKey, openaiApiKey,
+    const { coinbaseApiKey, coinbaseApiSecret, geminiApiKey, openrouterApiKey, openaiApiKey,
       telegramCoinbaseBotToken, telegramNordnetBotToken, telegramIbkrBotToken, redditClientSecret, infraSecrets, ...safe } = state
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(safe)) } catch { /* ignore */ }
   }, [state])
