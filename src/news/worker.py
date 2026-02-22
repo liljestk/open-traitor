@@ -1,13 +1,22 @@
 """
 Background news worker — runs as a separate process in Docker.
-Continuously fetches and processes crypto news.
+
+Discovers *all* exchange profile configs (coinbase.yaml, ibkr.yaml, nordnet.yaml)
+and aggregates news from each profile's configured sources (subreddits + RSS feeds).
+
+Writes to Redis:
+  news:latest                — global union of all articles (capped at max_articles)
+  news:{profile}:latest      — articles from that profile's sources only
+  news:stats                 — aggregator statistics
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -17,6 +26,31 @@ from dotenv import load_dotenv
 
 from src.news.aggregator import NewsAggregator
 from src.utils.logger import setup_logger, get_logger
+
+
+# Profile configs we attempt to discover (filename stem → profile name)
+_PROFILE_FILES: dict[str, str] = {
+    "coinbase.yaml": "coinbase",
+    "ibkr.yaml": "ibkr",
+    "nordnet.yaml": "nordnet",
+}
+
+
+def _discover_profiles(config_dir: str) -> dict[str, dict]:
+    """Return {profile_name: news_config} for each discovered config file."""
+    profiles: dict[str, dict] = {}
+    for filename, profile in _PROFILE_FILES.items():
+        path = Path(config_dir) / filename
+        if path.exists():
+            try:
+                with open(path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                news_cfg = cfg.get("news", {})
+                if news_cfg.get("rss_feeds") or news_cfg.get("reddit_subreddits"):
+                    profiles[profile] = news_cfg
+            except Exception:
+                pass
+    return profiles
 
 
 def main():
@@ -50,17 +84,76 @@ def main():
         except Exception as e:
             logger.warning(f"Redis not available: {e}")
 
-    # Initialize aggregator
-    news_config = config.get("news", {})
-    aggregator = NewsAggregator(
-        config=news_config,
-        redis_client=redis_client,
-        reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
-        reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
-        reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+    # Discover per-profile news configs
+    config_dir = os.environ.get("CONFIG_DIR", "config")
+    profile_configs = _discover_profiles(config_dir)
+    global_news_cfg = config.get("news", {})
+
+    # Merge all unique sources across profiles + global settings
+    all_subreddits: set[str] = set(global_news_cfg.get("reddit_subreddits", []))
+    all_rss: set[str] = set(global_news_cfg.get("rss_feeds", []))
+    for pcfg in profile_configs.values():
+        all_subreddits.update(pcfg.get("reddit_subreddits", []))
+        all_rss.update(pcfg.get("rss_feeds", []))
+
+    merged_config = {
+        **global_news_cfg,
+        "reddit_subreddits": sorted(all_subreddits),
+        "rss_feeds": sorted(all_rss),
+    }
+
+    logger.info(
+        f"📰 Discovered profiles: {list(profile_configs.keys()) or ['(global only)']}"
+    )
+    logger.info(
+        f"📰 Merged sources: {len(all_subreddits)} subreddits, {len(all_rss)} RSS feeds"
     )
 
-    fetch_interval = news_config.get("fetch_interval", 300)
+    reddit_creds = {
+        "reddit_client_id": os.environ.get("REDDIT_CLIENT_ID", ""),
+        "reddit_client_secret": os.environ.get("REDDIT_CLIENT_SECRET", ""),
+        "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+    }
+
+    # Single aggregator with merged sources (avoids duplicate HTTP requests)
+    aggregator = NewsAggregator(
+        config=merged_config,
+        redis_client=redis_client,
+        **reddit_creds,
+    )
+
+    fetch_interval = min(
+        merged_config.get("fetch_interval", 300),
+        *(pcfg.get("fetch_interval", 300) for pcfg in profile_configs.values()),
+    )
+
+    # Pre-compute per-profile matching sets for fast article routing
+    profile_match: dict[str, dict] = {}
+    for pname, pcfg in profile_configs.items():
+        subs = {s.lower() for s in pcfg.get("reddit_subreddits", [])}
+        rss_ids: set[str] = set()
+        import re as _re
+        for url in pcfg.get("rss_feeds", []):
+            m = _re.search(r'//(?:www\.)?([^/]+)', url)
+            if m:
+                rss_ids.add(m.group(1).lower().replace(".", "_"))
+        profile_match[pname] = {"subs": subs, "rss": rss_ids}
+
+    def _route_article(article: dict, subs: set[str], rss_ids: set[str]) -> bool:
+        """Return True if the article belongs to a profile's sources."""
+        tags = {t.lower() for t in article.get("tags", [])}
+        source = (article.get("source") or "").lower()
+        if tags & subs:
+            return True
+        if tags & rss_ids:
+            return True
+        for sub in subs:
+            if sub in source:
+                return True
+        for rid in rss_ids:
+            if rid in source:
+                return True
+        return False
 
     logger.info(f"📰 News worker running | Fetch interval: {fetch_interval}s")
 
@@ -68,11 +161,31 @@ def main():
     while True:
         try:
             articles = aggregator.fetch_all()
-            logger.info(f"📰 Fetched {len(articles)} articles")
+            logger.info(f"📰 Fetched {len(articles)} articles total")
+
+            # Write per-profile keys
+            if redis_client and profile_configs:
+                from dataclasses import asdict
+                all_dicts = [
+                    asdict(a) if hasattr(a, "__dataclass_fields__") else a
+                    for a in articles
+                ]
+                for pname, pm in profile_match.items():
+                    matched = [
+                        a for a in all_dicts
+                        if _route_article(a, pm["subs"], pm["rss"])
+                    ]
+                    max_arts = profile_configs[pname].get("max_articles", 50)
+                    matched = matched[-max_arts:]
+                    redis_client.set(
+                        f"news:{pname}:latest",
+                        json.dumps(matched, default=str),
+                        ex=900,
+                    )
+                    logger.info(f"  └─ {pname}: {len(matched)} articles")
 
             stats = aggregator.get_stats()
             if redis_client:
-                import json
                 redis_client.set("news:stats", json.dumps(stats, default=str), ex=600)
 
         except Exception as e:

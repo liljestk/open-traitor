@@ -1157,12 +1157,10 @@ async def ws_live(websocket: WebSocket):
         if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
             await websocket.close(code=1008, reason="Invalid or missing API key")
             return
-    else:
-        # H7 fix: when no API key is configured, restrict to localhost
-        client_host = websocket.client.host if websocket.client else ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
-            await websocket.close(code=1008, reason="No API key configured; remote access denied")
-            return
+    # When no API key is configured, network-level access control is handled
+    # by the Docker port binding (127.0.0.1:8090) — same as the HTTP
+    # middleware.  Checking websocket.client.host here would break Docker
+    # setups where the client appears as the bridge-network gateway IP.
 
     # L22 fix: echo the auth subprotocol so browsers don't reject per RFC 6455
     _accepted_subprotocol = None
