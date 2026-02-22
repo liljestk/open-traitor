@@ -605,8 +605,17 @@ export interface ScanResult {
   summary_text: string
 }
 
+export interface PairInfo {
+  pair: string
+  followed_by_llm: boolean
+  followed_by_human: boolean
+  price: number | null
+}
+
 export interface WatchlistData {
   active_pairs: string[]
+  human_followed_pairs: string[]
+  pair_info: PairInfo[]
   live_prices: Record<string, number>
   scan: ScanResult | null
   pair_count: number
@@ -614,6 +623,18 @@ export interface WatchlistData {
 
 export const fetchWatchlist = () =>
   apiFetch<WatchlistData>('/watchlist')
+
+export const followPair = (pair: string, exchange = '') =>
+  apiFetch<{ ok: boolean; pair: string; followed_by: string; exchange: string }>('/watchlist/follow', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pair, exchange }),
+  })
+
+export const unfollowPair = (pair: string) =>
+  apiFetch<{ ok: boolean; pair: string; unfollowed: boolean }>(`/watchlist/follow/${encodeURIComponent(pair)}`, {
+    method: 'DELETE',
+  })
 
 // ─── Candles / Charts ──────────────────────────────────────────────────────
 

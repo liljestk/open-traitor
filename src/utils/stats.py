@@ -230,6 +230,18 @@ class StatsDB:
                 summary_text TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_scan_ts ON scan_results(ts);
+
+            -- Pair follows: tracks which pairs are followed by LLM and/or human
+            CREATE TABLE IF NOT EXISTS pair_follows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair TEXT NOT NULL,
+                exchange TEXT NOT NULL DEFAULT 'coinbase',
+                followed_by TEXT NOT NULL DEFAULT 'human',  -- 'llm' or 'human'
+                ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                UNIQUE(pair, followed_by)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pair_follows_pair ON pair_follows(pair);
+            CREATE INDEX IF NOT EXISTS idx_pair_follows_exchange ON pair_follows(exchange);
         """)
         conn.commit()
         self._migrate_db(conn)
@@ -322,13 +334,13 @@ class StatsDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_portfolio_range(self, hours: int = 24) -> dict:
+    def get_portfolio_range(self, hours: int = 24, quote_currency: str | None = None) -> dict:
         """Get min/max/avg portfolio value over a period.
 
         Uses the same anomaly-filtering logic as get_portfolio_history to exclude
         paper-mode bleed-through values.
         """
-        history = self.get_portfolio_history(hours=hours)
+        history = self.get_portfolio_history(hours=hours, quote_currency=quote_currency)
         if not history:
             return {"low": 0, "high": 0, "avg": 0, "samples": 0}
         values = [h["portfolio_value"] for h in history]
@@ -486,18 +498,24 @@ class StatsDB:
         )
         conn.commit()
 
-    def get_events(self, hours: int = 24, event_type: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def get_events(self, hours: int = 24, event_type: Optional[str] = None, limit: int = 50, quote_currency: str | None = None) -> list[dict]:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        # Build optional quote-currency filter on the pair column
+        qc_clause = ""
+        params_extra: list = []
+        if quote_currency:
+            qc_clause = " AND UPPER(pair) LIKE ?"
+            params_extra = [f"%-{quote_currency.upper()}"]
         if event_type:
             rows = conn.execute(
-                "SELECT * FROM events WHERE ts >= ? AND event_type = ? ORDER BY ts DESC LIMIT ?",
-                (cutoff, event_type, limit),
+                "SELECT * FROM events WHERE ts >= ? AND event_type = ?" + qc_clause + " ORDER BY ts DESC LIMIT ?",
+                (cutoff, event_type, *params_extra, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?",
-                (cutoff, limit),
+                "SELECT * FROM events WHERE ts >= ?" + qc_clause + " ORDER BY ts DESC LIMIT ?",
+                (cutoff, *params_extra, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -599,9 +617,25 @@ class StatsDB:
         ).fetchone()
         return dict(row) if row else None
 
-    def get_daily_summaries(self, days: int = 7) -> list[dict]:
+    def get_daily_summaries(self, days: int = 7, quote_currency: str | None = None) -> list[dict]:
+        """Get daily summaries.  When *quote_currency* is provided and the
+        table has an ``exchange`` column, filter by exchange.  Falls back
+        gracefully when the column doesn't exist (legacy DBs)."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        if quote_currency:
+            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            exchange = _qc_exchange_map.get(quote_currency.upper())
+            if exchange:
+                # Try filtering by exchange; fall back if column doesn't exist
+                try:
+                    rows = conn.execute(
+                        "SELECT * FROM daily_summaries WHERE date >= ? AND exchange = ? ORDER BY date DESC",
+                        (cutoff, exchange),
+                    ).fetchall()
+                    return [dict(r) for r in rows]
+                except Exception:
+                    pass  # exchange column doesn't exist in this DB
         rows = conn.execute(
             "SELECT * FROM daily_summaries WHERE date >= ? ORDER BY date DESC",
             (cutoff,),
@@ -614,27 +648,36 @@ class StatsDB:
         """Get a comprehensive performance summary for the LLM."""
         return {
             "trade_stats": self.get_trade_stats(hours, quote_currency=quote_currency),
-            "portfolio_range": self.get_portfolio_range(hours),
+            "portfolio_range": self.get_portfolio_range(hours, quote_currency=quote_currency),
             "event_counts": self.get_event_counts(hours),
             "recent_trades": self.get_trades(hours, limit=10, quote_currency=quote_currency),
         }
 
-    def get_portfolio_history(self, hours: int = 24) -> list[dict]:
+    def get_portfolio_history(self, hours: int = 24, quote_currency: str | None = None) -> list[dict]:
         """Get portfolio value over time (for trend analysis).
 
         Filters out anomalous snapshots from first-boot:
         - portfolio_value == 0  (before live sync)
         - portfolio_value wildly different from the stable median
           (paper-mode initial_balance bleed-through, e.g. ~914 vs real ~6)
+
+        When *quote_currency* is given, only snapshots whose exchange matches
+        the currency's canonical exchange are returned (via the ``exchange``
+        column added in the multi-exchange migration).
         """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        rows = conn.execute(
-            """SELECT ts, portfolio_value, return_pct, total_pnl
-               FROM portfolio_snapshots WHERE ts >= ? AND portfolio_value > 0
-               ORDER BY ts""",
-            (cutoff,),
-        ).fetchall()
+        base_sql = """SELECT ts, portfolio_value, return_pct, total_pnl
+               FROM portfolio_snapshots WHERE ts >= ? AND portfolio_value > 0"""
+        params: list = [cutoff]
+        if quote_currency:
+            # Map quote currency → exchange name stored in the exchange column
+            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            exchange = _qc_exchange_map.get(quote_currency.upper())
+            if exchange:
+                base_sql += " AND exchange = ?"
+                params.append(exchange)
+        rows = conn.execute(base_sql + " ORDER BY ts", params).fetchall()
         if not rows:
             return []
 
@@ -1527,4 +1570,65 @@ class StatsDB:
             "equity": equity_pairs,
             "total_pairs": len(rows),
         }
+
+    # ─── Pair Follows ──────────────────────────────────────────────────────
+
+    def get_pair_follows(self, exchange: str | None = None, quote_currency: str | None = None) -> list[dict]:
+        """Get all followed pairs, optionally filtered by exchange or quote currency."""
+        conn = self._get_conn()
+        sql = "SELECT pair, exchange, followed_by, ts FROM pair_follows"
+        conditions: list[str] = []
+        params: list = []
+        if exchange:
+            conditions.append("exchange = ?")
+            params.append(exchange)
+        if quote_currency:
+            conditions.append("UPPER(pair) LIKE ?")
+            params.append(f"%-{quote_currency.upper()}")
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY pair, followed_by"
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def follow_pair(self, pair: str, followed_by: str = "human", exchange: str = "coinbase") -> bool:
+        """Add a pair follow. Returns True if newly added, False if already existed."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO pair_follows (pair, exchange, followed_by)
+                   VALUES (?, ?, ?)""",
+                (pair.upper(), exchange, followed_by),
+            )
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception:
+            return False
+
+    def unfollow_pair(self, pair: str, followed_by: str = "human") -> bool:
+        """Remove a pair follow. Returns True if actually deleted."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "DELETE FROM pair_follows WHERE pair = ? AND followed_by = ?",
+            (pair.upper(), followed_by),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_followed_pairs_set(self, followed_by: str | None = None, quote_currency: str | None = None) -> set[str]:
+        """Return a set of followed pair names for quick lookup."""
+        conn = self._get_conn()
+        sql = "SELECT DISTINCT pair FROM pair_follows"
+        conditions: list[str] = []
+        params: list = []
+        if followed_by:
+            conditions.append("followed_by = ?")
+            params.append(followed_by)
+        if quote_currency:
+            conditions.append("UPPER(pair) LIKE ?")
+            params.append(f"%-{quote_currency.upper()}")
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        rows = conn.execute(sql, params).fetchall()
+        return {r["pair"] for r in rows}
 

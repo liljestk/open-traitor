@@ -67,7 +67,7 @@ _temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
 _config: dict = {}
 _exchange_client = None   # ExchangeClient instance (optional, for price lookups)
 
-_ws_connections: list[WebSocket] = []
+_ws_connections: list[tuple[WebSocket, str | None]] = []  # (ws, quote_currency_filter)
 
 
 _rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
@@ -393,18 +393,17 @@ def _require_db(profile: str = ""):
         try:
             from src.utils.stats import StatsDB
             db_path = os.path.join("data", f"stats_{safe}.db")
-            if not os.path.exists(db_path):
-                # Profile DB doesn't exist — fall back to default
-                logger.info(f"📊 Profile DB not found ({db_path}), falling back to default")
-                if _stats_db is None:
-                    raise HTTPException(status_code=503, detail="Stats DB not initialised")
-                return _stats_db
-            # Check if DB is just an empty shell (< 8 KB = no real data)
-            if os.path.getsize(db_path) < 8192:
-                logger.info(f"📊 Profile DB is empty shell ({db_path}), falling back to default")
-                if _stats_db is None:
-                    raise HTTPException(status_code=503, detail="Stats DB not initialised")
-                return _stats_db
+            if not os.path.exists(db_path) or os.path.getsize(db_path) < 8192:
+                # Profile DB doesn't exist or is an empty shell.
+                # Create a fresh empty DB so equity profiles return empty data
+                # rather than silently falling back to the crypto/default DB.
+                logger.info(
+                    f"📊 Profile DB missing or empty ({db_path}), "
+                    f"creating empty StatsDB for '{safe}'"
+                )
+                db = StatsDB(db_path=db_path)
+                _profile_db_cache[safe] = db
+                return db
             # Evict oldest entry if cache is at capacity (H4 fix)
             if len(_profile_db_cache) >= _MAX_PROFILE_DBS:
                 evicted_key, evicted_db = _profile_db_cache.popitem(last=False)
@@ -569,10 +568,12 @@ def list_events(
     event_type: Optional[str] = Query(None),
     hours: int = Query(24 * 7, ge=1),
     limit: int = Query(500, ge=1, le=5000),
+    profile: str = Query(""),
     db=Depends(_get_profile_db),
 ):
     """Returns a list of system events/logs from the database."""
-    events = db.get_events(hours=hours, event_type=event_type, limit=limit)
+    qc = _quote_currency_for(profile)
+    events = db.get_events(hours=hours, event_type=event_type, limit=limit, quote_currency=qc)
     # Parse event data json if possible
     for e in events:
         if isinstance(e.get("data"), str):
@@ -639,11 +640,18 @@ def get_stats_summary(
         else:
             cycle_row = conn.execute(cycle_sql, (cutoff_24h,)).fetchone()
 
-        # Latest portfolio snapshot
-        snapshot = conn.execute(
-            """SELECT portfolio_value, total_pnl, ts
-               FROM portfolio_snapshots ORDER BY ts DESC LIMIT 1"""
-        ).fetchone()
+        # Latest portfolio snapshot (filtered by exchange when profile is set)
+        snapshot_sql = """SELECT portfolio_value, total_pnl, ts
+               FROM portfolio_snapshots"""
+        snapshot_params: list = []
+        if qc:
+            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            exchange = _qc_exchange_map.get(qc.upper())
+            if exchange:
+                snapshot_sql += " WHERE exchange = ?"
+                snapshot_params.append(exchange)
+        snapshot_sql += " ORDER BY ts DESC LIMIT 1"
+        snapshot = conn.execute(snapshot_sql, snapshot_params).fetchone()
 
         stats = dict(trade_row) if trade_row else {}
         stats.update(dict(recent_row) if recent_row else {})
@@ -1164,8 +1172,15 @@ async def ws_live(websocket: WebSocket):
             _accepted_subprotocol = _proto
             break
     await websocket.accept(subprotocol=_accepted_subprotocol)
-    _ws_connections.append(websocket)
-    logger.info(f"WS client connected ({len(_ws_connections)} total)")
+
+    # Extract profile from query params for event filtering
+    from urllib.parse import parse_qs, urlparse
+    _qs = parse_qs(urlparse(str(websocket.url)).query)
+    _ws_profile = (_qs.get("profile", [""])[0] or "").strip()
+    _ws_qc = _quote_currency_for(_ws_profile)
+
+    _ws_connections.append((websocket, _ws_qc))
+    logger.info(f"WS client connected (profile={_ws_profile!r}, qc={_ws_qc}) ({len(_ws_connections)} total)")
     try:
         while True:
             # Keep connection alive; events are pushed by _redis_subscriber
@@ -1175,8 +1190,7 @@ async def ws_live(websocket: WebSocket):
         pass
     finally:
         # Guard: the Redis subscriber may have already removed this socket
-        if websocket in _ws_connections:
-            _ws_connections.remove(websocket)
+        _ws_connections[:] = [(ws, qc) for ws, qc in _ws_connections if ws is not websocket]
         logger.info(f"WS client disconnected ({len(_ws_connections)} remaining)")
 
 
@@ -1212,15 +1226,21 @@ async def _redis_subscriber():
                 except Exception:
                     continue
 
+                # Extract pair from event for profile filtering
+                event_pair = (payload.get("pair") or "").upper()
+
                 dead = []
-                for ws in list(_ws_connections):
+                for ws, ws_qc in list(_ws_connections):
+                    # Filter: if this WS connection has a quote currency filter,
+                    # only send events that match (or have no pair info)
+                    if ws_qc and event_pair and not event_pair.endswith(f"-{ws_qc.upper()}"):
+                        continue
                     try:
                         await ws.send_json(payload)
                     except Exception:
                         dead.append(ws)
                 for ws in dead:
-                    if ws in _ws_connections:
-                        _ws_connections.remove(ws)
+                    _ws_connections[:] = [(w, q) for w, q in _ws_connections if w is not ws]
 
         except asyncio.CancelledError:
             # Graceful shutdown
@@ -2082,10 +2102,11 @@ def _utcnow_str() -> str:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/portfolio/history", summary="Portfolio value time-series for equity curve")
-def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), db=Depends(_get_profile_db)):
+def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), profile: str = Query(""), db=Depends(_get_profile_db)):
     """Returns portfolio snapshots as time-series data for charting."""
     try:
-        rows = db.get_portfolio_history(hours=hours)
+        qc = _quote_currency_for(profile)
+        rows = db.get_portfolio_history(hours=hours, quote_currency=qc)
         return _sanitize_floats({"history": rows, "count": len(rows)})
     except Exception as exc:
         logger.exception("portfolio/history error")
@@ -2100,9 +2121,9 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760), profile: str = Query("
         perf = db.get_performance_summary(hours=hours, quote_currency=qc)
         best_worst = db.get_best_worst_trades(hours=hours, quote_currency=qc)
         days = max(1, hours // 24)
-        summaries = db.get_daily_summaries(days=days)
+        summaries = db.get_daily_summaries(days=days, quote_currency=qc)
         win_loss = db.get_win_loss_stats(hours=hours, quote_currency=qc)
-        portfolio_range = db.get_portfolio_range(hours=hours)
+        portfolio_range = db.get_portfolio_range(hours=hours, quote_currency=qc)
 
         return _sanitize_floats({
             "performance": perf,
@@ -2121,16 +2142,30 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760), profile: str = Query("
 # ---------------------------------------------------------------------------
 
 @app.get("/api/portfolio/exposure", summary="Current portfolio position concentration")
-def get_portfolio_exposure(db=Depends(_get_profile_db)):
-    """Returns the latest portfolio snapshot with position breakdown."""
+def get_portfolio_exposure(profile: str = Query(""), db=Depends(_get_profile_db)):
+    """Returns the latest portfolio snapshot with position breakdown.
+
+    When a profile is active, only the snapshot from the matching exchange is
+    returned, and positions are filtered to pairs with the profile's quote
+    currency so crypto holdings never bleed into equity views.
+    """
     conn = _open_conn(db)
+    qc = _quote_currency_for(profile)
     try:
-        row = conn.execute(
-            """SELECT portfolio_value, cash_balance, return_pct, total_pnl,
+        # Build query: prefer the snapshot for the profile's exchange
+        base_sql = """SELECT portfolio_value, cash_balance, return_pct, total_pnl,
                       max_drawdown, open_positions, current_prices, fear_greed_value,
                       high_stakes_active, ts
-               FROM portfolio_snapshots ORDER BY ts DESC LIMIT 1"""
-        ).fetchone()
+               FROM portfolio_snapshots"""
+        params: list = []
+        if qc:
+            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            exchange = _qc_exchange_map.get(qc.upper())
+            if exchange:
+                base_sql += " WHERE exchange = ?"
+                params.append(exchange)
+        base_sql += " ORDER BY ts DESC LIMIT 1"
+        row = conn.execute(base_sql, params).fetchone()
         if not row:
             return {"exposure": None}
 
@@ -2147,6 +2182,17 @@ def get_portfolio_exposure(db=Depends(_get_profile_db)):
         positions = data.get("open_positions") or {}
         prices = data.get("current_prices") or {}
         portfolio_val = data.get("portfolio_value") or 1
+
+        # Filter positions by quote currency when a profile is active
+        if qc:
+            positions = {
+                pair: pos for pair, pos in positions.items()
+                if pair.upper().endswith(f"-{qc.upper()}")
+            }
+            prices = {
+                pair: p for pair, p in prices.items()
+                if pair.upper().endswith(f"-{qc.upper()}")
+            }
 
         breakdown = []
         allocated = 0.0
@@ -2189,17 +2235,23 @@ def get_portfolio_exposure(db=Depends(_get_profile_db)):
 def get_news(
     count: int = Query(30, ge=1, le=100),
     profile: str = Query("", description="Exchange profile"),
+    db=Depends(_get_profile_db),
 ):
     """Returns recent news articles from Redis cache (populated by news worker).
 
     When a profile is set, try the profile-specific key first
     (``news:{profile}:latest``), then fall back to the global ``news:latest``
     key and filter articles by tags matching the profile's news sources.
+
+    Human-followed pairs (from the watchlist) boost relevance: articles whose
+    tags or title contain the base symbol of a followed pair are included even
+    if they don't match the profile's source config.
     """
     if not _redis_client:
         return {"articles": [], "count": 0, "source": "unavailable"}
     try:
         resolved = _resolve_profile(profile)
+        qc = _quote_currency_for(profile)
 
         # 1) Try profile-specific Redis key
         raw = None
@@ -2216,6 +2268,16 @@ def get_news(
         articles = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
         if not isinstance(articles, list):
             articles = []
+
+        # Build set of base symbols from human-followed pairs for relevance matching
+        followed_symbols: set[str] = set()
+        try:
+            human_pairs = db.get_followed_pairs_set(followed_by="human", quote_currency=qc)
+            for p in human_pairs:
+                base = p.split("-")[0].lower() if "-" in p else p.lower()
+                followed_symbols.add(base)
+        except Exception:
+            pass  # non-critical
 
         # 3) Filter articles by profile's news sources when using global key
         if resolved and articles:
@@ -2238,6 +2300,7 @@ def get_news(
             def _matches_profile(article: dict) -> bool:
                 tags = {t.lower() for t in article.get("tags", [])}
                 source = (article.get("source") or "").lower()
+                title = (article.get("title") or "").lower()
                 # Match by subreddit tag
                 if tags & expected_subs:
                     return True
@@ -2251,10 +2314,17 @@ def get_news(
                 for sub in expected_subs:
                     if sub in source:
                         return True
+                # Match by human-followed pair symbols appearing in tags or title
+                if followed_symbols:
+                    if tags & followed_symbols:
+                        return True
+                    for sym in followed_symbols:
+                        if sym in title:
+                            return True
                 return False
 
-            # Only filter if we have source config; otherwise show all
-            if expected_subs or expected_rss:
+            # Only filter if we have source config or followed symbols; otherwise show all
+            if expected_subs or expected_rss or followed_symbols:
                 articles = [a for a in articles if _matches_profile(a)]
 
         articles = articles[:count]
@@ -2323,15 +2393,86 @@ def get_watchlist(
             pairs = [p for p in pairs if p.upper().endswith(suffix)]
             live_prices = {k: v for k, v in live_prices.items() if k.upper().endswith(suffix)}
 
+        # Build follow status for each pair (LLM-chosen pairs come from config)
+        follows = db.get_pair_follows(quote_currency=qc)
+        # Index follows by pair → set of followed_by values
+        follow_map: dict[str, set[str]] = {}
+        for f in follows:
+            follow_map.setdefault(f["pair"].upper(), set()).add(f["followed_by"])
+
+        # Config pairs are considered LLM-followed
+        for p in pairs:
+            follow_map.setdefault(p.upper(), set()).add("llm")
+
+        # Human-followed pairs that aren't in the config list
+        human_followed = sorted({
+            p for p, sources in follow_map.items()
+            if "human" in sources and p not in {x.upper() for x in pairs}
+        })
+
+        # Build combined pair info list
+        all_pairs = list(dict.fromkeys(pairs + human_followed))  # preserve order, dedup
+        pair_info = []
+        for p in all_pairs:
+            sources = follow_map.get(p.upper(), set())
+            pair_info.append({
+                "pair": p,
+                "followed_by_llm": "llm" in sources,
+                "followed_by_human": "human" in sources,
+                "price": live_prices.get(p),
+            })
+
         return _sanitize_floats({
             "active_pairs": pairs,
+            "human_followed_pairs": human_followed,
+            "pair_info": pair_info,
             "live_prices": live_prices,
             "scan": scan_data,
-            "pair_count": len(pairs),
+            "pair_count": len(all_pairs),
         })
     except Exception as exc:
         logger.exception("watchlist error")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+class _FollowPairBody(_BaseModel):
+    pair: str
+    exchange: str = ""  # auto-detected from pair when empty
+
+
+@app.post("/api/watchlist/follow", summary="Follow a pair (human)")
+def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(_get_profile_db)):
+    """Add a pair to the human-curated watchlist.
+
+    This does NOT affect the autonomous LLM's trading decisions or pair
+    selection — it only controls what the dashboard shows in the watchlist
+    and news feed.
+    """
+    pair = body.pair.upper().strip()
+    if not pair or "-" not in pair:
+        raise HTTPException(status_code=400, detail=f"Invalid pair format: {pair!r}")
+
+    # Detect exchange from profile or pair suffix
+    resolved = _resolve_profile(profile)
+    qc = _quote_currency_for(profile)
+    _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+    exchange = body.exchange or _qc_exchange_map.get((qc or "").upper(), resolved or "coinbase")
+
+    db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
+    return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}
+
+
+@app.delete("/api/watchlist/follow/{pair}", summary="Unfollow a pair (human)")
+def unfollow_pair(pair: str, db=Depends(_get_profile_db)):
+    """Remove a pair from the human-curated watchlist.
+
+    Only removes the human follow — LLM follows (config pairs) are unaffected.
+    """
+    pair = pair.upper().strip()
+    deleted = db.unfollow_pair(pair=pair, followed_by="human")
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Not following {pair!r}")
+    return {"ok": True, "pair": pair, "unfollowed": True}
 
 
 # ---------------------------------------------------------------------------
@@ -2492,8 +2633,12 @@ def get_command_history(limit: int = Query(20, ge=1, le=100)):
 
 
 @app.get("/api/trailing-stops", summary="Active trailing stop states")
-def get_trailing_stops():
-    """Returns trailing stop data from Redis (published by the orchestrator)."""
+def get_trailing_stops(profile: str = Query("")):
+    """Returns trailing stop data from Redis (published by the orchestrator).
+
+    When a profile is active, filters trailing stops to only include pairs
+    that match the profile's quote currency.
+    """
     if not _redis_client:
         return {"stops": {}, "source": "unavailable"}
     try:
@@ -2501,6 +2646,13 @@ def get_trailing_stops():
         if not raw:
             return {"stops": {}, "source": "redis_empty"}
         stops = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+        # Filter by profile quote currency
+        qc = _quote_currency_for(profile)
+        if qc and isinstance(stops, dict):
+            stops = {
+                pair: data for pair, data in stops.items()
+                if pair.upper().endswith(f"-{qc.upper()}")
+            }
         return _sanitize_floats({"stops": stops, "source": "redis"})
     except Exception as exc:
         logger.warning(f"trailing-stops error: {exc}")
