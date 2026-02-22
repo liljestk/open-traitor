@@ -2,14 +2,14 @@
  * Watchlist — Active pairs monitoring with live prices, scan results, price charts,
  * and human follow/unfollow management.
  */
-import { useState } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import {
   Eye, TrendingUp, TrendingDown, BarChart2, RefreshCw, Zap,
-  Bot, UserRound, Plus,
+  Bot, UserRound, Plus, Search, Loader2,
 } from 'lucide-react'
-import { fetchWatchlist, fetchCandles, followPair, unfollowPair, type PairInfo } from '../api'
+import { fetchWatchlist, fetchCandles, followPair, unfollowPair, searchProducts, type PairInfo, type ProductResult } from '../api'
 import { useCurrencyFormatter } from '../store'
 import CandlestickChart from '../components/CandlestickChart'
 import { SkeletonCards, SkeletonBlock } from '../components/Skeleton'
@@ -125,34 +125,161 @@ function TopMovers({ movers }: { movers: Array<{ pair: string; change_pct: numbe
   )
 }
 
-/* ── Add-pair input ─────────────────────────────────────────────────────── */
+/* ── Add-pair search with autocomplete ──────────────────────────────────── */
 
 function AddPairInput({ onAdd, isAdding }: { onAdd: (pair: string) => void; isAdding: boolean }) {
-  const [value, setValue] = useState('')
-  const submit = () => {
-    const trimmed = value.trim().toUpperCase()
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<ProductResult[]>([])
+  const [isSearching, setIsSearching] = useState(false)
+  const [showDropdown, setShowDropdown] = useState(false)
+  const [highlightIdx, setHighlightIdx] = useState(-1)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setShowDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const doSearch = useCallback(async (q: string) => {
+    if (q.length < 1) { setResults([]); setShowDropdown(false); return }
+    setIsSearching(true)
+    try {
+      const data = await searchProducts(q)
+      setResults(data.results)
+      setShowDropdown(data.results.length > 0)
+      setHighlightIdx(-1)
+    } catch {
+      setResults([])
+    } finally {
+      setIsSearching(false)
+    }
+  }, [])
+
+  const handleChange = (val: string) => {
+    setQuery(val)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => doSearch(val.trim()), 250)
+  }
+
+  const selectProduct = (product: ProductResult) => {
+    onAdd(product.id)
+    setQuery('')
+    setResults([])
+    setShowDropdown(false)
+  }
+
+  const submitRaw = () => {
+    const trimmed = query.trim().toUpperCase()
     if (trimmed && trimmed.includes('-')) {
       onAdd(trimmed)
-      setValue('')
+      setQuery('')
+      setResults([])
+      setShowDropdown(false)
     }
   }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!showDropdown || results.length === 0) {
+      if (e.key === 'Enter') submitRaw()
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setHighlightIdx((prev) => Math.min(prev + 1, results.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setHighlightIdx((prev) => Math.max(prev - 1, 0))
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      if (highlightIdx >= 0 && highlightIdx < results.length) {
+        selectProduct(results[highlightIdx])
+      } else {
+        submitRaw()
+      }
+    } else if (e.key === 'Escape') {
+      setShowDropdown(false)
+    }
+  }
+
   return (
-    <div className="flex items-center gap-1.5">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => e.key === 'Enter' && submit()}
-        placeholder="AAPL-USD"
-        className="flex-1 bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
-      />
-      <button
-        onClick={submit}
-        disabled={isAdding || !value.trim().includes('-')}
-        className="flex items-center gap-1 text-xs px-3 py-1.5 bg-brand-700 hover:bg-brand-600 text-white rounded-lg disabled:opacity-40 transition-colors"
-      >
-        <Plus size={12} /> Follow
-      </button>
+    <div ref={wrapperRef} className="relative">
+      <div className="flex items-center gap-1.5">
+        <div className="relative flex-1">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => handleChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={() => results.length > 0 && setShowDropdown(true)}
+            placeholder="Search pairs… e.g. BTC, NOKIA, ETH-EUR"
+            className="w-full bg-gray-800/60 border border-gray-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+          />
+          {isSearching && (
+            <Loader2 size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 animate-spin" />
+          )}
+        </div>
+        <button
+          onClick={submitRaw}
+          disabled={isAdding || !query.trim()}
+          className="flex items-center gap-1 text-xs px-3 py-1.5 bg-brand-700 hover:bg-brand-600 text-white rounded-lg disabled:opacity-40 transition-colors"
+        >
+          <Plus size={12} /> Follow
+        </button>
+      </div>
+
+      {/* Autocomplete dropdown */}
+      {showDropdown && results.length > 0 && (
+        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-gray-900 border border-gray-700 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+          {results.map((p, i) => (
+            <button
+              key={p.id}
+              onClick={() => selectProduct(p)}
+              className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-xs transition-colors ${
+                i === highlightIdx
+                  ? 'bg-brand-900/30 text-gray-200'
+                  : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-semibold text-gray-200 whitespace-nowrap">{p.id}</span>
+                {p.display_name !== p.base && (
+                  <span className="text-gray-500 truncate">{p.display_name}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 flex-shrink-0 text-[10px]">
+                {p.price_change_24h !== 0 && (
+                  <span className={p.price_change_24h >= 0 ? 'text-green-400' : 'text-red-400'}>
+                    {p.price_change_24h >= 0 ? '+' : ''}{p.price_change_24h.toFixed(1)}%
+                  </span>
+                )}
+                {p.volume_24h > 0 && (
+                  <span className="text-gray-600">
+                    Vol: {p.volume_24h >= 1_000_000 ? `${(p.volume_24h / 1_000_000).toFixed(1)}M` : p.volume_24h >= 1000 ? `${(p.volume_24h / 1000).toFixed(0)}K` : p.volume_24h.toFixed(0)}
+                  </span>
+                )}
+              </div>
+            </button>
+          ))}
+          <div className="px-3 py-1.5 text-[10px] text-gray-600 border-t border-gray-800">
+            {results.length} results · ↑↓ to navigate · Enter to select
+          </div>
+        </div>
+      )}
+
+      {/* Help text */}
+      {!showDropdown && !query && (
+        <p className="text-[10px] text-gray-600 mt-1 px-1">
+          Type a symbol or name to search the exchange. You can also enter a full pair like BTC-EUR directly.
+        </p>
+      )}
     </div>
   )
 }
