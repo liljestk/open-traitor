@@ -49,6 +49,8 @@ interface WizardState {
   redditClientId: string
   redditClientSecret: string
   redditUserAgent: string
+  /** Infrastructure secrets loaded from server — preserved on re-save */
+  infraSecrets: Record<string, string>
 }
 
 const INITIAL_STATE: WizardState = {
@@ -85,6 +87,7 @@ const INITIAL_STATE: WizardState = {
   redditClientId: '',
   redditClientSecret: '',
   redditUserAgent: 'auto-traitor/1.0',
+  infraSecrets: {},
 }
 
 const POPULAR_CRYPTO = [
@@ -415,7 +418,8 @@ function validateStep(stepId: string, state: WizardState): StepValidation {
   const issues: string[] = []
   switch (stepId) {
     case 'exchange':
-      if (!state.exchanges.coinbase && !state.exchanges.nordnet && !state.exchanges.ibkr) issues.push('Select an exchange')
+      if (!state.exchanges.coinbase && !state.exchanges.nordnet && !state.exchanges.ibkr) issues.push('Select at least one exchange')
+      if (state.exchanges.nordnet && state.exchanges.ibkr) issues.push('Pick one shares broker — NordNet or IBKR, not both')
       break
     case 'mode':
       if (state.tradingMode === 'live' && !state.liveConfirmed) issues.push('Confirm live trading risks')
@@ -487,7 +491,7 @@ function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {[
-            { icon: <BarChart3 size={14} />, text: 'Exchange account (Coinbase / Nordnet / IBKR)', required: true },
+            { icon: <BarChart3 size={14} />, text: 'Exchange account (Coinbase + optionally NordNet or IBKR)', required: true },
             { icon: <Sparkles size={14} />, text: 'LLM API key (or use local Ollama)', required: false },
             { icon: <MessageSquare size={14} />, text: 'Telegram account (for alerts)', required: false },
             { icon: <Shield size={14} />, text: 'Docker Desktop installed', required: true },
@@ -513,7 +517,7 @@ function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {[
-            ['Exchange connection', 'Coinbase crypto / Nordnet / IBKR equities'],
+            ['Exchange connection', 'Coinbase crypto + NordNet or IBKR equities'],
             ['Trading mode', 'Paper (simulated) or Live (real money)'],
             ['Asset universe', 'Which crypto & stocks the agent monitors'],
             ['AI brain', 'Multi-provider LLM chain (Gemini / OpenAI / Ollama)'],
@@ -580,16 +584,22 @@ function StepExchange({ state, update }: { state: WizardState; update: (p: Parti
   ]
 
   const selectExchange = (key: 'coinbase' | 'nordnet' | 'ibkr') => {
-    // Only one exchange at a time (radio-style)
-    update({ exchanges: { coinbase: key === 'coinbase', nordnet: key === 'nordnet', ibkr: key === 'ibkr' } })
+    // Coinbase toggles independently; NordNet & IBKR are mutually exclusive (pick one shares broker)
+    if (key === 'coinbase') {
+      update({ exchanges: { ...exchanges, coinbase: !exchanges.coinbase } })
+    } else {
+      // Shares broker: toggle selected, deselect the other
+      const alreadyActive = exchanges[key]
+      update({ exchanges: { ...exchanges, nordnet: key === 'nordnet' ? !alreadyActive : false, ibkr: key === 'ibkr' ? !alreadyActive : false } })
+    }
   }
 
   return (
     <>
       <SectionHeader
         icon={<BarChart3 size={22} />}
-        title="Choose Your Exchange"
-        subtitle="Select which market you want to trade on. Only one exchange can be active at a time."
+        title="Choose Your Exchanges"
+        subtitle="Pick Coinbase for crypto, plus optionally one shares broker (NordNet or IBKR — not both)."
       />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
         {cards.map(c => {
@@ -622,13 +632,16 @@ function StepExchange({ state, update }: { state: WizardState; update: (p: Parti
                   <div style={{ fontSize: 12, color: '#6e7681' }}>{c.sub}</div>
                 </div>
                 <div style={{
-                  width: 24, height: 24, borderRadius: '50%',
+                  width: 24, height: 24, borderRadius: c.key === 'coinbase' ? 6 : '50%',
                   border: `2px solid ${active ? c.color : '#30363d'}`,
                   background: active ? c.color : 'transparent',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   transition: 'all 0.15s',
                 }}>
-                  {active && <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#fff' }} />}
+                  {active && (c.key === 'coinbase'
+                    ? <Check size={14} color="#fff" strokeWidth={3} />
+                    : <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#fff' }} />
+                  )}
                 </div>
               </div>
               <p style={{ margin: '0 0 14px 0', fontSize: 13, color: '#8b949e', lineHeight: 1.6 }}>{c.desc}</p>
@@ -645,7 +658,10 @@ function StepExchange({ state, update }: { state: WizardState; update: (p: Parti
         })}
       </div>
       {!exchanges.coinbase && !exchanges.nordnet && !exchanges.ibkr && (
-        <div style={{ marginTop: 16 }}><Warning>Please select an exchange to continue.</Warning></div>
+        <div style={{ marginTop: 16 }}><Warning>Please select at least one exchange to continue.</Warning></div>
+      )}
+      {exchanges.nordnet && exchanges.ibkr && (
+        <div style={{ marginTop: 16 }}><Warning>Pick one shares broker — NordNet or IBKR, not both.</Warning></div>
       )}
     </>
   )
@@ -1374,12 +1390,23 @@ function generateEnvContent(state: WizardState): string {
   blank()
   const rs = (n: number) => { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a).map(b => c[b % c.length]).join('') }
   const rh = (n: number) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a).map(b => b.toString(16).padStart(2, '0')).join('') }
-  const rp = rs(32); add('REDIS_PASSWORD', rp, 'Redis (auto-generated)'); add('REDIS_URL', `redis://default:${rp}@redis:6379/0`); blank()
-  const tp = rs(32); add('TEMPORAL_DB_USER', 'temporal', 'Temporal (auto-generated)'); add('TEMPORAL_DB_PASSWORD', tp); add('TEMPORAL_DB_NAME', 'temporal'); blank()
-  const ls = rs(48), ll = rs(48), la = rs(20), ld = rs(32), cp = rs(32), mp = rs(32), ek = rh(32)
-  add('LANGFUSE_DB_PASSWORD', ld, 'Langfuse (auto-generated)'); add('LANGFUSE_NEXTAUTH_SECRET', ls); add('LANGFUSE_SALT', ll)
-  add('LANGFUSE_ADMIN_PASSWORD', la); add('LANGFUSE_PUBLIC_KEY', 'at-public-key', 'Langfuse project init keys'); add('LANGFUSE_SECRET_KEY', 'at-secret-key'); blank()
-  add('CLICKHOUSE_PASSWORD', cp, 'Langfuse v3 — ClickHouse + MinIO (auto-generated)'); add('MINIO_ROOT_USER', 'minio'); add('MINIO_ROOT_PASSWORD', mp); add('LANGFUSE_ENCRYPTION_KEY', ek); blank()
+  // Reuse existing infrastructure secrets if loaded from server, otherwise generate new ones
+  const s = state.infraSecrets || {}
+  const rp = s.REDIS_PASSWORD || rs(32)
+  add('REDIS_PASSWORD', rp, 'Redis (auto-generated)'); add('REDIS_URL', s.REDIS_URL || `redis://default:${rp}@redis:6379/0`); blank()
+  add('TEMPORAL_DB_USER', s.TEMPORAL_DB_USER || 'temporal', 'Temporal (auto-generated)')
+  add('TEMPORAL_DB_PASSWORD', s.TEMPORAL_DB_PASSWORD || rs(32))
+  add('TEMPORAL_DB_NAME', s.TEMPORAL_DB_NAME || 'temporal'); blank()
+  add('LANGFUSE_DB_PASSWORD', s.LANGFUSE_DB_PASSWORD || rs(32), 'Langfuse (auto-generated)')
+  add('LANGFUSE_NEXTAUTH_SECRET', s.LANGFUSE_NEXTAUTH_SECRET || rs(48))
+  add('LANGFUSE_SALT', s.LANGFUSE_SALT || rs(48))
+  add('LANGFUSE_ADMIN_PASSWORD', s.LANGFUSE_ADMIN_PASSWORD || rs(20))
+  add('LANGFUSE_PUBLIC_KEY', s.LANGFUSE_PUBLIC_KEY || 'at-public-key', 'Langfuse project init keys')
+  add('LANGFUSE_SECRET_KEY', s.LANGFUSE_SECRET_KEY || 'at-secret-key'); blank()
+  add('CLICKHOUSE_PASSWORD', s.CLICKHOUSE_PASSWORD || rs(32), 'Langfuse v3 — ClickHouse + MinIO (auto-generated)')
+  add('MINIO_ROOT_USER', s.MINIO_ROOT_USER || 'minio')
+  add('MINIO_ROOT_PASSWORD', s.MINIO_ROOT_PASSWORD || rs(32))
+  add('LANGFUSE_ENCRYPTION_KEY', s.LANGFUSE_ENCRYPTION_KEY || rh(32)); blank()
   return lines.join('\n')
 }
 
@@ -1429,12 +1456,41 @@ export default function SetupWizard() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [stepKey, setStepKey] = useState(0) // for re-triggering enter animation
+  const [loading, setLoading] = useState(true)
   const mainRef = useRef<HTMLDivElement>(null)
 
-  // Auto-save to localStorage
+  // Load live config from server on mount
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/setup')
+        if (!res.ok) throw new Error('fetch failed')
+        const data = await res.json()
+        if (!cancelled && data?.exists) {
+          setState(prev => ({
+            ...prev,
+            ...data,
+            // Ensure nested objects merge properly
+            exchanges: { ...prev.exchanges, ...(data.exchanges || {}) },
+            infraSecrets: data.infraSecrets || {},
+          }))
+          // Skip welcome step — go directly to Exchange
+          setStep(1)
+        }
+      } catch {
+        // Server unreachable or no config — stay on welcome with defaults
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Auto-save to localStorage (skip secrets and infraSecrets)
   useEffect(() => {
     const { coinbaseApiKey, coinbaseApiSecret, geminiApiKey, openaiApiKey,
-      telegramCoinbaseBotToken, telegramNordnetBotToken, telegramIbkrBotToken, redditClientSecret, ...safe } = state
+      telegramCoinbaseBotToken, telegramNordnetBotToken, telegramIbkrBotToken, redditClientSecret, infraSecrets, ...safe } = state
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(safe)) } catch { /* ignore */ }
   }, [state])
 
@@ -1526,6 +1582,22 @@ export default function SetupWizard() {
     const a = document.createElement('a'); a.href = url; a.download = '.env'; a.click()
     URL.revokeObjectURL(url)
   }, [state])
+
+  // ── Loading screen ──
+  if (loading) {
+    return (
+      <div style={{
+        height: '100vh', background: '#080c10', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        fontFamily: "'Inter', system-ui, sans-serif", color: '#8b949e',
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <RefreshCw size={28} color="#22c55e" style={{ animation: 'at-spin 1s linear infinite', marginBottom: 16 }} />
+          <div style={{ fontSize: 14 }}>Loading configuration…</div>
+        </div>
+      </div>
+    )
+  }
 
   // ── Success screen ──
   if (saved) {

@@ -213,6 +213,9 @@ export interface SimulatedTrade {
 
 // ─── API calls ─────────────────────────────────────────────────────────────
 
+export const fetchSetupConfig = () =>
+  apiFetch<Record<string, any>>('/setup')
+
 export const fetchCycles = (pair?: string, limit = 50, offset = 0) =>
   apiFetch<{ cycles: CycleSummary[]; count: number }>(
     `/cycles?limit=${limit}&offset=${offset}${pair ? `&pair=${pair}` : ''}`

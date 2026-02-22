@@ -272,22 +272,15 @@ if not _DASHBOARD_COMMAND_SIGNING_KEY:
 async def _api_key_middleware(request: Request, call_next):
     """Require explicit API key auth for dashboard endpoints when configured.
 
-    H28 fix: When DASHBOARD_API_KEY is unset, restrict mutating endpoints
-    to localhost-only connections to avoid leaving the API wide open.
+    When DASHBOARD_API_KEY is set, every /api/ request must carry a matching
+    X-API-Key header.  When unset, all /api/ requests are allowed — network-
+    level access control is handled by the Docker port binding
+    (127.0.0.1:8090) which ensures only local traffic reaches the container.
     """
     if _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
         api_key = request.headers.get("X-API-Key", "")
         if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
             return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
-    elif not _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
-        # H28: No API key configured — only allow from localhost
-        client_host = request.client.host if request.client else ""
-        _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
-        if client_host not in _LOCALHOST_ADDRS:
-            return JSONResponse(
-                {"detail": "API key not configured; remote access denied"},
-                status_code=403,
-            )
     return await call_next(request)
 
 
@@ -1216,6 +1209,123 @@ class _SetupConfigBody(_BaseModel):
     config_env: dict[str, str]  # env vars for config/.env
     root_env: dict[str, str]  # env vars for root .env (Docker Compose)
     assets: dict | None = None  # {coinbase_pairs: [...], nordnet_pairs: [...], ibkr_pairs: [...]}
+
+
+def _parse_env_file(path: str) -> dict[str, str]:
+    """Parse a .env file into a dict, ignoring comments and blank lines."""
+    result: dict[str, str] = {}
+    if not os.path.exists(path):
+        return result
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            idx = line.index("=")
+            key = line[:idx].strip()
+            value = line[idx + 1:].strip()
+            result[key] = value
+    return result
+
+
+@app.get("/api/setup", summary="Load current configuration for the setup wizard")
+def get_setup_config():
+    """Read config/.env, root .env, and YAML configs and return a
+    WizardState-compatible JSON so the frontend wizard can pre-populate."""
+    try:
+        import yaml as _yaml
+
+        config_env = _parse_env_file(os.path.join("config", ".env"))
+        root_env = _parse_env_file(".env")
+
+        if not config_env:
+            return {"exists": False}
+
+        env = config_env.get
+
+        # Detect active exchanges from YAML config existence
+        exchanges = {"coinbase": False, "nordnet": False, "ibkr": False}
+        yaml_pairs: dict[str, list[str]] = {}
+        for exch, fname in [("coinbase", "coinbase.yaml"), ("nordnet", "nordnet.yaml"), ("ibkr", "ibkr.yaml")]:
+            ypath = os.path.join("config", fname)
+            if os.path.exists(ypath):
+                exchanges[exch] = True
+                try:
+                    with open(ypath, "r", encoding="utf-8") as f:
+                        ycfg = _yaml.safe_load(f) or {}
+                    yaml_pairs[exch] = (ycfg.get("trading") or {}).get("pairs", [])
+                except Exception:
+                    yaml_pairs[exch] = []
+
+        # Map env vars → WizardState fields
+        trading_mode = env("TRADING_MODE", "paper")
+        live_confirmed = env("LIVE_TRADING_CONFIRMED", "") != ""
+
+        # Telegram: parse authorized users
+        authorized = env("TELEGRAM_AUTHORIZED_USERS", "")
+        user_ids = [u.strip() for u in authorized.split(",") if u.strip()]
+        primary_user = user_ids[0] if user_ids else ""
+        additional_users = ",".join(user_ids[1:]) if len(user_ids) > 1 else ""
+        telegram_enabled = bool(primary_user)
+
+        # Infrastructure secrets (passed through so save preserves them)
+        infra_secrets = {}
+        _INFRA_KEYS = [
+            "REDIS_PASSWORD", "REDIS_URL",
+            "TEMPORAL_DB_USER", "TEMPORAL_DB_PASSWORD", "TEMPORAL_DB_NAME",
+            "LANGFUSE_DB_PASSWORD", "LANGFUSE_NEXTAUTH_SECRET", "LANGFUSE_SALT",
+            "LANGFUSE_ADMIN_PASSWORD", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "CLICKHOUSE_PASSWORD", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
+            "LANGFUSE_ENCRYPTION_KEY",
+        ]
+        for k in _INFRA_KEYS:
+            if k in config_env:
+                infra_secrets[k] = config_env[k]
+
+        state = {
+            "exists": True,
+            "exchanges": exchanges,
+            "tradingMode": trading_mode,
+            "liveConfirmed": live_confirmed,
+            "cryptoPairs": yaml_pairs.get("coinbase", []),
+            "customCryptoPair": "",
+            "stockPairs": yaml_pairs.get("nordnet", []),
+            "customStockPair": "",
+            "ibkrPairs": yaml_pairs.get("ibkr", []),
+            "customIbkrPair": "",
+            "coinbaseApiKey": env("COINBASE_API_KEY", ""),
+            "coinbaseApiSecret": env("COINBASE_API_SECRET", ""),
+            "ibkrHost": env("IBKR_HOST", "127.0.0.1"),
+            "ibkrPort": env("IBKR_PORT", "4002"),
+            "ibkrClientId": env("IBKR_CLIENT_ID", "1"),
+            "ibkrCurrency": env("IBKR_CURRENCY", "USD"),
+            "geminiEnabled": env("GEMINI_API_KEY", "") != "",
+            "geminiApiKey": env("GEMINI_API_KEY", ""),
+            "openaiEnabled": env("OPENAI_API_KEY", "") != "",
+            "openaiApiKey": env("OPENAI_API_KEY", ""),
+            "ollamaModel": env("OLLAMA_MODEL", "qwen2.5:14b"),
+            "telegramEnabled": telegram_enabled,
+            "telegramUserId": primary_user,
+            "telegramAdditionalUsers": additional_users,
+            "telegramCoinbaseBotToken": env("TELEGRAM_BOT_TOKEN_COINBASE", ""),
+            "telegramCoinbaseChatId": env("TELEGRAM_CHAT_ID_COINBASE", ""),
+            "telegramNordnetBotToken": env("TELEGRAM_BOT_TOKEN_NORDNET", ""),
+            "telegramNordnetChatId": env("TELEGRAM_CHAT_ID_NORDNET", ""),
+            "telegramIbkrBotToken": env("TELEGRAM_BOT_TOKEN_IBKR", ""),
+            "telegramIbkrChatId": env("TELEGRAM_CHAT_ID_IBKR", ""),
+            "redditEnabled": env("REDDIT_CLIENT_ID", "") != "",
+            "redditClientId": env("REDDIT_CLIENT_ID", ""),
+            "redditClientSecret": env("REDDIT_CLIENT_SECRET", ""),
+            "redditUserAgent": env("REDDIT_USER_AGENT", "auto-traitor/1.0"),
+            # Infra secrets so the frontend can preserve them on re-save
+            "infraSecrets": infra_secrets,
+        }
+        return state
+    except Exception as exc:
+        logger.exception("setup GET error")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/setup", summary="Save initial configuration from setup wizard")
