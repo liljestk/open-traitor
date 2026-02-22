@@ -353,8 +353,15 @@ def main():
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).
     if getattr(exchange, "paper_mode", False) and native_currency != "USD" and hasattr(exchange, "_paper_balance"):
-        initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
-        exchange._paper_balance[native_currency] = initial_paper
+        # M6 fix: acquire the paper balance lock for thread safety
+        _balance_lock = getattr(exchange, "_paper_balance_lock", None)
+        if _balance_lock:
+            with _balance_lock:
+                initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
+                exchange._paper_balance[native_currency] = initial_paper
+        else:
+            initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
+            exchange._paper_balance[native_currency] = initial_paper
         logger.info(f"📝 Paper balance: {initial_paper:,.2f} {native_currency}")
 
     # Absolute Rules

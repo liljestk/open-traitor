@@ -140,6 +140,7 @@ class Orchestrator:
         # Persistent event loop for async operations within the sync run_forever() loop.
         # Avoids repeatedly creating/destroying event loops via asyncio.run().
         self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)  # M5 fix: register as thread-current loop
 
         # Trading state
         if getattr(exchange, "paper_mode", False):
@@ -164,7 +165,7 @@ class Orchestrator:
         self.market_analyst = MarketAnalystAgent(llm, self.state, config)
         self.strategist = StrategistAgent(llm, self.state, config)
         self.risk_manager = RiskManagerAgent(llm, self.state, config, rules)
-        self.executor = ExecutorAgent(llm, self.state, config, exchange, rules)
+        self.executor = ExecutorAgent(llm, self.state, config, exchange, rules, telegram=telegram_bot)
         self.settings_advisor = SettingsAdvisorAgent(
             llm, self.state, config, rules,
             review_interval=config.get("trading", {}).get("settings_review_interval", 10),
@@ -983,7 +984,7 @@ class Orchestrator:
                 else:
                     logger.warning(f"Unknown dashboard command: {action}")
         except Exception as e:
-            logger.debug(f"Dashboard command processing error: {e}")
+            logger.warning(f"Dashboard command processing error: {e}")
 
     def _validate_dashboard_command(self, cmd: dict) -> tuple[bool, str]:
         """Validate signature and freshness of dashboard-originated commands."""

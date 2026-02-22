@@ -75,7 +75,7 @@ llm:
     rpm_limit: 14
     daily_token_limit: 950000
     cooldown_seconds: 65
-    api_key_set: false
+    api_key_set: true
   - name: openai
     enabled: true
     base_url: https://api.openai.com/v1

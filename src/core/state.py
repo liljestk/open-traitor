@@ -371,7 +371,7 @@ class TradingState:
             for t in self.trades:
                 if t.id == trade_id:
                     # Compute deltas vs original booking
-                    old_qty = t.filled_quantity if t.filled_quantity else t.quantity
+                    old_qty = t.filled_quantity if t.filled_quantity is not None else t.quantity
                     old_value = (t.filled_price or t.price) * old_qty
                     new_value = filled_price * filled_quantity
 

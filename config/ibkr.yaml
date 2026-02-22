@@ -74,7 +74,7 @@ llm:
     When uncertain, you recommend holding or waiting for better setups. '
   providers:
   - api_key_env: GEMINI_API_KEY
-    api_key_set: false
+    api_key_set: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     cooldown_seconds: 65
     daily_token_limit: 950000

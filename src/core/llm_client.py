@@ -352,8 +352,9 @@ class LLMClient:
 
                 # Success — record metrics
                 elapsed_ms = (time.time() - start_time) * 1000
-                self._call_count += 1
-                self._last_provider = provider.name
+                with self._providers_lock:
+                    self._call_count += 1
+                    self._last_provider = provider.name
 
                 prompt_tokens = 0
                 completion_tokens = 0
@@ -361,7 +362,8 @@ class LLMClient:
                     prompt_tokens = response.usage.prompt_tokens or 0
                     completion_tokens = response.usage.completion_tokens or 0
                     total = response.usage.total_tokens or 0
-                    self._total_tokens += total
+                    with self._providers_lock:
+                        self._total_tokens += total
                     self._record_call(provider, total)
 
                 content = (response.choices[0].message.content or "").strip()
@@ -483,12 +485,14 @@ class LLMClient:
                 )
 
                 elapsed_ms = (time.time() - start_time) * 1000
-                self._call_count += 1
-                self._last_provider = provider.name
+                with self._providers_lock:
+                    self._call_count += 1
+                    self._last_provider = provider.name
 
                 if response.usage:
                     total = response.usage.total_tokens or 0
-                    self._total_tokens += total
+                    with self._providers_lock:
+                        self._total_tokens += total
                     self._record_call(provider, total)
 
                 msg = response.choices[0].message
@@ -588,13 +592,23 @@ class LLMClient:
             except json.JSONDecodeError:
                 pass
 
-        # Try to find JSON object pattern
-        json_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
+        # Try to find JSON object pattern (M2 fix: brace-balanced extraction)
+        # Find all { positions and try parsing from each one
+        for i, ch in enumerate(text):
+            if ch == '{':
+                # Try progressively larger substrings from this brace
+                depth = 0
+                for j in range(i, len(text)):
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[i:j+1])
+                        except json.JSONDecodeError:
+                            break  # try next opening brace
+                        break
 
         logger.error(f"Could not extract JSON from response: {text[:300]}")
         return {"error": "Failed to parse LLM response", "raw": text[:500]}

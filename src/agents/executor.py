@@ -29,10 +29,12 @@ class ExecutorAgent(BaseAgent):
         config,
         exchange: ExchangeClient,
         rules: AbsoluteRules,
+        telegram=None,
     ):
         super().__init__("executor", llm, state, config)
         self.exchange = exchange
         self.rules = rules
+        self._telegram = telegram  # H1/H2: for orphaned order alerts
         self.training_collector = None  # set by orchestrator if enabled
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
@@ -235,6 +237,16 @@ class ExecutorAgent(BaseAgent):
                         "Manual reconciliation may be needed."
                     )
                     trade.status = TradeStatus.FAILED
+                    # H1 fix: escalate orphaned orders to user via Telegram
+                    if self._telegram:
+                        self._telegram.send_message(
+                            f"\U0001f6a8 *ORPHANED ORDER ALERT*\n\n"
+                            f"Exchange order filled but state rejected it:\n"
+                            f"Pair: `{pair}` | Action: `{action}`\n"
+                            f"Order ID: `{trade.coinbase_order_id}`\n"
+                            f"Error: {ve}\n\n"
+                            f"Manual reconciliation may be needed."
+                        )
                     return {
                         "executed": False,
                         "error": f"State rejected trade: {ve}",
@@ -401,7 +413,7 @@ class ExecutorAgent(BaseAgent):
         Calling it unconditionally would corrupt the internal position/cash state
         if the exchange rejects the order.
         """
-        qty = trade.filled_quantity or trade.quantity
+        qty = trade.filled_quantity if trade.filled_quantity is not None else trade.quantity
 
         result = self.exchange.place_market_order(
             pair=trade.pair,
@@ -426,6 +438,15 @@ class ExecutorAgent(BaseAgent):
                     f"❌ close_trade returned None for {trade.id} ({trade.pair}) — "
                     "exchange sold but state not updated; potential divergence"
                 )
+                success = False  # H2 fix: report failure when state diverges
+                # Escalate to user
+                if self._telegram:
+                    self._telegram.send_message(
+                        f"\U0001f6a8 *STATE DIVERGENCE*\n\n"
+                        f"Sold `{trade.pair}` on exchange but state update failed.\n"
+                        f"Trade ID: `{trade.id}`\n"
+                        f"Manual check required."
+                    )
             elif closed.pnl and closed.pnl < 0:
                 self.rules.record_loss(abs(closed.pnl))
 

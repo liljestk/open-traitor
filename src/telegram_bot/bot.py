@@ -342,6 +342,19 @@ class TelegramBot:
                     self._outbound_bot = Bot(token=self.bot_token)
         return self._outbound_bot
 
+    def _get_send_loop(self):
+        """Return a dedicated event loop for outbound messages (M3 fix).
+
+        Lazily creates a background thread running an event loop, reused for
+        all send_message() calls from threads without their own loop.
+        """
+        if not hasattr(self, '_send_loop') or self._send_loop is None:
+            import asyncio
+            self._send_loop = asyncio.new_event_loop()
+            t = threading.Thread(target=self._send_loop.run_forever, daemon=True)
+            t.start()
+        return self._send_loop
+
     def send_message(self, text: str) -> None:
         """Send a message to the configured chat (thread-safe, uses library)."""
         try:
@@ -368,7 +381,13 @@ class TelegramBot:
                     lambda f: f.exception() and logger.error(f"Telegram send_message failed: {f.exception()}")
                 )
             except RuntimeError:
-                asyncio.run(_send(bot, self.chat_id, text))
+                # M3 fix: reuse a dedicated outbound event loop instead of
+                # creating/destroying one per message via asyncio.run()
+                loop = self._get_send_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    _send(bot, self.chat_id, text), loop
+                )
+                future.result(timeout=30)  # block until sent
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
 

@@ -294,15 +294,6 @@ app = FastAPI(
 
 _cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
 _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["http://localhost:5173", "http://localhost:8090"]
-if "*" in _cors_origins:
-    logger.warning("⚠️ CORS allow_origins contains wildcard — restrict via DASHBOARD_CORS_ORIGINS env var")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=False,       # must be False when allow_origins contains "*"
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +314,26 @@ if not _DASHBOARD_COMMAND_SIGNING_KEY:
         "⚠️  DASHBOARD_COMMAND_SIGNING_KEY not set — trade command endpoint will "
         "reject command enqueueing for safety."
     )
+
+
+# Apply CORS after API key is resolved
+if "*" in _cors_origins:
+    if not _DASHBOARD_API_KEY:
+        # H4 fix: CORS wildcard + no API key = full cross-origin exposure
+        logger.error(
+            "⚠️ CORS wildcard with no DASHBOARD_API_KEY is dangerous — "
+            "restricting to localhost origins"
+        )
+        _cors_origins = ["http://localhost:5173", "http://localhost:8090"]
+    else:
+        logger.warning("⚠️ CORS allow_origins contains wildcard — restrict via DASHBOARD_CORS_ORIGINS env var")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,       # must be False when allow_origins contains "*"
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.middleware("http")
@@ -2459,7 +2470,7 @@ def send_trade_command(
         return {"status": "command_sent", "action": action, "pair": pair}
     except Exception as exc:
         logger.exception("HITL command error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error processing command")
 
 
 @app.get("/api/trade/commands/history", summary="Recent HITL command history")
