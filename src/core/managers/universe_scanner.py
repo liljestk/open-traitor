@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from src.analysis.technical import TechnicalAnalyzer
 from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy
 from src.utils.logger import get_logger
-from src.utils.rate_limiter import get_rate_limiter
 
 if TYPE_CHECKING:
     from src.core.orchestrator import Orchestrator
@@ -85,9 +84,10 @@ class UniverseScanner:
             logger.debug("Universe scan: no candidates passed volume/movement filter")
             return
 
-        # Sort by volume descending, cap at 50 to limit API calls
+        # Sort by volume descending, cap at 25 to limit API calls
+        # (LLM screener only considers top 20, so 25 is sufficient)
         candidates.sort(key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True)
-        candidates = candidates[:50]
+        candidates = candidates[:25]
 
         analyzer = TechnicalAnalyzer(
             orch.config.get("analysis", {}).get("technical", {})
@@ -96,82 +96,91 @@ class UniverseScanner:
         bb_strategy = BollingerReversionStrategy(orch.config)
 
         scan_results: dict[str, dict] = {}
-        rate_limiter = get_rate_limiter()
+        _BATCH_SIZE = 5
+        _BATCH_PAUSE = 1.5  # seconds between batches to avoid 429 storms
 
-        for product in candidates:
-            pair = product["product_id"]
-            try:
-                rate_limiter.wait("coinbase_rest")
-                candles = orch.exchange.get_candles(pair, granularity="ONE_HOUR", limit=200)
-                if not candles or len(candles) < 30:
+        for batch_idx in range(0, len(candidates), _BATCH_SIZE):
+            # Pace batches to stay well under the Coinbase REST rate limit
+            if batch_idx > 0:
+                import time as _scan_time
+                _scan_time.sleep(_BATCH_PAUSE)
+
+            batch = candidates[batch_idx : batch_idx + _BATCH_SIZE]
+            for product in batch:
+                pair = product["product_id"]
+                try:
+                    # NOTE: get_candles() already calls _throttled_request() which
+                    # acquires a rate-limiter token internally — no extra wait needed.
+                    candles = orch.exchange.get_candles(pair, granularity="ONE_HOUR", limit=200)
+                    if not candles or len(candles) < 30:
+                        continue
+
+                    analysis = analyzer.analyze(candles)
+                    if "error" in analysis:
+                        continue
+
+                    # Run strategy signals (pure math)
+                    ema_sig = ema_strategy.generate_signal(pair, candles, analysis)
+                    bb_sig = bb_strategy.generate_signal(pair, candles, analysis)
+
+                    # Composite score: combine indicators
+                    indicators = analysis.get("indicators", {})
+                    rsi = indicators.get("rsi")
+                    adx = indicators.get("adx")
+                    volume_ratio = indicators.get("volume_ratio", 1.0)
+                    macd_hist = indicators.get("macd_histogram")
+
+                    score = 0.0
+                    # RSI momentum (not overbought, not oversold — sweet spot 30-65 for buys)
+                    if rsi is not None:
+                        if 30 <= rsi <= 45:
+                            score += 0.25  # oversold bounce potential
+                        elif 45 < rsi <= 65:
+                            score += 0.15  # healthy momentum
+                        elif rsi > 80:
+                            score -= 0.2  # overbought
+
+                    # ADX trend strength
+                    if adx is not None and adx > 25:
+                        score += 0.2
+
+                    # Volume confirmation
+                    if volume_ratio > 1.5:
+                        score += 0.15
+                    elif volume_ratio > 1.2:
+                        score += 0.1
+
+                    # MACD histogram positive
+                    if macd_hist is not None and macd_hist > 0:
+                        score += 0.1
+
+                    # Strategy confidence boost
+                    for sig in [ema_sig, bb_sig]:
+                        if sig.action == "buy" and sig.confidence > 0.5:
+                            score += 0.2 * sig.confidence
+
+                    # Movement bonus (higher absolute % change = more opportunity)
+                    pct_change = abs(float(product.get("price_percentage_change_24h", 0) or 0))
+                    score += min(pct_change / 20.0, 0.15)  # cap at 15%
+
+                    scan_results[pair] = {
+                        "product": product,
+                        "current_price": analysis.get("current_price"),
+                        "rsi": rsi,
+                        "adx": adx,
+                        "volume_ratio": volume_ratio,
+                        "macd_histogram": macd_hist,
+                        "ema_signal": ema_sig.action,
+                        "ema_confidence": ema_sig.confidence,
+                        "bb_signal": bb_sig.action,
+                        "bb_confidence": bb_sig.confidence,
+                        "composite_score": round(score, 3),
+                        "price_change_24h_pct": float(product.get("price_percentage_change_24h", 0) or 0),
+                        "volume_24h": float(product.get("volume_24h", 0) or 0),
+                    }
+                except Exception as e:
+                    logger.debug(f"Scan skip {pair}: {e}")
                     continue
-
-                analysis = analyzer.analyze(candles)
-                if "error" in analysis:
-                    continue
-
-                # Run strategy signals (pure math)
-                ema_sig = ema_strategy.generate_signal(pair, candles, analysis)
-                bb_sig = bb_strategy.generate_signal(pair, candles, analysis)
-
-                # Composite score: combine indicators
-                indicators = analysis.get("indicators", {})
-                rsi = indicators.get("rsi")
-                adx = indicators.get("adx")
-                volume_ratio = indicators.get("volume_ratio", 1.0)
-                macd_hist = indicators.get("macd_histogram")
-
-                score = 0.0
-                # RSI momentum (not overbought, not oversold — sweet spot 30-65 for buys)
-                if rsi is not None:
-                    if 30 <= rsi <= 45:
-                        score += 0.25  # oversold bounce potential
-                    elif 45 < rsi <= 65:
-                        score += 0.15  # healthy momentum
-                    elif rsi > 80:
-                        score -= 0.2  # overbought
-
-                # ADX trend strength
-                if adx is not None and adx > 25:
-                    score += 0.2
-
-                # Volume confirmation
-                if volume_ratio > 1.5:
-                    score += 0.15
-                elif volume_ratio > 1.2:
-                    score += 0.1
-
-                # MACD histogram positive
-                if macd_hist is not None and macd_hist > 0:
-                    score += 0.1
-
-                # Strategy confidence boost
-                for sig in [ema_sig, bb_sig]:
-                    if sig.action == "buy" and sig.confidence > 0.5:
-                        score += 0.2 * sig.confidence
-
-                # Movement bonus (higher absolute % change = more opportunity)
-                pct_change = abs(float(product.get("price_percentage_change_24h", 0) or 0))
-                score += min(pct_change / 20.0, 0.15)  # cap at 15%
-
-                scan_results[pair] = {
-                    "product": product,
-                    "current_price": analysis.get("current_price"),
-                    "rsi": rsi,
-                    "adx": adx,
-                    "volume_ratio": volume_ratio,
-                    "macd_histogram": macd_hist,
-                    "ema_signal": ema_sig.action,
-                    "ema_confidence": ema_sig.confidence,
-                    "bb_signal": bb_sig.action,
-                    "bb_confidence": bb_sig.confidence,
-                    "composite_score": round(score, 3),
-                    "price_change_24h_pct": float(product.get("price_percentage_change_24h", 0) or 0),
-                    "volume_24h": float(product.get("volume_24h", 0) or 0),
-                }
-            except Exception as e:
-                logger.debug(f"Scan skip {pair}: {e}")
-                continue
 
         orch._scan_results = scan_results
 
