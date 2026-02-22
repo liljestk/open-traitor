@@ -104,7 +104,8 @@ Findings organized by priority.
 
 - [x] **M1 — CORS defaults to `["*"]`** — ✅ Fixed. Defaults to localhost origins. `allow_methods`/`allow_headers` still wildcard (low risk).
 - [ ] **M2 — Executive summary reveals DB profile names** — `src/dashboard/server.py:672`
-- [ ] **M3 — Raw exceptions in order results** — `src/core/coinbase_client.py:810`
+- [x] **M3 — Raw exceptions in order results** — `src/core/coinbase_client.py:810`
+  ✅ Verified. Exception handler already returns sanitized message ("Order failed — check logs for details").
 - [x] **M4 — Exception class name leaked to Telegram** — `src/core/orchestrator.py:692`
   ✅ Fixed. Redacted `type(e).__name__`.
 - [x] **M5 — Prompt injection regex bypassed via Unicode** — ✅ Fixed (NFKC + zero-width strip). Cyrillic homoglyphs still bypass — see M22.
@@ -128,7 +129,8 @@ Findings organized by priority.
 - [x] **M17 — Simulated trade PnL always computed as long** — ✅ Fixed. Direction-aware.
 - [ ] **M18 — Fee rates hardcoded to Coinbase** — `src/core/fee_manager.py:37`
 - [ ] **M19 — RouteFinder crypto-specific** — `src/core/route_finder.py:91`
-- [ ] **M20 — Signed dashboard commands no replay protection** — `src/core/orchestrator.py`
+- [x] **M20 — Signed dashboard commands no replay protection** — `src/core/orchestrator.py`
+  ✅ Fixed. Nonce replay protection with 5-minute expiry window and periodic pruning.
 - [ ] **M21 — `ValueError` from `add_trade` may crash orchestrator** — `src/core/state.py:280`
   Verified: broad `except Exception` in executor catches it, but recovery is incorrect (see H27).
 
@@ -203,8 +205,8 @@ Findings organized by priority.
   ✅ Fixed. `atexit.register(self.close)` in `__init__`.
 - [x] **L19 — Journal JSONL+CSV writes in separate lock scopes** — `src/utils/journal.py:95`
   ✅ Fixed. Single RLock scope for both writes.
-- [ ] **L20 — Bridge reversals don't call `_record_rotation_leg`** — `src/core/portfolio_rotator.py:700`
-  Unlike fiat reversals, bridge reversals aren't tracked in AbsoluteRules counters. Inconsistent.
+- [x] **L20 — Bridge reversals don't call `_record_rotation_leg`** — `src/core/portfolio_rotator.py:700`
+  ✅ Fixed. Bridge reversal success path now calls `_record_rotation_leg()` for counter parity.
 - [x] **L21 — `_schema_summary` cached forever** — `src/agents/settings_advisor.py:127`
   ✅ Fixed. TTL-based cache (300s).
 - [x] **L22 — WS subprotocol not echoed** — `src/dashboard/server.py:1030`
@@ -212,7 +214,7 @@ Findings organized by priority.
 
 ---
 
-## Do not fix yet — Cross-Asset Interference (Share vs Crypto)
+## Cross-Asset Interference (Share vs Crypto)
 
 - [ ] **X1 — Single `cash_balance` for all exchanges** — `src/core/state.py`
 - [ ] **X2 — Daily counters global, not per-exchange** — `src/core/rules.py`
@@ -228,21 +230,21 @@ Findings organized by priority.
 |----------|-------|-------|------|
 | Critical | 10 | **10** | 0 |
 | High | 28 | **28** | 0 |
-| Medium | 33 | **27** | 6 |
-| Low | 22 | **14** | 8 |
+| Medium | 33 | **29** | 4 |
+| Low | 22 | **15** | 7 |
 | Cross-asset | 5 | 0 | 5 |
-| **Total** | **98** | **79** | **19** |
+| **Total** | **98** | **82** | **16** |
 
 ### Remaining open items (won't fix / deferred)
 
 **Medium — deferred by design:**
-M2 (profile name disclosure — low risk), M3 (already sanitized), M13 (CSRF — frontend rework),
-M18/M19 (cross-asset fee/route), M20 (replay protection — signed commands)
+M2 (profile name disclosure — low risk), M13 (CSRF — frontend rework),
+M18/M19 (cross-asset fee/route)
 
 **Low — won't fix / low priority:**
 L1 (masked secrets at INFO), L2 (unbounded attempts dict), L7 (to_summary not atomic — RLock inefficiency),
 L10 (GIL provides barrier), L11 (frontend JS mapping), L12 (already uses env var),
-L13 (Redis reconnect — already has reconnect), L20 (bridge reversal tracking)
+L13 (Redis reconnect — already has reconnect)
 
 ## Progress Log
 
@@ -259,3 +261,4 @@ L13 (Redis reconnect — already has reconnect), L20 (bridge reversal tracking)
 - 2026-02-21 Second full review: M1, M5, M6, M9, M14, M15, M16, M17, L3, L4, L5, L6, L8 confirmed fixed. Added C6–C10, H22–H28, M22–M33, L15–L22 (32 new findings).
 - 2026-02-22 Full sweep: C6–C10, H22–H28, M4, M7–M8, M10–M12, M22–M33, L9, L14–L19, L21–L22 all fixed. 39 items resolved in single session.
 - 2026-02-22 Re-review: 36 verified, 4 regressions found (R2, R3, R5, R7). All regressions fixed same day.
+- 2026-07-14 Final sweep: M3 verified, M20 fixed (nonce replay), L20 fixed (bridge rotation tracking). Also fixed items from CODE-REVIEW-2025-07.md (H4, M2-M7 new, L1, L3, L6, L7 new).
