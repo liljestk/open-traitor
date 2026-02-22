@@ -99,28 +99,41 @@ function PairCard({
 
 /* ── Top movers ─────────────────────────────────────────────────────────── */
 
-function TopMovers({ movers }: { movers: Array<{ pair: string; change_pct: number; volume: number }> }) {
+function TopMovers({ movers }: { movers: Array<{ pair: string; change_pct?: number; volume?: number; score?: number }> }) {
   if (!Array.isArray(movers) || !movers.length) return null
   return (
     <div className="space-y-1.5">
-      {movers.slice(0, 10).map((m) => (
-        <div key={m.pair} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2">
-          <div className="flex items-center gap-2">
-            {m.change_pct >= 0 ? (
-              <TrendingUp size={12} className="text-green-400" />
-            ) : (
-              <TrendingDown size={12} className="text-red-400" />
-            )}
-            <span className="text-xs font-medium text-gray-200">{m.pair}</span>
+      {movers.slice(0, 10).map((m) => {
+        // API may return {pair, score} or {pair, change_pct, volume} depending on scan source
+        const displayValue = m.change_pct ?? m.score ?? 0
+        const isPositive = displayValue >= 0
+        return (
+          <div key={m.pair} className="flex items-center justify-between bg-gray-800/40 rounded-lg px-3 py-2">
+            <div className="flex items-center gap-2">
+              {isPositive ? (
+                <TrendingUp size={12} className="text-green-400" />
+              ) : (
+                <TrendingDown size={12} className="text-red-400" />
+              )}
+              <span className="text-xs font-medium text-gray-200">{m.pair}</span>
+            </div>
+            <div className="flex items-center gap-3 text-xs">
+              {m.change_pct != null ? (
+                <span className={isPositive ? 'text-green-400' : 'text-red-400'}>
+                  {isPositive ? '+' : ''}{displayValue.toFixed(2)}%
+                </span>
+              ) : m.score != null ? (
+                <span className="text-brand-400">
+                  Score: {displayValue.toFixed(2)}
+                </span>
+              ) : null}
+              {m.volume != null && (
+                <span className="text-gray-600">Vol: {m.volume.toLocaleString()}</span>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3 text-xs">
-            <span className={m.change_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
-              {m.change_pct >= 0 ? '+' : ''}{m.change_pct.toFixed(2)}%
-            </span>
-            <span className="text-gray-600">Vol: {m.volume?.toLocaleString() ?? '—'}</span>
-          </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -318,7 +331,7 @@ export default function Watchlist() {
   const pairInfos = data?.pair_info ?? []
   const prices = data?.live_prices ?? {}
   const scan = data?.scan
-  const topMovers = (scan?.top_movers ?? []) as Array<{ pair: string; change_pct: number; volume: number }>
+  const topMovers = (scan?.top_movers ?? []) as Array<{ pair: string; change_pct?: number; volume?: number; score?: number }>
   const rpmBudget = data?.rpm_budget ?? null
   const effectiveMax = rpmBudget?.effective_max ?? Infinity
   const isAtLimit = pairInfos.length >= effectiveMax
