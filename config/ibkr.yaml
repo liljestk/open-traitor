@@ -82,7 +82,7 @@ llm:
     model: gemini-2.0-flash
     name: gemini
     rpm_limit: 14
-    tier: free          # change to 'paid' when on a paid Gemini plan
+    tier: free
     timeout: 30
   - api_key_env: OPENROUTER_API_KEY
     api_key_set: false
@@ -104,7 +104,7 @@ llm:
     model: gpt-4o-mini
     name: openai
     rpm_limit: 450
-    tier: free          # change to 'paid' when on a paid OpenAI plan
+    tier: free
     timeout: 45
   - api_key_set: true
     base_url_env: OLLAMA_BASE_URL

@@ -42,12 +42,12 @@ Respond with JSON:
 }
 
 Rules:
-- If confidence is below 0.6, always recommend "hold"
+- Be decisive. Look for actionable short-term trades and scaling opportunities even if signals are imperfect.
+- If confidence is above the threshold, you should lean towards action (buy or sell).
 - Never exceed spending limits specified in tasks
 - Always set stop-loss for buy orders
 - Consider the current portfolio before adding more of the same asset
-- If the signal is neutral but there's no compelling reason to trade, hold
-- Capital preservation is always the top priority
+- Do not hold simply out of fear. Calculate risk-reward and take small entries on decent setups.
 - For sells of existing holdings, use the quantity shown in ACTUAL COINBASE HOLDINGS"""
 
 

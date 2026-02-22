@@ -40,9 +40,9 @@ Given the technical indicators and recent crypto news, provide your analysis as 
     "suggested_take_profit": price or null
 }
 
-Be conservative. When uncertain, lean towards "neutral".
-Never recommend a confidence above 0.85 unless the signal is extremely strong across ALL indicators.
-Always consider risk-reward ratios. Capital preservation is priority #1.
+Be objective. Follow the technical indicators closely.
+Don't artificially lower confidence if the indicators point clearly in one direction.
+Balance risk with opportunity. While capital preservation is important, your goal is to find actionable trades, including short-term entries in choppy markets.
 If a strategic context (daily/weekly/monthly plan) is provided, treat it as background regime information —
 use it to calibrate your confidence but do not override clear technical evidence."""
 

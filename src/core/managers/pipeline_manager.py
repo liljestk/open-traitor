@@ -23,6 +23,8 @@ class PipelineManager:
     
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
+        self._candle_cache: dict[str, tuple[float, list]] = {}
+        self._candle_cache_lock = asyncio.Lock()
 
     def _compute_ensemble(self, strategy_signals: dict) -> dict | None:
         """Compute a weighted ensemble from individual strategy signals.
@@ -129,18 +131,26 @@ class PipelineManager:
         # Data fetching (synchronous -> use asyncio.to_thread if we want true non-blocking,
         # but for now we let it block slightly since Coinbase REST is fast)
         _step_t = time.monotonic()
-        await orch.rate_limiter.async_wait("coinbase_rest")
-        try:
-            candles = await asyncio.to_thread(
-                orch.exchange.get_candles,
-                pair,
-                granularity=orch.config.get("analysis", {}).get("technical", {}).get(
-                    "candle_granularity", "ONE_HOUR"
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ Skipping pipeline for {pair}: get_candles failed: {e}")
-            return
+        granularity = orch.config.get("analysis", {}).get("technical", {}).get(
+            "candle_granularity", "ONE_HOUR"
+        )
+        
+        async with self._candle_cache_lock:
+            cached = self._candle_cache.get(pair)
+            if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
+                candles = list(cached[1])
+            else:
+                await orch.rate_limiter.async_wait("coinbase_rest")
+                try:
+                    candles = await asyncio.to_thread(
+                        orch.exchange.get_candles,
+                        pair,
+                        granularity=granularity,
+                    )
+                    self._candle_cache[pair] = (time.monotonic(), list(candles))
+                except Exception as e:
+                    logger.warning(f"⚠️ Skipping pipeline for {pair}: get_candles failed: {e}")
+                    return
 
         if orch.ws_feed:
             price = orch.ws_feed.get_price(pair)
@@ -257,8 +267,16 @@ class PipelineManager:
                 _sem = asyncio.Semaphore(3)  # max 3 concurrent API calls
 
                 async def _fetch_with_sem(p):
+                    async with self._candle_cache_lock:
+                        cached = self._candle_cache.get(p)
+                        if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
+                            return list(cached[1])
                     async with _sem:
-                        return await asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
+                        await orch.rate_limiter.async_wait("coinbase_rest")
+                        res = await asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
+                        async with self._candle_cache_lock:
+                            self._candle_cache[p] = (time.monotonic(), list(res))
+                        return res
 
                 other_results = await asyncio.gather(*[
                     _fetch_with_sem(p) for p in other_pairs

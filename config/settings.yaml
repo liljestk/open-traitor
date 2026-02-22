@@ -10,7 +10,7 @@ trading:
   - ETH-EUR
   quote_currency: EUR
   interval: 120
-  min_confidence: 0.55
+  min_confidence: 0.50
   max_open_positions: 8
   reconcile_every_cycles: 10
   paper_slippage_pct: 0.0005
@@ -54,16 +54,9 @@ llm:
   max_retries: 3
   timeout: 60
   recovery_check_interval: 120
-  persona: 'You are a cautious, analytical cryptocurrency trading assistant.
-
-    You prioritize capital preservation over aggressive gains.
-
-    You always consider risk-reward ratios before suggesting trades.
-
-    You never recommend trading with more than the user''s specified limits.
-
-    When uncertain, you recommend holding or waiting for better setups.
-
+  persona: 'You are a sharp, tactical cryptocurrency trading assistant.
+    You actively look for profitable opportunities and balance risk-reward optimally.
+    You are decisive and make trades when the data aligns, rather than waiting for perfect conditions.
     '
   providers:
   - name: gemini
