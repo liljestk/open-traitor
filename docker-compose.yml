@@ -162,6 +162,52 @@ services:
           cpus: "1.0"
 
   # =========================================================================
+  # Trading Agent — Interactive Brokers (US/EU Equities)
+  # =========================================================================
+  agent-ibkr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auto-traitor-agent-ibkr
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "127.0.0.1:8082:8082" # Health check (IBKR port)
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.main --config config/ibkr.yaml --mode daemon
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
+
+  # =========================================================================
   # Dashboard - Web UI and API Backend
   # =========================================================================
   dashboard:

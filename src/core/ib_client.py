@@ -12,8 +12,6 @@ IBKR's tiered commission schedule.
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.utils.logger import get_logger
@@ -57,7 +55,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         self,
         paper_mode: bool = True,
         paper_slippage_pct: float = 0.0003,
-        initial_balance_usd: float = 100_000.0,
+        initial_balance: float = 100_000.0,
         ib_host: str = "127.0.0.1",
         ib_port: int = 4002,        # 4001 = live TWS, 4002 = paper TWS / IB Gateway
         ib_client_id: int = 1,
@@ -72,7 +70,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
         # Paper-mode state via mixin
         self._init_paper(
-            initial_balances={self._native_currency: initial_balance_usd},
+            initial_balances={self._native_currency: initial_balance},
             slippage_pct=paper_slippage_pct,
         )
         # IBKR US tiered commission: ~$0.0035/share, min $0.35, max 1% of trade
@@ -86,7 +84,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         else:
             logger.info(
                 f"IBClient initialised in 📝 PAPER mode "
-                f"({self._native_currency} {initial_balance_usd:,.0f})"
+                f"({self._native_currency} {initial_balance:,.0f})"
             )
 
     # ------------------------------------------------------------------
@@ -158,8 +156,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         Live mode will query IB historical data.
         """
         if self.paper_mode:
-            logger.debug(
-                f"get_candles({product_id}) — paper mode, returning empty list"
+            logger.warning(
+                f"get_candles({product_id}) — paper mode returns no candle data; "
+                f"analysis pipeline will have no signals until a live data source is configured"
             )
             return []
         raise NotImplementedError
