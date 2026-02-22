@@ -7,7 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import {
   Eye, TrendingUp, TrendingDown, BarChart2, RefreshCw, Zap,
-  Bot, UserRound, Plus, Search, Loader2,
+  Bot, UserRound, Plus, Search, Loader2, Gauge, AlertTriangle,
 } from 'lucide-react'
 import { fetchWatchlist, fetchCandles, followPair, unfollowPair, searchProducts, type PairInfo, type ProductResult } from '../api'
 import { useCurrencyFormatter } from '../store'
@@ -319,6 +319,10 @@ export default function Watchlist() {
   const prices = data?.live_prices ?? {}
   const scan = data?.scan
   const topMovers = (scan?.top_movers ?? []) as Array<{ pair: string; change_pct: number; volume: number }>
+  const rpmBudget = data?.rpm_budget ?? null
+  const effectiveMax = rpmBudget?.effective_max ?? Infinity
+  const isAtLimit = pairInfos.length >= effectiveMax
+  const isOverLimit = pairInfos.length > effectiveMax
 
   const handleToggleFollow = (info: PairInfo) => {
     if (info.followed_by_human) {
@@ -335,7 +339,19 @@ export default function Watchlist() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-bold text-gray-100">Watchlist</h2>
-            <span className="text-xs text-gray-500">{pairInfos.length} pairs</span>
+            {rpmBudget ? (
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${
+                isOverLimit
+                  ? 'text-red-400 bg-red-900/20 border-red-700/40'
+                  : isAtLimit
+                    ? 'text-amber-400 bg-amber-900/20 border-amber-700/40'
+                    : 'text-green-400 bg-green-900/20 border-green-700/40'
+              }`}>
+                {pairInfos.length} / {effectiveMax} pairs
+              </span>
+            ) : (
+              <span className="text-xs text-gray-500">{pairInfos.length} pairs</span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {scan && (
@@ -356,11 +372,44 @@ export default function Watchlist() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Pair list */}
           <div className="space-y-4">
+            {/* RPM limit banner */}
+            {rpmBudget && (
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+                isOverLimit
+                  ? 'bg-red-900/20 border-red-700/30 text-red-300'
+                  : isAtLimit
+                    ? 'bg-amber-900/20 border-amber-700/30 text-amber-300'
+                    : 'bg-gray-800/40 border-gray-700/30 text-gray-400'
+              }`}>
+                <Gauge size={12} className="flex-shrink-0" />
+                <span>
+                  {isOverLimit ? (
+                    <>
+                      <AlertTriangle size={10} className="inline mr-1" />
+                      <strong>{pairInfos.length - effectiveMax} over limit</strong> — agent will trade top {effectiveMax} only.
+                      {rpmBudget.provider !== 'local-only' && <> ({rpmBudget.provider} {rpmBudget.rpm} RPM)</>}
+                    </>
+                  ) : isAtLimit ? (
+                    <>At capacity ({effectiveMax} pairs). Remove a pair or upgrade provider to add more.</>
+                  ) : (
+                    <>{effectiveMax - pairInfos.length} slot{effectiveMax - pairInfos.length !== 1 ? 's' : ''} remaining · {rpmBudget.provider}{rpmBudget.provider !== 'local-only' ? ` ${rpmBudget.rpm} RPM` : ''}</>
+                  )}
+                </span>
+              </div>
+            )}
+
             {/* Add pair input */}
-            <AddPairInput
-              onAdd={(pair) => followMut.mutate(pair)}
-              isAdding={followMut.isPending}
-            />
+            {isAtLimit ? (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/40 border border-gray-700/30 text-xs text-gray-500">
+                <Plus size={12} className="opacity-40" />
+                <span>Follow limit reached ({effectiveMax} pairs). Unfollow a pair to add more.</span>
+              </div>
+            ) : (
+              <AddPairInput
+                onAdd={(pair) => followMut.mutate(pair)}
+                isAdding={followMut.isPending}
+              />
+            )}
 
             <div className="space-y-1.5">
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1">Active Pairs</h3>
@@ -387,6 +436,9 @@ export default function Watchlist() {
             <div className="flex items-center gap-3 px-1 text-[10px] text-gray-600">
               <span className="flex items-center gap-1"><Bot size={10} className="text-violet-400" /> = LLM-selected</span>
               <span className="flex items-center gap-1"><UserRound size={10} className="text-sky-400" /> = Your follow</span>
+              {rpmBudget && rpmBudget.provider !== 'local-only' && (
+                <span className="flex items-center gap-1"><Gauge size={10} className="text-blue-400" /> = {rpmBudget.rpm} RPM ({rpmBudget.interval}s cycle)</span>
+              )}
             </div>
 
             {/* Top movers from scan */}

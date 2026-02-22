@@ -299,6 +299,7 @@ export interface SettingsResponse {
   section_labels: Record<string, string>
   telegram_tiers: Record<string, { sections: string[]; description: string }>
   schema: Record<string, SectionSchema>
+  rpm_budget?: RpmBudget
 }
 
 export interface SettingsUpdateResult {
@@ -630,6 +631,22 @@ export interface PairInfo {
   price: number | null
 }
 
+export interface RpmBudget {
+  provider: string
+  model?: string
+  tier?: string
+  rpm: number
+  interval: number
+  available_per_cycle: number
+  overhead: number
+  entity_budget: number
+  calls_per_entity?: number
+  max_entities: number
+  configured_max: number
+  effective_max: number
+  note?: string
+}
+
 export interface WatchlistData {
   active_pairs: string[]
   human_followed_pairs: string[]
@@ -637,6 +654,7 @@ export interface WatchlistData {
   live_prices: Record<string, number>
   scan: ScanResult | null
   pair_count: number
+  rpm_budget: RpmBudget | null
 }
 
 export const fetchWatchlist = () =>

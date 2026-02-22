@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef, type ReactNode, type
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowRight, ArrowLeft, Check, AlertTriangle, Eye, EyeOff, Plus, X, Download,
-  Zap, Server, Cloud, Bot, Coins, BarChart3, Newspaper,
+  Zap, Server, Cloud, Bot, Coins, BarChart3, Newspaper, Activity,
   Lock, Info, Sparkles, Settings2, Copy, ExternalLink,
   MonitorDot, MessageSquare, TrendingUp, Rocket, Shield,
   ChevronDown, ChevronRight, RefreshCw, CircleAlert, CheckCircle2,
@@ -59,7 +59,7 @@ const INITIAL_STATE: WizardState = {
   exchanges: { coinbase: true, nordnet: false, ibkr: false },
   tradingMode: 'paper',
   liveConfirmed: false,
-  cryptoPairs: ['BTC-EUR', 'ETH-EUR'],
+  cryptoPairs: ['BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'LINK-EUR', 'DOGE-EUR'],
   customCryptoPair: '',
   stockPairs: ['VOLV-B.ST', 'ERIC-B.ST', 'ABB.ST'],
   customStockPair: '',
@@ -817,6 +817,17 @@ function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardState; up
     <>
       <SectionHeader icon={<TrendingUp size={22} />} title="Assets to Follow" subtitle="Select which assets the agent will monitor. The agent also auto-discovers opportunities beyond this list." />
       <Tip>These are your <strong>starting pairs</strong>. The agent's pair discovery engine will automatically scan for additional opportunities based on volume and momentum.</Tip>
+      <div style={{
+        padding: '10px 14px', background: '#3b82f608', border: '1px solid #3b82f622',
+        borderRadius: 8, marginTop: 12, fontSize: 12, color: '#8b949e', display: 'flex', alignItems: 'center', gap: 8,
+      }}>
+        <Activity size={14} style={{ color: '#60a5fa', flexShrink: 0 }} />
+        <span>
+          The number of pairs you can actively track depends on your LLM provider's RPM limit.
+          Free-tier providers (Gemini 14 RPM) support ~5 pairs; paid providers support up to 30.
+          Don't worry — you can select more here, the system auto-adjusts at runtime.
+        </span>
+      </div>
       <div style={{ marginTop: 16 }}>
         {state.exchanges.coinbase && renderPairSection({
           title: 'Cryptocurrency Pairs', icon: <Coins size={18} />, color: '#3b82f6',
@@ -996,6 +1007,39 @@ function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<Wi
             </div>
           )
         })}
+      </div>
+
+      {/* RPM Budget Explanation */}
+      <div style={{
+        padding: '14px 18px', background: 'linear-gradient(135deg, #3b82f608, #3b82f615)',
+        border: '1px solid #3b82f633', borderRadius: 10, marginBottom: 24,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <Activity size={16} style={{ color: '#60a5fa' }} />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#e6edf3' }}>How RPM Limits Affect Trading Capacity</span>
+        </div>
+        <p style={{ margin: 0, fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+          Each trading cycle uses ~2 LLM calls per tracked asset (analysis + strategy). Your provider's <strong style={{ color: '#c9d1d9' }}>requests-per-minute (RPM)</strong> limit
+          determines how many assets the agent can monitor simultaneously.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 12 }}>
+          {([
+            { label: 'Gemini Free', rpm: 14, pairs: 5, color: '#3b82f6' },
+            { label: 'OpenRouter Free', rpm: 20, pairs: 8, color: '#f59e0b' },
+            { label: 'OpenAI Paid', rpm: 450, pairs: 30, color: '#10b981' },
+          ]).map(p => (
+            <div key={p.label} style={{
+              padding: '10px 14px', background: '#0d111788', borderRadius: 8,
+              border: `1px solid ${p.color}22`,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: p.color }}>{p.label}</div>
+              <div style={{ fontSize: 11, color: '#6e7681', marginTop: 2 }}>{p.rpm} RPM → up to <strong style={{ color: '#e6edf3' }}>{p.pairs} pairs</strong></div>
+            </div>
+          ))}
+        </div>
+        <p style={{ margin: '10px 0 0', fontSize: 11, color: '#6e7681' }}>
+          You can adjust <strong style={{ color: '#8b949e' }}>max_active_pairs</strong> in Settings after setup. The system auto-clamps to a safe value based on your provider's RPM.
+        </p>
       </div>
 
       <h3 style={{ margin: '0 0 12px 0', fontSize: 15, fontWeight: 700, color: '#e6edf3', display: 'flex', alignItems: 'center', gap: 8 }}>

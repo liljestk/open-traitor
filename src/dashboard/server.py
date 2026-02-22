@@ -52,6 +52,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.utils.logger import get_logger
 from src.utils.pair_format import parse_pair
+from src.utils.rpm_budget import compute_rpm_entity_cap
 
 logger = get_logger("dashboard")
 
@@ -1758,6 +1759,22 @@ def get_settings():
     try:
         full = _sm_get_full()
         full["schema"] = _sm_get_schema()
+
+        # Attach RPM budget breakdown so frontend can show limits
+        try:
+            cfg = _get_config()
+            providers = cfg.get("llm_providers", [])
+            interval = cfg.get("trading", {}).get("interval", 120)
+            max_entities, breakdown = compute_rpm_entity_cap(providers, interval)
+            configured_max = cfg.get("trading", {}).get("max_active_pairs", 5)
+            full["rpm_budget"] = {
+                **breakdown,
+                "configured_max": configured_max,
+                "effective_max": min(configured_max, max_entities),
+            }
+        except Exception as _rpm_err:
+            logger.debug(f"rpm_budget enrichment skipped: {_rpm_err}")
+
         return full
     except Exception as exc:
         logger.exception("settings GET error")
@@ -2502,6 +2519,21 @@ def get_watchlist(
                 "price": live_prices.get(p),
             })
 
+        # Compute RPM budget to expose limits to the UI
+        rpm_budget = None
+        try:
+            providers = config.get("llm_providers", [])
+            interval = config.get("trading", {}).get("interval", 120)
+            max_entities, breakdown = compute_rpm_entity_cap(providers, interval)
+            configured_max = config.get("trading", {}).get("max_active_pairs", 5)
+            rpm_budget = {
+                **breakdown,
+                "configured_max": configured_max,
+                "effective_max": min(configured_max, max_entities),
+            }
+        except Exception as _rpm_err:
+            logger.debug(f"watchlist rpm_budget enrichment skipped: {_rpm_err}")
+
         return _sanitize_floats({
             "active_pairs": pairs,
             "human_followed_pairs": human_followed,
@@ -2509,6 +2541,7 @@ def get_watchlist(
             "live_prices": live_prices,
             "scan": scan_data,
             "pair_count": len(all_pairs),
+            "rpm_budget": rpm_budget,
         })
     except Exception as exc:
         logger.exception("watchlist error")

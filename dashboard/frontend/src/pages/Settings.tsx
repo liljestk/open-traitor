@@ -57,7 +57,7 @@ const FIELD_DESCRIPTIONS: Record<string, Record<string, string>> = {
     invalidate_strategic_context: 'Force re-evaluation of strategic context on next cycle.',
     include_crypto_quotes: 'Include crypto-to-crypto pairs (e.g. ETH-BTC) in universe scanning.',
     pair_universe_refresh_seconds: 'How often to rescan the full pair universe for new opportunities.',
-    max_active_pairs: 'Maximum number of pairs to actively monitor and trade at any time.',
+    max_active_pairs: 'Maximum pairs to actively monitor. Capped by your LLM provider\'s RPM limit — the system automatically calculates the safe maximum based on your provider and cycle interval.',
     scan_volume_threshold: 'Minimum 24h volume required for a pair to be considered in scanning.',
     scan_movement_threshold_pct: 'Minimum price movement % to flag a pair as a mover during scans.',
     screener_interval_cycles: 'How often (in cycles) to run the pair screener/scanner.',
@@ -658,6 +658,100 @@ function SectionCard({ name, label, values, schema, telegramTier, onSave, search
               )
             })
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RPM Budget Card — shows entity tracking capacity based on LLM RPM limits
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function RpmBudgetCard({ rpm_budget, current_pairs }: { rpm_budget: import('../api').RpmBudget; current_pairs: number }) {
+  const effective = rpm_budget.effective_max
+  const usagePct = effective > 0 ? Math.round((current_pairs / effective) * 100) : 0
+  const isAtLimit = current_pairs >= effective
+  const isOverLimit = current_pairs > effective
+  const isLocal = rpm_budget.provider === 'local-only'
+  const barColor = isOverLimit ? '#ef4444' : isAtLimit ? '#f59e0b' : '#22c55e'
+
+  return (
+    <div style={{
+      padding: '16px 20px', background: '#0d111788', border: `1px solid ${isOverLimit ? '#ef444433' : '#21262d'}`,
+      borderRadius: 10, marginBottom: 16,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Gauge size={16} style={{ color: barColor }} />
+          <span style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3' }}>RPM Entity Budget</span>
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 10,
+            background: `${barColor}18`, color: barColor, fontWeight: 600,
+            border: `1px solid ${barColor}22`,
+          }}>
+            {current_pairs} / {effective} pairs
+          </span>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ height: 6, background: '#161b22', borderRadius: 3, overflow: 'hidden', marginBottom: 12 }}>
+        <div style={{
+          height: '100%', borderRadius: 3, background: barColor,
+          width: `${Math.min(usagePct, 100)}%`, transition: 'width 0.3s ease',
+        }} />
+      </div>
+
+      {/* Stats grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Provider</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.provider}</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>RPM Limit</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{isLocal ? '∞ (local)' : rpm_budget.rpm}</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Cycle Interval</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.interval}s</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Max from RPM</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.max_entities}</div>
+        </div>
+      </div>
+
+      {/* Explanation */}
+      <div style={{ marginTop: 12, fontSize: 11, color: '#6e7681', lineHeight: 1.5 }}>
+        {isLocal ? (
+          <>Local models (Ollama) have no RPM limit — entity cap is set to <strong style={{ color: '#8b949e' }}>max_active_pairs ({rpm_budget.configured_max})</strong> from your settings.</>
+        ) : (
+          <>
+            Your <strong style={{ color: '#8b949e' }}>{rpm_budget.provider}</strong> provider allows{' '}
+            <strong style={{ color: '#8b949e' }}>{rpm_budget.rpm} requests/min</strong>.
+            With a <strong style={{ color: '#8b949e' }}>{rpm_budget.interval}s</strong> cycle,
+            that's ~{rpm_budget.available_per_cycle} calls/cycle — minus {rpm_budget.overhead} overhead = budget for{' '}
+            <strong style={{ color: '#8b949e' }}>{rpm_budget.max_entities} entities</strong> (2 LLM calls each).
+            {rpm_budget.configured_max < rpm_budget.max_entities && (
+              <> Your <strong style={{ color: '#8b949e' }}>max_active_pairs = {rpm_budget.configured_max}</strong> setting further limits this to <strong style={{ color: '#22c55e' }}>{effective}</strong>.</>
+            )}
+            {rpm_budget.configured_max > rpm_budget.max_entities && (
+              <> Your <strong style={{ color: '#f59e0b' }}>max_active_pairs = {rpm_budget.configured_max}</strong> exceeds the RPM budget, so the system auto-clamps to <strong style={{ color: '#f59e0b' }}>{effective}</strong>.</>
+            )}
+          </>
+        )}
+      </div>
+
+      {isOverLimit && (
+        <div style={{
+          marginTop: 10, padding: '8px 12px', background: '#ef444415',
+          border: '1px solid #ef444433', borderRadius: 8,
+          fontSize: 12, color: '#f87171', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <AlertTriangle size={14} />
+          <span>You have <strong>{current_pairs - effective} pair(s)</strong> over the limit. The agent will only actively trade the top {effective}. Remove excess pairs or upgrade your LLM provider for more capacity.</span>
         </div>
       )}
     </div>
@@ -1346,6 +1440,16 @@ export default function Settings() {
           {trading_enabled ? 'Disable Trading' : 'Enable Trading'}
         </button>
       </div>
+
+      {/* ─── RPM Entity Budget (trading & intelligence tabs) ─── */}
+      {data.rpm_budget && !searchQuery && (activeTab === 'trading' || activeTab === 'intelligence') && (
+        <RpmBudgetCard
+          rpm_budget={data.rpm_budget}
+          current_pairs={(settings.trading as Record<string, unknown>)?.pairs
+            ? ((settings.trading as Record<string, unknown>).pairs as string[]).length
+            : 0}
+        />
+      )}
 
       {/* ─── Quick Presets ─── */}
       <div style={{ marginBottom: 20 }}>
