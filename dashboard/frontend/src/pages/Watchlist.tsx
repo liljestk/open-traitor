@@ -48,7 +48,7 @@ function PairCard({
 }
 
 function TopMovers({ movers }: { movers: Array<{ pair: string; change_pct: number; volume: number }> }) {
-  if (!movers?.length) return null
+  if (!Array.isArray(movers) || !movers.length) return null
   return (
     <div className="space-y-1.5">
       {movers.slice(0, 10).map((m) => (

@@ -129,7 +129,7 @@ export default function NewsFeed() {
                         {article.summary}
                       </p>
                     )}
-                    {article.tags?.length > 0 && (
+                    {Array.isArray(article.tags) && article.tags.length > 0 && (
                       <div className="flex gap-1 mt-1.5">
                         {article.tags.slice(0, 5).map((tag) => (
                           <span key={tag} className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 rounded">

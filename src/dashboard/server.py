@@ -2084,6 +2084,9 @@ def get_watchlist(db=Depends(_get_profile_db)):
                         scan_data[field] = json.loads(scan_data[field])
                     except Exception:
                         pass
+            # Ensure top_movers is always a list (old data may be a plain string)
+            if not isinstance(scan_data.get("top_movers"), list):
+                scan_data["top_movers"] = []
 
         return _sanitize_floats({
             "active_pairs": pairs,

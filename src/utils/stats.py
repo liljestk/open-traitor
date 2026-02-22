@@ -1104,5 +1104,9 @@ class StatsDB:
             result["top_movers"] = json.loads(result.get("top_movers", "[]"))
         except (json.JSONDecodeError, TypeError):
             result["top_movers"] = []
+        # Guard: json.loads of a JSON-encoded string returns a str, not a list
+        # (old data stored top_movers as a plain string before M4 fix)
+        if not isinstance(result["top_movers"], list):
+            result["top_movers"] = []
         return result
 
