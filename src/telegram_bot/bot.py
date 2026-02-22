@@ -129,7 +129,7 @@ class TelegramBot:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
 
-        logger.info("🤖 Telegram bot starting polling...")
+        logger.info(f"🤖 Telegram bot starting polling (mode={self.mode})...")
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)

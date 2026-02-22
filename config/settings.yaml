@@ -53,6 +53,7 @@ llm:
   max_tokens: 2000
   max_retries: 3
   timeout: 60
+  recovery_check_interval: 120
   persona: 'You are a cautious, analytical cryptocurrency trading assistant.
 
     You prioritize capital preservation over aggressive gains.

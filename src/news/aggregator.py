@@ -53,9 +53,11 @@ class NewsAggregator:
         reddit_client_id: str = "",
         reddit_client_secret: str = "",
         reddit_user_agent: str = "auto-traitor-bot/0.1",
+        profile: str = "",
     ):
         self.config = config
         self.redis = redis_client
+        self.profile = profile  # e.g. "coinbase", "nordnet" — used for Redis key
 
         # Reddit config
         self.reddit_client_id = reddit_client_id
@@ -251,16 +253,25 @@ class NewsAggregator:
         # Store in Redis if available; publish update signal for subscribers
         if self.redis:
             try:
+                payload = json.dumps([asdict(a) for a in self.articles[-20:]], default=str)
+                # Always write to global key for backward compat / "All Systems" view
                 self.redis.set(
                     "news:latest",
-                    json.dumps([asdict(a) for a in self.articles[-20:]], default=str),
+                    payload,
                     ex=600,  # 10 min TTL
                 )
+                # Also write to profile-specific key when running under a profile
+                if self.profile:
+                    self.redis.set(
+                        f"news:{self.profile}:latest",
+                        payload,
+                        ex=600,
+                    )
                 # Notify any subscribers (e.g. orchestrator) that fresh news is available.
                 # Non-blocking: if the channel has no subscribers the message is silently dropped.
                 self.redis.publish(
                     "news:updates",
-                    json.dumps({"count": len(unique_articles)}, default=str),
+                    json.dumps({"count": len(unique_articles), "profile": self.profile}, default=str),
                 )
             except Exception as e:
                 logger.warning(f"Redis store failed: {e}")

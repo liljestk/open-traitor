@@ -527,6 +527,27 @@ export interface PredictionAccuracyData {
 export const fetchPredictionAccuracy = (days = 30) =>
   apiFetch<PredictionAccuracyData>(`/predictions/accuracy?days=${days}`)
 
+// ── Tracked Pairs ─────────────────────────────────────────────────────
+
+export interface TrackedPair {
+  pair: string
+  prediction_count: number
+  last_predicted: string
+  signal_types: string[]
+}
+
+export interface TrackedPairsData {
+  crypto: TrackedPair[]
+  equity: TrackedPair[]
+  total_pairs: number
+}
+
+export const fetchTrackedPairs = () =>
+  apiFetch<TrackedPairsData>(`/predictions/tracked-pairs`)
+
+export const cleanupPortfolioSnapshots = () =>
+  apiFetch<{ deleted: number; status: string }>(`/portfolio/cleanup`, { method: 'POST' })
+
 // ─── Portfolio Exposure ────────────────────────────────────────────────────
 
 export interface ExposureBreakdown {

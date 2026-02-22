@@ -8,6 +8,7 @@ the client automatically falls through to the next provider in the chain.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -171,6 +172,15 @@ class LLMClient:
         self.max_retries = max_retries
         self.timeout = timeout
         self.persona = persona
+
+        # Stored config for rescan/recovery polling
+        self._providers_config: list[dict] = []
+        self._fallback_base_url = base_url
+        self._fallback_model = model
+        self._fallback_timeout = timeout
+        self._fallback_max_retries = max_retries
+        self._recovery_task: Optional[asyncio.Task] = None
+        self._recovery_interval: float = 120.0  # seconds
 
         if providers:
             self._providers = providers
@@ -617,14 +627,161 @@ class LLMClient:
         return False
 
     def reload_providers(self, new_providers: list[LLMProvider]) -> None:
-        """Hot-reload the provider chain (called from dashboard settings)."""
+        """Hot-reload the provider chain, preserving token counters for existing providers."""
         with self._providers_lock:
+            # Build a lookup of existing provider state by name
+            old_state: dict[str, LLMProvider] = {
+                p.name: p for p in self._providers
+            }
+
+            # Carry forward daily token counters and RPM timestamps
+            for np in new_providers:
+                old = old_state.get(np.name)
+                if old and not np.is_local:
+                    with old._lock:
+                        np.daily_tokens = old.daily_tokens
+                        np.daily_date = old.daily_date
+                        np.rpm_timestamps = list(old.rpm_timestamps)
+                        # Preserve cooldown only if still active
+                        if old.cooldown_until > time.monotonic():
+                            np.cooldown_until = old.cooldown_until
+
             self._providers = list(new_providers)
             if self._providers:
                 self.model = self._providers[0].model
                 self.client = self._providers[0].client
             names = [p.name for p in self._providers]
         logger.info(f"🔄 LLM providers reloaded: {' → '.join(names)}")
+
+    def update_providers_config(
+        self,
+        providers_config: list[dict],
+        fallback_base_url: str = "http://localhost:11434",
+        fallback_model: str = "llama3.1:8b",
+        fallback_timeout: int = 60,
+        fallback_max_retries: int = 1,
+    ) -> None:
+        """Store the raw provider config for use by rescan_and_reload()."""
+        self._providers_config = list(providers_config)
+        self._fallback_base_url = fallback_base_url
+        self._fallback_model = fallback_model
+        self._fallback_timeout = fallback_timeout
+        self._fallback_max_retries = fallback_max_retries
+
+    def rescan_and_reload(self) -> bool:
+        """Re-run build_providers() against current os.environ and reload if the chain changed.
+
+        Returns True if a reload happened.
+        """
+        if not self._providers_config:
+            return False
+
+        new_providers = build_providers(
+            self._providers_config,
+            fallback_base_url=self._fallback_base_url,
+            fallback_model=self._fallback_model,
+            fallback_timeout=self._fallback_timeout,
+            fallback_max_retries=self._fallback_max_retries,
+        )
+
+        # Compare chain: name+model tuples
+        with self._providers_lock:
+            old_sig = [(p.name, p.model) for p in self._providers]
+        new_sig = [(p.name, p.model) for p in new_providers]
+
+        if old_sig != new_sig:
+            added = set(dict(new_sig)) - set(dict(old_sig))
+            removed = set(dict(old_sig)) - set(dict(new_sig))
+            parts = []
+            if added:
+                parts.append(f"added={added}")
+            if removed:
+                parts.append(f"removed={removed}")
+            logger.info(f"♻️ Provider chain changed ({', '.join(parts)}), reloading...")
+            self.reload_providers(new_providers)
+            return True
+
+        return False
+
+    def check_provider_recovery(self) -> None:
+        """Check if any cloud provider has recovered from cooldown or daily token exhaustion.
+
+        Logs recovery transitions so they're visible in dashboards/logs.
+        Called by the recovery poller and optionally by the orchestrator each cycle.
+        """
+        now = time.monotonic()
+        with self._providers_lock:
+            providers = list(self._providers)
+
+        for p in providers:
+            if p.is_local:
+                continue
+
+            with p._lock:
+                # Check cooldown recovery
+                was_cooling = getattr(p, '_was_in_cooldown', False)
+                in_cooldown = now < p.cooldown_until
+                if was_cooling and not in_cooldown:
+                    logger.info(
+                        f"♻️ Provider '{p.name}' recovered from cooldown — "
+                        f"resuming as {'primary' if providers[0].name == p.name else 'fallback'}"
+                    )
+                p._was_in_cooldown = in_cooldown  # type: ignore[attr-defined]
+
+                # Check daily token budget recovery (date rollover)
+                today = dt_date.today().isoformat()
+                if p.daily_token_limit > 0 and p.daily_date != today:
+                    if p.daily_tokens >= p.daily_token_limit:
+                        logger.info(
+                            f"♻️ Provider '{p.name}' daily token budget reset "
+                            f"({p.daily_tokens:,} → 0) — new day {today}"
+                        )
+                    p.daily_tokens = 0
+                    p.daily_date = today
+
+    async def _recovery_poll_loop(self) -> None:
+        """Background coroutine that periodically rescans providers and checks recovery."""
+        logger.info(
+            f"🔄 LLM recovery poller started (interval={self._recovery_interval:.0f}s)"
+        )
+        try:
+            while True:
+                await asyncio.sleep(self._recovery_interval)
+                try:
+                    self.check_provider_recovery()
+                    self.rescan_and_reload()
+                except Exception as exc:
+                    logger.warning(f"Recovery poll error (non-fatal): {exc}")
+        except asyncio.CancelledError:
+            logger.info("🔄 LLM recovery poller stopped")
+
+    def start_recovery_polling(
+        self,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        interval: Optional[float] = None,
+    ) -> None:
+        """Start the background recovery poller.
+
+        Args:
+            loop: The asyncio event loop to schedule the task on.
+                  If None, uses asyncio.get_event_loop().
+            interval: Override the polling interval in seconds.
+        """
+        if interval is not None:
+            self._recovery_interval = max(30.0, float(interval))
+
+        if self._recovery_task is not None and not self._recovery_task.done():
+            logger.debug("Recovery poller already running")
+            return
+
+        target_loop = loop or asyncio.get_event_loop()
+        self._recovery_task = target_loop.create_task(self._recovery_poll_loop())
+
+    def stop_recovery_polling(self) -> None:
+        """Cancel the background recovery poller."""
+        if self._recovery_task and not self._recovery_task.done():
+            self._recovery_task.cancel()
+            self._recovery_task = None
 
     def provider_status(self) -> list[dict]:
         """Return status of each provider for dashboard display."""

@@ -359,6 +359,7 @@ def main():
         reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
         reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
         reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+        profile=profile,
     )
 
     # Validate credentials
@@ -397,19 +398,47 @@ def main():
             
         logger.info(f"🔒 Telegram authorized users: {authorized_list}")
 
+        # Detect if another agent is already polling with this token (via Redis)
+        _bot_mode = telegram_config.get("mode", "controller")
+        if _bot_mode == "controller" and redis_client:
+            import hashlib as _hashlib
+            _token_hash = _hashlib.sha256(telegram_token.encode()).hexdigest()[:16]
+            _lock_key = f"telegram:poller:{_token_hash}"
+            try:
+                # Try to acquire the poller lock (60s TTL, renewed by the polling thread)
+                _acquired = redis_client.set(_lock_key, profile, nx=True, ex=120)
+                if not _acquired:
+                    _holder = redis_client.get(_lock_key)
+                    _holder_str = _holder.decode() if isinstance(_holder, bytes) else str(_holder)
+                    logger.warning(
+                        f"⚠️ Telegram bot token already polled by '{_holder_str}' — "
+                        f"switching to REPORTING mode (outbound only) for '{profile}'"
+                    )
+                    _bot_mode = "reporting"
+                else:
+                    logger.info(f"🔒 Acquired Telegram poller lock for profile '{profile}'")
+            except Exception as e:
+                logger.warning(f"Redis Telegram lock check failed: {e} — proceeding as controller")
+
+        # Determine exchange display name for Telegram messages
+        _exchange_name = config.get("trading", {}).get("exchange", profile or "auto-traitor").upper()
+        _currency = config.get("trading", {}).get("quote_currency", "EUR")
+
         telegram_bot = TelegramBot(
             bot_token=telegram_token,
             chat_id=telegram_chat_id,
             authorized_users=authorized_list,
-            mode=telegram_config.get("mode", "controller"),
+            mode=_bot_mode,
         )
         telegram_bot.start()
-        logger.info("📱 Telegram bot started")
+        logger.info(f"📱 Telegram bot started (mode={_bot_mode}, exchange={_exchange_name})")
         # Give the polling thread a moment to connect, then send startup ping
         time.sleep(2)
         telegram_bot.send_message(
-            f"👋 *Auto-Traitor is online!*\n\n"
-            f"Mode: `{mode.upper()}`\n"
+            f"👋 *Auto-Traitor [{_exchange_name}] is online!*\n\n"
+            f"Mode: `{mode.upper()}` | Currency: `{_currency}`\n"
+            f"Profile: `{profile}`\n"
+            f"Telegram mode: `{_bot_mode}`\n"
             f"Ready and listening. 🚀"
         )
     else:

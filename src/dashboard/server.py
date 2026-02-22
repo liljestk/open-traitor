@@ -73,6 +73,55 @@ _ws_connections: list[WebSocket] = []
 _rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
 _llm_client = None        # LLMClient instance (optional, for provider status)
 
+# ---------------------------------------------------------------------------
+# Profile resolution — maps frontend profile IDs to backend identifiers
+# ---------------------------------------------------------------------------
+
+# Frontend sends profile=crypto, but the agent runs as profile=coinbase
+PROFILE_ALIASES: dict[str, str] = {
+    "crypto": "coinbase",
+}
+
+# Profiles whose data lives in the default (injected) stats.db
+# (historical crypto data was written before per-profile DBs were introduced)
+PROFILE_USE_DEFAULT_DB: set[str] = {"coinbase", "settings"}
+
+# Profile → config file path
+PROFILE_CONFIG_FILES: dict[str, str] = {
+    "coinbase": "config/coinbase.yaml",
+    "nordnet": "config/nordnet.yaml",
+    "ibkr": "config/ibkr.yaml",
+}
+
+# Profile → quote currency (authoritative fallback when config is unavailable)
+PROFILE_CURRENCIES: dict[str, str] = {
+    "": "EUR",
+    "coinbase": "EUR",
+    "nordnet": "SEK",
+    "ibkr": "USD",
+}
+
+
+def _resolve_profile(profile: str) -> str:
+    """Resolve frontend profile aliases to canonical backend profile names."""
+    if not profile:
+        return ""
+    p = profile.lower().strip()
+    return PROFILE_ALIASES.get(p, p)
+
+
+def _get_config_for_profile(profile: str = "") -> dict:
+    """Load the config for a specific profile, falling back to the default config."""
+    resolved = _resolve_profile(profile)
+    config_file = PROFILE_CONFIG_FILES.get(resolved)
+    if config_file:
+        try:
+            from src.utils.settings_manager import load_settings
+            return load_settings(config_file)
+        except Exception:
+            pass
+    return _get_config()
+
 # Pending confirmation tokens for sensitive operations (C4/H5 fix)
 # Maps token → {action, payload, expires}
 _pending_confirmations: dict[str, dict] = {}
@@ -296,14 +345,25 @@ _profile_db_lock = threading.Lock()
 
 
 def _require_db(profile: str = ""):
-    """Return the StatsDB for *profile* (empty string → default / injected)."""
-    if not profile:
+    """Return the StatsDB for *profile* (empty string → default / injected).
+
+    Resolution order:
+    1. Resolve aliases (e.g. crypto → coinbase).
+    2. If the resolved profile is in PROFILE_USE_DEFAULT_DB, return the
+       injected default DB (stats.db — contains historical crypto data).
+    3. Otherwise look up / open stats_{resolved}.db.
+    4. If the profile-specific DB doesn't exist or is tiny (<8 KB, empty
+       shell), fall back to the default DB gracefully.
+    """
+    resolved = _resolve_profile(profile)
+
+    if not resolved or resolved in PROFILE_USE_DEFAULT_DB:
         if _stats_db is None:
             raise HTTPException(status_code=503, detail="Stats DB not initialised")
         return _stats_db
 
     # Sanitise: alphanumeric + underscore only
-    safe = "".join(c for c in profile if c.isalnum() or c == "_")
+    safe = "".join(c for c in resolved if c.isalnum() or c == "_")
     if not safe:
         raise HTTPException(status_code=400, detail=f"Invalid profile: {profile!r}")
 
@@ -315,10 +375,17 @@ def _require_db(profile: str = ""):
             from src.utils.stats import StatsDB
             db_path = os.path.join("data", f"stats_{safe}.db")
             if not os.path.exists(db_path):
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Stats DB for profile '{safe}' not found ({db_path})",
-                )
+                # Profile DB doesn't exist — fall back to default
+                logger.info(f"📊 Profile DB not found ({db_path}), falling back to default")
+                if _stats_db is None:
+                    raise HTTPException(status_code=503, detail="Stats DB not initialised")
+                return _stats_db
+            # Check if DB is just an empty shell (< 8 KB = no real data)
+            if os.path.getsize(db_path) < 8192:
+                logger.info(f"📊 Profile DB is empty shell ({db_path}), falling back to default")
+                if _stats_db is None:
+                    raise HTTPException(status_code=503, detail="Stats DB not initialised")
+                return _stats_db
             # Evict oldest entry if cache is at capacity (H4 fix)
             if len(_profile_db_cache) >= _MAX_PROFILE_DBS:
                 evicted_key, evicted_db = _profile_db_cache.popitem(last=False)
@@ -498,7 +565,10 @@ def list_events(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/stats/summary", summary="Portfolio and trade stats overview")
-def get_stats_summary(db=Depends(_get_profile_db)):
+def get_stats_summary(
+    profile: str = Query("", description="Exchange profile"),
+    db=Depends(_get_profile_db),
+):
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
     conn = _open_conn(db)
     try:
@@ -556,7 +626,13 @@ def get_stats_summary(db=Depends(_get_profile_db)):
             stats["win_rate"] = None
         if snapshot:
             stats["portfolio"] = dict(snapshot)
-        stats["currency"] = _get_config().get("trading", {}).get("quote_currency", "EUR")
+        # Use profile-specific config for currency
+        resolved = _resolve_profile(profile)
+        cfg = _get_config_for_profile(profile)
+        stats["currency"] = cfg.get("trading", {}).get(
+            "quote_currency",
+            PROFILE_CURRENCIES.get(resolved, "EUR"),
+        )
         return stats
     except Exception as exc:
         logger.exception("stats/summary error")
@@ -1478,7 +1554,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
         _ALLOWED_ENV_KEYS = {
             "COINBASE_API_KEY", "COINBASE_API_SECRET", "COINBASE_KEY_FILE",
             "REDIS_URL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
-            "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
             "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_AUTHORIZED_USERS",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
             "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",
@@ -1493,9 +1569,38 @@ def setup_config(body: _SetupConfigBody, request: Request):
             else:
                 logger.warning(f"Setup wizard: rejected unknown env key {key!r}")
 
+        # 6. Hot-reload LLM providers so new API keys take effect immediately
+        llm_reloaded = False
+        if _llm_client:
+            try:
+                from src.core.llm_client import build_providers
+                saved_providers = _sm_get_providers()
+                llm_config = _get_config().get("llm", {})
+                ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+                fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
+                new_providers = build_providers(
+                    saved_providers,
+                    fallback_base_url=ollama_url,
+                    fallback_model=fallback_model,
+                    fallback_timeout=llm_config.get("timeout", 60),
+                    fallback_max_retries=llm_config.get("max_retries", 3),
+                )
+                _llm_client.reload_providers(new_providers)
+                # Update stored config so recovery polling picks up new keys
+                _llm_client.update_providers_config(
+                    saved_providers,
+                    fallback_base_url=ollama_url,
+                    fallback_model=fallback_model,
+                    fallback_timeout=llm_config.get("timeout", 60),
+                    fallback_max_retries=llm_config.get("max_retries", 3),
+                )
+                llm_reloaded = True
+            except Exception as _reload_err:
+                logger.warning(f"LLM provider hot-reload after setup failed: {_reload_err}")
+
         logger.warning(
             f"⚙️ Setup wizard config saved: {len(body.config_env)} env vars, "
-            f"yamls={updated_yamls} (ip={source_ip})"
+            f"yamls={updated_yamls}, llm_reloaded={llm_reloaded} (ip={source_ip})"
         )
 
         return {
@@ -1504,6 +1609,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "root_env_path": root_env_path,
             "env_vars_count": len(body.config_env),
             "updated_yamls": updated_yamls,
+            "llm_reloaded": llm_reloaded,
         }
     except HTTPException:
         raise
@@ -2033,20 +2139,78 @@ def get_portfolio_exposure(db=Depends(_get_profile_db)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/news", summary="Recent news headlines with sentiment")
-def get_news(count: int = Query(30, ge=1, le=100)):
-    """Returns recent news articles from Redis cache (populated by news worker)."""
+def get_news(
+    count: int = Query(30, ge=1, le=100),
+    profile: str = Query("", description="Exchange profile"),
+):
+    """Returns recent news articles from Redis cache (populated by news worker).
+
+    When a profile is set, try the profile-specific key first
+    (``news:{profile}:latest``), then fall back to the global ``news:latest``
+    key and filter articles by tags matching the profile's news sources.
+    """
     if not _redis_client:
         return {"articles": [], "count": 0, "source": "unavailable"}
     try:
-        raw = _redis_client.get("news:latest")
+        resolved = _resolve_profile(profile)
+
+        # 1) Try profile-specific Redis key
+        raw = None
+        if resolved:
+            raw = _redis_client.get(f"news:{resolved}:latest")
+
+        # 2) Fall back to global key
+        if not raw:
+            raw = _redis_client.get("news:latest")
+
         if not raw:
             return {"articles": [], "count": 0, "source": "redis_empty"}
+
         articles = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
-        # Ensure list format and limit
-        if isinstance(articles, list):
-            articles = articles[:count]
-        else:
+        if not isinstance(articles, list):
             articles = []
+
+        # 3) Filter articles by profile's news sources when using global key
+        if resolved and articles:
+            cfg = _get_config_for_profile(profile)
+            news_cfg = cfg.get("news", {})
+            # Build a set of expected source identifiers from the profile's config
+            expected_subs = {s.lower() for s in news_cfg.get("reddit_subreddits", [])}
+            expected_rss = set()
+            for url in news_cfg.get("rss_feeds", []):
+                # Extract domain-like identifier from RSS URL
+                import re as _re
+                m = _re.search(r'//(?:www\.)?([^/]+)', url)
+                if m:
+                    expected_rss.add(m.group(1).lower().replace(".", "_"))
+
+            # CoinGecko trending is crypto-specific
+            crypto_profiles = {"coinbase", "crypto"}
+            has_coingecko = resolved in crypto_profiles
+
+            def _matches_profile(article: dict) -> bool:
+                tags = {t.lower() for t in article.get("tags", [])}
+                source = (article.get("source") or "").lower()
+                # Match by subreddit tag
+                if tags & expected_subs:
+                    return True
+                # Match by RSS source tag
+                if tags & expected_rss:
+                    return True
+                # Match coingecko for crypto profiles
+                if has_coingecko and "coingecko" in tags:
+                    return True
+                # Match by source field containing expected identifiers
+                for sub in expected_subs:
+                    if sub in source:
+                        return True
+                return False
+
+            # Only filter if we have source config; otherwise show all
+            if expected_subs or expected_rss:
+                articles = [a for a in articles if _matches_profile(a)]
+
+        articles = articles[:count]
         return {"articles": articles, "count": len(articles), "source": "redis"}
     except Exception as exc:
         logger.warning(f"news endpoint error: {exc}")
@@ -2058,9 +2222,12 @@ def get_news(count: int = Query(30, ge=1, le=100)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/watchlist", summary="Active pairs watchlist with scan results")
-def get_watchlist(db=Depends(_get_profile_db)):
+def get_watchlist(
+    profile: str = Query("", description="Exchange profile"),
+    db=Depends(_get_profile_db),
+):
     """Returns the latest universe scan results + active pair configuration."""
-    config = _get_config()
+    config = _get_config_for_profile(profile)
     try:
         scan = db.get_latest_scan_results()
         pairs = config.get("trading", {}).get("pairs", [])
@@ -2111,6 +2278,27 @@ def get_prediction_accuracy(days: int = Query(30, ge=1, le=365), db=Depends(_get
         return _sanitize_floats(result)
     except Exception as exc:
         logger.exception("prediction accuracy error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/predictions/tracked-pairs", summary="Pairs the LLM system actively tracks")
+def get_tracked_pairs(db=Depends(_get_profile_db)):
+    """Return pairs the LLM has analyzed recently, grouped by asset class."""
+    try:
+        return db.get_tracked_pairs()
+    except Exception as exc:
+        logger.exception("tracked pairs error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/portfolio/cleanup", summary="One-time cleanup of bad portfolio snapshots")
+def cleanup_portfolio(db=Depends(_get_profile_db)):
+    """Delete anomalous portfolio snapshots (zero-value and paper-mode bleed-through)."""
+    try:
+        deleted = db.cleanup_bad_snapshots()
+        return {"deleted": deleted, "status": "ok"}
+    except Exception as exc:
+        logger.exception("portfolio cleanup error")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

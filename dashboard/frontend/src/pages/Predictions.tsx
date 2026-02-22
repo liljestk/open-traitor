@@ -1,16 +1,20 @@
 /**
  * Predictions vs Actuals — Signal accuracy analysis with charts.
  * Shows how well the AI market analyst predicts price movements.
+ * Separated by asset class (Crypto / Equity).
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
-  Cell, Line, AreaChart, Area,
+  Cell, AreaChart, Area,
 } from 'recharts'
-import { Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2, Zap } from 'lucide-react'
-import { fetchPredictionAccuracy, type PredictionAccuracyData } from '../api'
+import { Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2, Zap, Clock, Layers } from 'lucide-react'
+import {
+  fetchPredictionAccuracy, fetchTrackedPairs,
+  type PredictionAccuracyData, type TrackedPairsData,
+} from '../api'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
@@ -21,6 +25,12 @@ const TIME_RANGES = [
   { label: '30d', days: 30 },
   { label: '90d', days: 90 },
   { label: '1y', days: 365 },
+]
+
+const ASSET_TABS = [
+  { id: 'all', label: 'All Assets' },
+  { id: 'crypto', label: 'Crypto' },
+  { id: 'equity', label: 'Shares' },
 ]
 
 const SIGNAL_COLORS: Record<string, string> = {
@@ -37,9 +47,99 @@ const SIGNAL_LABELS: Record<string, string> = {
   strong_buy: 'Strong Buy',
   buy: 'Buy',
   weak_buy: 'Weak Buy',
+  neutral: 'Neutral',
   weak_sell: 'Weak Sell',
   sell: 'Sell',
   strong_sell: 'Strong Sell',
+}
+
+// Classify a pair as crypto or equity
+function classifyPair(pair: string): 'crypto' | 'equity' {
+  const upper = pair.toUpperCase()
+  if (upper.endsWith('-SEK') || upper.endsWith('-NOK') || upper.endsWith('-DKK')) return 'equity'
+  return 'crypto'
+}
+
+// Filter predictions by asset class
+function filterByAsset(data: PredictionAccuracyData, tab: string): PredictionAccuracyData {
+  if (tab === 'all') return data
+
+  const filteredPredictions = data.predictions.filter(p => classifyPair(p.pair) === tab)
+  const filteredPerPair: typeof data.per_pair = {}
+  for (const [pair, stats] of Object.entries(data.per_pair)) {
+    if (classifyPair(pair) === tab) filteredPerPair[pair] = stats
+  }
+
+  // Recompute overall from filtered
+  const overall = { total: 0, correct_24h: 0, evaluated_24h: 0, correct_1h: 0, evaluated_1h: 0, accuracy_24h_pct: null as number | null, accuracy_1h_pct: null as number | null }
+  for (const p of filteredPredictions) {
+    overall.total++
+    if (p.outcomes['24h']) { overall.evaluated_24h++; if (p.outcomes['24h'].correct) overall.correct_24h++ }
+    if (p.outcomes['1h']) { overall.evaluated_1h++; if (p.outcomes['1h'].correct) overall.correct_1h++ }
+  }
+  overall.accuracy_24h_pct = overall.evaluated_24h ? Math.round(overall.correct_24h / overall.evaluated_24h * 1000) / 10 : null
+  overall.accuracy_1h_pct = overall.evaluated_1h ? Math.round(overall.correct_1h / overall.evaluated_1h * 1000) / 10 : null
+
+  // Recompute by_signal_type from filtered
+  const bySignal: typeof data.by_signal_type = {}
+  for (const p of filteredPredictions) {
+    if (!bySignal[p.signal_type]) bySignal[p.signal_type] = { total: 0, correct_24h: 0, evaluated_24h: 0, accuracy_pct: null }
+    bySignal[p.signal_type].total++
+    if (p.outcomes['24h']) { bySignal[p.signal_type].evaluated_24h++; if (p.outcomes['24h'].correct) bySignal[p.signal_type].correct_24h++ }
+  }
+  for (const st of Object.keys(bySignal)) {
+    const s = bySignal[st]
+    s.accuracy_pct = s.evaluated_24h ? Math.round(s.correct_24h / s.evaluated_24h * 1000) / 10 : null
+  }
+
+  return {
+    predictions: filteredPredictions,
+    per_pair: filteredPerPair,
+    overall,
+    by_signal_type: bySignal,
+    confidence_calibration: data.confidence_calibration,
+    daily_accuracy: data.daily_accuracy,
+  }
+}
+
+// ── LLM-Tracked Pairs Section ──────────────────────────────────────────────
+
+function TrackedPairsSection({ data, assetTab }: { data: TrackedPairsData; assetTab: string }) {
+  const pairs = assetTab === 'equity' ? data.equity
+    : assetTab === 'crypto' ? data.crypto
+    : [...data.crypto, ...data.equity]
+
+  if (!pairs.length) {
+    return (
+      <EmptyState
+        icon="chart"
+        title={assetTab === 'equity' ? 'No equity pairs tracked' : 'No pairs tracked yet'}
+        description="The AI will start tracking pairs as it runs analysis cycles."
+      />
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+      {pairs.sort((a, b) => b.prediction_count - a.prediction_count).map((p) => {
+        const isEquity = classifyPair(p.pair) === 'equity'
+        return (
+          <div key={p.pair} className="rounded-lg border border-gray-800 bg-gray-900/40 p-2.5 hover:border-gray-700 transition-colors">
+            <div className="flex items-center gap-1.5 mb-1">
+              <span className={`w-1.5 h-1.5 rounded-full ${isEquity ? 'bg-blue-400' : 'bg-green-400'}`} />
+              <span className="text-xs font-medium text-gray-200 truncate">{p.pair}</span>
+            </div>
+            <p className="text-[10px] text-gray-500">
+              {p.prediction_count} predictions
+            </p>
+            <p className="text-[10px] text-gray-600">
+              Last: {dayjs(p.last_predicted).fromNow?.() ?? dayjs(p.last_predicted).format('MMM DD HH:mm')}
+            </p>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 // ── Per-Pair Accuracy Heatmap ──────────────────────────────────────────────
@@ -47,14 +147,17 @@ const SIGNAL_LABELS: Record<string, string> = {
 function PairAccuracyGrid({ data }: { data: PredictionAccuracyData }) {
   const pairs = Object.entries(data.per_pair)
     .sort((a, b) => (b[1].total) - (a[1].total))
-    .slice(0, 20)
+    .slice(0, 24)
 
   if (!pairs.length) return <EmptyState icon="chart" title="No pair data" description="Predictions will appear as the bot runs cycles." />
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
       {pairs.map(([pair, stats]) => {
-        const acc = stats.accuracy_24h_pct
+        // Prefer 24h accuracy, fall back to 1h
+        const acc = stats.accuracy_24h_pct ?? stats.accuracy_1h_pct
+        const horizon = stats.accuracy_24h_pct != null ? '24h' : '1h'
+        const evaluated = stats.accuracy_24h_pct != null ? stats.evaluated_24h : stats.evaluated_1h
         const bgColor = acc == null ? 'bg-gray-800/50' :
           acc >= 65 ? 'bg-green-900/40 border-green-700/50' :
           acc >= 50 ? 'bg-yellow-900/30 border-yellow-700/40' :
@@ -71,7 +174,7 @@ function PairAccuracyGrid({ data }: { data: PredictionAccuracyData }) {
               {acc != null ? `${acc}%` : '—'}
             </p>
             <p className="text-[10px] text-gray-500 mt-0.5">
-              {stats.evaluated_24h}/{stats.total} evaluated
+              {evaluated}/{stats.total} eval ({horizon})
             </p>
           </div>
         )
@@ -88,7 +191,6 @@ function CalibrationChart({ data }: { data: PredictionAccuracyData['confidence_c
   const chartData = data.map((b) => ({
     range: b.confidence_range,
     accuracy: b.accuracy_pct ?? 0,
-    ideal: parseInt(b.confidence_range) + 10, // midpoint of bucket as ideal
     count: b.total,
   }))
 
@@ -100,14 +202,13 @@ function CalibrationChart({ data }: { data: PredictionAccuracyData['confidence_c
         <YAxis tick={{ fontSize: 10, fill: '#6e7681' }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
         <Tooltip
           contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
-          formatter={(v: any, name?: string) => [`${Number(v ?? 0).toFixed(1)}%`, name === 'accuracy' ? 'Actual Accuracy' : 'Reference']}
+          formatter={(v: any) => [`${Number(v ?? 0).toFixed(1)}%`, 'Actual Accuracy']}
         />
         <Bar dataKey="accuracy" name="Actual Accuracy" radius={[3, 3, 0, 0]}>
           {chartData.map((entry, i) => (
             <Cell key={i} fill={entry.accuracy >= 55 ? '#22c55e' : entry.accuracy >= 45 ? '#eab308' : '#ef4444'} opacity={0.85} />
           ))}
         </Bar>
-        <Line type="monotone" dataKey="ideal" name="Reference" stroke="#6b7280" strokeDasharray="5 5" dot={false} />
       </BarChart>
     </ResponsiveContainer>
   )
@@ -123,6 +224,7 @@ function DailyAccuracyChart({ data }: { data: PredictionAccuracyData['daily_accu
     accuracy: d.accuracy_pct ?? 0,
     total: d.total,
     correct: d.correct,
+    evaluated: d.evaluated,
   }))
 
   return (
@@ -144,7 +246,6 @@ function DailyAccuracyChart({ data }: { data: PredictionAccuracyData['daily_accu
             return [v, name ?? '']
           }}
         />
-        {/* 50% reference line */}
         <Area type="monotone" dataKey="accuracy" stroke="#3b82f6" strokeWidth={2} fill="url(#accGrad)" />
       </AreaChart>
     </ResponsiveContainer>
@@ -196,35 +297,45 @@ function RecentPredictions({ data }: { data: PredictionAccuracyData }) {
       <table className="min-w-full text-xs">
         <thead>
           <tr className="border-b border-gray-800 bg-gray-900/50">
-            {['Time', 'Pair', 'Signal', 'Conf.', 'Entry', 'TP', 'SL', '1h', '4h', '24h', '7d'].map((h) => (
-              <th key={h} className="px-3 py-2 text-left font-medium text-gray-400">{h}</th>
+            {['Time', 'Pair', 'Type', 'Signal', 'Conf.', 'Entry', 'TP', 'SL', '1h', '4h', '24h', '7d'].map((h) => (
+              <th key={h} className="px-2.5 py-2 text-left font-medium text-gray-400">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {predictions.map((p, i) => (
             <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
-              <td className="px-3 py-2 text-gray-400">{dayjs(p.ts).format('MMM DD HH:mm')}</td>
-              <td className="px-3 py-2 font-medium text-gray-200">{p.pair}</td>
-              <td className="px-3 py-2">
+              <td className="px-2.5 py-2 text-gray-400">{dayjs(p.ts).format('MMM DD HH:mm')}</td>
+              <td className="px-2.5 py-2 font-medium text-gray-200">{p.pair}</td>
+              <td className="px-2.5 py-2">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${classifyPair(p.pair) === 'equity' ? 'bg-blue-400' : 'bg-green-400'}`} />
+                <span className="text-[10px] text-gray-500">{classifyPair(p.pair) === 'equity' ? 'EQ' : 'CR'}</span>
+              </td>
+              <td className="px-2.5 py-2">
                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold"
                   style={{ color: SIGNAL_COLORS[p.signal_type] ?? '#6b7280', background: `${SIGNAL_COLORS[p.signal_type] ?? '#6b7280'}15` }}>
                   {SIGNAL_LABELS[p.signal_type] ?? p.signal_type}
                 </span>
               </td>
-              <td className="px-3 py-2 text-gray-300">{(p.confidence * 100).toFixed(0)}%</td>
-              <td className="px-3 py-2 text-gray-300 font-mono">{p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
-              <td className="px-3 py-2 text-green-400/70 font-mono">
+              <td className="px-2.5 py-2 text-gray-300">{(p.confidence * 100).toFixed(0)}%</td>
+              <td className="px-2.5 py-2 text-gray-300 font-mono">{p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
+              <td className="px-2.5 py-2 text-green-400/70 font-mono">
                 {p.suggested_tp ? (p.suggested_tp < 1 ? p.suggested_tp.toFixed(6) : p.suggested_tp.toFixed(2)) : '—'}
               </td>
-              <td className="px-3 py-2 text-red-400/70 font-mono">
+              <td className="px-2.5 py-2 text-red-400/70 font-mono">
                 {p.suggested_sl ? (p.suggested_sl < 1 ? p.suggested_sl.toFixed(6) : p.suggested_sl.toFixed(2)) : '—'}
               </td>
               {['1h', '4h', '24h', '7d'].map((h) => {
                 const o = p.outcomes[h]
-                if (!o) return <td key={h} className="px-3 py-2 text-gray-600">—</td>
+                if (!o) return (
+                  <td key={h} className="px-2.5 py-2">
+                    <span className="text-gray-600 text-[10px] flex items-center gap-0.5">
+                      <Clock size={8} className="opacity-50" />pending
+                    </span>
+                  </td>
+                )
                 return (
-                  <td key={h} className="px-3 py-2">
+                  <td key={h} className="px-2.5 py-2">
                     <span className={`inline-flex items-center gap-0.5 ${o.correct ? 'text-green-400' : 'text-red-400'}`}>
                       {o.correct ? '✓' : '✗'}
                       <span className="text-[10px] opacity-70">{o.pct_change > 0 ? '+' : ''}{o.pct_change.toFixed(2)}%</span>
@@ -244,38 +355,70 @@ function RecentPredictions({ data }: { data: PredictionAccuracyData }) {
 
 export default function Predictions() {
   const [days, setDays] = useState(30)
+  const [assetTab, setAssetTab] = useState('all')
 
-  const { data, isLoading } = useQuery({
+  const { data: rawData, isLoading } = useQuery({
     queryKey: ['prediction-accuracy', days],
     queryFn: () => fetchPredictionAccuracy(days),
     refetchInterval: 120_000,
   })
 
+  const { data: trackedPairs } = useQuery({
+    queryKey: ['tracked-pairs'],
+    queryFn: fetchTrackedPairs,
+    refetchInterval: 300_000,
+  })
+
+  const data = rawData ? filterByAsset(rawData, assetTab) : undefined
   const overall = data?.overall
+
+  // Count pending (unevaluated) predictions
+  const pendingCount = data ? data.predictions.filter(p => !p.outcomes['1h']).length : 0
 
   return (
     <PageTransition>
       <div className="p-6 space-y-6">
-        {/* Header + time range */}
-        <div className="flex items-center justify-between">
+        {/* Header + controls */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h2 className="text-xl font-bold text-gray-100">Predictions vs Actuals</h2>
-            <p className="text-xs text-gray-500 mt-0.5">How well does the AI predict price movements?</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Live AI signal accuracy — data from {rawData?.overall?.total ?? 0} real predictions
+            </p>
           </div>
-          <div className="flex gap-1">
-            {TIME_RANGES.map((r) => (
-              <button
-                key={r.days}
-                onClick={() => setDays(r.days)}
-                className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${
-                  days === r.days
-                    ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
-                    : 'bg-gray-800/50 text-gray-400 border border-gray-800 hover:border-gray-700'
-                }`}
-              >
-                {r.label}
-              </button>
-            ))}
+          <div className="flex gap-2 flex-wrap">
+            {/* Asset class tabs */}
+            <div className="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+              {ASSET_TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setAssetTab(t.id)}
+                  className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${
+                    assetTab === t.id
+                      ? 'bg-gray-700 text-gray-100'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {/* Time range */}
+            <div className="flex gap-1">
+              {TIME_RANGES.map((r) => (
+                <button
+                  key={r.days}
+                  onClick={() => setDays(r.days)}
+                  className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${
+                    days === r.days
+                      ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
+                      : 'bg-gray-800/50 text-gray-400 border border-gray-800 hover:border-gray-700'
+                  }`}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -290,19 +433,19 @@ export default function Predictions() {
                 value={overall?.total?.toString() ?? '0'}
                 accent="blue"
                 icon={<Crosshair size={14} />}
-                sub={`${overall?.evaluated_24h ?? 0} evaluated`}
+                sub={pendingCount > 0 ? `${pendingCount} pending eval` : `${overall?.evaluated_1h ?? 0} evaluated`}
               />
               <StatCard
                 label="24h Accuracy"
                 value={overall?.accuracy_24h_pct != null ? `${overall.accuracy_24h_pct}%` : '—'}
-                accent={(overall?.accuracy_24h_pct ?? 0) >= 55 ? 'green' : (overall?.accuracy_24h_pct ?? 0) >= 45 ? 'gray' : 'red'}
+                accent={(overall?.accuracy_24h_pct ?? 0) >= 55 ? 'green' : 'red'}
                 icon={<Target size={14} />}
                 sub={`${overall?.correct_24h ?? 0}/${overall?.evaluated_24h ?? 0} correct`}
               />
               <StatCard
                 label="1h Accuracy"
                 value={overall?.accuracy_1h_pct != null ? `${overall.accuracy_1h_pct}%` : '—'}
-                accent={(overall?.accuracy_1h_pct ?? 0) >= 55 ? 'green' : (overall?.accuracy_1h_pct ?? 0) >= 45 ? 'gray' : 'red'}
+                accent={(overall?.accuracy_1h_pct ?? 0) >= 55 ? 'green' : 'red'}
                 icon={<Zap size={14} />}
                 sub={`${overall?.correct_1h ?? 0}/${overall?.evaluated_1h ?? 0} correct`}
               />
@@ -331,6 +474,31 @@ export default function Predictions() {
                 icon={<BarChart2 size={14} />}
               />
             </>
+          )}
+        </div>
+
+        {/* LLM-Tracked Pairs */}
+        <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
+            <Layers size={14} className="text-violet-400" />
+            AI-Tracked Pairs
+            {trackedPairs && (
+              <span className="text-[10px] font-normal text-gray-600">
+                {trackedPairs.crypto.length} crypto · {trackedPairs.equity.length} equity
+              </span>
+            )}
+          </h3>
+          <p className="text-[10px] text-gray-600 mb-3">
+            Pairs the LLM system has autonomously chosen to analyze and predict.
+            <span className="inline-flex items-center gap-1 ml-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Crypto
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block ml-1" /> Equity
+            </span>
+          </p>
+          {trackedPairs ? (
+            <TrackedPairsSection data={trackedPairs} assetTab={assetTab} />
+          ) : (
+            <SkeletonBlock className="h-[100px]" />
           )}
         </div>
 
@@ -372,7 +540,7 @@ export default function Predictions() {
               <Target size={14} className="text-amber-400" />
               Confidence Calibration
             </h3>
-            <p className="text-[10px] text-gray-600 mb-2">Bars = actual accuracy at each confidence level. Dashed = ideal (well-calibrated).</p>
+            <p className="text-[10px] text-gray-600 mb-2">Bars = actual accuracy at each confidence level.</p>
             {isLoading ? (
               <SkeletonBlock className="h-[220px]" />
             ) : data?.confidence_calibration?.length ? (
@@ -385,10 +553,10 @@ export default function Predictions() {
           <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
             <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
               <Crosshair size={14} className="text-teal-400" />
-              Per-Pair Accuracy (24h)
+              Per-Pair Accuracy
             </h3>
             <p className="text-[10px] text-gray-600 mb-2">
-              Green = ≥65% accurate · Yellow = 50-65% · Red = &lt;50%
+              Green = ≥65% · Yellow = 50-65% · Red = &lt;50% · Best available horizon shown.
             </p>
             {isLoading ? (
               <SkeletonBlock className="h-[220px]" />
@@ -400,10 +568,14 @@ export default function Predictions() {
 
         {/* Recent predictions table */}
         <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+          <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
             <Crosshair size={14} className="text-cyan-400" />
             Recent Predictions
           </h3>
+          <p className="text-[10px] text-gray-600 mb-3">
+            Live predictions from the AI market analyst. Outcomes update automatically as time passes.
+            <Clock size={8} className="inline ml-1 opacity-50" /> = awaiting evaluation window.
+          </p>
           {isLoading ? (
             <SkeletonBlock className="h-[300px]" />
           ) : data ? (

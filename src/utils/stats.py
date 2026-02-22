@@ -323,16 +323,21 @@ class StatsDB:
         return [dict(r) for r in rows]
 
     def get_portfolio_range(self, hours: int = 24) -> dict:
-        """Get min/max/avg portfolio value over a period."""
-        conn = self._get_conn()
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        row = conn.execute(
-            """SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
-                      AVG(portfolio_value) as avg, COUNT(*) as samples
-               FROM portfolio_snapshots WHERE ts >= ?""",
-            (cutoff,),
-        ).fetchone()
-        return dict(row) if row else {}
+        """Get min/max/avg portfolio value over a period.
+
+        Uses the same anomaly-filtering logic as get_portfolio_history to exclude
+        paper-mode bleed-through values.
+        """
+        history = self.get_portfolio_history(hours=hours)
+        if not history:
+            return {"low": 0, "high": 0, "avg": 0, "samples": 0}
+        values = [h["portfolio_value"] for h in history]
+        return {
+            "low": min(values),
+            "high": max(values),
+            "avg": sum(values) / len(values),
+            "samples": len(values),
+        }
 
     # ─── Trades ────────────────────────────────────────────────────────────
 
@@ -607,15 +612,35 @@ class StatsDB:
         }
 
     def get_portfolio_history(self, hours: int = 24) -> list[dict]:
-        """Get portfolio value over time (for trend analysis)."""
+        """Get portfolio value over time (for trend analysis).
+
+        Filters out anomalous snapshots from first-boot:
+        - portfolio_value == 0  (before live sync)
+        - portfolio_value wildly different from the stable median
+          (paper-mode initial_balance bleed-through, e.g. ~914 vs real ~6)
+        """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         rows = conn.execute(
             """SELECT ts, portfolio_value, return_pct, total_pnl
-               FROM portfolio_snapshots WHERE ts >= ?
+               FROM portfolio_snapshots WHERE ts >= ? AND portfolio_value > 0
                ORDER BY ts""",
             (cutoff,),
         ).fetchall()
+        if not rows:
+            return []
+
+        # Detect and remove paper-mode bleed-through values.
+        # Strategy: find the *median* of the last 20% of values (most recent = most trustworthy),
+        # then discard anything more than 10x above that median.
+        values = [r["portfolio_value"] for r in rows]
+        tail = sorted(values[max(0, len(values) - len(values) // 5):])
+        if tail:
+            median_val = tail[len(tail) // 2]
+            if median_val > 0:
+                threshold = max(median_val * 10, 100)  # at least 100 to avoid filtering micro-portfolios
+                rows = [r for r in rows if r["portfolio_value"] <= threshold]
+
         return [dict(r) for r in rows]
 
     def get_best_worst_trades(self, hours: int = 168) -> dict:
@@ -1334,5 +1359,89 @@ class StatsDB:
             "by_signal_type": by_signal,
             "confidence_calibration": calibration,
             "daily_accuracy": daily_list,
+        }
+
+    def cleanup_bad_snapshots(self) -> int:
+        """One-time cleanup: delete portfolio snapshots with anomalous values.
+
+        Removes rows where portfolio_value is 0 or wildly inconsistent with
+        recent stable values (paper-mode bleed-through from initial_balance).
+        Returns the number of deleted rows.
+        """
+        conn = self._get_conn()
+
+        # Find the median of the last 500 snapshots (most recent / stable)
+        recent = conn.execute(
+            """SELECT portfolio_value FROM portfolio_snapshots
+               WHERE portfolio_value > 0
+               ORDER BY ts DESC LIMIT 500"""
+        ).fetchall()
+        if not recent:
+            return 0
+
+        values = sorted(r["portfolio_value"] for r in recent)
+        median_val = values[len(values) // 2]
+        if median_val <= 0:
+            return 0
+
+        threshold = max(median_val * 10, 100)
+
+        # Delete zero-value and anomalously high snapshots
+        cursor = conn.execute(
+            """DELETE FROM portfolio_snapshots
+               WHERE portfolio_value = 0 OR portfolio_value > ?""",
+            (threshold,),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        logger.info(f"Cleaned up {deleted} bad portfolio snapshots (threshold={threshold:.2f})")
+        return deleted
+
+    def get_tracked_pairs(self) -> dict:
+        """Return pairs the LLM system has analyzed, grouped by asset class.
+
+        Looks at agent_reasoning entries to see what pairs were actually
+        predicted on, and classifies them as crypto or equity.
+        """
+        conn = self._get_conn()
+
+        # Get all pairs with prediction counts from last 7 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        rows = conn.execute(
+            """SELECT pair, COUNT(*) as prediction_count,
+                      MAX(ts) as last_predicted,
+                      GROUP_CONCAT(DISTINCT signal_type) as signal_types
+               FROM agent_reasoning
+               WHERE agent_name = 'market_analyst' AND ts >= ?
+               GROUP BY pair
+               ORDER BY prediction_count DESC""",
+            (cutoff,),
+        ).fetchall()
+
+        # Classify pairs
+        crypto_suffixes = {"-USD", "-EUR", "-BTC", "-ETH", "-USDT", "-USDC", "-GBP"}
+        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordnet equities
+
+        crypto_pairs = []
+        equity_pairs = []
+        for r in rows:
+            pair = r["pair"]
+            item = {
+                "pair": pair,
+                "prediction_count": r["prediction_count"],
+                "last_predicted": r["last_predicted"],
+                "signal_types": (r["signal_types"] or "").split(","),
+            }
+            # Classify by suffix
+            is_equity = any(pair.upper().endswith(s) for s in equity_suffixes)
+            if is_equity:
+                equity_pairs.append(item)
+            else:
+                crypto_pairs.append(item)
+
+        return {
+            "crypto": crypto_pairs,
+            "equity": equity_pairs,
+            "total_pairs": len(rows),
         }
 
