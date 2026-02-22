@@ -191,10 +191,7 @@ trading:
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 1800
-  pairs:
-  - ATOM-EUR
-  - BTC-EUR
-  - ETH-EUR
+  pairs: []  # cleared for fresh LLM-driven rediscovery
   paper_slippage_pct: 0.0005
   quote_currencies:
   - EUR
