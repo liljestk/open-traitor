@@ -726,6 +726,49 @@ def list_products():
         return {"products": []}
 
 
+@app.get("/api/products/search", summary="Search tradable products by keyword")
+def search_products(q: str = Query("", min_length=1, description="Search query (symbol or name)")):
+    """Search products by base currency / product ID substring.
+
+    Returns up to 25 matches sorted alphabetically.
+    Falls back to an empty list when the exchange client is unavailable.
+    """
+    if not getattr(_exchange_client, "_rest_client", None):
+        return {"results": [], "query": q}
+
+    try:
+        resp = _exchange_client._rest_client.get_products()
+        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+        items = raw.get("products", [])
+        query = q.upper().strip()
+        results = []
+        for p in items:
+            if (
+                p.get("trading_disabled", True)
+                or p.get("is_disabled", False)
+                or str(p.get("status", "")).lower() != "online"
+            ):
+                continue
+            pid = (p.get("product_id") or "").upper()
+            base = (p.get("base_currency_id") or "").upper()
+            display_name = (p.get("base_display_symbol") or base)
+            if query in pid or query in base or query in display_name.upper():
+                results.append({
+                    "id": p.get("product_id", ""),
+                    "base": p.get("base_currency_id", ""),
+                    "quote": p.get("quote_currency_id", ""),
+                    "display_name": display_name,
+                    "volume_24h": float(p.get("volume_24h", 0) or 0),
+                    "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
+                })
+        # Sort by 24h volume desc so the most traded pairs appear first
+        results.sort(key=lambda x: x["volume_24h"], reverse=True)
+        return {"results": results[:25], "query": q}
+    except Exception as e:
+        logger.warning(f"product search error: {e}")
+        return {"results": [], "query": q}
+
+
 @app.get("/api/market/price", summary="Live price for a trading pair")
 def get_market_price(pair: str = Query(..., description="e.g. BTC-EUR")):
     """Returns the current best-estimate price for the given pair."""
@@ -1432,6 +1475,8 @@ def get_setup_config():
             "ibkrCurrency": env("IBKR_CURRENCY", "USD"),
             "geminiEnabled": env("GEMINI_API_KEY", "") != "",
             "geminiApiKey": env("GEMINI_API_KEY", ""),
+            "openrouterEnabled": env("OPENROUTER_API_KEY", "") != "",
+            "openrouterApiKey": env("OPENROUTER_API_KEY", ""),
             "openaiEnabled": env("OPENAI_API_KEY", "") != "",
             "openaiApiKey": env("OPENAI_API_KEY", ""),
             "ollamaModel": env("OLLAMA_MODEL", "qwen2.5:14b"),
@@ -1604,7 +1649,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
         _ALLOWED_ENV_KEYS = {
             "COINBASE_API_KEY", "COINBASE_API_SECRET", "COINBASE_KEY_FILE",
             "REDIS_URL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
-            "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
             "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_AUTHORIZED_USERS",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
             "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",
@@ -1898,6 +1943,22 @@ def get_llm_providers():
     except Exception as exc:
         logger.exception("llm-providers GET error")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/settings/openrouter-credits", summary="Check OpenRouter free-tier credits")
+async def get_openrouter_credits():
+    """Return OpenRouter credit balance and usage info.
+
+    Calls the OpenRouter /api/v1/auth/key endpoint to check remaining credits,
+    usage, and whether the key is on a free tier.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return {"ok": False, "error": "OPENROUTER_API_KEY not set"}
+
+    from src.core.llm_client import check_openrouter_credits
+    info = await check_openrouter_credits(api_key)
+    return info
 
 
 class _ProvidersUpdateBody(_BaseModel):
@@ -2348,14 +2409,8 @@ def get_watchlist(
         scan = db.get_latest_scan_results()
         pairs = config.get("trading", {}).get("pairs", [])
 
-        # Get live prices for active pairs
+        # Get live prices for active pairs (filled after we know human-followed too)
         live_prices = {}
-        if _exchange_client and pairs:
-            for pair in pairs[:20]:  # limit to avoid rate-limiting
-                try:
-                    live_prices[pair] = _exchange_client.get_current_price(pair)
-                except Exception:
-                    pass
 
         # Parse scan results JSON
         scan_data = None
@@ -2410,6 +2465,15 @@ def get_watchlist(
 
         # Build combined pair info list
         all_pairs = list(dict.fromkeys(pairs + human_followed))  # preserve order, dedup
+
+        # Fetch live prices for ALL pairs (config + human-followed), capped at 30
+        if _exchange_client and all_pairs:
+            for pair in all_pairs[:30]:
+                try:
+                    live_prices[pair] = _exchange_client.get_current_price(pair)
+                except Exception:
+                    pass
+
         pair_info = []
         for p in all_pairs:
             sources = follow_map.get(p.upper(), set())

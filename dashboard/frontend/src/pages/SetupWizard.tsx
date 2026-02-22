@@ -33,6 +33,8 @@ interface WizardState {
   ibkrCurrency: string
   geminiEnabled: boolean
   geminiApiKey: string
+  openrouterEnabled: boolean
+  openrouterApiKey: string
   openaiEnabled: boolean
   openaiApiKey: string
   ollamaModel: string
@@ -71,6 +73,8 @@ const INITIAL_STATE: WizardState = {
   ibkrCurrency: 'USD',
   geminiEnabled: false,
   geminiApiKey: '',
+  openrouterEnabled: false,
+  openrouterApiKey: '',
   openaiEnabled: false,
   openaiApiKey: '',
   ollamaModel: 'qwen2.5:14b',
@@ -439,6 +443,7 @@ function validateStep(stepId: string, state: WizardState): StepValidation {
       break
     case 'llm':
       if (state.geminiEnabled && !state.geminiApiKey) issues.push('Gemini API key missing')
+      if (state.openrouterEnabled && !state.openrouterApiKey) issues.push('OpenRouter API key missing')
       if (state.openaiEnabled && !state.openaiApiKey) issues.push('OpenAI API key missing')
       break
     case 'telegram':
@@ -520,7 +525,7 @@ function StepWelcome({ onStart }: { onStart: () => void }) {
             ['Exchange connection', 'Coinbase crypto + NordNet or IBKR equities'],
             ['Trading mode', 'Paper (simulated) or Live (real money)'],
             ['Asset universe', 'Which crypto & stocks the agent monitors'],
-            ['AI brain', 'Multi-provider LLM chain (Gemini / OpenAI / Ollama)'],
+            ['AI brain', 'Multi-provider LLM chain (Gemini / OpenRouter / Ollama)'],
             ['Notifications', 'Telegram bot for alerts, approvals & commands'],
             ['News feeds', 'Reddit + RSS for market sentiment analysis'],
             ['Infrastructure', 'Redis, Langfuse, Temporal (auto-generated secrets)'],
@@ -937,7 +942,7 @@ function StepIbkrConnection({ state, update }: { state: WizardState; update: (p:
 function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<WizardState>) => void }) {
   return (
     <>
-      <SectionHeader icon={<Sparkles size={22} />} title="AI / LLM Configuration" subtitle="Configure the AI brain. Requests try providers in order: Gemini → OpenAI → Ollama (local fallback)." />
+      <SectionHeader icon={<Sparkles size={22} />} title="AI / LLM Configuration" subtitle="Configure the AI brain. Requests try providers in order: Gemini → OpenRouter → OpenAI → Ollama (local fallback)." />
 
       <h3 style={{ margin: '0 0 12px 0', fontSize: 15, fontWeight: 700, color: '#e6edf3', display: 'flex', alignItems: 'center', gap: 8 }}>
         <Cloud size={16} color="#6e7681" /> Cloud Providers
@@ -951,6 +956,12 @@ function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<Wi
             icon: Zap, color: '#3b82f6', title: 'Google Gemini', model: 'gemini-2.0-flash', rate: '14 RPM free',
             placeholder: 'AIza...', steps: ['Go to aistudio.google.com/app/apikey', 'Click "Create API key"', 'Copy the key'],
             link: { url: 'https://aistudio.google.com/app/apikey', label: 'Get key' },
+          },
+          { key: 'openrouter' as const, enabled: state.openrouterEnabled, apiKey: state.openrouterApiKey,
+            enabledKey: 'openrouterEnabled', apiKeyKey: 'openrouterApiKey',
+            icon: Cloud, color: '#f59e0b', title: 'OpenRouter', model: '200+ models (free tier)', rate: 'Free models available',
+            placeholder: 'sk-or-...', steps: ['Go to openrouter.ai/keys', 'Sign in and click "Create Key"', 'Copy the key (starts with sk-or-)'],
+            link: { url: 'https://openrouter.ai/keys', label: 'Get key' },
           },
           { key: 'openai' as const, enabled: state.openaiEnabled, apiKey: state.openaiApiKey,
             enabledKey: 'openaiEnabled', apiKeyKey: 'openaiApiKey',
@@ -1349,10 +1360,13 @@ function generateEnvContent(state: WizardState): string {
     add('IBKR_CURRENCY', state.ibkrCurrency)
     blank()
   }
-  if (state.geminiEnabled && state.geminiApiKey) add('GEMINI_API_KEY', state.geminiApiKey, 'Google Gemini API (provider 1)')
+  if (state.geminiEnabled && state.geminiApiKey) add('GEMINI_API_KEY', state.geminiApiKey, 'Google Gemini API (provider 1 — fastest)')
   else lines.push('# GEMINI_API_KEY= (not configured)')
   blank()
-  if (state.openaiEnabled && state.openaiApiKey) add('OPENAI_API_KEY', state.openaiApiKey, 'OpenAI API (provider 2)')
+  if (state.openrouterEnabled && state.openrouterApiKey) add('OPENROUTER_API_KEY', state.openrouterApiKey, 'OpenRouter API (provider 2 — 200+ models, free tier)')
+  else lines.push('# OPENROUTER_API_KEY= (not configured)')
+  blank()
+  if (state.openaiEnabled && state.openaiApiKey) add('OPENAI_API_KEY', state.openaiApiKey, 'OpenAI API (provider 3 — fallback)')
   else lines.push('# OPENAI_API_KEY= (not configured)')
   blank()
   add('OLLAMA_MODEL', state.ollamaModel, 'Ollama LLM model')

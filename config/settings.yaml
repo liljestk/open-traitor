@@ -77,6 +77,17 @@ llm:
     cooldown_seconds: 65
     tier: free          # change to 'paid' when on a paid Gemini plan
     api_key_set: true
+  - name: openrouter
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: google/gemini-2.0-flash-exp:free
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    tier: free
+    api_key_set: false
   - name: openai
     enabled: true
     base_url: https://api.openai.com/v1

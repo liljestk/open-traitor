@@ -1,9 +1,15 @@
 """
 LLM Client wrapper with multi-provider fallback chain.
 
-Supports an ordered list of providers (e.g. Gemini -> OpenAI -> Ollama).
+Supports an ordered list of providers (e.g. Gemini -> OpenRouter -> Ollama).
 Each provider uses the OpenAI-compatible API. On rate-limit or quota errors
 the client automatically falls through to the next provider in the chain.
+
+Smart free-tier management:
+  - Tracks per-provider RPM, daily token budgets, and cooldowns.
+  - OpenRouter: periodically checks remaining free credits via /api/v1/auth/key.
+  - Gemini: respects 15 RPM / 1M token-per-day free limits.
+  - Automatic recovery polling re-enables providers after cooldown / day rollover.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date as dt_date
 from typing import Any, Optional, TYPE_CHECKING
 
+import httpx
 from openai import AsyncOpenAI, RateLimitError, APIStatusError
 
 from src.utils.logger import get_logger
@@ -26,6 +33,55 @@ if TYPE_CHECKING:
     from src.utils.tracer import SpanContext
 
 logger = get_logger("core.llm")
+
+# ─── OpenRouter helpers ───────────────────────────────────────────────────────
+
+# Default headers OpenRouter recommends for attribution/ranking
+_OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://github.com/auto-traitor",
+    "X-Title": "auto-traitor",
+}
+
+# Free-tier models on OpenRouter (suffix :free). Ordered by preference.
+OPENROUTER_FREE_MODELS: list[str] = [
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemini-2.5-flash-preview-05-20:free",
+    "meta-llama/llama-4-maverick:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen3-235b-a22b:free",
+    "meta-llama/llama-4-scout:free",
+]
+
+
+async def check_openrouter_credits(api_key: str) -> dict[str, Any]:
+    """Query OpenRouter /api/v1/auth/key to get remaining credits & usage.
+
+    Returns dict with keys: ok, credits_remaining, usage, rate_limit, is_free_tier.
+    On failure returns {"ok": False, "error": "..."}.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "error": f"HTTP {resp.status_code}"}
+            data = resp.json().get("data", {})
+            credits_remaining = data.get("limit_remaining")
+            usage = data.get("usage", 0)
+            rate_limit = data.get("rate_limit", {})
+            is_free = data.get("is_free_tier", credits_remaining == 0 and usage == 0)
+            return {
+                "ok": True,
+                "credits_remaining": credits_remaining,
+                "usage": usage,
+                "rate_limit": rate_limit,
+                "is_free_tier": is_free,
+                "label": data.get("label", ""),
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 # ─── Provider dataclass ───────────────────────────────────────────────────────
@@ -48,6 +104,10 @@ class LLMProvider:
     rpm_timestamps: list[float] = field(default_factory=list)
     # Per-provider lock for thread-safe rate/quota tracking (H1 fix)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # OpenRouter-specific: cached credit info
+    _credits_remaining: Optional[float] = field(default=None, repr=False)
+    _credits_checked_at: float = field(default=0.0, repr=False)
+    _free_model_index: int = field(default=0, repr=False)  # current free model rotation
 
 
 def build_providers(
@@ -105,6 +165,15 @@ def build_providers(
                 api_key="ollama",
                 timeout=timeout,
                 max_retries=fallback_max_retries,
+            )
+        elif name == "openrouter":
+            # OpenRouter: add attribution headers for better rate limits
+            client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=0,
+                default_headers=_OPENROUTER_HEADERS,
             )
         else:
             # Cloud provider: use real key, no retries (we handle fallback)
@@ -280,12 +349,72 @@ class LLMClient:
             p.daily_tokens += total_tokens
 
     def _activate_cooldown(self, p: LLMProvider, reason: str) -> None:
-        """Put a provider on cooldown after a rate-limit or quota error."""
+        """Put a provider on cooldown after a rate-limit or quota error.
+
+        For OpenRouter on free tier: rotate to next free model before cooldown,
+        so we can keep trying different free models.
+        """
         with p._lock:
             p.cooldown_until = time.monotonic() + p.cooldown_seconds
+
+        # OpenRouter free-model rotation: if one free model is rate-limited,
+        # try the next one before giving up entirely
+        if p.name == "openrouter" and p.tier == "free":
+            self._rotate_openrouter_model(p, reason)
+
         logger.warning(
             f"⏸️ Provider '{p.name}' cooldown ({p.cooldown_seconds}s): {reason}"
         )
+
+    def _rotate_openrouter_model(self, p: LLMProvider, reason: str) -> None:
+        """Rotate an OpenRouter provider to the next free model.
+
+        If all free models have been tried, stay on cooldown.
+        """
+        with p._lock:
+            old_model = p.model
+            if old_model.endswith(":free") or old_model in OPENROUTER_FREE_MODELS:
+                p._free_model_index = (p._free_model_index + 1) % len(OPENROUTER_FREE_MODELS)
+                new_model = OPENROUTER_FREE_MODELS[p._free_model_index]
+                if new_model != old_model:
+                    p.model = new_model
+                    # Clear cooldown since we're trying a different model
+                    p.cooldown_until = 0.0
+                    logger.info(
+                        f"🔄 OpenRouter: rotated free model {old_model} → {new_model} "
+                        f"(reason: {reason[:80]})"
+                    )
+
+    async def check_openrouter_credits_cached(self, p: LLMProvider) -> Optional[dict]:
+        """Check OpenRouter credits with a 5-minute cache.
+
+        Returns the credit info dict or None if not an OpenRouter provider.
+        """
+        if p.name != "openrouter":
+            return None
+
+        now = time.monotonic()
+        with p._lock:
+            if now - p._credits_checked_at < 300:  # 5 min cache
+                return {"ok": True, "credits_remaining": p._credits_remaining}
+
+        # Fetch fresh data
+        api_key = p.client.api_key
+        if not api_key or api_key == "ollama":
+            return None
+
+        info = await check_openrouter_credits(api_key)
+        if info.get("ok"):
+            with p._lock:
+                p._credits_remaining = info.get("credits_remaining")
+                p._credits_checked_at = now
+            remaining = info.get("credits_remaining")
+            is_free = info.get("is_free_tier", False)
+            logger.debug(
+                f"OpenRouter credits: remaining={remaining}, "
+                f"free_tier={is_free}, usage={info.get('usage', 0)}"
+            )
+        return info
 
     def _select_providers(
         self, agent_name: Optional[str] = None, priority: Optional[str] = None,
@@ -825,7 +954,10 @@ class LLMClient:
                     p.daily_date = today
 
     async def _recovery_poll_loop(self) -> None:
-        """Background coroutine that periodically rescans providers and checks recovery."""
+        """Background coroutine that periodically rescans providers and checks recovery.
+
+        Also checks OpenRouter free-tier credits and rotates models if needed.
+        """
         logger.info(
             f"🔄 LLM recovery poller started (interval={self._recovery_interval:.0f}s)"
         )
@@ -835,10 +967,32 @@ class LLMClient:
                 try:
                     self.check_provider_recovery()
                     self.rescan_and_reload()
+                    # Check OpenRouter credits for all openrouter providers
+                    await self._check_all_openrouter_credits()
                 except Exception as exc:
                     logger.warning(f"Recovery poll error (non-fatal): {exc}")
         except asyncio.CancelledError:
             logger.info("🔄 LLM recovery poller stopped")
+
+    async def _check_all_openrouter_credits(self) -> None:
+        """Check OpenRouter credit balance for all OpenRouter providers in the chain."""
+        with self._providers_lock:
+            providers = list(self._providers)
+        for p in providers:
+            if p.name == "openrouter" and not p.is_local:
+                info = await self.check_openrouter_credits_cached(p)
+                if info and info.get("ok"):
+                    remaining = info.get("credits_remaining")
+                    if remaining is not None and remaining <= 0 and p.tier == "free":
+                        # Free credits exhausted — ensure we're using :free models
+                        with p._lock:
+                            if not p.model.endswith(":free"):
+                                old = p.model
+                                p.model = OPENROUTER_FREE_MODELS[0]
+                                logger.info(
+                                    f"💸 OpenRouter credits exhausted, "
+                                    f"switched to free model: {old} → {p.model}"
+                                )
 
     def start_recovery_polling(
         self,
@@ -893,6 +1047,12 @@ class LLMClient:
                         t for t in p.rpm_timestamps if t > time.time() - 60
                     ]),
                 })
+                # OpenRouter-specific: credit balance
+                if p.name == "openrouter":
+                    with p._lock:
+                        status["credits_remaining"] = p._credits_remaining
+                        status["free_model_index"] = p._free_model_index
+                    status["is_free_model"] = p.model.endswith(":free")
             result.append(status)
         return result
 

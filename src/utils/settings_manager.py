@@ -1009,6 +1009,7 @@ _LLM_PROVIDER_SCHEMA: dict[str, dict[str, Any]] = {
     "daily_token_limit": {"type": int,  "min": 0,  "max": 100_000_000},
     "cooldown_seconds":  {"type": int,  "min": 5,  "max": 3600},
     "is_local":          {"type": bool},
+    "tier":              {"type": str},   # "free" or "paid"
 }
 
 

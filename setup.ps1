@@ -424,6 +424,29 @@ else {
 
 Write-Host ""
 
+# OpenRouter
+$setupOpenRouter = Prompt-YesNo -Prompt "Set up OpenRouter API? (access 200+ models, generous free tier)" -Default $false
+$openrouterKey = ""
+if ($setupOpenRouter) {
+    Write-Host ""
+    Write-Host "  How to get an OpenRouter API key:" -ForegroundColor White
+    Write-Host "    1. Go to https://openrouter.ai/keys" -ForegroundColor DarkGray
+    Write-Host "    2. Sign in and click 'Create Key'" -ForegroundColor DarkGray
+    Write-Host "    3. Copy the key (starts with sk-or-)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Free tier includes: Gemini Flash, Llama, DeepSeek, Qwen models" -ForegroundColor Green
+    Write-Host "  Acts as fallback between Gemini direct and local Ollama" -ForegroundColor DarkGray
+    Write-Host ""
+    $openrouterKey = Prompt-Required -Prompt "OpenRouter API Key"
+    Append-Env -Key "OPENROUTER_API_KEY" -Value $openrouterKey -Comment "OpenRouter API (provider 2 — 200+ models, free tier available)"
+    Write-OK "OpenRouter configured."
+}
+else {
+    Append-Env -Key "# OPENROUTER_API_KEY" -Value "" -Comment "OpenRouter API (not configured)"
+}
+
+Write-Host ""
+
 # OpenAI
 $setupOpenAI = Prompt-YesNo -Prompt "Set up OpenAI API?" -Default $false
 $openaiKey = ""
@@ -435,7 +458,7 @@ if ($setupOpenAI) {
     Write-Host "    3. Copy the key (starts with sk-)" -ForegroundColor DarkGray
     Write-Host ""
     $openaiKey = Prompt-Required -Prompt "OpenAI API Key"
-    Append-Env -Key "OPENAI_API_KEY" -Value $openaiKey -Comment "OpenAI API (provider 2 — fallback)"
+    Append-Env -Key "OPENAI_API_KEY" -Value $openaiKey -Comment "OpenAI API (provider 3 — fallback)"
     Write-OK "OpenAI configured."
 }
 else {

@@ -334,12 +334,17 @@ export interface LLMProviderLiveStatus {
   model: string
   is_local: boolean
   available: boolean
+  tier?: string
   in_cooldown?: boolean
   cooldown_remaining_s?: number
   daily_tokens?: number
   daily_token_limit?: number
   rpm_limit?: number
   rpm_current?: number
+  /** OpenRouter-specific: remaining credit balance */
+  credits_remaining?: number | null
+  /** OpenRouter-specific: whether current model is a free model */
+  is_free_model?: boolean
 }
 
 export interface LLMProviderConfig {
@@ -355,6 +360,7 @@ export interface LLMProviderConfig {
   daily_token_limit?: number
   cooldown_seconds?: number
   is_local?: boolean
+  tier?: string
   api_key_set?: boolean
   live_status?: LLMProviderLiveStatus
 }
@@ -375,6 +381,18 @@ export const updateApiKeys = (keys: Record<string, string>) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keys }),
   })
+
+export interface OpenRouterCreditsInfo {
+  ok: boolean
+  error?: string
+  credits_remaining?: number | null
+  usage?: number
+  is_free_tier?: boolean
+  label?: string
+}
+
+export const fetchOpenRouterCredits = () =>
+  apiFetch<OpenRouterCreditsInfo>('/settings/openrouter-credits')
 
 // ─── Portfolio & Analytics ─────────────────────────────────────────────────
 
@@ -635,6 +653,20 @@ export const unfollowPair = (pair: string) =>
   apiFetch<{ ok: boolean; pair: string; unfollowed: boolean }>(`/watchlist/follow/${encodeURIComponent(pair)}`, {
     method: 'DELETE',
   })
+
+// ─── Product Search (pair lookup) ──────────────────────────────────────────
+
+export interface ProductResult {
+  id: string
+  base: string
+  quote: string
+  display_name: string
+  volume_24h: number
+  price_change_24h: number
+}
+
+export const searchProducts = (q: string) =>
+  apiFetch<{ results: ProductResult[]; query: string }>(`/products/search?q=${encodeURIComponent(q)}`)
 
 // ─── Candles / Charts ──────────────────────────────────────────────────────
 
