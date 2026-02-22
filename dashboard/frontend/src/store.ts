@@ -4,28 +4,11 @@ import type { LiveEvent } from './api'
 const MAX_EVENTS = 200
 
 /**
- * Maps known profiles to their native currency.
- * Override via localStorage key "auto_traitor_profile_currencies" (JSON object).
+ * Fallback currency when nothing is known about a profile.
+ * The actual currencies are fetched from the backend /api/setup endpoint
+ * and stored in exchangeCurrencies.
  */
-const DEFAULT_PROFILE_CURRENCIES: Record<string, string> = {
-  '': 'EUR',
-  crypto: 'EUR',
-  nordnet: 'SEK',
-  ibkr: 'USD',
-}
-
-function loadProfileCurrencies(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem('auto_traitor_profile_currencies')
-    if (raw) return { ...DEFAULT_PROFILE_CURRENCIES, ...JSON.parse(raw) }
-  } catch { /* ignore */ }
-  return DEFAULT_PROFILE_CURRENCIES
-}
-
-function currencyForProfile(profile: string): string {
-  const map = loadProfileCurrencies()
-  return map[profile.toLowerCase()] ?? 'EUR'
-}
+const FALLBACK_CURRENCY = 'EUR'
 
 export type Density = 'comfortable' | 'compact'
 
@@ -34,9 +17,11 @@ interface LiveStore {
   currency: string
   density: Density
   availableExchanges: Record<string, boolean>
+  exchangeCurrencies: Record<string, string>
   setProfile: (p: string) => void
   setDensity: (d: Density) => void
   setAvailableExchanges: (e: Record<string, boolean>) => void
+  setExchangeCurrencies: (c: Record<string, string>) => void
   events: LiveEvent[]
   connected: boolean
   setConnected: (v: boolean) => void
@@ -44,23 +29,35 @@ interface LiveStore {
   clearEvents: () => void
 }
 
+function currencyForProfile(profile: string, currencies: Record<string, string>): string {
+  const key = profile.toLowerCase()
+  // 'crypto' profile maps to coinbase exchange
+  const exchangeKey = key === '' || key === 'crypto' ? 'coinbase' : key
+  return currencies[exchangeKey] ?? FALLBACK_CURRENCY
+}
+
 const initialProfile = localStorage.getItem('auto_traitor_profile') || ''
 const initialDensity = (localStorage.getItem('auto_traitor_density') || 'comfortable') as Density
 
-export const useLiveStore = create<LiveStore>((set) => ({
+export const useLiveStore = create<LiveStore>((set, get) => ({
   profile: initialProfile,
-  currency: currencyForProfile(initialProfile),
+  currency: FALLBACK_CURRENCY,
   density: initialDensity,
-  availableExchanges: { coinbase: true, nordnet: true, ibkr: true },
+  availableExchanges: { coinbase: false, nordnet: false, ibkr: false },
+  exchangeCurrencies: {},
   setProfile: (profile) => {
     localStorage.setItem('auto_traitor_profile', profile)
-    set({ profile, currency: currencyForProfile(profile) })
+    set({ profile, currency: currencyForProfile(profile, get().exchangeCurrencies) })
   },
   setDensity: (density) => {
     localStorage.setItem('auto_traitor_density', density)
     set({ density })
   },
   setAvailableExchanges: (availableExchanges) => set({ availableExchanges }),
+  setExchangeCurrencies: (exchangeCurrencies) => {
+    const currency = currencyForProfile(get().profile, exchangeCurrencies)
+    set({ exchangeCurrencies, currency })
+  },
   events: [],
   connected: false,
   setConnected: (connected) => set({ connected }),
@@ -76,7 +73,7 @@ export const useLiveStore = create<LiveStore>((set) => ({
 
 /** Format a number as currency using the active profile's currency. */
 export function useCurrencyFormatter() {
-  const currency = useLiveStore((s) => s.currency)
+  const currency = useLiveStore((s) => s.currency) || 'EUR'
   return (val: number | null | undefined): string => {
     if (val == null) return '—'
     return new Intl.NumberFormat('en-US', {
@@ -90,7 +87,7 @@ export function useCurrencyFormatter() {
 
 /** Return the currency symbol alone (e.g. "€", "kr"). */
 export function useCurrencySymbol(): string {
-  const currency = useLiveStore((s) => s.currency)
+  const currency = useLiveStore((s) => s.currency) || 'EUR'
   const parts = new Intl.NumberFormat('en-US', { style: 'currency', currency }).formatToParts(0)
   return parts.find((p) => p.type === 'currency')?.value ?? currency
 }

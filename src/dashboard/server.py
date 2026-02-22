@@ -1417,19 +1417,36 @@ def get_setup_config():
 
         env = config_env.get
 
-        # Detect active exchanges from YAML config existence
+        # Detect active exchanges: YAML must exist AND exchange-specific
+        # credentials / tokens must be configured in the env file.
+        _EXCHANGE_CRED_KEYS: dict[str, list[str]] = {
+            "coinbase": ["COINBASE_API_KEY"],
+            "nordnet": ["TELEGRAM_BOT_TOKEN_NORDNET", "NORDNET_USERNAME", "NORDNET_API_KEY"],
+            "ibkr": ["TELEGRAM_BOT_TOKEN_IBKR", "IBKR_ACCOUNT"],
+        }
         exchanges = {"coinbase": False, "nordnet": False, "ibkr": False}
         yaml_pairs: dict[str, list[str]] = {}
+        exchange_currencies: dict[str, str] = {}
         for exch, fname in [("coinbase", "coinbase.yaml"), ("nordnet", "nordnet.yaml"), ("ibkr", "ibkr.yaml")]:
             ypath = os.path.join("config", fname)
-            if os.path.exists(ypath):
-                exchanges[exch] = True
-                try:
-                    with open(ypath, "r", encoding="utf-8") as f:
-                        ycfg = _yaml.safe_load(f) or {}
-                    yaml_pairs[exch] = (ycfg.get("trading") or {}).get("pairs", [])
-                except Exception:
-                    yaml_pairs[exch] = []
+            if not os.path.exists(ypath):
+                continue
+            # Check that at least one credential key is set for this exchange
+            has_creds = any(
+                config_env.get(k, "").strip()
+                for k in _EXCHANGE_CRED_KEYS.get(exch, [])
+            )
+            exchanges[exch] = has_creds
+            try:
+                with open(ypath, "r", encoding="utf-8") as f:
+                    ycfg = _yaml.safe_load(f) or {}
+                yaml_pairs[exch] = (ycfg.get("trading") or {}).get("pairs", [])
+                exchange_currencies[exch] = (ycfg.get("trading") or {}).get("quote_currency", "EUR")
+            except Exception:
+                yaml_pairs[exch] = []
+        # ENV override: IBKR_CURRENCY takes precedence over YAML
+        if config_env.get("IBKR_CURRENCY", "").strip():
+            exchange_currencies["ibkr"] = config_env["IBKR_CURRENCY"].strip()
 
         # Map env vars → WizardState fields
         trading_mode = env("TRADING_MODE", "paper")
@@ -1459,6 +1476,7 @@ def get_setup_config():
         state = {
             "exists": True,
             "exchanges": exchanges,
+            "exchangeCurrencies": exchange_currencies,
             "tradingMode": trading_mode,
             "liveConfirmed": live_confirmed,
             "cryptoPairs": yaml_pairs.get("coinbase", []),

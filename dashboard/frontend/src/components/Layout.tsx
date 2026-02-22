@@ -7,12 +7,13 @@ import { openLiveSocket, fetchSetupConfig } from '../api'
 /**
  * All possible profiles.  Filtered at render-time to only show
  * exchanges that are actually configured on the backend.
+ * The `sub` label is dynamically resolved from exchangeCurrencies.
  */
-const ALL_PROFILES = [
-  { id: '', label: 'Default', sub: 'All Systems', exchange: null },
-  { id: 'crypto', label: 'Crypto', sub: 'EUR', exchange: 'coinbase' },
-  { id: 'nordnet', label: 'Equities', sub: 'SEK', exchange: 'nordnet' },
-  { id: 'ibkr', label: 'Equities', sub: 'USD', exchange: 'ibkr' },
+const ALL_PROFILES: { id: string; label: string; exchange: string | null }[] = [
+  { id: '', label: 'Default', exchange: null },
+  { id: 'crypto', label: 'Crypto', exchange: 'coinbase' },
+  { id: 'nordnet', label: 'Equities', exchange: 'nordnet' },
+  { id: 'ibkr', label: 'Equities', exchange: 'ibkr' },
 ]
 
 const NAV = [
@@ -59,7 +60,8 @@ export default function Layout() {
   const connected = useLiveStore((s) => s.connected)
   const density = useLiveStore((s) => s.density)
   const availableExchanges = useLiveStore((s) => s.availableExchanges)
-  const { setConnected, addEvent, setAvailableExchanges } = useLiveStore()
+  const exchangeCurrencies = useLiveStore((s) => s.exchangeCurrencies)
+  const { setConnected, addEvent, setAvailableExchanges, setExchangeCurrencies } = useLiveStore()
   const wsRef = useRef<WebSocket | null>(null)
   const location = useLocation()
 
@@ -67,6 +69,7 @@ export default function Layout() {
   useEffect(() => {
     fetchSetupConfig().then((cfg) => {
       if (cfg?.exchanges) setAvailableExchanges(cfg.exchanges)
+      if (cfg?.exchangeCurrencies) setExchangeCurrencies(cfg.exchangeCurrencies)
     }).catch(() => { /* keep defaults */ })
   }, [])
 
@@ -149,11 +152,16 @@ export default function Layout() {
             >
               {ALL_PROFILES
                 .filter((p) => p.exchange === null || availableExchanges[p.exchange])
-                .map((p) => (
+                .map((p) => {
+                const sub = p.exchange === null
+                  ? 'All Systems'
+                  : (exchangeCurrencies[p.exchange] ?? 'EUR')
+                return (
                 <option key={p.id} value={p.id} style={{ background: '#161b22', color: '#e6edf3' }}>
-                  {p.label} ({p.sub})
+                  {p.label} ({sub})
                 </option>
-              ))}
+              )})
+              }
             </select>
             <ChevronDown
               size={13}

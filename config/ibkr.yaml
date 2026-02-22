@@ -174,15 +174,15 @@ trading:
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
   pairs:
-  - AAPL-USD
-  - MSFT-USD
-  - GOOGL-USD
-  - AMZN-USD
-  - NVDA-USD
+  - AAPL-EUR
+  - MSFT-EUR
+  - GOOGL-EUR
+  - AMZN-EUR
+  - NVDA-EUR
   paper_slippage_pct: 0.0003
   quote_currencies:
-  - USD
-  quote_currency: USD
+  - EUR
+  quote_currency: EUR
   reconcile_every_cycles: 10
   scan_movement_threshold_pct: 0.5
   scan_volume_threshold: 10000

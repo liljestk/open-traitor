@@ -3,12 +3,12 @@ trading:
   mode: paper           # Start in paper mode until NordnetClient is battle-tested
   pair_discovery: all
   quote_currencies:
-  - SEK
+  - EUR
   pairs:
   - VOLV-B.ST
   - ERIC-B.ST
   - ABB.ST
-  quote_currency: SEK
+  quote_currency: EUR
   interval: 300         # Stocks move slower; 5-min cycles are sufficient
   min_confidence: 0.60
   max_open_positions: 10
