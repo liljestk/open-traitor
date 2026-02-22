@@ -34,6 +34,58 @@ if TYPE_CHECKING:
 
 logger = get_logger("core.llm")
 
+# ─── Config .env file reading (live-reload across containers) ────────────────
+# Docker env_file vars are only injected at container creation.
+# When the dashboard writes new API keys to config/.env, other containers
+# won't see them in os.environ until restart.  This module reads config/.env
+# directly as a fallback, with a short TTL cache to avoid repeated disk I/O.
+
+_CONFIG_ENV_PATH = os.path.join("config", ".env")
+_config_env_cache: dict[str, str] = {}
+_config_env_mtime: float = 0.0
+_config_env_lock = threading.Lock()
+
+
+def _read_config_env() -> dict[str, str]:
+    """Parse config/.env into a dict, cached by file mtime."""
+    global _config_env_cache, _config_env_mtime
+    try:
+        st = os.stat(_CONFIG_ENV_PATH)
+    except OSError:
+        return _config_env_cache
+    if st.st_mtime == _config_env_mtime and _config_env_cache:
+        return _config_env_cache
+    with _config_env_lock:
+        # Double-check after acquiring lock
+        try:
+            st = os.stat(_CONFIG_ENV_PATH)
+        except OSError:
+            return _config_env_cache
+        if st.st_mtime == _config_env_mtime and _config_env_cache:
+            return _config_env_cache
+        result: dict[str, str] = {}
+        try:
+            with open(_CONFIG_ENV_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    idx = line.index("=")
+                    result[line[:idx].strip()] = line[idx + 1:].strip()
+        except OSError:
+            return _config_env_cache
+        _config_env_cache = result
+        _config_env_mtime = st.st_mtime
+        return result
+
+
+def _resolve_env(var_name: str, default: str = "") -> str:
+    """Resolve an env var: os.environ first, then config/.env file fallback."""
+    val = os.environ.get(var_name, "")
+    if val:
+        return val
+    return _read_config_env().get(var_name, default)
+
 # ─── OpenRouter helpers ───────────────────────────────────────────────────────
 
 # Default headers OpenRouter recommends for attribution/ranking
@@ -134,26 +186,27 @@ def build_providers(
         is_local = pc.get("is_local", False)
         name = pc.get("name", "unknown")
 
-        # Resolve API key
+        # Resolve API key — check os.environ, then fall back to config/.env
+        # so keys saved by the dashboard are picked up without container restart.
         api_key_env = pc.get("api_key_env", "")
-        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+        api_key = _resolve_env(api_key_env) if api_key_env else ""
         if not is_local and not api_key:
             logger.info(f"Skipping provider '{name}': {api_key_env} not set")
             continue
 
-        # Resolve base URL
+        # Resolve base URL (same env + file fallback)
         base_url_env = pc.get("base_url_env", "")
         base_url = pc.get("base_url", "")
         if base_url_env:
-            base_url = os.environ.get(base_url_env, base_url or fallback_base_url)
+            base_url = _resolve_env(base_url_env, base_url or fallback_base_url)
         if not base_url:
             base_url = fallback_base_url
 
-        # Resolve model
+        # Resolve model (same env + file fallback)
         model_env = pc.get("model_env", "")
         model = pc.get("model", fallback_model)
         if model_env:
-            model = os.environ.get(model_env, model)
+            model = _resolve_env(model_env, model)
 
         timeout = pc.get("timeout", fallback_timeout)
 
@@ -883,8 +936,10 @@ class LLMClient:
         self._fallback_max_retries = fallback_max_retries
 
     def rescan_and_reload(self) -> bool:
-        """Re-run build_providers() against current os.environ and reload if the chain changed.
+        """Re-run build_providers() against os.environ + config/.env and reload if the chain changed.
 
+        This enables live-reload of API keys written by the dashboard to
+        config/.env without needing a container restart.
         Returns True if a reload happened.
         """
         if not self._providers_config:
