@@ -70,6 +70,7 @@ class UniverseScanner:
         """
         orch = self.orchestrator
         if not orch._pair_universe:
+            logger.info("📭 Universe scan skipped: pair universe not yet loaded")
             return
 
         # Pre-filter by 24h volume and price movement
@@ -81,7 +82,10 @@ class UniverseScanner:
                 candidates.append(p)
 
         if not candidates:
-            logger.debug("Universe scan: no candidates passed volume/movement filter")
+            logger.info(
+                f"📭 Universe scan: 0/{len(orch._pair_universe)} passed filters "
+                f"(vol>{orch._scan_volume_threshold}, move>{orch._scan_movement_threshold_pct}%)"
+            )
             return
 
         # Sort by volume descending, cap at 25 to limit API calls
@@ -227,6 +231,7 @@ class UniverseScanner:
         import re as _re
         orch = self.orchestrator
         if not orch._scan_results:
+            logger.info("📭 LLM screener skipped: no scan results available (universe may be empty or API throttled)")
             return
 
         # Build top candidates sorted by composite score
@@ -264,6 +269,12 @@ class UniverseScanner:
         held_pairs = list(orch.state.open_positions.keys())
         held_note = f"Currently holding positions in: {', '.join(held_pairs)}" if held_pairs else "No open positions."
 
+        # Use actual quote currency from config for accurate LLM examples
+        qc = orch.config.get("trading", {}).get("quote_currency", "EUR")
+        # Build example pairs from actual scan results for the LLM
+        example_pairs = [p for p, _ in ranked[:3]]
+        example_str = json.dumps(example_pairs) if example_pairs else f'["BTC-{qc}","ETH-{qc}","SOL-{qc}"]'
+
         prompt = (
             f"You are a crypto pair screener. Pick the best {orch._max_active_pairs} "
             f"pairs to actively trade from the scan results below.\n\n"
@@ -274,7 +285,7 @@ class UniverseScanner:
             f"- Prioritize: high composite score, buy signals, strong momentum, adequate volume\n"
             f"- Avoid: overbought (RSI>80), low volume, sell signals unless reversal expected\n"
             f"- If a held pair is weakening, it's OK to drop it (rotation will handle exit)\n\n"
-            f"Reply with ONLY a JSON array of pair names, e.g. [\"BTC-USD\",\"ETH-USD\",\"SOL-USD\"]\n"
+            f"Reply with ONLY a JSON array of pair names, e.g. {example_str}\n"
             f"No explanation needed."
         )
 
@@ -302,6 +313,13 @@ class UniverseScanner:
                 if isinstance(selected, list) and all(isinstance(s, str) for s in selected):
                     # Validate pairs exist in scan results
                     valid = [p for p in selected if p in orch._scan_results]
+                    if not valid:
+                        rejected = [p for p in selected if p not in orch._scan_results]
+                        logger.warning(
+                            f"⚠️ LLM screener selected {len(selected)} pairs but none "
+                            f"matched scan results. LLM returned: {selected[:5]}. "
+                            f"Scan has: {list(orch._scan_results.keys())[:5]}..."
+                        )
                     if valid:
                         old_pairs = set(orch._screener_active_pairs)
                         orch._screener_active_pairs = valid[:orch._max_active_pairs]

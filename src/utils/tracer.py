@@ -24,7 +24,7 @@ import os
 import time
 import threading
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from src.utils.logger import get_logger
@@ -114,7 +114,7 @@ class SpanContext:
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "latency_ms": round(self.latency_ms, 1),
-                    "ts": time.time(),
+                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
                 self._redis.publish(_REDIS_CHANNEL, json.dumps(event))
             except Exception as e:
@@ -162,7 +162,7 @@ class TraceContext:
                     "type": "trace_started",
                     "cycle_id": cycle_id,
                     "pair": pair,
-                    "ts": time.time(),
+                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "metadata": metadata or {},
                 }))
             except Exception:
@@ -237,7 +237,7 @@ class TraceContext:
                     "type": "trace_finished",
                     "cycle_id": self._cycle_id,
                     "pair": self._pair,
-                    "ts": time.time(),
+                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "metadata": metadata or {},
                 }))
             except Exception:

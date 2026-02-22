@@ -338,6 +338,23 @@ class Orchestrator:
         self._scan_results: dict[str, dict] = {}       # pair → {technicals, strategies, score}
         self._screener_active_pairs: list[str] = []    # pairs selected by LLM screener
         self._screener_cycle_counter: int = 0
+
+        # Restore LLM-followed pairs from DB so a container restart
+        # doesn't lose the screener's selection (cold-start fix)
+        try:
+            restored = self.stats_db.get_followed_pairs_set(
+                followed_by="llm",
+                quote_currency=trading_cfg.get("quote_currency"),
+            )
+            if restored:
+                self._screener_active_pairs = sorted(restored)
+                logger.info(
+                    f"♻️ Restored {len(restored)} LLM-followed pairs from DB: "
+                    f"{self._screener_active_pairs}"
+                )
+        except Exception as _restore_err:
+            logger.warning(f"⚠️ Could not restore LLM-followed pairs: {_restore_err}")
+
         self._SCREENER_INTERVAL: int = int(
             trading_cfg.get("screener_interval_cycles", 5)
         )
@@ -534,6 +551,12 @@ class Orchestrator:
 
                 # Effective pairs: screener-selected (if any) or configured seed list
                 effective_pairs = self._screener_active_pairs or self.pairs[:self._max_active_pairs]
+                if not effective_pairs:
+                    logger.warning(
+                        "⚠️ No active pairs to trade this cycle "
+                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}). "
+                        "Waiting for LLM screener to pick pairs..."
+                    )
 
                 sorted_pairs = sorted(
                     effective_pairs,

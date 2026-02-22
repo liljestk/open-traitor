@@ -95,6 +95,7 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -230,6 +231,7 @@ services:
     environment:
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
     volumes:
       - ./config:/app/config
       - ./data:/app/data

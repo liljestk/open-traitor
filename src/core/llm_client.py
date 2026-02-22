@@ -473,12 +473,14 @@ class LLMClient:
     def _select_providers(
         self, agent_name: Optional[str] = None, priority: Optional[str] = None,
     ) -> list[LLMProvider]:
-        """Return the provider list in the best order for this call's priority.
+        """Return the provider list — always cloud-first, local as fallback.
 
-        On **paid** tier (any cloud provider): always cloud-first (original order).
-        On **free** tier:
-          - *high* priority  → cloud first, local fallback  (unchanged)
-          - *normal* / *low* → local first, cloud fallback  (saves quota)
+        The original "smart routing" logic sent normal/low priority calls to
+        Ollama first when all cloud providers were on the free tier.  In
+        practice this made Ollama the *default* for the majority of calls
+        (market_analyst, executor, settings_advisor) instead of the intended
+        fallback.  Cloud providers handle rate-limit exhaustion via natural
+        fallback in the retry loop, so reordering is unnecessary.
 
         Args:
             agent_name: the calling agent (mapped via AGENT_PRIORITIES).
@@ -487,31 +489,10 @@ class LLMClient:
         with self._providers_lock:
             providers = list(self._providers)
 
-        if not providers:
-            return providers
-
-        # Resolve priority
-        if priority is None:
-            priority = self.AGENT_PRIORITIES.get(agent_name or "", "normal")
-
-        # Check if ANY cloud provider is on a paid tier
-        any_paid = any(not p.is_local and p.tier == "paid" for p in providers)
-
-        # Paid tier or high-priority call → keep original order (cloud first)
-        if any_paid or priority == "high":
-            return providers
-
-        # Free tier + normal/low priority → local first, cloud as fallback
-        local = [p for p in providers if p.is_local]
-        cloud = [p for p in providers if not p.is_local]
-        reordered = local + cloud
-        if reordered != providers:
-            _agent = f" ({agent_name})" if agent_name else ""
-            logger.debug(
-                f"🔀 Smart routing{_agent}: local-first "
-                f"(priority={priority}, tier=free)"
-            )
-        return reordered
+        # Always return the configured order (cloud first, local last).
+        # The retry loop in chat()/chat_json() already falls through to
+        # the next provider on rate-limit / quota errors.
+        return providers
 
     @staticmethod
     def _is_rate_or_quota_error(exc: Exception) -> bool:

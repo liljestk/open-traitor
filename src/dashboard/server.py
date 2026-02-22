@@ -2322,12 +2322,20 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(_get_profile_db)
         breakdown = []
         allocated = 0.0
         for pair, pos in positions.items():
-            qty = pos.get("quantity", 0) if isinstance(pos, dict) else 0
-            price = prices.get(pair, pos.get("entry_price", 0)) if isinstance(pos, dict) else 0
+            # Handle both formats:
+            #   dict  → {"quantity": ..., "entry_price": ...}  (full position)
+            #   float → just the quantity (legacy / orchestrator format)
+            if isinstance(pos, dict):
+                qty = pos.get("quantity", 0)
+                entry_price = pos.get("entry_price", 0)
+                price = prices.get(pair, entry_price)
+            else:
+                qty = float(pos) if pos else 0
+                entry_price = prices.get(pair, 0)  # no stored entry, use current
+                price = prices.get(pair, 0)
             value = qty * price
             pct = (value / portfolio_val * 100) if portfolio_val else 0
             allocated += value
-            entry_price = pos.get("entry_price", 0) if isinstance(pos, dict) else 0
             pnl_pct = ((price - entry_price) / entry_price * 100) if entry_price else 0
             breakdown.append({
                 "pair": pair,
