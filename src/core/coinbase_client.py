@@ -117,6 +117,16 @@ class CoinbaseClient(ExchangeClient):
         self._product_cache_ts: float = 0.0
         self._product_cache_lock = threading.RLock()
 
+        # ── Centralised REST API throttle + retry ─────────────────────────
+        from src.utils.rate_limiter import get_rate_limiter
+        self._rate_limiter = get_rate_limiter()
+        self._throttle_lock = threading.Lock()
+        self._backoff_until: float = 0.0          # monotonic timestamp
+        self._consecutive_errors: int = 0
+        self._MAX_RETRIES: int = 3
+        self._BASE_BACKOFF: float = 2.0           # seconds, doubles each retry
+        self._MAX_BACKOFF: float = 120.0           # hard cap
+
         if not paper_mode:
             self._init_real_client(api_key, api_secret, key_file)
         else:
@@ -166,6 +176,71 @@ class CoinbaseClient(ExchangeClient):
             )
 
     # =========================================================================
+    # Centralised REST throttle + automatic retry
+    # =========================================================================
+
+    def _throttled_request(self, method_name: str, *args, **kwargs) -> Any:
+        """
+        Call a method on ``_rest_client`` with rate-limit throttling and
+        automatic retry on 429 / 403-rate-limit responses.
+
+        All public methods that hit the Coinbase REST API should delegate
+        here instead of calling ``self._rest_client.<method>()`` directly.
+        """
+        import time as _time
+
+        # Honour any active cooldown from a previous 429/403 burst
+        cooldown_remaining = self._backoff_until - _time.monotonic()
+        if cooldown_remaining > 0:
+            logger.info(
+                f"⏳ Coinbase cooldown active — sleeping {cooldown_remaining:.1f}s"
+            )
+            _time.sleep(cooldown_remaining)
+
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            # Acquire a token from the shared rate-limiter bucket
+            self._rate_limiter.wait("coinbase_rest", timeout=60.0)
+
+            try:
+                fn = getattr(self._rest_client, method_name)
+                result = fn(*args, **kwargs)
+                # Success — reset consecutive error counter
+                if self._consecutive_errors > 0:
+                    self._consecutive_errors = 0
+                return result
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_rate_limit = (
+                    "429" in exc_str
+                    or "too many" in exc_str
+                    or ("403" in exc_str and "too many" in exc_str)
+                    or "rate" in exc_str
+                )
+                if is_rate_limit and attempt < self._MAX_RETRIES:
+                    self._consecutive_errors += 1
+                    backoff = min(
+                        self._BASE_BACKOFF * (2 ** (attempt - 1)),
+                        self._MAX_BACKOFF,
+                    )
+                    # Progressive cooldown: after repeated 429s, back off longer
+                    if self._consecutive_errors >= 3:
+                        backoff = min(backoff * self._consecutive_errors, self._MAX_BACKOFF)
+                    self._backoff_until = _time.monotonic() + backoff
+                    logger.warning(
+                        f"⚠️ Coinbase rate-limited ({method_name}, attempt {attempt}/"
+                        f"{self._MAX_RETRIES}) — backing off {backoff:.1f}s"
+                    )
+                    _time.sleep(backoff)
+                    last_exc = exc
+                    continue
+                # Not a rate-limit error, or final attempt — re-raise
+                raise
+
+        # Should never reach here, but just in case
+        raise last_exc  # type: ignore[misc]
+
+    # =========================================================================
     # Market Data
     # =========================================================================
 
@@ -173,7 +248,7 @@ class CoinbaseClient(ExchangeClient):
         """Get product details (e.g., BTC-USD)."""
         if self._rest_client:
             try:
-                product = self._rest_client.get_product(product_id)
+                product = self._throttled_request("get_product", product_id)
                 result = product.to_dict() if hasattr(product, "to_dict") else dict(product)
                 self._last_prices[product_id] = float(result.get("price", 0))
                 return result
@@ -219,7 +294,8 @@ class CoinbaseClient(ExchangeClient):
                 seconds = granularity_seconds.get(granularity, 3600)
                 start = end - (limit * seconds)
 
-                candles = self._rest_client.get_candles(
+                candles = self._throttled_request(
+                    "get_candles",
                     product_id=product_id,
                     start=str(start),
                     end=str(end),
@@ -238,7 +314,8 @@ class CoinbaseClient(ExchangeClient):
         """Get recent market trades."""
         if self._rest_client:
             try:
-                trades = self._rest_client.get_market_trades(
+                trades = self._throttled_request(
+                    "get_market_trades",
                     product_id=product_id, limit=limit
                 )
                 result = trades.to_dict() if hasattr(trades, "to_dict") else dict(trades)
@@ -252,7 +329,8 @@ class CoinbaseClient(ExchangeClient):
         """Get order book for a product."""
         if self._rest_client:
             try:
-                book = self._rest_client.get_product_book(
+                book = self._throttled_request(
+                    "get_product_book",
                     product_id=product_id, limit=limit
                 )
                 return book.to_dict() if hasattr(book, "to_dict") else dict(book)
@@ -272,7 +350,7 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                accounts = self._rest_client.get_accounts()
+                accounts = self._throttled_request("get_accounts")
                 result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
                 account_list = result.get("accounts", [])
                 if not account_list:
@@ -314,7 +392,7 @@ class CoinbaseClient(ExchangeClient):
             }
 
         try:
-            accounts = self._rest_client.get_accounts()
+            accounts = self._throttled_request("get_accounts")
             result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
             account_list = result.get("accounts", [])
             currencies = [
@@ -358,7 +436,7 @@ class CoinbaseClient(ExchangeClient):
             return "USD"
 
         try:
-            accounts = self._rest_client.get_accounts()
+            accounts = self._throttled_request("get_accounts")
             result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
             account_list = result.get("accounts", [])
 
@@ -406,7 +484,7 @@ class CoinbaseClient(ExchangeClient):
         # Step 2: Fetch all products
         if self._rest_client:
             try:
-                products_resp = self._rest_client.get_products()
+                products_resp = self._throttled_request("get_products")
                 pdata = products_resp.to_dict() if hasattr(products_resp, "to_dict") else dict(products_resp)
                 all_products = pdata.get("products", [])
                 
@@ -447,7 +525,7 @@ class CoinbaseClient(ExchangeClient):
             candidate = f"{base}-{native_currency}"
             if self._rest_client:
                 try:
-                    product = self._rest_client.get_product(candidate)
+                    product = self._throttled_request("get_product", candidate)
                     pdata = product.to_dict() if hasattr(product, "to_dict") else dict(product)
                     if (
                         pdata.get("product_id") == candidate
@@ -488,7 +566,7 @@ class CoinbaseClient(ExchangeClient):
         only_trade = only_trade or set()
 
         try:
-            products_resp = self._rest_client.get_products()
+            products_resp = self._throttled_request("get_products")
             pdata = products_resp.to_dict() if hasattr(products_resp, "to_dict") else dict(products_resp)
             all_products = pdata.get("products", [])
 
@@ -544,7 +622,7 @@ class CoinbaseClient(ExchangeClient):
             if not self._rest_client:
                 return self._product_cache or []
             try:
-                resp = self._rest_client.get_products()
+                resp = self._throttled_request("get_products")
                 pdata = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
                 self._product_cache = pdata.get("products", [])
                 self._product_cache_ts = now
@@ -820,7 +898,8 @@ class CoinbaseClient(ExchangeClient):
         if self._rest_client:
             try:
 
-                order = self._rest_client.market_order_buy(
+                order = self._throttled_request(
+                    "market_order_buy",
                     client_order_id=str(uuid.uuid4()),
                     product_id=product_id,
                     quote_size=quote_size,
@@ -859,7 +938,8 @@ class CoinbaseClient(ExchangeClient):
         if self._rest_client:
             try:
 
-                order = self._rest_client.limit_order_gtc_buy(
+                order = self._throttled_request(
+                    "limit_order_gtc_buy",
                     client_order_id=str(uuid.uuid4()),
                     product_id=product_id,
                     base_size=base_size,
@@ -902,7 +982,8 @@ class CoinbaseClient(ExchangeClient):
         if self._rest_client:
             try:
 
-                order = self._rest_client.limit_order_gtc_sell(
+                order = self._throttled_request(
+                    "limit_order_gtc_sell",
                     client_order_id=str(uuid.uuid4()),
                     product_id=product_id,
                     base_size=base_size,
@@ -934,7 +1015,7 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                result = self._rest_client.cancel_orders([order_id])
+                result = self._throttled_request("cancel_orders", [order_id])
                 res = result.to_dict() if hasattr(result, "to_dict") else dict(result)
                 logger.info(f"✅ Order cancelled: {order_id}")
                 return {"success": True, "result": res}
@@ -956,7 +1037,8 @@ class CoinbaseClient(ExchangeClient):
         if self._rest_client:
             try:
 
-                order = self._rest_client.market_order_sell(
+                order = self._throttled_request(
+                    "market_order_sell",
                     client_order_id=str(uuid.uuid4()),
                     product_id=product_id,
                     base_size=base_size,
@@ -981,7 +1063,7 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                order = self._rest_client.get_order(order_id)
+                order = self._throttled_request("get_order", order_id)
                 return order.to_dict() if hasattr(order, "to_dict") else dict(order)
             except Exception as e:
                 logger.error(f"Error fetching order {order_id}: {e}")
@@ -995,7 +1077,7 @@ class CoinbaseClient(ExchangeClient):
 
         if self._rest_client:
             try:
-                orders = self._rest_client.list_orders(order_status=["OPEN"])
+                orders = self._throttled_request("list_orders", order_status=["OPEN"])
                 result = orders.to_dict() if hasattr(orders, "to_dict") else dict(orders)
                 return result.get("orders", [])
             except Exception as e:
