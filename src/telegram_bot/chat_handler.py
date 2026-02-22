@@ -249,6 +249,11 @@ def _build_fast_patterns():
         # Settings tiers info
         (r"^/settings.?tiers?$|^(what|which)\s+settings?\s+(can|are)\s+(I|we)?\s*(change|update|safe|allowed)",
          "get_settings_tiers", None),
+        # Approve / reject trade (inline keyboard buttons & typed commands)
+        (r"^/approve\s+(\S+)$|^approve\s+(?:trade\s+)?(\S+)$",
+         "approve_item", None),
+        (r"^/reject\s+(\S+)$|^reject\s+(?:trade\s+)?(\S+)$",
+         "reject_item", None),
     ]
     for pattern_str, func_name, template in patterns:
         FAST_PATTERNS.append((
@@ -1064,6 +1069,19 @@ class TelegramChatHandler:
                     if not preset:
                         return "⚠️ Please specify a preset: disabled, conservative, moderate, or aggressive."
                     return self._execute_fast_with_args(func_name, {"preset": preset})
+                # Approve/reject: extract trade ID from regex groups
+                if func_name in ("approve_item", "reject_item"):
+                    item_id = next((g for g in m.groups() if g), None)
+                    if not item_id:
+                        return "⚠️ Please specify a trade ID."
+                    result = self._execute_fast_with_args(func_name, {"item_id": item_id})
+                    verb = "approved" if func_name == "approve_item" else "rejected"
+                    if isinstance(result, str):
+                        return result
+                    if isinstance(result, dict) and result.get("ok"):
+                        return f"✅ Trade **{item_id}** {verb}."
+                    err = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
+                    return f"⚠️ Could not {verb.rstrip('d')} trade: {err}"
                 return self._execute_fast(func_name, template)
 
         # ── Contextual affirmatives ──────────────────────────────────────────

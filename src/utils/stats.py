@@ -1033,8 +1033,15 @@ class StatsDB:
         row = dict(row)
         quantity = row["quantity"]
         entry_price = row["entry_price"]
-        pnl_abs = (close_price - entry_price) * quantity
-        pnl_pct = ((close_price / entry_price) - 1) * 100 if entry_price > 0 else 0.0
+        # Direction-aware PnL: short when from_currency is the base (sold base)
+        pair_base = row["pair"].split("-")[0]
+        is_short = row.get("from_currency", "") == pair_base
+        if is_short:
+            pnl_abs = (entry_price - close_price) * quantity
+            pnl_pct = ((entry_price / close_price) - 1) * 100 if close_price > 0 else 0.0
+        else:
+            pnl_abs = (close_price - entry_price) * quantity
+            pnl_pct = ((close_price / entry_price) - 1) * 100 if entry_price > 0 else 0.0
         closed_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """UPDATE simulated_trades
