@@ -430,13 +430,13 @@ class TechnicalAnalyzer:
         if adx is None:
             return "unknown"
         if adx >= 40:
-            if plus_di and minus_di and plus_di > minus_di:
-                return "strong_uptrend"
-            return "strong_downtrend"
+            if plus_di is not None and minus_di is not None:
+                return "strong_uptrend" if plus_di > minus_di else "strong_downtrend"
+            return "strong_trend"
         if adx >= 25:
-            if plus_di and minus_di and plus_di > minus_di:
-                return "uptrend"
-            return "downtrend"
+            if plus_di is not None and minus_di is not None:
+                return "uptrend" if plus_di > minus_di else "downtrend"
+            return "trending"
         if adx >= 20:
             return "weak_trend"
         return "no_trend"

@@ -44,7 +44,9 @@ class TaxLot:
 
     @property
     def total_cost(self) -> float:
-        return self.remaining_quantity * self.cost_per_unit + self.fees
+        # Cycle-3 fix: prorate fees for partially consumed lots
+        fee_ratio = self.remaining_quantity / self.quantity if self.quantity > 0 else 0.0
+        return self.remaining_quantity * self.cost_per_unit + self.fees * fee_ratio
 
     def to_dict(self) -> dict:
         return {

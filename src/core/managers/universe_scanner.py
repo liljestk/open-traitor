@@ -345,9 +345,12 @@ class UniverseScanner:
 
         lines.append("Top 10 by composite score:")
         for pair, d in ranked[:10]:
+            rsi = d.get('rsi')
+            adx = d.get('adx')
             lines.append(
                 f"  {pair}: score={d['composite_score']:.3f} "
-                f"RSI={d.get('rsi', '?'):.1f} ADX={d.get('adx', '?'):.1f} "
+                f"RSI={f'{rsi:.1f}' if rsi is not None else '?'} "
+                f"ADX={f'{adx:.1f}' if adx is not None else '?'} "
                 f"EMA={d.get('ema_signal', '?')} BB={d.get('bb_signal', '?')} "
                 f"vol24h={d.get('volume_24h', 0):.0f} chg={d.get('price_change_24h_pct', 0):+.2f}%"
             )

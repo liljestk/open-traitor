@@ -197,19 +197,24 @@ class SentimentAnalyzer:
         bear_matches = []
 
         # Check multi-word phrases first (longer matches take priority)
+        # Cycle-3 fix: remove matched text to prevent sub-phrase double-counting
+        bull_text = text_lower
         for keyword, weight in sorted(
             self.bullish_keywords.items(), key=lambda x: -len(x[0])
         ):
-            if keyword in text_lower:
+            if keyword in bull_text:
                 bullish_score += weight
                 bull_matches.append(keyword)
+                bull_text = bull_text.replace(keyword, "", 1)
 
+        bear_text = text_lower
         for keyword, weight in sorted(
             self.bearish_keywords.items(), key=lambda x: -len(x[0])
         ):
-            if keyword in text_lower:
+            if keyword in bear_text:
                 bearish_score += weight
                 bear_matches.append(keyword)
+                bear_text = bear_text.replace(keyword, "", 1)
 
         total_matches = len(bull_matches) + len(bear_matches)
 

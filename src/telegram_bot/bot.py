@@ -361,8 +361,11 @@ class TelegramBot:
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _send(bot, self.chat_id, text), loop
+                )
+                future.add_done_callback(
+                    lambda f: f.exception() and logger.error(f"Telegram send_message failed: {f.exception()}")
                 )
             except RuntimeError:
                 asyncio.run(_send(bot, self.chat_id, text))
@@ -412,7 +415,10 @@ class TelegramBot:
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                asyncio.run_coroutine_threadsafe(_send_approval(bot), loop)
+                future = asyncio.run_coroutine_threadsafe(_send_approval(bot), loop)
+                future.add_done_callback(
+                    lambda f: f.exception() and logger.error(f"Telegram approval request failed: {f.exception()}")
+                )
             except RuntimeError:
                 asyncio.run(_send_approval(bot))
 

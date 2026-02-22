@@ -264,7 +264,7 @@ class BacktestEngine:
         for pos in positions:
             if not pos.closed:
                 fee = last_price * pos.quantity * self.fee_pct
-                pnl = (last_price - pos.entry_price) * pos.quantity - fee
+                pnl = (last_price - pos.entry_price) * pos.quantity - pos.entry_fee - fee
                 pos.closed = True
                 pos.exit_price = last_price
                 pos.exit_time = candles[-1].get("start", "")
@@ -340,9 +340,9 @@ class BacktestEngine:
                 down_var = sum(r ** 2 for r in downside) / len(returns) if downside else 0
                 down_std = math.sqrt(down_var) if down_var > 0 else 0
 
-                # Annualize: assume ~8760 candle-periods per year for hourly data
+                # Annualize: ~8760 candle-periods per year for hourly data
                 # (365 × 24). Adjust by sqrt for volatility.
-                annualization = math.sqrt(len(returns))  # simple: total periods
+                annualization = math.sqrt(8760)  # hourly candles
                 sharpe = (mean_ret / std_ret * annualization) if std_ret > 0 else 0
                 sortino = (mean_ret / down_std * annualization) if down_std > 0 else 0
 

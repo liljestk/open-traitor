@@ -57,6 +57,26 @@ class StateManager:
             for trade_id, approval in loaded.items():
                 is_swap = approval.get("_is_swap", False)
                 if is_swap:
+                    # Cycle-3 fix: validate swap approvals too (pair format + amount bounds)
+                    from src.utils.security import validate_trading_pair
+                    sell_pair = approval.get("sell_pair", "")
+                    buy_pair = approval.get("buy_pair", "")
+                    try:
+                        swap_amount = float(approval.get("quote_amount") or 0)
+                    except (TypeError, ValueError):
+                        swap_amount = 0.0
+                    if (
+                        not validate_trading_pair(sell_pair)
+                        or not validate_trading_pair(buy_pair)
+                        or swap_amount <= 0
+                        or swap_amount > orch.rules.max_single_trade * 2
+                    ):
+                        logger.warning(
+                            f"Discarding invalid swap approval from Redis: "
+                            f"id={trade_id!r} sell={sell_pair!r} buy={buy_pair!r} "
+                            f"amount={swap_amount}"
+                        )
+                        continue
                     validated[trade_id] = approval
                     continue
                 pair = approval.get("pair", "")

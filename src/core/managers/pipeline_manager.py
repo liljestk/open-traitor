@@ -240,13 +240,18 @@ class PipelineManager:
             all_candles = {pair: candles}
             other_pairs = [p for p in orch.pairs if p != pair]
             if other_pairs:
-                # Fetch candles for other pairs in parallel
+                # Fetch candles for other pairs with concurrency cap (Cycle-3 fix)
                 granularity = orch.config.get("analysis", {}).get("technical", {}).get(
                     "candle_granularity", "ONE_HOUR"
                 )
+                _sem = asyncio.Semaphore(3)  # max 3 concurrent API calls
+
+                async def _fetch_with_sem(p):
+                    async with _sem:
+                        return await asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
+
                 other_results = await asyncio.gather(*[
-                    asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
-                    for p in other_pairs
+                    _fetch_with_sem(p) for p in other_pairs
                 ], return_exceptions=True)
                 for p, result in zip(other_pairs, other_results):
                     if isinstance(result, Exception):
@@ -303,7 +308,11 @@ class PipelineManager:
         confidence = signal.get("confidence", 0)
         notify_threshold = orch.config.get("telegram", {}).get("notify_on_signal_confidence", 0.8)
         if confidence >= notify_threshold and orch.telegram:
-            signal_obj = orch.state.signals[-1] if orch.state.signals else None
+            # Cycle-3 fix: find the signal for THIS pair instead of signals[-1]
+            # which races with concurrent pipelines via asyncio.gather.
+            signal_obj = next(
+                (s for s in reversed(orch.state.signals) if s.pair == pair), None
+            )
             if signal_obj:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
 

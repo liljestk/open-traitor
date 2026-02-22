@@ -167,6 +167,10 @@ class ExecutorAgent(BaseAgent):
                     # Limit order resting — record as PENDING
                     trade.status = TradeStatus.PENDING
                     trade.coinbase_order_id = order_id
+                    # Cycle-3 fix: update quantity to match actual order size
+                    if use_limit and action == "buy":
+                        trade.quantity = float(base_size)
+                        trade.price = limit_price
                     self.state.add_trade(trade)
                     self.logger.info(
                         f"📋 Limit order resting: {trade.to_summary()} — "
@@ -322,7 +326,9 @@ class ExecutorAgent(BaseAgent):
             remaining = max(0.0, (trade.filled_quantity or trade.quantity) - quantity)
             if remaining > 0:
                 # H5 fix: pass sold_quantity so positions are deducted
-                self.state.update_partial_fill(trade.id, remaining, sold_quantity=quantity)
+                # Cycle-3: also credit sell proceeds to cash_balance
+                sell_proceeds = close_price * quantity - fees
+                self.state.update_partial_fill(trade.id, remaining, sold_quantity=quantity, sell_proceeds=sell_proceeds)
             else:
                 # Position fully exited by tiers
                 pass

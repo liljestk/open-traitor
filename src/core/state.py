@@ -338,11 +338,12 @@ class TradingState:
                     return trade
             return None
 
-    def update_partial_fill(self, trade_id: str, remaining_quantity: float, sold_quantity: float = 0.0) -> None:
+    def update_partial_fill(self, trade_id: str, remaining_quantity: float, sold_quantity: float = 0.0, sell_proceeds: float = 0.0) -> None:
         """Update trade quantity after a partial sell (M12 fix: public API instead of _lock).
 
         H5 fix: also deduct *sold_quantity* from self.positions so that position
         tracking stays accurate between partial sell and full close.
+        Cycle-3 fix: credit *sell_proceeds* (quantity * price - fees) to cash_balance.
         """
         with self._lock:
             for t in self.trades:
@@ -352,10 +353,16 @@ class TradingState:
                     if sold_quantity > 0:
                         current = self.positions.get(t.pair, 0)
                         self.positions[t.pair] = max(0.0, current - sold_quantity)
+                    # Cycle-3: credit sell proceeds to cash
+                    if sell_proceeds > 0:
+                        self.cash_balance += sell_proceeds
                     return
 
     def update_trade_fill(self, trade_id: str, filled_price: float, filled_quantity: float, fees: float, status=None) -> bool:
         """Atomically update a trade's fill data under lock (H4 fix).
+
+        Cycle-3 fix: also reconcile positions and cash_balance when the
+        actual fill differs from the original add_trade booking.
 
         Returns True if the trade was found and updated.
         """
@@ -363,11 +370,32 @@ class TradingState:
         with self._lock:
             for t in self.trades:
                 if t.id == trade_id:
+                    # Compute deltas vs original booking
+                    old_qty = t.filled_quantity if t.filled_quantity else t.quantity
+                    old_value = (t.filled_price or t.price) * old_qty
+                    new_value = filled_price * filled_quantity
+
                     if status is not None:
                         t.status = status
                     t.filled_price = filled_price
                     t.filled_quantity = filled_quantity
                     t.fees = fees
+
+                    # Reconcile position quantity delta
+                    qty_delta = filled_quantity - old_qty
+                    if abs(qty_delta) > 1e-12:
+                        if t.action.value == "buy":
+                            self.positions[t.pair] = self.positions.get(t.pair, 0) + qty_delta
+                        else:
+                            self.positions[t.pair] = max(0.0, self.positions.get(t.pair, 0) - qty_delta)
+
+                    # Reconcile cash delta (buy: more value = less cash; sell: inverse)
+                    value_delta = new_value - old_value + fees
+                    if abs(value_delta) > 1e-12:
+                        if t.action.value == "buy":
+                            self.cash_balance -= value_delta
+                        else:
+                            self.cash_balance += value_delta
                     return True
             return False
 
@@ -381,19 +409,27 @@ class TradingState:
             return False
 
     def reverse_trade_booking(self, trade) -> None:
-        """Undo the position/cash changes from add_trade for a cancelled/failed order."""
+        """Undo the position/cash changes from add_trade for a cancelled/failed order.
+
+        Cycle-3 fix: use filled_quantity when available (partially-filled
+        cancel) so we only reverse the *unfilled* portion.  The filled
+        portion has real exchange-side consequences and must stay booked.
+        """
         with self._lock:
+            filled_qty = getattr(trade, "filled_quantity", None) or 0.0
+            unfilled_qty = max(0.0, trade.quantity - filled_qty)
+            unfilled_value = unfilled_qty * (trade.filled_price or trade.price) if unfilled_qty else trade.value
+
             if trade.action.value == "buy":
-                # M2 fix: clamp to zero to prevent negative positions
                 self.positions[trade.pair] = max(
-                    0.0, self.positions.get(trade.pair, 0) - trade.quantity
+                    0.0, self.positions.get(trade.pair, 0) - unfilled_qty
                 )
-                self.cash_balance += trade.value
+                self.cash_balance += unfilled_value
             elif trade.action.value == "sell":
                 self.positions[trade.pair] = (
-                    self.positions.get(trade.pair, 0) + trade.quantity
+                    self.positions.get(trade.pair, 0) + unfilled_qty
                 )
-                self.cash_balance -= trade.value
+                self.cash_balance -= unfilled_value
 
     # ── Live-snapshot staleness threshold (seconds) ──
     _LIVE_STALENESS_THRESHOLD: float = 300.0  # 5 minutes

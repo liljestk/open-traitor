@@ -365,22 +365,29 @@ RECENT LOSS ANALYSIS (signal reasoning that led to losses):
 
 Generate the {horizon} plan as JSON."""
 
-    # Create a planning trace in Langfuse
+    # Create a planning trace in Langfuse (Cycle-3 fix: wrap in try/except
+    # so tracer failures don't crash the Temporal activity)
     trace_id = f"planning-{horizon}-{uuid.uuid4().hex[:8]}"
-    tracer = _get_planning_tracer()
-    trace_ctx = tracer.start_trace(
-        cycle_id=trace_id,
-        pair="planning",
-        metadata={"horizon": horizon},
-    ) if tracer else None
-
+    trace_ctx = None
     span = None
-    if trace_ctx is not None:
-        span = trace_ctx.start_span(
-            f"planning_{horizon}",
-            input_data={"system": system_prompt[:500], "user": user_message[:500]},
-            model=_PLANNING_MODEL,
-        )
+    try:
+        tracer = _get_planning_tracer()
+        if tracer:
+            trace_ctx = tracer.start_trace(
+                cycle_id=trace_id,
+                pair="planning",
+                metadata={"horizon": horizon},
+            )
+        if trace_ctx is not None:
+            span = trace_ctx.start_span(
+                f"planning_{horizon}",
+                input_data={"system": system_prompt[:500], "user": user_message[:500]},
+                model=_PLANNING_MODEL,
+            )
+    except Exception as e:
+        logger.warning(f"Planning trace setup failed (non-fatal): {e}")
+        trace_ctx = None
+        span = None
 
     llm = _get_llm_client()
     try:

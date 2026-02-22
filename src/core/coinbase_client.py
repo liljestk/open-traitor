@@ -1113,9 +1113,9 @@ class CoinbaseClient(ExchangeClient):
                     "error": f"Insufficient {base_currency} balance. Have: {base_bal:.6f}, Need: {quantity:.6f}",
                 }
 
-            self._paper_balance[base_currency] = base_bal - quantity
-            self._paper_balance[quote_currency] = self._paper_balance.get(quote_currency, 0) + quote_amount
-            self._paper_balance[quote_currency] -= fee
+            self._paper_balance[base_currency] = round(base_bal - quantity, 8)
+            self._paper_balance[quote_currency] = round(self._paper_balance.get(quote_currency, 0) + quote_amount, 8)
+            self._paper_balance[quote_currency] = round(self._paper_balance[quote_currency] - fee, 8)
 
             # L14 fix: create and append order inside the same lock scope
             order_id = str(uuid.uuid4())
