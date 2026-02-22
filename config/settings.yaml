@@ -196,3 +196,9 @@ routing:
   - BTC
   min_bridge_volume_24h: 10000
   slippage_factor: 0.001
+training_data:
+  enabled: true
+  include_raw_candles: false
+  include_prompts: true
+  max_candles_per_snapshot: 50
+  buffer_size: 0

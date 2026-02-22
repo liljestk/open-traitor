@@ -46,6 +46,7 @@ from src.utils.journal import TradeJournal
 from src.utils.audit import AuditLog
 from src.utils.stats import StatsDB
 from src.utils.tracer import get_llm_tracer
+from src.utils.training_data import TrainingDataCollector
 from src.utils import settings_manager as sm
 from src.core.managers.pipeline_manager import PipelineManager
 from src.core.managers.state_manager import StateManager
@@ -245,6 +246,14 @@ class Orchestrator:
 
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
+
+        # ─── Training Data Collector (for future fine-tuning) ───
+        self.training_collector = TrainingDataCollector(config)
+        self.executor.training_collector = self.training_collector
+        # Hook LLM callback so every prompt/response is captured
+        llm_cb = self.training_collector.make_llm_callback()
+        if llm_cb:
+            self.llm._interaction_callback = llm_cb
 
         # ─── Live Holdings Sync (Coinbase API → TradingState) ───
         trading_cfg = config.get("trading", {})

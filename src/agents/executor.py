@@ -33,6 +33,7 @@ class ExecutorAgent(BaseAgent):
         super().__init__("executor", llm, state, config)
         self.exchange = exchange
         self.rules = rules
+        self.training_collector = None  # set by orchestrator if enabled
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
@@ -428,6 +429,8 @@ class ExecutorAgent(BaseAgent):
             elif closed.pnl and closed.pnl < 0:
                 self.rules.record_loss(abs(closed.pnl))
 
+            self._record_training_outcome(trade, close_price, reason)
+
             self.logger.info(
                 f"Position closed ({reason}): {trade.to_summary()}"
             )
@@ -446,6 +449,37 @@ class ExecutorAgent(BaseAgent):
             "reason": reason,
             "success": success,
         }
+
+    def _record_training_outcome(self, trade: Trade, close_price: float, reason: str) -> None:
+        """Record trade outcome for training data (fire-and-forget)."""
+        try:
+            tc = self.training_collector
+            if not tc or not tc.enabled:
+                return
+            entry = trade.filled_price or trade.price
+            pnl = trade.pnl or 0.0
+            pnl_pct = ((close_price / entry) - 1) * 100 if entry and entry > 0 else 0.0
+            hold_secs = 0.0
+            if trade.closed_at and trade.timestamp:
+                try:
+                    hold_secs = (trade.closed_at - trade.timestamp).total_seconds()
+                except Exception:
+                    pass
+            tc.record_outcome(
+                trade_id=trade.id,
+                pair=trade.pair,
+                action=trade.action.value if hasattr(trade.action, "value") else str(trade.action),
+                entry_price=entry or 0.0,
+                exit_price=close_price,
+                quantity=trade.filled_quantity or trade.quantity or 0.0,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                fees=trade.fees or 0.0,
+                hold_duration_seconds=hold_secs,
+                exit_reason=reason,
+            )
+        except Exception:
+            pass  # never break executor
 
     # =========================================================================
     # Limit Order Lifecycle Management

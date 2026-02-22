@@ -195,6 +195,7 @@ class LLMClient:
         self._total_tokens = 0
         self._last_provider = ""
         self._providers_lock = threading.RLock()
+        self._interaction_callback = None  # set by TrainingDataCollector
 
         names = [p.name for p in self._providers]
         logger.info(
@@ -370,6 +371,24 @@ class LLMClient:
                         latency_ms=elapsed_ms,
                         model=f"{provider.name}/{provider.model}",
                     )
+
+                # Fire-and-forget callback for training data collection
+                if self._interaction_callback is not None:
+                    try:
+                        self._interaction_callback(
+                            agent_name=agent_name or "",
+                            system_prompt=system_prompt,
+                            user_message=user_message,
+                            response_text=content,
+                            provider=provider.name,
+                            model=provider.model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            latency_ms=elapsed_ms,
+                            temperature=temp,
+                        )
+                    except Exception:
+                        pass  # never break LLM flow
 
                 return content
 

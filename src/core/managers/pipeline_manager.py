@@ -111,6 +111,11 @@ class PipelineManager:
         cycle_id = str(uuid.uuid4())
         strategic_context = orch.context_manager.get_strategic_context()
 
+        # Set training data pipeline context so LLM callback knows cycle_id/pair
+        tc = getattr(orch, "training_collector", None)
+        if tc and tc.enabled:
+            tc.set_pipeline_context(cycle_id, pair)
+
         # Run synchronous blocking functions in executor if necessary
         await asyncio.to_thread(orch.holdings_manager.maybe_refresh_holdings)
 
@@ -279,6 +284,37 @@ class PipelineManager:
         except Exception as e:
             logger.debug(f"Failed to load recent outcomes: {e}")
 
+        # ─── Training Data: record market snapshot ───
+        if tc and tc.enabled:
+            try:
+                tc.record_snapshot(
+                    cycle_id, pair,
+                    price=price,
+                    candles=candles,
+                    technical=tech_analysis,
+                    strategy_signals=strategy_signals,
+                    fear_greed=fg_prompt,
+                    multi_timeframe=mtf_prompt,
+                    sentiment=sentiment_data,
+                    correlation_matrix=correlation_matrix,
+                    kelly_stats=kelly_stats,
+                    portfolio_value=(
+                        orch.state.live_portfolio_value
+                        if orch.state.live_portfolio_value > 0
+                        else orch.state.portfolio_value
+                    ),
+                    cash_balance=(
+                        sum(orch.state.live_cash_balances.values())
+                        if orch.state.live_cash_balances
+                        else orch.state.cash_balance
+                    ),
+                    open_positions=orch.state.open_positions,
+                    recent_outcomes=recent_outcomes,
+                    strategic_context=strategic_context,
+                )
+            except Exception:
+                pass  # never break pipeline
+
         # Step 2: Market Analysis
         _step_t = time.monotonic()
         analysis_result = await orch.market_analyst.execute({
@@ -298,6 +334,21 @@ class PipelineManager:
 
         signal = analysis_result.get("signal", {})
         _timings["analyst"] = time.monotonic() - _step_t
+
+        # ─── Training Data: record analysis decision ───
+        if tc and tc.enabled:
+            try:
+                tc.record_decision(
+                    cycle_id, pair, "analysis",
+                    decision=signal,
+                    action=signal.get("signal_type", ""),
+                    confidence=signal.get("confidence", 0),
+                    reasoning=signal.get("reasoning", ""),
+                    context={"llm_analysis": analysis_result.get("llm_analysis", "")},
+                )
+            except Exception:
+                pass
+
         if "error" in analysis_result:
             logger.warning(f"Analysis failed for {pair}: {analysis_result.get('error')}")
             orch.journal.log_decision("analysis_failed", pair, "none", {"error": analysis_result.get('error')})
@@ -353,6 +404,20 @@ class PipelineManager:
 
         if strategy_result.get("action") == "hold":
             _timings["strategist"] = time.monotonic() - _step_t
+
+            # ─── Training Data: record hold decision ───
+            if tc and tc.enabled:
+                try:
+                    tc.record_decision(
+                        cycle_id, pair, "hold",
+                        decision=strategy_result,
+                        action="hold",
+                        confidence=strategy_result.get("confidence", 0),
+                        reasoning=strategy_result.get("reason", strategy_result.get("reasoning", "")),
+                    )
+                except Exception:
+                    pass
+
             _total = time.monotonic() - _t0
             _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
             logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [hold]")
@@ -389,6 +454,22 @@ class PipelineManager:
 
         if not risk_result.get("approved"):
             _timings["risk"] = time.monotonic() - _step_t
+
+            # ─── Training Data: record rejected decision ───
+            if tc and tc.enabled:
+                try:
+                    tc.record_decision(
+                        cycle_id, pair, "rejected",
+                        decision=risk_result,
+                        action=strategy_result.get("action", "unknown"),
+                        confidence=strategy_result.get("confidence", 0),
+                        approved=False,
+                        reasoning=risk_result.get("reason", ""),
+                        context={"proposal": strategy_result},
+                    )
+                except Exception:
+                    pass
+
             _total = time.monotonic() - _t0
             _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
             logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [rejected]")
@@ -532,6 +613,27 @@ class PipelineManager:
 
             if orch.telegram and orch.config.get("telegram", {}).get("notify_on_trade", True):
                 orch.telegram.send_trade_notification(trade_event)
+
+            # ─── Training Data: record execution decision ───
+            if tc and tc.enabled:
+                try:
+                    tc.record_decision(
+                        cycle_id, pair, "execution",
+                        decision=exec_result,
+                        action=risk_result.get("action", "unknown"),
+                        confidence=risk_result.get("confidence", 0),
+                        approved=True,
+                        reasoning=risk_result.get("reasoning", ""),
+                        context={
+                            "signal": signal,
+                            "strategy": strategy_result,
+                            "risk": risk_result,
+                            "slippage_pct": exec_result.get("slippage_pct", 0),
+                            "order_type": exec_result.get("order_type", ""),
+                        },
+                    )
+                except Exception:
+                    pass
 
             _timings["exec"] = time.monotonic() - _step_t
             _total = time.monotonic() - _t0
