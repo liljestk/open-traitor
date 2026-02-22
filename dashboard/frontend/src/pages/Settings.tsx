@@ -678,6 +678,9 @@ function LLMProvidersSection() {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
+
+  const providers = data?.providers ?? []
+
   const { data: orCredits } = useQuery<OpenRouterCreditsInfo>({
     queryKey: ['openrouter-credits'],
     queryFn: fetchOpenRouterCredits,
@@ -693,7 +696,6 @@ function LLMProvidersSection() {
     queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
   }})
 
-  const providers = data?.providers ?? []
   const startEdit = () => { setDraft(providers.map(p => ({ ...p }))); setKeyDrafts({}); setVisibleKeys({}); setEditing(true); setMsg(null) }
   const cancel = () => { setEditing(false); setKeyDrafts({}); setVisibleKeys({}); setMsg(null) }
 

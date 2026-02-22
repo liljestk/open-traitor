@@ -1,6 +1,9 @@
 """
-Crypto News Aggregator — Fetches news from multiple open sources.
+Crypto & Market News Aggregator — Fetches news from multiple open sources.
 Sources: Reddit, RSS feeds (CoinTelegraph, CoinDesk, Decrypt, etc.)
+
+Includes lightweight NLP enrichment (sentiment, ticker extraction, relevance
+scoring, noise filtering) so the dashboard receives actionable articles.
 """
 
 from __future__ import annotations
@@ -20,6 +23,159 @@ import requests
 from src.utils.logger import get_logger
 
 logger = get_logger("news.aggregator")
+
+# ── Keyword-based sentiment analysis ────────────────────────────────────────
+
+_BULLISH_WORDS = frozenset([
+    "surge", "surges", "surging", "soar", "soars", "soaring", "rally", "rallies",
+    "rallying", "pump", "pumps", "pumping", "moon", "mooning", "breakout",
+    "bullish", "all-time high", "ath", "record high", "skyrocket", "boom",
+    "gain", "gains", "gained", "uptick", "uptrend", "recovery", "recovers",
+    "rebound", "rebounds", "outperform", "outperforms", "beat", "beats",
+    "upgrade", "upgraded", "buy", "accumulate", "undervalued", "growth",
+    "profit", "profits", "green", "optimism", "optimistic", "positive",
+    "strong", "strength", "momentum", "breakthrough", "milestone", "adoption",
+])
+
+_BEARISH_WORDS = frozenset([
+    "crash", "crashes", "crashing", "plunge", "plunges", "plunging", "dump",
+    "dumps", "dumping", "tank", "tanks", "tanking", "bearish", "sell-off",
+    "selloff", "sell off", "decline", "declines", "declining", "drop", "drops",
+    "dropping", "slump", "slumps", "downturn", "downtrend", "correction",
+    "fear", "panic", "capitulation", "liquidation", "liquidated", "hack",
+    "hacked", "exploit", "scam", "fraud", "rug pull", "rugpull", "ban",
+    "banned", "lawsuit", "sued", "sec charges", "warning", "risk", "risky",
+    "overvalued", "bubble", "collapse", "collapses", "loss", "losses", "red",
+    "negative", "weak", "weakness", "downgrade", "underperform",
+])
+
+# Well-known crypto/stock symbol patterns (3-5 uppercase letters)
+_KNOWN_TICKERS = frozenset([
+    "BTC", "ETH", "SOL", "ADA", "XRP", "DOT", "AVAX", "MATIC", "LINK",
+    "ATOM", "UNI", "AAVE", "DOGE", "SHIB", "LTC", "BCH", "FIL", "APT",
+    "ARB", "OP", "SUI", "SEI", "TIA", "NEAR", "INJ", "FET", "RNDR",
+    "GRT", "CRV", "MKR", "SNX", "COMP", "LDO", "RPL", "PEPE", "WIF",
+    "BONK", "JUP", "PYTH", "W", "ENA", "STRK", "MANTA", "DYM", "TKX",
+    # Traditional stocks that might appear in investing subs
+    "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
+    "AMD", "INTC", "NFLX", "DIS", "BA", "GS", "JPM", "V", "MA",
+    "NOKIA", "NOK", "PLTR", "GME", "AMC", "RIVN", "LCID", "NIO",
+    "COIN", "MSTR", "SQ", "PYPL", "ABNB", "UBER", "SNAP", "PINS",
+    "ROKU", "ZM", "CRWD", "NET", "DDOG", "SNOW", "MDB", "U",
+    "SPY", "QQQ", "VOO", "VTI", "ARKK", "VGT", "SCHD",
+])
+
+# Regex: $TICKER or standalone 2-5 uppercase letters bounded by word boundaries
+_TICKER_RE = re.compile(
+    r'(?:\$([A-Z]{1,5}))|(?<![A-Za-z])([A-Z]{2,5})(?![A-Za-z])'
+)
+
+# Noise patterns — skip generic meta/discussion posts
+_NOISE_PATTERNS = [
+    re.compile(p, re.IGNORECASE) for p in [
+        r"^daily.*(?:discussion|thread|general)",
+        r"^weekly.*(?:discussion|thread|general)",
+        r"^monthly.*(?:discussion|thread)",
+        r"^(?:mega)?thread",
+        r"^(?:investing|trading).*scam.*(?:reminder|warning|alert)",
+        r"^rate my (?:portfolio|picks)",
+        r"^moronic monday",
+        r"^mentor monday",
+        r"^weekend",
+        r"^mod.*post",
+        r"^rule[s]? (?:update|change|reminder)",
+        r"^community (?:update|announcement|guidelines)",
+    ]
+]
+
+
+def _classify_sentiment(text: str) -> str:
+    """Keyword-based sentiment: bullish / bearish / neutral."""
+    lower = text.lower()
+    bull = sum(1 for w in _BULLISH_WORDS if w in lower)
+    bear = sum(1 for w in _BEARISH_WORDS if w in lower)
+    if bull > bear and bull >= 1:
+        return "bullish"
+    if bear > bull and bear >= 1:
+        return "bearish"
+    return "neutral"
+
+
+def _extract_tickers(text: str) -> list[str]:
+    """Extract likely stock/crypto ticker symbols from text."""
+    found: list[str] = []
+    for m in _TICKER_RE.finditer(text):
+        ticker = m.group(1) or m.group(2)
+        if ticker and ticker in _KNOWN_TICKERS:
+            found.append(ticker)
+    return list(dict.fromkeys(found))  # dedup, preserve order
+
+
+def _relevance_score(article: "NewsArticle") -> float:
+    """Score 0-1 based on specificity & actionability."""
+    score = 0.3  # base score for any article
+
+    text = f"{article.title} {article.summary}".lower()
+
+    # Has specific tickers → more relevant
+    tickers = _extract_tickers(article.title + " " + article.summary)
+    if tickers:
+        score += min(0.3, len(tickers) * 0.1)
+
+    # Non-neutral sentiment → more relevant
+    if article.sentiment and article.sentiment != "neutral":
+        score += 0.1
+
+    # From RSS (actual news sites) → more relevant than Reddit self-posts
+    if "rss" in article.tags:
+        score += 0.1
+
+    # Has a URL that isn't just a Reddit self-post
+    if article.url and "reddit.com" not in article.url:
+        score += 0.05
+
+    # Recency bonus — articles < 2h old get a boost
+    if article.published:
+        age = (datetime.now(timezone.utc) - article.published).total_seconds()
+        if age < 7200:
+            score += 0.1
+        elif age < 14400:
+            score += 0.05
+
+    # Penalty for very short content (probably low-effort)
+    if len(text) < 50:
+        score -= 0.1
+
+    return max(0.0, min(1.0, round(score, 3)))
+
+
+def _is_noise(title: str) -> bool:
+    """Return True if the post is a generic/meta discussion thread."""
+    for pattern in _NOISE_PATTERNS:
+        if pattern.search(title):
+            return True
+    return False
+
+
+def _enrich_article(article: "NewsArticle") -> "NewsArticle":
+    """Add sentiment, tickers, relevance score to an article in-place."""
+    text = f"{article.title} {article.summary}"
+
+    # Sentiment
+    if not article.sentiment or article.sentiment == "neutral":
+        article.sentiment = _classify_sentiment(text)
+
+    # Ticker extraction → add to tags
+    tickers = _extract_tickers(text)
+    existing_tags = set(t.lower() for t in article.tags)
+    for ticker in tickers:
+        if ticker.lower() not in existing_tags:
+            article.tags.append(ticker)
+
+    # Relevance score
+    article.relevance_score = _relevance_score(article)
+
+    return article
 
 
 @dataclass
@@ -214,13 +370,17 @@ class NewsAggregator:
                 data = resp.json()
                 coins = data.get("coins", [])
                 trending_names = [c["item"]["name"] for c in coins[:7]]
+                trending_symbols = [c["item"].get("symbol", "").upper() for c in coins[:7]]
+                tags = ["coingecko", "trending"] + [s for s in trending_symbols if s]
                 article = NewsArticle(
                     title="CoinGecko Trending Coins",
                     summary=f"Currently trending: {', '.join(trending_names)}",
                     source="coingecko",
                     url="https://www.coingecko.com/en/trending",
                     published=datetime.now(timezone.utc),
-                    tags=["coingecko", "trending"],
+                    sentiment="bullish",
+                    relevance_score=0.6,
+                    tags=tags,
                 )
                 articles.append(article)
         except Exception as e:
@@ -229,12 +389,22 @@ class NewsAggregator:
         return articles
 
     def fetch_all(self) -> list[NewsArticle]:
-        """Fetch news from all sources."""
+        """Fetch news from all sources, enrich and filter."""
         all_articles = []
 
         all_articles.extend(self.fetch_reddit())
         all_articles.extend(self.fetch_rss())
         all_articles.extend(self.fetch_coingecko_trending())
+
+        # Filter noise (generic/meta discussion threads)
+        before_filter = len(all_articles)
+        all_articles = [a for a in all_articles if not _is_noise(a.title)]
+        if before_filter != len(all_articles):
+            logger.info(f"📰 Filtered {before_filter - len(all_articles)} noise posts")
+
+        # Enrich: sentiment, tickers, relevance
+        for article in all_articles:
+            _enrich_article(article)
 
         # Deduplicate by ID
         seen = set()
@@ -243,6 +413,12 @@ class NewsAggregator:
             if article.id not in seen:
                 seen.add(article.id)
                 unique_articles.append(article)
+
+        # Sort by relevance (highest first), then by recency
+        unique_articles.sort(
+            key=lambda a: (a.relevance_score, a.published or datetime.min.replace(tzinfo=timezone.utc)),
+            reverse=True,
+        )
 
         # Store
         with self._lock:
