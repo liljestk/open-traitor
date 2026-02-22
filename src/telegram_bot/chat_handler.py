@@ -1337,6 +1337,7 @@ class TelegramChatHandler:
             messages=conv_messages,
             temperature=0.5,
             max_tokens=600,
+            agent_name="telegram_chat",
         )
 
         # Model responded with no tool calls — just return the text.
@@ -1367,6 +1368,7 @@ class TelegramChatHandler:
                             messages=conv_messages,
                             temperature=0.5,
                             max_tokens=600,
+                            agent_name="telegram_chat",
                         )
                         logger.debug("Re-answered with live price injection")
                         return final_text or "👍"
@@ -1406,6 +1408,7 @@ class TelegramChatHandler:
             messages=continuation_messages,
             temperature=0.5,
             max_tokens=600,
+            agent_name="telegram_chat",
         )
 
         # If the model wants to call MORE tools after the first batch (rare), execute
@@ -1463,6 +1466,7 @@ class TelegramChatHandler:
             user_message=text,
             temperature=0.5,
             max_tokens=600,
+            agent_name="telegram_chat",
         )
         return self._parse_and_execute_actions(raw)
 

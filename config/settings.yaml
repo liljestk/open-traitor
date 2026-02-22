@@ -75,6 +75,7 @@ llm:
     rpm_limit: 14
     daily_token_limit: 950000
     cooldown_seconds: 65
+    tier: free          # change to 'paid' when on a paid Gemini plan
     api_key_set: true
   - name: openai
     enabled: true
@@ -85,6 +86,7 @@ llm:
     rpm_limit: 450
     daily_token_limit: 0
     cooldown_seconds: 30
+    tier: free          # change to 'paid' when on a paid OpenAI plan
     api_key_set: false
   - name: ollama
     enabled: true

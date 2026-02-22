@@ -40,6 +40,7 @@ class LLMProvider:
     rpm_limit: int = 0          # 0 = no local RPM tracking
     daily_token_limit: int = 0  # 0 = unlimited
     cooldown_seconds: int = 60
+    tier: str = "free"          # "free" or "paid" — controls smart routing
     # Mutable tracking state
     cooldown_until: float = 0.0
     daily_tokens: int = 0
@@ -114,6 +115,7 @@ def build_providers(
                 max_retries=0,
             )
 
+        tier = pc.get("tier", "free")
         providers.append(LLMProvider(
             name=name,
             client=client,
@@ -122,9 +124,12 @@ def build_providers(
             rpm_limit=pc.get("rpm_limit", 0),
             daily_token_limit=pc.get("daily_token_limit", 0),
             cooldown_seconds=pc.get("cooldown_seconds", 60),
+            tier=tier,
         ))
 
-        logger.info(f"  Provider '{name}' ready | model={model} | local={is_local}")
+        logger.info(
+            f"  Provider '{name}' ready | model={model} | local={is_local} | tier={tier}"
+        )
 
     # Ensure at least one provider (Ollama fallback)
     if not providers:
@@ -154,7 +159,24 @@ class LLMClient:
     Tries providers in order. On rate-limit/quota errors, activates a cooldown
     on that provider and falls through to the next one. Local providers
     (Ollama) are always available as the final fallback.
+
+    Tier-aware smart routing:
+      - "paid" tier: all calls try cloud first (original behaviour).
+      - "free" tier: only high-priority calls (strategy, risk, telegram) try
+        cloud first; normal/low-priority calls prefer local, with cloud as
+        fallback only if local fails.
     """
+
+    # Agent name → priority mapping. Unknown agents default to "normal".
+    AGENT_PRIORITIES: dict[str, str] = {
+        "strategist":         "high",    # trade decisions – accuracy matters
+        "risk_manager":       "high",    # risk gating – correctness critical
+        "portfolio_rotator":  "high",    # portfolio-level rebalancing
+        "telegram_chat":      "high",    # user-facing interactive chat
+        "market_analyst":     "normal",  # runs per-pair each cycle, high volume
+        "executor":           "normal",  # mostly deterministic, LLM rarely used
+        "settings_advisor":   "low",     # periodic, non-urgent
+    }
 
     def __init__(
         self,
@@ -265,6 +287,49 @@ class LLMClient:
             f"⏸️ Provider '{p.name}' cooldown ({p.cooldown_seconds}s): {reason}"
         )
 
+    def _select_providers(
+        self, agent_name: Optional[str] = None, priority: Optional[str] = None,
+    ) -> list[LLMProvider]:
+        """Return the provider list in the best order for this call's priority.
+
+        On **paid** tier (any cloud provider): always cloud-first (original order).
+        On **free** tier:
+          - *high* priority  → cloud first, local fallback  (unchanged)
+          - *normal* / *low* → local first, cloud fallback  (saves quota)
+
+        Args:
+            agent_name: the calling agent (mapped via AGENT_PRIORITIES).
+            priority:   explicit override — if set, agent_name mapping is ignored.
+        """
+        with self._providers_lock:
+            providers = list(self._providers)
+
+        if not providers:
+            return providers
+
+        # Resolve priority
+        if priority is None:
+            priority = self.AGENT_PRIORITIES.get(agent_name or "", "normal")
+
+        # Check if ANY cloud provider is on a paid tier
+        any_paid = any(not p.is_local and p.tier == "paid" for p in providers)
+
+        # Paid tier or high-priority call → keep original order (cloud first)
+        if any_paid or priority == "high":
+            return providers
+
+        # Free tier + normal/low priority → local first, cloud as fallback
+        local = [p for p in providers if p.is_local]
+        cloud = [p for p in providers if not p.is_local]
+        reordered = local + cloud
+        if reordered != providers:
+            _agent = f" ({agent_name})" if agent_name else ""
+            logger.debug(
+                f"🔀 Smart routing{_agent}: local-first "
+                f"(priority={priority}, tier=free)"
+            )
+        return reordered
+
     @staticmethod
     def _is_rate_or_quota_error(exc: Exception) -> bool:
         """Check if an exception is a rate-limit or quota error."""
@@ -332,14 +397,14 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         span: Optional["SpanContext"] = None,
         agent_name: Optional[str] = None,
+        priority: Optional[str] = None,
     ) -> str:
         """Send a chat completion request, trying providers in chain order."""
         start_time = time.time()
         temp = temperature or self.temperature
         tokens = max_tokens or self.max_tokens
         last_error: Optional[Exception] = None
-        with self._providers_lock:
-            providers = list(self._providers)
+        providers = self._select_providers(agent_name=agent_name, priority=priority)
 
         for provider in providers:
             if not self._is_provider_available(provider):
@@ -448,6 +513,8 @@ class LLMClient:
         messages: Optional[list[dict]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        agent_name: Optional[str] = None,
+        priority: Optional[str] = None,
     ) -> tuple[Optional[str], list[dict], Optional[dict]]:
         """
         Send a chat completion with OpenAI-format tool definitions.
@@ -471,9 +538,8 @@ class LLMClient:
         if user_message:
             chat_messages.append({"role": "user", "content": user_message})
 
-        # H25 fix: snapshot provider list under lock (mirrors chat() fix H14)
-        with self._providers_lock:
-            providers = list(self._providers)
+        # Smart routing: reorder providers based on tier + priority
+        providers = self._select_providers(agent_name=agent_name, priority=priority)
 
         for provider in providers:
             if not self._is_provider_available(provider):
@@ -558,6 +624,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         span: Optional["SpanContext"] = None,
         agent_name: Optional[str] = None,
+        priority: Optional[str] = None,
     ) -> dict:
         """
         Send a chat request and parse the response as JSON.
@@ -574,6 +641,7 @@ class LLMClient:
             temperature=temperature,
             span=span,
             agent_name=agent_name,
+            priority=priority,
         )
 
         try:
@@ -809,6 +877,7 @@ class LLMClient:
                 "model": p.model,
                 "is_local": p.is_local,
                 "available": self._is_provider_available(p),
+                "tier": p.tier,
             }
             if not p.is_local:
                 status.update({
