@@ -901,14 +901,17 @@ Keep it under 10 lines. Be honest about losses."""
 
         # Parse cron expression as simple interval
         cron = sched.get("cron_expression", "")
-        if cron.endswith("h"):
-            interval_hours = int(cron[:-1])
-        elif cron.endswith("m"):
-            interval_hours = int(cron[:-1]) / 60
-        elif cron.endswith("d"):
-            interval_hours = int(cron[:-1]) * 24
-        else:
-            interval_hours = 1  # Default hourly
+        try:
+            if cron.endswith("h"):
+                interval_hours = int(cron[:-1])
+            elif cron.endswith("m"):
+                interval_hours = int(cron[:-1]) / 60
+            elif cron.endswith("d"):
+                interval_hours = int(cron[:-1]) * 24
+            else:
+                interval_hours = 1  # Default hourly
+        except (ValueError, TypeError):
+            interval_hours = 1  # M7: fallback to hourly on malformed cron
 
         return (now - last).total_seconds() >= interval_hours * 3600
 
@@ -1123,7 +1126,7 @@ class TelegramChatHandler:
              "get_news_summary"),
             (["stats", "performance", "how did"],
              "get_stats"),
-            (["high.?stakes"],
+            (["high stakes", "high-stakes", "highstakes"],
              "get_highstakes_status"),
         ]
 

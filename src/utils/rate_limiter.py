@@ -155,11 +155,14 @@ class RateLimiter:
 
 # Global rate limiter instance
 _global_limiter: Optional[RateLimiter] = None
+_global_limiter_lock = threading.Lock()  # M11: prevent TOCTOU race
 
 
 def get_rate_limiter() -> RateLimiter:
     """Get or create the global rate limiter."""
     global _global_limiter
     if _global_limiter is None:
-        _global_limiter = RateLimiter()
+        with _global_limiter_lock:
+            if _global_limiter is None:
+                _global_limiter = RateLimiter()
     return _global_limiter

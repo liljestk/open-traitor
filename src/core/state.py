@@ -327,20 +327,55 @@ class TradingState:
                     return trade
             return None
 
-    def update_partial_fill(self, trade_id: str, remaining_quantity: float) -> None:
-        """Update trade quantity after a partial sell (M12 fix: public API instead of _lock)."""
+    def update_partial_fill(self, trade_id: str, remaining_quantity: float, sold_quantity: float = 0.0) -> None:
+        """Update trade quantity after a partial sell (M12 fix: public API instead of _lock).
+
+        H5 fix: also deduct *sold_quantity* from self.positions so that position
+        tracking stays accurate between partial sell and full close.
+        """
         with self._lock:
             for t in self.trades:
                 if t.id == trade_id:
                     t.filled_quantity = remaining_quantity
+                    # H5: deduct sold portion from positions
+                    if sold_quantity > 0:
+                        current = self.positions.get(t.pair, 0)
+                        self.positions[t.pair] = max(0.0, current - sold_quantity)
                     return
+
+    def update_trade_fill(self, trade_id: str, filled_price: float, filled_quantity: float, fees: float, status=None) -> bool:
+        """Atomically update a trade's fill data under lock (H4 fix).
+
+        Returns True if the trade was found and updated.
+        """
+        from src.models.trade import TradeStatus
+        with self._lock:
+            for t in self.trades:
+                if t.id == trade_id:
+                    if status is not None:
+                        t.status = status
+                    t.filled_price = filled_price
+                    t.filled_quantity = filled_quantity
+                    t.fees = fees
+                    return True
+            return False
+
+    def mark_trade_status(self, trade_id: str, status) -> bool:
+        """Set a trade's status under lock (H4 fix for pending order lifecycle)."""
+        with self._lock:
+            for t in self.trades:
+                if t.id == trade_id:
+                    t.status = status
+                    return True
+            return False
 
     def reverse_trade_booking(self, trade) -> None:
         """Undo the position/cash changes from add_trade for a cancelled/failed order."""
         with self._lock:
             if trade.action.value == "buy":
-                self.positions[trade.pair] = (
-                    self.positions.get(trade.pair, 0) - trade.quantity
+                # M2 fix: clamp to zero to prevent negative positions
+                self.positions[trade.pair] = max(
+                    0.0, self.positions.get(trade.pair, 0) - trade.quantity
                 )
                 self.cash_balance += trade.value
             elif trade.action.value == "sell":

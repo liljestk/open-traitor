@@ -1044,7 +1044,7 @@ class Orchestrator:
         try:
             stop = self.trailing_stops.tighten_to_breakeven(pair)
             if stop:
-                entry = stop.entry_price
+                entry = stop["entry_price"]  # H3 fix: tighten_to_breakeven returns dict
                 msg = f"🎯 Dashboard tightened stop on {pair} to breakeven ({format_currency(entry)})"
                 logger.info(msg)
                 if self.telegram:

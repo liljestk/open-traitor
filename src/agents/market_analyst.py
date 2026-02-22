@@ -290,11 +290,11 @@ Provide your analysis as JSON."""
         if rsi_signal == "oversold":
             score += 2
         elif rsi_signal == "bearish":
-            score += 1
+            score -= 1
         elif rsi_signal == "overbought":
             score -= 2
         elif rsi_signal == "bullish":
-            score -= 1  # wait for pullback
+            score += 1
 
         macd_signal = indicators.get("macd_signal", "neutral")
         if "bullish" in macd_signal:

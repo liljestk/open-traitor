@@ -13,6 +13,7 @@ import Analytics from './pages/Analytics'
 import NewsFeed from './pages/NewsFeed'
 import Watchlist from './pages/Watchlist'
 import RiskExposure from './pages/RiskExposure'
+import SetupWizard from './pages/SetupWizard'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,6 +29,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <Routes>
+          <Route path="/setup" element={<SetupWizard />} />
           <Route element={<Layout />}>
             <Route index element={<CycleExplorer />} />
             <Route path="/cycle/:cycleId" element={<CyclePlayback />} />

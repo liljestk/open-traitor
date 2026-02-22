@@ -111,7 +111,9 @@ def health():
 @app.route("/health/components")
 def health_components():
     """Detailed component health."""
-    components = _health_state.get("components", {})
+    # H12: acquire lock before reading shared state
+    with _lock:
+        components = dict(_health_state.get("components", {}))
     return jsonify(components)
 
 

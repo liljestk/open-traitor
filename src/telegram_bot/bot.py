@@ -54,6 +54,7 @@ class TelegramBot:
         self._app = None
         self._thread: Optional[threading.Thread] = None
         self._running_event = threading.Event()
+        self._outbound_bot = None  # H8: reuse Bot instance for outbound messages
 
         # =====================================================================
         # AUTHORIZATION — STRICT USER ID ALLOWLIST
@@ -259,7 +260,11 @@ class TelegramBot:
             message = f"Button pressed: {data}"
 
         response = await self._get_response(message, user)
-        await query.edit_message_text(response, parse_mode="Markdown")
+        # M9: Markdown fallback for callback responses
+        try:
+            await query.edit_message_text(response, parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(response)
 
     # =========================================================================
     # Core Response Logic
@@ -327,6 +332,13 @@ class TelegramBot:
     # Outbound Messaging (thread-safe, called from orchestrator)
     # =========================================================================
 
+    def _get_outbound_bot(self):
+        """Return a reusable Bot instance for outbound messages (H8)."""
+        if self._outbound_bot is None:
+            from telegram import Bot
+            self._outbound_bot = Bot(token=self.bot_token)
+        return self._outbound_bot
+
     def send_message(self, text: str) -> None:
         """Send a message to the configured chat (thread-safe, uses library)."""
         try:
@@ -342,7 +354,7 @@ class TelegramBot:
                     except Exception:
                         await bot.send_message(chat_id=chat_id, text=chunk)
 
-            bot = Bot(token=self.bot_token)
+            bot = self._get_outbound_bot()
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
@@ -393,7 +405,7 @@ class TelegramBot:
                     reply_markup=keyboard,
                 )
 
-            bot = Bot(token=self.bot_token)
+            bot = self._get_outbound_bot()
             import asyncio
             try:
                 loop = asyncio.get_running_loop()

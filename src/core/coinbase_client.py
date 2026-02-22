@@ -230,6 +230,7 @@ class CoinbaseClient(ExchangeClient):
                 return candle_list
             except Exception as e:
                 logger.error(f"Error fetching candles for {product_id}: {e}")
+                return []  # H1 fix: never fall through to mock data in live mode
 
         return self._mock_candles(product_id, limit)
 
@@ -761,10 +762,12 @@ class CoinbaseClient(ExchangeClient):
     def get_portfolio_value(self) -> float:
         """Get total portfolio value in USD."""
         if self.paper_mode:
-            total = 0.0
-            for currency, amount in self._paper_balance.items():
-                total += self._currency_to_usd(currency, amount)
-            return total
+            # H2 fix: hold lock during iteration to prevent RuntimeError
+            with self._paper_balance_lock:
+                total = 0.0
+                for currency, amount in self._paper_balance.items():
+                    total += self._currency_to_usd(currency, amount)
+                return total
 
         accounts = self.get_accounts()
         total = 0.0

@@ -1083,10 +1083,12 @@ def update_llm_providers(
     if not ok:
         return False, err, []
 
-    cfg = load_settings(path)
-    llm_section = cfg.setdefault("llm", {})
-    llm_section["providers"] = providers
-    save_settings(cfg, path)
+    # H6 fix: single lock scope for load→modify→save to prevent TOCTOU
+    with _lock:
+        cfg = load_settings(path)
+        llm_section = cfg.setdefault("llm", {})
+        llm_section["providers"] = providers
+        save_settings(cfg, path)
 
     logger.warning(f"🔧 LLM providers updated: {[p.get('name') for p in providers]}")
     return True, "", providers

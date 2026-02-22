@@ -122,12 +122,15 @@ class RiskManagerAgent(BaseAgent):
             corr = 0.0
             if base_currency in correlation_matrix:
                 for existing_pair_key in correlation_matrix[base_currency]:
-                    if open_base in existing_pair_key:
+                    # H13: exact match to avoid substring collision (e.g. BTC vs WBTC)
+                    epk_base = existing_pair_key.split("-")[0] if "-" in existing_pair_key else existing_pair_key
+                    if open_base == epk_base:
                         corr = abs(correlation_matrix[base_currency].get(existing_pair_key, 0))
                         break
             # Also check reverse direction
             for existing_pair_key in correlation_matrix:
-                if open_base in existing_pair_key:
+                epk_base = existing_pair_key.split("-")[0] if "-" in existing_pair_key else existing_pair_key
+                if open_base == epk_base:
                     corr = max(corr, abs(
                         correlation_matrix.get(existing_pair_key, {}).get(base_currency, 0)
                     ))

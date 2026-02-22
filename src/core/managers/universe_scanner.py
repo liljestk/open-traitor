@@ -182,6 +182,10 @@ class UniverseScanner:
                 key=lambda kv: kv[1]["composite_score"],
                 reverse=True,
             )[:10]
+            # M4: pass structured list for proper JSON serialisation
+            top_movers_list = [
+                {"pair": p, "score": d["composite_score"]} for p, d in top_movers
+            ]
             top_movers_str = ", ".join(
                 f"{p}={d['composite_score']}" for p, d in top_movers
             )
@@ -190,7 +194,7 @@ class UniverseScanner:
                     universe_size=len(orch._pair_universe),
                     scanned_pairs=len(scan_results),
                     results_json=scan_results,
-                    top_movers=top_movers_str,
+                    top_movers=top_movers_list,
                     summary_text=self.get_scan_summary(),
                 )
             except Exception as e:
@@ -264,12 +268,18 @@ class UniverseScanner:
 
         try:
             # C10 fix: LLMClient has no generate() method; use async chat()
-            response = orch._loop.run_until_complete(orch.llm.chat(
-                system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
-                user_message=prompt,
-                temperature=0.2,
-                max_tokens=200,
-            ))
+            # C1 fix: use run_coroutine_threadsafe — may be called from non-loop thread
+            import asyncio as _asyncio
+            future = _asyncio.run_coroutine_threadsafe(
+                orch.llm.chat(
+                    system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
+                    user_message=prompt,
+                    temperature=0.2,
+                    max_tokens=200,
+                ),
+                orch._loop,
+            )
+            response = future.result(timeout=60)
 
             # Parse JSON array from response
             text = response.strip()

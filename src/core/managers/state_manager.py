@@ -80,7 +80,9 @@ class StateManager:
                     continue
                 validated[trade_id] = approval
             discarded = len(loaded) - len(validated)
-            orch._pending_approvals = validated
+            # M3: assign under lock to avoid race with approve/reject/prune
+            with orch._pending_approvals_lock:
+                orch._pending_approvals = validated
             logger.info(
                 f"Loaded {len(validated)} pending approvals from Redis "
                 f"(discarded {discarded} invalid)"

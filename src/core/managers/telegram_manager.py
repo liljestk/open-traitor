@@ -356,15 +356,16 @@ class TelegramManager:
             except (ValueError, TypeError) as e:
                 return {"ok": False, "error": str(e)}
             old_val = trading_cfg.get(param)
-            trading_cfg[param] = new_val
-            if param == "interval":
-                orch.interval = new_val
-            logger.warning(f"🔧 TRADING PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
-            # Persist to settings.yaml
+            # M5: persist first, apply to runtime only on success
             try:
                 sm.update_section("trading", {param: new_val})
             except Exception as e:
                 logger.error(f"Failed to persist trading param to disk: {e}")
+                return {"ok": False, "error": f"Persist failed: {e}"}
+            trading_cfg[param] = new_val
+            if param == "interval":
+                orch.interval = new_val
+            logger.warning(f"🔧 TRADING PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
             return {"ok": True, "param": param, "old": old_val, "new": new_val}
 
         ch.register_function("update_trading_param", _update_trading_param)
@@ -389,16 +390,17 @@ class TelegramManager:
             except (ValueError, TypeError) as e:
                 return {"ok": False, "error": str(e)}
             old_val = risk_cfg.get(param)
+            # M5: persist first, apply to runtime only on success
+            try:
+                sm.update_section("risk", {param: new_val})
+            except Exception as e:
+                logger.error(f"Failed to persist risk param to disk: {e}")
+                return {"ok": False, "error": f"Persist failed: {e}"}
             risk_cfg[param] = new_val
             # Propagate trailing_stop_pct to the TrailingStopManager
             if param == "trailing_stop_pct":
                 orch.trailing_stops.default_trail_pct = new_val
             logger.warning(f"🔧 RISK PARAM UPDATED (runtime) | {param}: {old_val!r} → {new_val!r}")
-            # Persist to settings.yaml
-            try:
-                sm.update_section("risk", {param: new_val})
-            except Exception as e:
-                logger.error(f"Failed to persist risk param to disk: {e}")
             return {"ok": True, "param": param, "old": old_val, "new": new_val}
 
         ch.register_function("update_risk_param", _update_risk_param)
@@ -796,7 +798,12 @@ class TelegramManager:
         if approved is not None:
             # Clear needs_approval so the executor does not short-circuit again
             approved = {**approved, "needs_approval": False}
-            result = orch._loop.run_until_complete(orch.executor.execute({"approved_trade": approved}))  # M31 fix
+            # C1 fix: use run_coroutine_threadsafe — we're on a Telegram thread, not the loop owner
+            import asyncio as _asyncio
+            future = _asyncio.run_coroutine_threadsafe(
+                orch.executor.execute({"approved_trade": approved}), orch._loop
+            )
+            result = future.result(timeout=60)
             if result.get("executed"):
                 return "✅ Trade executed successfully!"
             return f"❌ Execution failed: {result.get('error', 'Unknown')}"
@@ -883,11 +890,17 @@ class TelegramManager:
 
         if not orch.rotator:
             return "🔄 Rotation not enabled."
-        proposals = orch._loop.run_until_complete(orch.rotator.evaluate_rotation(
-            held_pairs=held_pairs,
-            all_pairs=orch.pairs,
-            current_prices=orch.state.current_prices,
-            portfolio_value=orch.state.portfolio_value,
-        ))
+        # C1 fix: use run_coroutine_threadsafe — we're on a Telegram thread
+        import asyncio as _asyncio
+        future = _asyncio.run_coroutine_threadsafe(
+            orch.rotator.evaluate_rotation(
+                held_pairs=held_pairs,
+                all_pairs=orch.pairs,
+                current_prices=orch.state.current_prices,
+                portfolio_value=orch.state.portfolio_value,
+            ),
+            orch._loop,
+        )
+        proposals = future.result(timeout=60)
 
         return orch.rotator.get_rotation_summary(proposals)

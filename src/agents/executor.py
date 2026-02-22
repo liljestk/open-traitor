@@ -244,10 +244,7 @@ class ExecutorAgent(BaseAgent):
                     "trade": trade.model_dump(mode="json"),
                     "order": order,
                     "order_type": "limit" if use_limit else "market",
-                    "slippage_pct": (
-                        (trade.filled_price - expected_price) / expected_price * 100
-                        if expected_price > 0 else 0
-                    ),
+                    "slippage_pct": slippage_pct if expected_price > 0 else 0,
                 }
             else:
                 trade.status = TradeStatus.FAILED
@@ -323,7 +320,8 @@ class ExecutorAgent(BaseAgent):
             # Update trade state via public method (M12 fix: don't access state._lock directly)
             remaining = max(0.0, (trade.filled_quantity or trade.quantity) - quantity)
             if remaining > 0:
-                self.state.update_partial_fill(trade.id, remaining)
+                # H5 fix: pass sold_quantity so positions are deducted
+                self.state.update_partial_fill(trade.id, remaining, sold_quantity=quantity)
             else:
                 # Position fully exited by tiers
                 pass
@@ -407,10 +405,15 @@ class ExecutorAgent(BaseAgent):
             close_price = float(order.get("average_filled_price", price))
             fees = float(order.get("fee", 0))
 
-            self.state.close_trade(trade.id, close_price, fees)
-
-            if trade.pnl and trade.pnl < 0:
-                self.rules.record_loss(abs(trade.pnl))
+            # C2 fix: check return value — exchange sell already placed
+            closed = self.state.close_trade(trade.id, close_price, fees)
+            if not closed:
+                self.logger.error(
+                    f"❌ close_trade returned None for {trade.id} ({trade.pair}) — "
+                    "exchange sold but state not updated; potential divergence"
+                )
+            elif closed.pnl and closed.pnl < 0:
+                self.rules.record_loss(abs(closed.pnl))
 
             self.logger.info(
                 f"Position closed ({reason}): {trade.to_summary()}"
@@ -469,7 +472,8 @@ class ExecutorAgent(BaseAgent):
                         f"⚠️ Order {trade.coinbase_order_id} for {trade.pair} "
                         "not found — marking as FAILED"
                     )
-                    trade.status = TradeStatus.FAILED
+                    # H4 fix: use state method instead of direct mutation
+                    self.state.mark_trade_status(trade.id, TradeStatus.FAILED)
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
@@ -482,31 +486,36 @@ class ExecutorAgent(BaseAgent):
                 status = order.get("status", "")
 
                 if status == "FILLED":
-                    # Order filled — update trade and record
-                    trade.status = TradeStatus.FILLED
-                    trade.filled_price = float(order.get("average_filled_price", trade.price))
-                    trade.filled_quantity = float(order.get("filled_size", trade.quantity))
-                    trade.fees = float(order.get("fee", 0))
+                    # H4 fix: update trade atomically under state lock
+                    filled_price = float(order.get("average_filled_price", trade.price))
+                    filled_quantity = float(order.get("filled_size", trade.quantity))
+                    fees = float(order.get("fee", 0))
+                    self.state.update_trade_fill(
+                        trade.id, filled_price, filled_quantity, fees,
+                        status=TradeStatus.FILLED,
+                    )
 
                     # Record spend in rules (for daily limit tracking)
-                    quote_amount = trade.filled_price * trade.filled_quantity
+                    quote_amount = filled_price * filled_quantity
                     self.rules.record_trade(quote_amount, action=trade.action.value)
 
                     self.logger.info(
                         f"✅ Limit order FILLED: {trade.pair} @ "
-                        f"{trade.filled_price:,.2f} (qty: {trade.filled_quantity:.6f})"
+                        f"{filled_price:,.2f} (qty: {filled_quantity:.6f})"
                     )
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
                         "order_id": trade.coinbase_order_id,
                         "action": "filled",
-                        "filled_price": trade.filled_price,
-                        "filled_quantity": trade.filled_quantity,
+                        "filled_price": filled_price,
+                        "filled_quantity": filled_quantity,
                     })
 
                 elif status in ("CANCELLED", "FAILED", "EXPIRED"):
-                    trade.status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
+                    # H4 fix: set status under lock
+                    new_status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
+                    self.state.mark_trade_status(trade.id, new_status)
                     # Reverse the position/cash booking from add_trade
                     self.state.reverse_trade_booking(trade)
                     self.logger.info(

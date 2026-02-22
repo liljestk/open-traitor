@@ -321,9 +321,11 @@ class CoinbaseWebSocketFeed:
             for channel in ("ticker", "market_trades"):
                 if to_remove:
                     timestamp = str(int(time.time()))
+                    # H11: use sorted product_ids to match signature computation
+                    sorted_remove = sorted(to_remove)
                     unsub = {
                         "type": "unsubscribe",
-                        "product_ids": list(to_remove),
+                        "product_ids": sorted_remove,
                         "channel": channel,
                     }
                     if self.api_key:
@@ -345,9 +347,11 @@ class CoinbaseWebSocketFeed:
 
                 if to_add:
                     timestamp = str(int(time.time()))
+                    # H11: use sorted product_ids to match signature computation
+                    sorted_add = sorted(to_add)
                     sub = {
                         "type": "subscribe",
-                        "product_ids": list(to_add),
+                        "product_ids": sorted_add,
                         "channel": channel,
                     }
                     if self.api_key:

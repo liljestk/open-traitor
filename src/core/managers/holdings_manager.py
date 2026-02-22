@@ -14,6 +14,7 @@ from src.core.coinbase_client import (
     _KNOWN_FIAT, _ALL_STABLECOINS, _EUR_EQUIVALENTS, _KNOWN_QUOTES, _get_fiat_rate_usd,
 )
 from src.utils.logger import get_logger
+from src.utils.rate_limiter import get_rate_limiter as _get_rate_limiter
 
 if TYPE_CHECKING:
     from src.core.orchestrator import Orchestrator
@@ -120,6 +121,7 @@ class HoldingsManager:
                     native_pair = f"{currency}-{native}"
                     if tracked_pair:
                         try:
+                            _get_rate_limiter().wait("coinbase_rest")  # M8
                             price = orch.exchange.get_current_price(tracked_pair)
                             if price > 0:
                                 prices_by_pair[tracked_pair] = price
@@ -129,6 +131,7 @@ class HoldingsManager:
                     elif native != "USD":
                         # Try the native pair even if not tracked
                         try:
+                            _get_rate_limiter().wait("coinbase_rest")  # M8
                             price = orch.exchange.get_current_price(native_pair)
                             if price > 0:
                                 prices_by_pair[native_pair] = price
