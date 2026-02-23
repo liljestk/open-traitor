@@ -1202,6 +1202,9 @@ def get_executive_summary():
 from src.dashboard.routes.planning import router as _planning_router
 app.include_router(_planning_router)
 
+from src.dashboard.routes.settings import router as _settings_router
+app.include_router(_settings_router)
+
 
 # ---------------------------------------------------------------------------
 # WebSocket — Live LLM event stream
