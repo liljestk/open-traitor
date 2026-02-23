@@ -678,10 +678,14 @@ function StepTradingMode({ state, update }: { state: WizardState; update: (p: Pa
       <SectionHeader icon={<Settings2 size={22} />} title="Trading Mode" subtitle="Choose how the agent trades. You can always switch modes later from the Settings page." />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         {([
-          { mode: 'paper' as const, icon: MonitorDot, title: 'Paper Trading', color: '#22c55e', tag: 'RECOMMENDED',
-            desc: 'Simulated trading with no real money. Perfect for testing strategies and building confidence. All trades tracked like real ones.' },
-          { mode: 'live' as const, icon: Zap, title: 'Live Trading', color: '#ef4444', tag: '',
-            desc: 'Real money trading on the exchange. The agent executes actual buy/sell orders. Make sure you understand the risks.' },
+          {
+            mode: 'paper' as const, icon: MonitorDot, title: 'Paper Trading', color: '#22c55e', tag: 'RECOMMENDED',
+            desc: 'Simulated trading with no real money. Perfect for testing strategies and building confidence. All trades tracked like real ones.'
+          },
+          {
+            mode: 'live' as const, icon: Zap, title: 'Live Trading', color: '#ef4444', tag: '',
+            desc: 'Real money trading on the exchange. The agent executes actual buy/sell orders. Make sure you understand the risks.'
+          },
         ]).map(m => {
           const Icon = m.icon
           const active = state.tradingMode === m.mode
@@ -962,19 +966,22 @@ function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<Wi
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 28 }}>
         {([
-          { key: 'gemini' as const, enabled: state.geminiEnabled, apiKey: state.geminiApiKey,
+          {
+            key: 'gemini' as const, enabled: state.geminiEnabled, apiKey: state.geminiApiKey,
             enabledKey: 'geminiEnabled', apiKeyKey: 'geminiApiKey',
             icon: Zap, color: '#3b82f6', title: 'Google Gemini', model: 'gemini-2.0-flash', rate: '14 RPM free',
             placeholder: 'AIza...', steps: ['Go to aistudio.google.com/app/apikey', 'Click "Create API key"', 'Copy the key'],
             link: { url: 'https://aistudio.google.com/app/apikey', label: 'Get key' },
           },
-          { key: 'openrouter' as const, enabled: state.openrouterEnabled, apiKey: state.openrouterApiKey,
+          {
+            key: 'openrouter' as const, enabled: state.openrouterEnabled, apiKey: state.openrouterApiKey,
             enabledKey: 'openrouterEnabled', apiKeyKey: 'openrouterApiKey',
             icon: Cloud, color: '#f59e0b', title: 'OpenRouter', model: '200+ models (free tier)', rate: 'Free models available',
             placeholder: 'sk-or-...', steps: ['Go to openrouter.ai/keys', 'Sign in and click "Create Key"', 'Copy the key (starts with sk-or-)'],
             link: { url: 'https://openrouter.ai/keys', label: 'Get key' },
           },
-          { key: 'openai' as const, enabled: state.openaiEnabled, apiKey: state.openaiApiKey,
+          {
+            key: 'openai' as const, enabled: state.openaiEnabled, apiKey: state.openaiApiKey,
             enabledKey: 'openaiEnabled', apiKeyKey: 'openaiApiKey',
             icon: Cloud, color: '#10b981', title: 'OpenAI', model: 'gpt-4o-mini', rate: '450 RPM',
             placeholder: 'sk-...', steps: ['Go to platform.openai.com/api-keys', 'Click "Create new secret key"', 'Copy the key (starts with sk-)'],
@@ -1247,9 +1254,56 @@ function StepNews({ state, update, onSkip }: { state: WizardState; update: (p: P
   )
 }
 
-function StepReview({ state, stepsWithValidation: _stepsWithValidation }: { state: WizardState; stepsWithValidation: { id: string; title: string; validation: StepValidation }[] }) {
+function StepReview({ state, initialServerState, stepsWithValidation: _stepsWithValidation }: { state: WizardState; initialServerState: WizardState | null; stepsWithValidation: { id: string; title: string; validation: StepValidation }[] }) {
   const [expandedEnv, setExpandedEnv] = useState(false)
   const envPreview = useMemo(() => generateEnvContent(state), [state])
+
+  const changes = useMemo(() => {
+    if (!initialServerState) return null
+    const diffs: { label: string; oldValue: string; newValue: string }[] = []
+
+    // Exchanges
+    const wasEx = [
+      initialServerState.exchanges.coinbase ? 'Coinbase' : null,
+      initialServerState.exchanges.nordnet ? 'Nordnet' : null,
+      initialServerState.exchanges.ibkr ? 'IBKR' : null,
+    ].filter(Boolean).join(' + ') || 'None'
+    const nowEx = [
+      state.exchanges.coinbase ? 'Coinbase' : null,
+      state.exchanges.nordnet ? 'Nordnet' : null,
+      state.exchanges.ibkr ? 'IBKR' : null,
+    ].filter(Boolean).join(' + ') || 'None'
+    if (wasEx !== nowEx) diffs.push({ label: 'Exchanges', oldValue: wasEx, newValue: nowEx })
+
+    // Trading Mode
+    if (initialServerState.tradingMode !== state.tradingMode) {
+      diffs.push({ label: 'Trading Mode', oldValue: initialServerState.tradingMode, newValue: state.tradingMode })
+    }
+
+    // Crypto Pairs
+    const wasCrypto = initialServerState.cryptoPairs.join(', ') || 'None'
+    const nowCrypto = state.cryptoPairs.join(', ') || 'None'
+    if (wasCrypto !== nowCrypto) diffs.push({ label: 'Crypto Pairs', oldValue: wasCrypto, newValue: nowCrypto })
+
+    // Stock Pairs
+    const wasStocks = initialServerState.stockPairs.join(', ') || 'None'
+    const nowStocks = state.stockPairs.join(', ') || 'None'
+    if (wasStocks !== nowStocks) diffs.push({ label: 'Stock Pairs', oldValue: wasStocks, newValue: nowStocks })
+
+    // IBKR Pairs
+    const wasIbkr = initialServerState.ibkrPairs.join(', ') || 'None'
+    const nowIbkr = state.ibkrPairs.join(', ') || 'None'
+    if (wasIbkr !== nowIbkr) diffs.push({ label: 'IBKR Pairs', oldValue: wasIbkr, newValue: nowIbkr })
+
+    // LLM Models
+    if (initialServerState.ollamaModel !== state.ollamaModel) diffs.push({ label: 'Ollama Model', oldValue: initialServerState.ollamaModel || 'None', newValue: state.ollamaModel || 'None' })
+
+    const wasLlm = [initialServerState.geminiEnabled && 'Gemini', initialServerState.openrouterEnabled && 'OpenRouter', initialServerState.openaiEnabled && 'OpenAI'].filter(Boolean).join(', ') || 'None'
+    const nowLlm = [state.geminiEnabled && 'Gemini', state.openrouterEnabled && 'OpenRouter', state.openaiEnabled && 'OpenAI'].filter(Boolean).join(', ') || 'None'
+    if (wasLlm !== nowLlm) diffs.push({ label: 'Cloud LLMs', oldValue: wasLlm, newValue: nowLlm })
+
+    return diffs.length > 0 ? diffs : null
+  }, [state, initialServerState])
 
   const sections = useMemo(() => {
     const s: { title: string; icon: ReactNode; items: { label: string; value: string; ok: boolean }[] }[] = []
@@ -1272,11 +1326,13 @@ function StepReview({ state, stepsWithValidation: _stepsWithValidation }: { stat
     }
 
     if (state.exchanges.ibkr) {
-      s.push({ title: 'IBKR Connection', icon: <BarChart3 size={14} />, items: [
-        { label: 'Gateway', value: `${state.ibkrHost}:${state.ibkrPort}`, ok: !!state.ibkrHost && !!state.ibkrPort },
-        { label: 'Client ID', value: state.ibkrClientId || '1', ok: true },
-        { label: 'Currency', value: state.ibkrCurrency, ok: true },
-      ] })
+      s.push({
+        title: 'IBKR Connection', icon: <BarChart3 size={14} />, items: [
+          { label: 'Gateway', value: `${state.ibkrHost}:${state.ibkrPort}`, ok: !!state.ibkrHost && !!state.ibkrPort },
+          { label: 'Client ID', value: state.ibkrClientId || '1', ok: true },
+          { label: 'Currency', value: state.ibkrCurrency, ok: true },
+        ]
+      })
     }
 
     const llm: { label: string; value: string; ok: boolean }[] = []
@@ -1323,7 +1379,25 @@ function StepReview({ state, stepsWithValidation: _stepsWithValidation }: { stat
 
       {!allOk && <Warning>Some items need attention (marked in yellow). You can still save and fix them later.</Warning>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: allOk ? 0 : 16 }}>
+      {changes && (
+        <div style={{ ...card, padding: 16, marginBottom: 16, marginTop: allOk ? 0 : 16, borderColor: '#3b82f6', background: 'rgba(59,130,246,0.05)' }}>
+          <h4 style={{ margin: '0 0 10px 0', fontSize: 13, fontWeight: 700, color: '#60a5fa', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Activity size={14} /> Changes from current setup
+          </h4>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {changes.map(diff => (
+              <div key={diff.label} style={{ fontSize: 12 }}>
+                <strong style={{ color: '#c9d1d9' }}>{diff.label}:&nbsp;</strong>
+                <span style={{ color: '#ef4444', textDecoration: 'line-through' }}>{diff.oldValue}</span>
+                <span style={{ color: '#8b949e', margin: '0 4px' }}>&rarr;</span>
+                <span style={{ color: '#4ade80' }}>{diff.newValue}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: (allOk && !changes) ? 0 : 16 }}>
         {sections.map(sec => (
           <div key={sec.title} style={{ ...card, padding: 16 }}>
             <h4 style={{ margin: '0 0 10px 0', fontSize: 13, fontWeight: 700, color: '#c9d1d9', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1510,6 +1584,7 @@ export default function SetupWizard() {
     try { const s = localStorage.getItem(STORAGE_KEY); return s ? { ...INITIAL_STATE, ...JSON.parse(s) } : INITIAL_STATE }
     catch { return INITIAL_STATE }
   })
+  const [initialServerState, setInitialServerState] = useState<WizardState | null>(null)
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -1521,28 +1596,29 @@ export default function SetupWizard() {
   // Load live config from server on mount
   useEffect(() => {
     let cancelled = false
-    ;(async () => {
-      try {
-        const res = await fetch('/api/setup')
-        if (!res.ok) throw new Error('fetch failed')
-        const data = await res.json()
-        if (!cancelled && data?.exists) {
-          setState(prev => ({
-            ...prev,
-            ...data,
-            // Ensure nested objects merge properly
-            exchanges: { ...prev.exchanges, ...(data.exchanges || {}) },
-            infraSecrets: data.infraSecrets || {},
-          }))
-          // Skip welcome step — go directly to Exchange
-          setStep(1)
+      ; (async () => {
+        try {
+          const res = await fetch('/api/setup')
+          if (!res.ok) throw new Error('fetch failed')
+          const data = await res.json()
+          if (!cancelled && data?.exists) {
+            const loadedState = {
+              ...INITIAL_STATE,
+              ...data,
+              exchanges: { ...INITIAL_STATE.exchanges, ...(data.exchanges || {}) },
+              infraSecrets: data.infraSecrets || {},
+            };
+            setState(prev => ({ ...prev, ...loadedState }))
+            setInitialServerState(loadedState)
+            // Skip welcome step — go directly to Exchange
+            setStep(1)
+          }
+        } catch {
+          // Server unreachable or no config — stay on welcome with defaults
+        } finally {
+          if (!cancelled) setLoading(false)
         }
-      } catch {
-        // Server unreachable or no config — stay on welcome with defaults
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
+      })()
     return () => { cancelled = true }
   }, [])
 
@@ -1775,7 +1851,7 @@ export default function SetupWizard() {
       case 'llm': return <StepLLM {...props} />
       case 'telegram': return <StepTelegram {...props} onSkip={goNext} />
       case 'news': return <StepNews {...props} onSkip={goNext} />
-      case 'review': return <StepReview state={state} stepsWithValidation={stepsWithValidation} />
+      case 'review': return <StepReview state={state} initialServerState={initialServerState} stepsWithValidation={stepsWithValidation} />
       default: return null
     }
   }
@@ -1847,7 +1923,7 @@ export default function SetupWizard() {
                   )}
                   <button
                     type="button"
-                    onClick={() => { if (i <= step) { setStep(i); setStepKey(k => k + 1); mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' }) } }}
+                    onClick={() => { setStep(i); setStepKey(k => k + 1); mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' }) }}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10,
                       width: '100%', padding: '9px 12px', borderRadius: 8,
@@ -1855,9 +1931,9 @@ export default function SetupWizard() {
                       border: isCurrent ? '1px solid rgba(34,197,94,0.15)' : '1px solid transparent',
                       color: isCurrent ? '#22c55e' : isDone ? '#4ade80' : '#6e7681',
                       fontSize: 13, fontWeight: isCurrent ? 600 : 400,
-                      cursor: i <= step ? 'pointer' : 'default',
+                      cursor: 'pointer',
                       textAlign: 'left', marginBottom: 2,
-                      opacity: i > step ? 0.4 : 1, transition: 'all 0.15s',
+                      opacity: 1, transition: 'all 0.15s',
                     }}
                   >
                     <div style={{
