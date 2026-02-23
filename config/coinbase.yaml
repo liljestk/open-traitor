@@ -46,7 +46,8 @@ fear_greed:
 fees:
   maker_fee_pct: 0.004
   min_gain_after_fees_pct: 0.005
-  min_trade_quote: 50
+  min_trade_quote: 1.0
+  min_trade_pct: 0.01
   model_type: crypto_percentage
   safety_margin: 1.5
   swap_cooldown_seconds: 3600

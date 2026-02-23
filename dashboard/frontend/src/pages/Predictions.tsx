@@ -2,23 +2,30 @@
  * Predictions vs Actuals — Signal accuracy analysis with charts.
  * Shows how well the AI market analyst predicts price movements.
  * Separated by asset class (Crypto / Equity).
+ * Includes per-pair prediction overlay chart.
  */
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import relativeTime from 'dayjs/plugin/relativeTime'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
-  Cell, AreaChart, Area,
+  Cell, AreaChart, Area, ComposedChart, Scatter, ReferenceLine,
 } from 'recharts'
-import { Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2, Zap, Clock, Layers } from 'lucide-react'
 import {
-  fetchPredictionAccuracy, fetchTrackedPairs,
+  Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2,
+  Zap, Clock, Layers, Eye, Search,
+} from 'lucide-react'
+import {
+  fetchPredictionAccuracy, fetchTrackedPairs, fetchPairPredictionHistory,
   type PredictionAccuracyData, type TrackedPairsData,
 } from '../api'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+
+dayjs.extend(relativeTime)
 
 const TIME_RANGES = [
   { label: '7d', days: 7 },
@@ -104,7 +111,9 @@ function filterByAsset(data: PredictionAccuracyData, tab: string): PredictionAcc
 
 // ── LLM-Tracked Pairs Section ──────────────────────────────────────────────
 
-function TrackedPairsSection({ data, assetTab }: { data: TrackedPairsData; assetTab: string }) {
+function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
+  data: TrackedPairsData; assetTab: string; onSelectPair: (pair: string) => void; selectedPair: string | null
+}) {
   const pairs = assetTab === 'equity' ? data.equity
     : assetTab === 'crypto' ? data.crypto
     : [...data.crypto, ...data.equity]
@@ -123,21 +132,208 @@ function TrackedPairsSection({ data, assetTab }: { data: TrackedPairsData; asset
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
       {pairs.sort((a, b) => b.prediction_count - a.prediction_count).map((p) => {
         const isEquity = classifyPair(p.pair) === 'equity'
+        const isSelected = selectedPair === p.pair
         return (
-          <div key={p.pair} className="rounded-lg border border-gray-800 bg-gray-900/40 p-2.5 hover:border-gray-700 transition-colors">
+          <button
+            key={p.pair}
+            onClick={() => onSelectPair(p.pair)}
+            className={`rounded-lg border p-2.5 transition-colors text-left ${
+              isSelected
+                ? 'border-brand-500 bg-brand-900/30 ring-1 ring-brand-500/50'
+                : 'border-gray-800 bg-gray-900/40 hover:border-gray-700'
+            }`}
+          >
             <div className="flex items-center gap-1.5 mb-1">
               <span className={`w-1.5 h-1.5 rounded-full ${isEquity ? 'bg-blue-400' : 'bg-green-400'}`} />
               <span className="text-xs font-medium text-gray-200 truncate">{p.pair}</span>
+              {isSelected && <Eye size={10} className="text-brand-400 ml-auto flex-shrink-0" />}
             </div>
             <p className="text-[10px] text-gray-500">
               {p.prediction_count} predictions
             </p>
             <p className="text-[10px] text-gray-600">
-              Last: {dayjs(p.last_predicted).fromNow?.() ?? dayjs(p.last_predicted).format('MMM DD HH:mm')}
+              Last: {dayjs(p.last_predicted).fromNow()}
             </p>
-          </div>
+          </button>
         )
       })}
+    </div>
+  )
+}
+
+// ── Prediction Overlay Chart ───────────────────────────────────────────────
+
+const OVERLAY_TIME_RANGES = [
+  { label: '1d', days: 1 },
+  { label: '7d', days: 7 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+]
+
+function PredictionOverlayChart({ pair }: { pair: string }) {
+  const [overlayDays, setOverlayDays] = useState(7)
+
+  const { data: history, isLoading } = useQuery({
+    queryKey: ['pair-prediction-history', pair, overlayDays],
+    queryFn: () => fetchPairPredictionHistory(pair, overlayDays),
+    enabled: !!pair,
+    refetchInterval: 120_000,
+  })
+
+  if (isLoading) return <SkeletonBlock className="h-[350px]" />
+
+  if (!history || !history.price_history.length) {
+    return <EmptyState icon="chart" title={`No price data for ${pair}`} description="Price history will appear as the bot collects data." />
+  }
+
+  // Build merged chart data: prices + prediction markers
+  const chartData = history.price_history.map((ph) => ({
+    ts: dayjs(ph.ts).format(overlayDays <= 1 ? 'HH:mm' : overlayDays <= 7 ? 'ddd HH:mm' : 'MMM DD'),
+    fullTs: ph.ts,
+    price: ph.price,
+    buyMarker: undefined as number | undefined,
+    sellMarker: undefined as number | undefined,
+  }))
+
+  // Overlay prediction markers on closest price points
+  for (const pred of history.predictions) {
+    const predTime = dayjs(pred.ts)
+    let closestIdx = 0
+    let closestDiff = Infinity
+    for (let i = 0; i < chartData.length; i++) {
+      const diff = Math.abs(dayjs(chartData[i].fullTs).diff(predTime, 'minute'))
+      if (diff < closestDiff) {
+        closestDiff = diff
+        closestIdx = i
+      }
+    }
+    if (closestDiff < 120) { // within 2 hours
+      if (pred.is_bullish) {
+        chartData[closestIdx].buyMarker = pred.entry_price
+      } else {
+        chartData[closestIdx].sellMarker = pred.entry_price
+      }
+    }
+  }
+
+  // Stats for this pair
+  const bullish = history.predictions.filter(p => p.is_bullish).length
+  const bearish = history.predictions.filter(p => !p.is_bullish).length
+  const evaluatedPreds = history.predictions.filter(p => p.outcomes['24h'] || p.outcomes['1h'])
+  const correctPreds = evaluatedPreds.filter(p =>
+    (p.outcomes['24h']?.correct) || (p.outcomes['1h']?.correct)
+  )
+  const accuracy = evaluatedPreds.length > 0
+    ? Math.round(correctPreds.length / evaluatedPreds.length * 1000) / 10
+    : null
+
+  // Price range for Y axis domain
+  const prices = chartData.map(d => d.price).filter(Boolean)
+  const minPrice = Math.min(...prices) * 0.998
+  const maxPrice = Math.max(...prices) * 1.002
+
+  // TP/SL reference lines from the latest prediction
+  const latestPred = history.predictions[history.predictions.length - 1]
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className="flex gap-1">
+            {OVERLAY_TIME_RANGES.map((r) => (
+              <button
+                key={r.days}
+                onClick={() => setOverlayDays(r.days)}
+                className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${
+                  overlayDays === r.days
+                    ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
+                    : 'bg-gray-800/50 text-gray-500 border border-gray-800 hover:border-gray-700'
+                }`}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-[10px] text-gray-500">
+            {history.total_predictions} predictions · {accuracy != null ? `${accuracy}% accurate` : 'pending eval'}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-[10px]">
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-green-500" /> Buy ({bullish})
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-red-500" /> Sell ({bearish})
+          </span>
+        </div>
+      </div>
+
+      <ResponsiveContainer width="100%" height={320}>
+        <ComposedChart data={chartData} margin={{ top: 10, right: 15, bottom: 0, left: 5 }}>
+          <defs>
+            <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.2} />
+              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+          <XAxis
+            dataKey="ts"
+            tick={{ fontSize: 9, fill: '#6e7681' }}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            tick={{ fontSize: 9, fill: '#6e7681' }}
+            domain={[minPrice, maxPrice]}
+            tickFormatter={(v: number) => v < 1 ? v.toFixed(4) : v < 100 ? v.toFixed(2) : v.toFixed(0)}
+          />
+          <Tooltip
+            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
+            formatter={(value: any, name: string | undefined) => {
+              if (name === 'price') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Price']
+              if (name === 'buyMarker') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Buy Signal']
+              if (name === 'sellMarker') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Sell Signal']
+              return [value, name]
+            }}
+          />
+          {latestPred?.suggested_tp && (
+            <ReferenceLine
+              y={latestPred.suggested_tp}
+              stroke="#22c55e"
+              strokeDasharray="5 5"
+              strokeOpacity={0.5}
+              label={{ value: 'TP', fill: '#22c55e', fontSize: 9, position: 'right' }}
+            />
+          )}
+          {latestPred?.suggested_sl && (
+            <ReferenceLine
+              y={latestPred.suggested_sl}
+              stroke="#ef4444"
+              strokeDasharray="5 5"
+              strokeOpacity={0.5}
+              label={{ value: 'SL', fill: '#ef4444', fontSize: 9, position: 'right' }}
+            />
+          )}
+          <Area
+            type="monotone"
+            dataKey="price"
+            stroke="#3b82f6"
+            strokeWidth={1.5}
+            fill="url(#priceGrad)"
+            dot={false}
+          />
+          <Scatter
+            dataKey="buyMarker"
+            fill="#22c55e"
+            shape="triangle"
+          />
+          <Scatter
+            dataKey="sellMarker"
+            fill="#ef4444"
+            shape="diamond"
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
     </div>
   )
 }
@@ -356,6 +552,8 @@ function RecentPredictions({ data }: { data: PredictionAccuracyData }) {
 export default function Predictions() {
   const [days, setDays] = useState(30)
   const [assetTab, setAssetTab] = useState('all')
+  const [selectedPair, setSelectedPair] = useState<string | null>(null)
+  const [pairSearch, setPairSearch] = useState('')
 
   const { data: rawData, isLoading } = useQuery({
     queryKey: ['prediction-accuracy', days],
@@ -374,6 +572,22 @@ export default function Predictions() {
 
   // Count pending (unevaluated) predictions
   const pendingCount = data ? data.predictions.filter(p => !p.outcomes['1h']).length : 0
+
+  // Build pair list for the overlay selector from both tracked pairs and prediction data
+  const allPairOptions = useMemo(() => {
+    const pairs = new Set<string>()
+    if (trackedPairs) {
+      for (const p of [...trackedPairs.crypto, ...trackedPairs.equity]) pairs.add(p.pair)
+    }
+    if (data) {
+      for (const pair of Object.keys(data.per_pair)) pairs.add(pair)
+    }
+    return Array.from(pairs).sort()
+  }, [trackedPairs, data])
+
+  const filteredPairOptions = pairSearch
+    ? allPairOptions.filter(p => p.toLowerCase().includes(pairSearch.toLowerCase()))
+    : allPairOptions
 
   return (
     <PageTransition>
@@ -496,11 +710,69 @@ export default function Predictions() {
             </span>
           </p>
           {trackedPairs ? (
-            <TrackedPairsSection data={trackedPairs} assetTab={assetTab} />
+            <TrackedPairsSection data={trackedPairs} assetTab={assetTab} onSelectPair={setSelectedPair} selectedPair={selectedPair} />
           ) : (
             <SkeletonBlock className="h-[100px]" />
           )}
         </div>
+
+        {/* Prediction Overlay Chart — shown when a pair is selected */}
+        {selectedPair && (
+          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                <Eye size={14} className="text-brand-400" />
+                Prediction Overlay: {selectedPair}
+              </h3>
+              <button
+                onClick={() => setSelectedPair(null)}
+                className="text-[10px] text-gray-500 hover:text-gray-300 px-2 py-0.5 rounded border border-gray-800 hover:border-gray-700"
+              >
+                Close
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-600 mb-3">
+              Actual price with AI prediction signals overlaid. Triangles = buy signals, diamonds = sell signals.
+            </p>
+            <PredictionOverlayChart pair={selectedPair} />
+          </div>
+        )}
+
+        {/* Quick pair selector (when no pair selected) */}
+        {!selectedPair && allPairOptions.length > 0 && (
+          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+              <Eye size={14} className="text-brand-400" />
+              Prediction Overlay
+            </h3>
+            <p className="text-[10px] text-gray-600 mb-3">
+              Select any tracked pair above or search below to view predictions overlaid on actual price.
+            </p>
+            <div className="relative max-w-sm">
+              <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input
+                type="text"
+                value={pairSearch}
+                onChange={(e) => setPairSearch(e.target.value)}
+                placeholder="Search pairs..."
+                className="w-full pl-8 pr-3 py-2 bg-gray-800/50 border border-gray-700 rounded-lg text-xs text-gray-200 placeholder-gray-600 focus:border-brand-500 focus:outline-none"
+              />
+            </div>
+            {pairSearch && filteredPairOptions.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {filteredPairOptions.slice(0, 20).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => { setSelectedPair(p); setPairSearch('') }}
+                    className="px-2.5 py-1 text-[11px] bg-gray-800/50 border border-gray-700 rounded-md text-gray-300 hover:border-brand-500 hover:text-brand-400 transition-colors"
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Charts row 1: Daily trend + Signal type breakdown */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

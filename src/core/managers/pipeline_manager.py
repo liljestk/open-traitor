@@ -339,6 +339,14 @@ class PipelineManager:
             except Exception:
                 pass  # never break pipeline
 
+        # Compute portfolio metrics once for all downstream agents
+        _portfolio_value = (
+            orch.state.live_portfolio_value if orch.state.live_portfolio_value > 0 else orch.state.portfolio_value
+        )
+        _cash_balance = (
+            sum(orch.state.live_cash_balances.values()) if orch.state.live_cash_balances else orch.state.cash_balance
+        )
+
         # Step 2: Market Analysis
         _step_t = time.monotonic()
         analysis_result = await orch.market_analyst.execute({
@@ -351,6 +359,9 @@ class PipelineManager:
             "strategy_signals": strategy_signals,
             "strategic_context": strategic_context,
             "currency_symbol": orch.state.currency_symbol,
+            "native_currency": orch.state.native_currency,
+            "portfolio_value": _portfolio_value,
+            "cash_balance": _cash_balance,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
@@ -419,6 +430,8 @@ class PipelineManager:
             "live_holdings_summary": orch.state.holdings_summary,
             "native_currency": orch.state.native_currency,
             "currency_symbol": orch.state.currency_symbol,
+            "portfolio_value": _portfolio_value,
+            "cash_balance": _cash_balance,
             "sentiment": sentiment_data,
             "strategy_signals": strategy_signals,
             "confidence_adjustment": pair_confidence_adj,
@@ -458,16 +471,10 @@ class PipelineManager:
 
         # Step 4: Risk Validation
         _step_t = time.monotonic()
-        risk_portfolio_value = (
-            orch.state.live_portfolio_value if orch.state.live_portfolio_value > 0 else orch.state.portfolio_value
-        )
-        risk_cash_balance = (
-            sum(orch.state.live_cash_balances.values()) if orch.state.live_cash_balances else orch.state.cash_balance
-        )
         risk_result = await orch.risk_manager.execute({
             "proposal": strategy_result,
-            "portfolio_value": risk_portfolio_value,
-            "cash_balance": risk_cash_balance,
+            "portfolio_value": _portfolio_value,
+            "cash_balance": _cash_balance,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,

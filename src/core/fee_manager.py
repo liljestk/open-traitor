@@ -155,7 +155,12 @@ class FeeManager:
         self.min_gain_after_fees_pct = self.config.get("min_gain_after_fees_pct", 0.005)
 
         # Below this amount, don't even bother (fees eat everything)
-        self.min_trade_quote = self.config.get("min_trade_quote", self.config.get("min_trade_usd", 50.0))
+        # This is the ABSOLUTE floor — exchange minimum (Coinbase: ~1 EUR)
+        self.min_trade_quote = self.config.get("min_trade_quote", self.config.get("min_trade_usd", 1.0))
+
+        # Dynamic minimum: percentage of portfolio (scales with account size)
+        # For a 6.80 EUR account with 1%, minimum = 0.068 EUR (we use the higher of floor or %)
+        self.min_trade_pct = self.config.get("min_trade_pct", 0.01)  # 1% of portfolio
 
         # Cooldown period after a swap to prevent churn (seconds)
         self.swap_cooldown_seconds = self.config.get("swap_cooldown_seconds", 3600)
@@ -163,8 +168,23 @@ class FeeManager:
         logger.info(
             f"💰 Fee Manager: trade fee={self.trade_fee_pct*100:.2f}%, "
             f"safety margin={self.fee_safety_margin}x, "
-            f"min gain after fees={self.min_gain_after_fees_pct*100:.2f}%"
+            f"min gain after fees={self.min_gain_after_fees_pct*100:.2f}%, "
+            f"min trade floor={self.min_trade_quote:.2f}, "
+            f"min trade pct={self.min_trade_pct*100:.1f}%"
         )
+
+    def get_dynamic_min_trade(self, portfolio_value: float = 0.0) -> float:
+        """Compute the effective minimum trade size based on portfolio value.
+
+        Returns the higher of:
+          - Absolute floor (min_trade_quote from config, default 1.0 EUR)
+          - Percentage of portfolio (min_trade_pct, default 1%)
+
+        This allows micro-accounts (e.g. 6.80 EUR) to trade while still
+        maintaining a sane floor for larger accounts.
+        """
+        pct_min = portfolio_value * self.min_trade_pct if portfolio_value > 0 else 0.0
+        return max(self.min_trade_quote, pct_min)
 
     def estimate_trade_fees(
         self,
@@ -224,6 +244,7 @@ class FeeManager:
         expected_gain_pct: float,
         is_swap: bool = False,
         n_legs: int | None = None,
+        portfolio_value: float = 0.0,
     ) -> tuple[bool, FeeEstimate]:
         """
         Determine if a trade is worth executing after fees.
@@ -233,13 +254,15 @@ class FeeManager:
             expected_gain_pct: Expected price movement (0.05 = 5%)
             is_swap: Whether this is a swap (2x fees)
             n_legs: Override leg count for route-aware fee calc (None = auto)
+            portfolio_value: Current portfolio value for dynamic min trade calc
 
         Returns:
             (is_worthwhile, fee_estimate)
         """
-        # Too small to trade
-        if quote_amount < self.min_trade_quote:
-            logger.debug(f"Trade too small: {quote_amount:.2f} < {self.min_trade_quote:.2f}")
+        # Too small to trade — use dynamic minimum based on portfolio size
+        effective_min = self.get_dynamic_min_trade(portfolio_value)
+        if quote_amount < effective_min:
+            logger.debug(f"Trade too small: {quote_amount:.4f} < {effective_min:.4f} (portfolio={portfolio_value:.2f})")
             estimate = FeeEstimate(
                 sell_fee_pct=0, buy_fee_pct=0, total_fee_pct=0,
                 sell_fee_quote=0, buy_fee_quote=0, total_fee_quote=0,
@@ -296,6 +319,7 @@ class FeeManager:
         available_quote: float,
         expected_gain_pct: float,
         is_swap: bool = False,
+        portfolio_value: float = 0.0,
     ) -> float:
         """
         Calculate optimal trade size given fee constraints.
@@ -305,9 +329,12 @@ class FeeManager:
             return 0.0
 
         # Start from max and work down
-        for pct in [1.0, 0.75, 0.5, 0.25, 0.1]:
+        for pct in [1.0, 0.75, 0.5, 0.25, 0.1, 0.05]:
             amount = available_quote * pct
-            worthwhile, _ = self.is_trade_worthwhile(amount, expected_gain_pct, is_swap)
+            worthwhile, _ = self.is_trade_worthwhile(
+                amount, expected_gain_pct, is_swap,
+                portfolio_value=portfolio_value,
+            )
             if worthwhile:
                 return amount
 
@@ -322,6 +349,7 @@ class FeeManager:
             f"  Swap cost (sell+buy): ~{swap_cost:.2f}%\n"
             f"  Safety margin: {self.fee_safety_margin}x\n"
             f"  Min gain after fees: {self.min_gain_after_fees_pct*100:.2f}%\n"
-            f"  Min trade size: {self.min_trade_quote:.0f}\n"
+            f"  Min trade floor: {self.min_trade_quote:.2f}\n"
+            f"  Min trade pct of portfolio: {self.min_trade_pct*100:.1f}%\n"
             f"  Swap breakeven: ~{swap_cost * self.fee_safety_margin:.2f}% predicted move"
         )

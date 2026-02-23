@@ -89,7 +89,8 @@ const FIELD_DESCRIPTIONS: Record<string, Record<string, string>> = {
     maker_fee_pct: 'Exchange maker fee percentage for limit orders.',
     safety_margin: 'Fee safety multiplier — accounts for fee variations and rounding.',
     min_gain_after_fees_pct: 'Minimum profit % after fees for a trade to be worthwhile.',
-    min_trade_quote: 'Minimum trade size in quote currency (exchange minimum + buffer).',
+    min_trade_quote: 'Absolute floor for minimum trade size in quote currency (e.g. 1.0 EUR).',
+    min_trade_pct: 'Minimum trade size as % of portfolio (0.01 = 1%). Dynamic — scales with account.',
     swap_cooldown_seconds: 'Cooldown between fee-related recalculations.',
   },
   high_stakes: {

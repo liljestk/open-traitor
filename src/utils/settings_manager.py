@@ -103,6 +103,7 @@ _FEES_SCHEMA: dict[str, dict[str, Any]] = {
     "safety_margin":           {"type": float, "min": 1.0, "max": 10.0},
     "min_gain_after_fees_pct": {"type": float, "min": 0.0, "max": 1.0},
     "min_trade_quote":         {"type": float, "min": 0, "max": 100_000},
+    "min_trade_pct":           {"type": float, "min": 0.0, "max": 1.0},
     "swap_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},
 }
 
@@ -365,6 +366,7 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "safety_margin":           {},
         "min_gain_after_fees_pct": {},
         "min_trade_quote":         {},
+        "min_trade_pct":           {},
     },
     "high_stakes": {
         "trade_size_multiplier":      {"max": 5.0},

@@ -564,6 +564,34 @@ export interface TrackedPairsData {
 export const fetchTrackedPairs = () =>
   apiFetch<TrackedPairsData>(`/predictions/tracked-pairs`)
 
+// ── Per-Pair Prediction History (overlay chart) ───────────────────────────
+
+export interface PricePoint {
+  ts: string
+  price: number
+}
+
+export interface PredictionMarker {
+  ts: string
+  signal_type: string
+  confidence: number
+  entry_price: number
+  suggested_tp: number | null
+  suggested_sl: number | null
+  is_bullish: boolean
+  outcomes: Record<string, PredictionOutcome | null>
+}
+
+export interface PairPredictionHistory {
+  pair: string
+  price_history: PricePoint[]
+  predictions: PredictionMarker[]
+  total_predictions: number
+}
+
+export const fetchPairPredictionHistory = (pair: string, days = 30) =>
+  apiFetch<PairPredictionHistory>(`/predictions/pair-history?pair=${encodeURIComponent(pair)}&days=${days}`)
+
 export const cleanupPortfolioSnapshots = () =>
   apiFetch<{ deleted: number; status: string }>(`/portfolio/cleanup`, { method: 'POST' })
 

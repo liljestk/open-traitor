@@ -44,7 +44,12 @@ Be objective. Follow the technical indicators closely.
 Don't artificially lower confidence if the indicators point clearly in one direction.
 Balance risk with opportunity. While capital preservation is important, your goal is to find actionable trades, including short-term entries in choppy markets.
 If a strategic context (daily/weekly/monthly plan) is provided, treat it as background regime information —
-use it to calibrate your confidence but do not override clear technical evidence."""
+use it to calibrate your confidence but do not override clear technical evidence.
+
+ACCOUNT-SIZE AWARENESS:
+- When account context is provided, calibrate stop-loss and take-profit levels to be realistic for the account size.
+- For micro/small accounts, tighter stops (closer to entry) reduce the capital at risk per trade.
+- Suggest entry amounts that make sense relative to the portfolio (don't suggest €100 entries on a €7 account)."""
 
 
 class MarketAnalystAgent(BaseAgent):
@@ -78,6 +83,9 @@ class MarketAnalystAgent(BaseAgent):
         strategy_signals = context.get("strategy_signals", {})
         strategic_context = context.get("strategic_context", "")
         currency_symbol = context.get("currency_symbol", "$")
+        native_currency = context.get("native_currency", "USD")
+        portfolio_value = context.get("portfolio_value", 0)
+        cash_balance = context.get("cash_balance", 0)
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -102,6 +110,9 @@ class MarketAnalystAgent(BaseAgent):
             strategy_signals=strategy_signals,
             strategic_context=strategic_context,
             currency_symbol=currency_symbol,
+            native_currency=native_currency,
+            portfolio_value=portfolio_value,
+            cash_balance=cash_balance,
         )
 
         # Create a tracing span for this LLM call
@@ -171,6 +182,9 @@ class MarketAnalystAgent(BaseAgent):
         strategy_signals: dict | None = None,
         strategic_context: str = "",
         currency_symbol: str = "$",
+        native_currency: str = "USD",
+        portfolio_value: float = 0,
+        cash_balance: float = 0,
     ) -> str:
         """Build the analysis prompt for the LLM."""
         sym = currency_symbol
@@ -198,6 +212,26 @@ class MarketAnalystAgent(BaseAgent):
             f"\nSTRATEGIC CONTEXT (from planning layer — use as background regime info):\n{strategic_context}\n"
             if strategic_context else ""
         )
+
+        # Account context — lightweight, helps calibrate entry/SL/TP
+        acct_section = ""
+        pv = portfolio_value or 0
+        if pv > 0:
+            if pv < 50:
+                bracket = "MICRO (< €50)"
+            elif pv < 500:
+                bracket = "SMALL (€50–€500)"
+            elif pv < 5000:
+                bracket = "MEDIUM (€500–€5K)"
+            else:
+                bracket = "LARGE (> €5K)"
+            acct_section = (
+                f"\nACCOUNT CONTEXT:\n"
+                f"- Portfolio Value: {sym}{pv:,.2f} {native_currency}\n"
+                f"- Available Cash: {sym}{cash_balance:,.2f} {native_currency}\n"
+                f"- Account Bracket: {bracket}\n"
+                f"- Calibrate entry sizes, stop-loss, and take-profit to this account size.\n"
+            )
 
         # M32 fix: safe formatting for potentially missing numeric indicators
         _rsi = indicators.get('rsi')
@@ -248,7 +282,7 @@ PRICE CHANGES:
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
 RECENT CRYPTO NEWS:
 {news}
-{strategy_section}
+{strategy_section}{acct_section}
 Provide your analysis as JSON."""
 
     def _build_signal(

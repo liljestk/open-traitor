@@ -326,7 +326,9 @@ class PortfolioRotator:
                     position_value,
                 )
 
-                if swap_quote < self.fee_manager.min_trade_quote:
+                if swap_quote < self.fee_manager.get_dynamic_min_trade(
+                    sum(current_prices.get(p, 0) * open_positions.get(p, 0) for p in open_positions)
+                ):
                     continue
 
                 # ── Route-aware fee estimation ──

@@ -85,6 +85,8 @@ class StrategistAgent(BaseAgent):
         live_holdings_summary = context.get("live_holdings_summary", "")
         currency_symbol = context.get("currency_symbol", "$")
         native_currency = context.get("native_currency", "USD")
+        portfolio_value = context.get("portfolio_value", 0)
+        cash_balance = context.get("cash_balance", 0)
         sentiment_data = context.get("sentiment", {})
         strategy_signals = context.get("strategy_signals", {})
         cycle_id = context.get("cycle_id", "")
@@ -125,6 +127,8 @@ class StrategistAgent(BaseAgent):
             live_holdings_summary=live_holdings_summary,
             currency_symbol=currency_symbol,
             native_currency=native_currency,
+            portfolio_value=portfolio_value,
+            cash_balance=cash_balance,
             sentiment_data=sentiment_data,
             strategy_signals=strategy_signals,
         )
@@ -191,6 +195,8 @@ class StrategistAgent(BaseAgent):
         live_holdings_summary: str = "",
         currency_symbol: str = "$",
         native_currency: str = "USD",
+        portfolio_value: float = 0,
+        cash_balance: float = 0,
         sentiment_data: dict | None = None,
         strategy_signals: dict | None = None,
     ) -> str:
@@ -229,6 +235,19 @@ class StrategistAgent(BaseAgent):
         # Cash display: use live balances if available, fallback to legacy
         cash_display = f"{sym}{balance.get(native_currency, balance.get('USD', 0)):,.2f} {native_currency}"
 
+        # Portfolio value display
+        pv = portfolio_value or 0
+        pv_display = f"{sym}{pv:,.2f} {native_currency}"
+        # Account size bracket for the LLM
+        if pv < 50:
+            acct_bracket = "MICRO (< €50) — trade smallest viable amounts, even €0.50 is fine"
+        elif pv < 500:
+            acct_bracket = "SMALL (€50–€500) — keep trades to 5–15% of portfolio"
+        elif pv < 5000:
+            acct_bracket = "MEDIUM (€500–€5K) — standard 2–10% position sizing"
+        else:
+            acct_bracket = "LARGE (> €5K) — conservative 2–5% per position"
+
         # Live holdings section
         holdings_section = ""
         if live_holdings_summary:
@@ -245,7 +264,9 @@ class StrategistAgent(BaseAgent):
 - Suggested Take-Profit: {signal.get('suggested_take_profit', 'N/A')}
 
 PORTFOLIO:
-- Cash: {cash_display}
+- Total Portfolio Value: {pv_display}
+- Available Cash: {cash_display}
+- Account Size: {acct_bracket}
 - Bot-Tracked Positions:
 {positions_text}
 {holdings_section}
