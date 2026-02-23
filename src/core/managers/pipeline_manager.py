@@ -519,6 +519,50 @@ class PipelineManager:
 
         # Step 5: Handle approval or execute
         _timings["risk"] = time.monotonic() - _step_t
+
+        # ─── Step 5a: Fee Viability Gate ─────────────────────────────
+        # Ensure the trade is actually profitable after fees.
+        # This was previously only checked for portfolio rotation swaps.
+        if risk_result.get("approved") and risk_result.get("action") == "buy":
+            trade_amount = float(risk_result.get("quote_amount", 0))
+            tp = risk_result.get("take_profit")
+            trade_price = risk_result.get("price", 0)
+            # Estimate expected gain from the take-profit target
+            if tp and trade_price and trade_price > 0:
+                expected_gain_pct = (float(tp) - trade_price) / trade_price
+            else:
+                # Fallback: use tier's take_profit_pct as expected gain
+                expected_gain_pct = getattr(
+                    getattr(orch, "portfolio_scaler", None), "tier", None
+                )
+                if expected_gain_pct:
+                    expected_gain_pct = expected_gain_pct.take_profit_pct
+                else:
+                    expected_gain_pct = orch.config.get("risk", {}).get("take_profit_pct", 0.06)
+
+            worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
+                quote_amount=trade_amount,
+                expected_gain_pct=expected_gain_pct,
+                is_swap=False,
+                portfolio_value=_portfolio_value,
+            )
+            if not worthwhile:
+                logger.info(
+                    f"💸 {pair}: Trade NOT worthwhile after fees "
+                    f"(amount={trade_amount:.2f}, expected={expected_gain_pct*100:.1f}%, "
+                    f"breakeven={fee_est.breakeven_move_pct*100:.1f}%)"
+                )
+                orch.journal.log_decision(
+                    "fee_gate_reject", pair, risk_result.get("action", "buy"),
+                    {"reason": "Fees would eat expected gains",
+                     "trade_amount": trade_amount,
+                     "breakeven_pct": fee_est.breakeven_move_pct,
+                     "expected_gain_pct": expected_gain_pct},
+                )
+                if trace_ctx is not None:
+                    trace_ctx.finish(metadata={"action": "fee_gate_reject"})
+                return
+
         if risk_result.get("needs_approval"):
             trade_desc = (
                 f"{risk_result['action'].upper()} {risk_result['pair']}\n"

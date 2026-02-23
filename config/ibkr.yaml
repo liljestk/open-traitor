@@ -171,7 +171,7 @@ trading:
   max_active_pairs: 8
   max_open_positions: 10
   min_confidence: 0.6
-  mode: paper
+  mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
   pairs:

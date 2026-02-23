@@ -54,6 +54,9 @@ class AbsoluteRules:
         self.always_use_stop_loss = config.get("always_use_stop_loss", True)
         self.max_stop_loss_pct = config.get("max_stop_loss_pct", 0.05)
 
+        # Portfolio scaler — set by orchestrator after init
+        self._portfolio_scaler = None
+
         # Thread safety — protects all daily counter reads/writes
         self._lock = threading.RLock()
 
@@ -66,6 +69,29 @@ class AbsoluteRules:
 
         logger.info("🔒 Absolute Rules Engine initialized")
         self._log_rules()
+
+    def set_portfolio_scaler(self, scaler) -> None:
+        """Attach a PortfolioScaler so tier-aware limits are used."""
+        self._portfolio_scaler = scaler
+
+    def _get_effective_limits(self, portfolio_value: float) -> tuple[float, float, float]:
+        """Return (max_cash_per_trade_pct, max_portfolio_risk_pct, emergency_stop) scaled by tier.
+
+        For micro/small accounts the config emergency_stop (€8000) would block ALL
+        trading, so we disable it when the scaler says we're in a small tier.
+        """
+        if self._portfolio_scaler and portfolio_value > 0:
+            self._portfolio_scaler.update(portfolio_value)
+            tier = self._portfolio_scaler.tier
+            eff_cash = tier.max_cash_per_trade_pct
+            eff_risk = tier.max_portfolio_risk_pct
+            # Disable emergency stop for MICRO/SMALL (portfolio IS tiny)
+            if tier.name in ("MICRO", "SMALL"):
+                eff_emerg = 0.0  # effectively disabled
+            else:
+                eff_emerg = self.emergency_stop_portfolio
+            return eff_cash, eff_risk, eff_emerg
+        return self.max_cash_per_trade_pct, self.max_portfolio_risk_pct, self.emergency_stop_portfolio
 
     def seed_daily_counters(self, db_path: str = None) -> None:
         """Seed daily counters from persisted trades to survive restarts.
@@ -194,6 +220,9 @@ class AbsoluteRules:
         """Inner implementation — caller must hold self._lock."""
         self._reset_daily_if_needed()
 
+        # Tier-scaled limits
+        eff_cash_pct, eff_risk_pct, eff_emerg = self._get_effective_limits(portfolio_value)
+
         violations: list[RuleViolation] = []
         needs_approval = False
         now = datetime.now(timezone.utc)
@@ -256,31 +285,31 @@ class AbsoluteRules:
                     "Wait before trading again",
                 ))
 
-        # --- Rule: Max cash per trade (BUY only — not meaningful when selling an asset) ---
+        # --- Rule: Max cash per trade (BUY only, tier-scaled) ---
         if action == TradeAction.BUY and cash_balance > 0:
             cash_pct = quote_value / cash_balance
-            if cash_pct > self.max_cash_per_trade_pct:
+            if cash_pct > eff_cash_pct:
                 violations.append(RuleViolation(
                     "max_cash_per_trade",
-                    f"Trade uses {cash_pct:.0%} of cash, max is {self.max_cash_per_trade_pct:.0%}",
+                    f"Trade uses {cash_pct:.0%} of cash, max is {eff_cash_pct:.0%}",
                     f"Cash: {cash_balance:,.2f}, Trade: {quote_value:,.2f}",
                 ))
 
-        # --- Rule: Emergency portfolio stop ---
-        if portfolio_value < self.emergency_stop_portfolio:
+        # --- Rule: Emergency portfolio stop (disabled for micro/small tiers) ---
+        if eff_emerg > 0 and portfolio_value < eff_emerg:
             violations.append(RuleViolation(
                 "emergency_stop",
-                f"Portfolio {portfolio_value:,.2f} below emergency stop {self.emergency_stop_portfolio:,.0f}",
+                f"Portfolio {portfolio_value:,.2f} below emergency stop {eff_emerg:,.0f}",
                 "ALL TRADING HALTED",
             ))
 
-        # --- Rule: Portfolio risk ---
+        # --- Rule: Portfolio risk (tier-scaled) ---
         if portfolio_value > 0:
             risk_pct = quote_value / portfolio_value
-            if risk_pct > self.max_portfolio_risk_pct:
+            if risk_pct > eff_risk_pct:
                 violations.append(RuleViolation(
                     "max_portfolio_risk",
-                    f"Trade risks {risk_pct:.0%} of portfolio, max is {self.max_portfolio_risk_pct:.0%}",
+                    f"Trade risks {risk_pct:.0%} of portfolio, max is {eff_risk_pct:.0%}",
                     "Reduce position size",
                 ))
 

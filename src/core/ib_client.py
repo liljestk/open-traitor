@@ -98,9 +98,13 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "Live IB trading requires the 'ib_insync' package. "
                 "Install with: pip install ib_insync"
             )
-        raise NotImplementedError(
-            "Live IB trading is not yet implemented. Use paper_mode=True."
-        )
+        self.ib = _IB()
+        try:
+            self.ib.connect(self._ib_host, self._ib_port, clientId=self._ib_client_id)
+            logger.info(f"✅ IBClient LIVE connected to {self._ib_host}:{self._ib_port} (Client ID: {self._ib_client_id})")
+        except Exception as e:
+            logger.error(f"❌ IBClient LIVE connection failed: {e}")
+            raise
 
     # ── Connection / account methods ─────────────────────────────────────
 
@@ -114,35 +118,97 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                     1 for v in self._paper_balance.values() if v > 0
                 ),
             }
+        
+        is_connected = getattr(self, "ib", None) and self.ib.isConnected()
+        if not is_connected:
+            return {
+                "ok": False,
+                "mode": "live",
+                "message": "IB Gateway not connected",
+                "error": "disconnected",
+            }
+        
+        accounts = self.ib.managedAccounts()
         return {
-            "ok": False,
+            "ok": True,
             "mode": "live",
-            "message": "Live mode not yet implemented",
-            "error": "not_implemented",
+            "message": f"IB Gateway live connected. Accounts: {', '.join(accounts)}",
+            "non_zero_accounts": len(accounts),
+            "total_accounts": len(accounts),
         }
 
     def get_accounts(self) -> list[dict[str, Any]]:
         if self.paper_mode:
             return self.paper_get_accounts()
-        raise NotImplementedError
+        
+        accounts_data = []
+        for acc in self.ib.managedAccounts():
+            vals = self.ib.accountValues(acc)
+            acc_info = {"id": acc, "currency": self._native_currency, "balances": {}}
+            for v in vals:
+                if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
+                    acc_info["balances"][self._native_currency] = float(v.value)
+                elif v.tag == "CashBalance" and v.currency == self._native_currency:
+                    acc_info["available_cash"] = float(v.value)
+            accounts_data.append(acc_info)
+        return accounts_data
 
     @property
     def balance(self) -> dict[str, float]:
-        return self.paper_get_all_balances()
+        if self.paper_mode:
+            return self.paper_get_all_balances()
+        
+        # Return portfolio positions and cash
+        balances = {"USD": 0.0, "EUR": 0.0}
+        
+        vals = self.ib.accountValues()
+        for v in vals:
+            if v.tag == "CashBalance":
+                balances[v.currency] = float(v.value)
+
+        for pos in self.ib.positions():
+            # Ticker symbol in live mode is position.contract.symbol
+            sym = pos.contract.symbol
+            balances[sym] = float(pos.position)
+        
+        # Make sure native currency is present
+        balances.setdefault(self._native_currency, 0.0)
+        return balances
 
     def detect_native_currency(self) -> str:
         return self._native_currency
 
     # ── Market data ──────────────────────────────────────────────────────
 
+    def _get_contract(self, pair: str):
+        """Helper to create and qualify an ib_insync Stock contract."""
+        from ib_insync import Stock
+        parts = pair.upper().split("-")
+        symbol = parts[0]
+        currency = parts[1] if len(parts) > 1 else self._native_currency
+        contract = Stock(symbol, 'SMART', currency)
+        self.ib.qualifyContracts(contract)
+        return contract
+
     def get_current_price(self, pair: str) -> float:
         """
         In paper mode, return last recorded price or 0.
-        In live mode, this will query IB market data.
+        In live mode, queries IB market data.
         """
         if self.paper_mode:
             return self._last_prices.get(pair.upper(), 0.0)
-        raise NotImplementedError
+        
+        try:
+            contract = self._get_contract(pair)
+            tickers = self.ib.reqTickers(contract)
+            if tickers:
+                t = tickers[0]
+                price = t.last if t.last == t.last and t.last > 0 else t.close
+                if price == price and price > 0:  # Check for NaN and > 0
+                    return float(price)
+        except Exception as e:
+            logger.warning(f"Failed to fetch live price for {pair}: {e}")
+        return 0.0
 
     def set_price(self, pair: str, price: float) -> None:
         """Helper for tests / paper mode: set the current price for a pair."""
@@ -161,7 +227,42 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 f"analysis pipeline will have no signals until a live data source is configured"
             )
             return []
-        raise NotImplementedError
+        
+        try:
+            contract = self._get_contract(product_id)
+            barSize = "1 day"
+            duration = f"{min(limit, 365)} D"
+            
+            if granularity == "ONE_HOUR":
+                barSize = "1 hour"
+                duration = f"{max(1, limit // 8)} D"
+            elif granularity == "ONE_MINUTE":
+                barSize = "1 min"
+                duration = f"{max(1, limit * 60)} S"
+
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr=duration,
+                barSizeSetting=barSize,
+                whatToShow='TRADES',
+                useRTH=True
+            )
+            
+            return [
+                {
+                    "time": bar.date.isoformat() if hasattr(bar.date, "isoformat") else str(bar.date),
+                    "open": float(bar.open),
+                    "high": float(bar.high),
+                    "low": float(bar.low),
+                    "close": float(bar.close),
+                    "volume": float(bar.volume),
+                }
+                for bar in bars
+            ]
+        except Exception as e:
+            logger.warning(f"Failed to fetch candles for {product_id}: {e}")
+            return []
 
     def get_market_trades(self, product_id: str, limit: int = 50) -> list[dict]:
         if self.paper_mode:
@@ -208,7 +309,44 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 return self._paper_market_buy(pair, amount, amount_is_base)
             else:
                 return self._paper_market_sell(pair, amount, amount_is_base)
-        raise NotImplementedError
+        
+        from ib_insync import MarketOrder
+        try:
+            contract = self._get_contract(pair)
+            
+            if not amount_is_base:
+                # IBKR requires quantity in shares (base asset)
+                price = self.get_current_price(pair)
+                if price <= 0:
+                    return {"success": False, "error": f"Invalid price for {pair}"}
+                shares = int(amount / price)
+            else:
+                shares = int(amount)
+                
+            if shares < 1:
+                return {"success": False, "error": "Order size must be at least 1 share"}
+
+            order = MarketOrder(side.upper(), shares)
+            if client_oid:
+                order.orderRef = client_oid
+                
+            trade = self.ib.placeOrder(contract, order)
+            # We don't wait for execution here, just return the order details
+            return {
+                "success": True,
+                "order_id": str(trade.order.orderId),
+                "status": "OPEN",  # It might execute soon, but returning OPEN
+                "side": side.upper(),
+                "pair": pair,
+                "filled_size": "0",
+                "filled_value": "0",
+                "average_filled_price": "0",
+                "fee": "0",
+                "ts": self.paper_now_iso(),
+            }
+        except Exception as e:
+            logger.error(f"Live market order failed: {e}")
+            return {"success": False, "error": str(e)}
 
     def place_limit_order(
         self,
@@ -223,20 +361,79 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             return self.place_market_order(
                 pair, side, size, amount_is_base=True, client_oid=client_oid
             )
-        raise NotImplementedError
+
+        from ib_insync import LimitOrder
+        try:
+            contract = self._get_contract(pair)
+            shares = int(size)
+            if shares < 1:
+                return {"success": False, "error": "Order size must be at least 1 share"}
+
+            order = LimitOrder(side.upper(), shares, round(price, 2))
+            if client_oid:
+                order.orderRef = client_oid
+                
+            trade = self.ib.placeOrder(contract, order)
+            return {
+                "success": True,
+                "order_id": str(trade.order.orderId),
+                "status": "OPEN",
+                "side": side.upper(),
+                "pair": pair,
+                "filled_size": "0",
+                "filled_value": "0",
+                "average_filled_price": "0",
+                "fee": "0",
+                "ts": self.paper_now_iso(),
+            }
+        except Exception as e:
+            logger.error(f"Live limit order failed: {e}")
+            return {"success": False, "error": str(e)}
 
     def cancel_order(self, order_id: str) -> dict:
         if self.paper_mode:
             return {"success": False, "error": "Paper orders are instant-fill"}
-        raise NotImplementedError
+        try:
+            for trade in self.ib.openTrades():
+                if str(trade.order.orderId) == order_id:
+                    self.ib.cancelOrder(trade.order)
+                    return {"success": True, "order_id": order_id}
+            return {"success": False, "error": "Order not found or not active"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def get_order(self, order_id: str) -> Optional[dict]:
         if self.paper_mode:
             return self.paper_get_order(order_id)
-        raise NotImplementedError
+        # Scan through trades
+        for trade in self.ib.trades():
+            if str(trade.order.orderId) == order_id:
+                return {
+                    "order_id": str(trade.order.orderId),
+                    "status": trade.orderStatus.status.upper(),
+                    "side": trade.order.action,
+                    "filled_size": str(trade.orderStatus.filled),
+                    "average_filled_price": str(trade.orderStatus.avgFillPrice),
+                }
+        return None
 
     def get_open_orders(self, pair: str | None = None) -> list[dict]:
-        return self.paper_get_open_orders()
+        if self.paper_mode:
+            return self.paper_get_open_orders()
+        open_orders = []
+        for trade in self.ib.openTrades():
+            sym = trade.contract.symbol
+            if pair and sym not in pair:
+                continue
+            open_orders.append({
+                "order_id": str(trade.order.orderId),
+                "pair": f"{sym}-{self._native_currency}",
+                "side": trade.order.action,
+                "size": str(trade.order.totalQuantity),
+                "price": str(getattr(trade.order, 'lmtPrice', 0)),
+                "status": trade.orderStatus.status.upper()
+            })
+        return open_orders
 
     # ── Paper trading engine ─────────────────────────────────────────────
 
@@ -361,16 +558,28 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
     def get_portfolio_value(self) -> float:
         """Compute total portfolio value in native currency."""
-        total = 0.0
-        with self._paper_balance_lock:
-            for asset, amount in self._paper_balance.items():
-                if asset == self._native_currency:
-                    total += amount
-                else:
-                    pair = f"{asset}-{self._native_currency}"
-                    px = self._last_prices.get(pair, 0.0)
-                    total += amount * px
-        return total
+        if self.paper_mode:
+            total = 0.0
+            with self._paper_balance_lock:
+                for asset, amount in self._paper_balance.items():
+                    if asset == self._native_currency:
+                        total += amount
+                    else:
+                        pair = f"{asset}-{self._native_currency}"
+                        px = self._last_prices.get(pair, 0.0)
+                        total += amount * px
+            return total
+        else:
+            vals = self.ib.accountValues()
+            for v in vals:
+                if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
+                    return float(v.value)
+            
+            # Fallback if specific currency is not found:
+            for v in vals:
+                if v.tag == "NetLiquidation":
+                    return float(v.value)
+            return 0.0
 
     def reconcile_positions(self, expected: dict[str, float]) -> dict:
         mismatches: list[dict] = []
@@ -399,9 +608,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         only_trade: list[str] | None = None,
     ) -> list[str]:
         """
-        In paper mode, return the ``only_trade`` list (if set) since we
-        cannot query the IB API for the full instrument list without a
-        live connection.
+        In live mode, use IB Scanner (Top % Gainers) to find active tickers.
         """
         if only_trade:
             return list(only_trade)
@@ -411,7 +618,66 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "returning empty list. Configure trading.only_trade in ibkr.yaml."
             )
             return []
-        raise NotImplementedError
+            
+        from ib_insync import ScannerSubscription
+        try:
+            # Find Top % Gainers on US Equities as an example of dynamic discovery
+            sub = ScannerSubscription(
+                instrument='STK',
+                locationCode='STK.US.MAJOR',
+                scanCode='TOP_PERC_GAIN'
+            )
+            scan_data = self.ib.reqScannerData(sub)
+            
+            pairs = []
+            quote = self._native_currency
+            
+            for item in scan_data:
+                sym = item.contractDetails.contract.symbol
+                pair = f"{sym}-{quote}"
+                
+                if never_trade and pair in never_trade:
+                    continue
+                    
+                pairs.append(pair)
+            
+            logger.info(f"IB Scanner found {len(pairs)} pairs")
+            return list(set(pairs))
+        except Exception as e:
+            logger.error(f"IB Scanner discovery failed: {e}")
+            return []
+
+    def get_news(self, pair: str, limit: int = 5) -> list[dict]:
+        """Fetch news for a specific pair via IBKR."""
+        if self.paper_mode:
+            return []
+            
+        try:
+            contract = self._get_contract(pair)
+            self.ib.qualifyContracts(contract)
+            
+            # Some connections require specifying the provider, 'BRF' is commonly available
+            # Get available providers if needed: providers = self.ib.reqNewsProviders()
+            news = self.ib.reqHistoricalNews(
+                conId=contract.conId,
+                providerCodes='BRF',
+                startDateTime='',
+                endDateTime='',
+                totalResults=limit
+            )
+            
+            results = []
+            for n in news:
+                results.append({
+                    "time": n.time.isoformat() if hasattr(n.time, "isoformat") else str(n.time),
+                    "headline": n.headline,
+                    "provider": n.providerCode,
+                    "article_id": n.articleId
+                })
+            return results
+        except Exception as e:
+            logger.error(f"Failed to fetch IBKR news for {pair}: {e}")
+            return []
 
     def adapt_pairs_to_account(
         self, pairs: list[str], native_currency: str

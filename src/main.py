@@ -406,6 +406,7 @@ def main():
         reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
         reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
         profile=profile,
+        exchange_client=exchange,
     )
 
     # Validate credentials

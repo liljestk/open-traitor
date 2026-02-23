@@ -210,10 +210,12 @@ class NewsAggregator:
         reddit_client_secret: str = "",
         reddit_user_agent: str = "auto-traitor-bot/0.1",
         profile: str = "",
+        exchange_client=None,
     ):
         self.config = config
         self.redis = redis_client
         self.profile = profile  # e.g. "coinbase", "nordnet" — used for Redis key
+        self.exchange_client = exchange_client
 
         # Reddit config
         self.reddit_client_id = reddit_client_id
@@ -388,6 +390,52 @@ class NewsAggregator:
 
         return articles
 
+    def fetch_ibkr_news(self) -> list[NewsArticle]:
+        """Fetch news from IBKR if available and configured."""
+        articles = []
+        if not getattr(self, 'exchange_client', None):
+            return articles
+            
+        if self.exchange_client.exchange_id != "ibkr" or getattr(self.exchange_client, 'paper_mode', True):
+            return articles
+            
+        try:
+            # We fetch news for configured trading pairs
+            pairs = self.config.get("trading", {}).get("pairs", [])
+            for pair in pairs:
+                ib_news = self.exchange_client.get_news(pair, limit=3)
+                for n in ib_news:
+                    title = n.get("headline", "")
+                    if not title:
+                        continue
+                        
+                    # Parse time if possible
+                    pub_time = datetime.now(timezone.utc)
+                    if "time" in n:
+                        try:
+                            # Tries to parse ISO format string or use as is if already datetime
+                            time_val = n["time"]
+                            if isinstance(time_val, str):
+                                pub_time = datetime.fromisoformat(time_val.replace('Z', '+00:00'))
+                            elif hasattr(time_val, "isoformat"):
+                                pub_time = time_val
+                        except Exception:
+                            pass
+
+                    articles.append(NewsArticle(
+                        title=title,
+                        summary=f"IBKR News for {pair}",
+                        source=f"IBKR-{n.get('provider', 'News')}",
+                        url=n.get("article_id", ""),
+                        published=pub_time,
+                        tags=[pair.split("-")[0]],
+                        relevance_score=0.8
+                    ))
+        except Exception as e:
+            logger.warning(f"IBKR News fetch failed: {e}")
+            
+        return articles
+
     def fetch_all(self) -> list[NewsArticle]:
         """Fetch news from all sources, enrich and filter."""
         all_articles = []
@@ -395,6 +443,7 @@ class NewsAggregator:
         all_articles.extend(self.fetch_reddit())
         all_articles.extend(self.fetch_rss())
         all_articles.extend(self.fetch_coingecko_trending())
+        all_articles.extend(self.fetch_ibkr_news())
 
         # Filter noise (generic/meta discussion threads)
         before_filter = len(all_articles)

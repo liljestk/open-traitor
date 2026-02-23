@@ -116,6 +116,8 @@ class CoinbaseClient(ExchangeClient):
         self._product_cache: list[dict] = []
         self._product_cache_ts: float = 0.0
         self._product_cache_lock = threading.RLock()
+        # Product catalogue — which product IDs exist on Coinbase (NO prices)
+        self._valid_product_ids: set[str] = set()
 
         # ── Centralised REST API throttle + retry ─────────────────────────
         from src.utils.rate_limiter import get_rate_limiter
@@ -263,7 +265,16 @@ class CoinbaseClient(ExchangeClient):
         return self._mock_product(product_id)
 
     def get_current_price(self, pair: str) -> float:
-        """Get the current price for a trading pair."""
+        """Get the **live** price for a trading pair.
+
+        Guards against 404 spam: only calls the individual ``get_product``
+        endpoint when the pair is known to exist in the Coinbase product
+        catalogue.  Delisted / invalid pairs return 0 instantly.
+        """
+        # Only hit the API if the pair actually exists on Coinbase
+        if not self._is_known_product(pair):
+            return 0.0
+
         product = self.get_product(pair)
         price = float(product.get("price", 0))
         if price > 0:
@@ -610,11 +621,18 @@ class CoinbaseClient(ExchangeClient):
 
     # ─── Universe Discovery (detailed metadata) ───────────────────────────
 
-    # Cached product list for find_direct_pair and universe discovery
-    _PRODUCT_CACHE_TTL: float = 600.0  # 10 min
+    # Product catalogue cache — stores which products EXIST, not prices.
+    # Prices are always fetched live; catalogues change rarely.
+    _PRODUCT_CACHE_TTL: float = 86_400.0  # 24 h — poll once a day for new/delisted pairs
 
     def _refresh_product_cache(self) -> list[dict]:
-        """Refresh the full product list from Coinbase (cached 10 min)."""
+        """Refresh the full product catalogue from Coinbase (single bulk call).
+
+        Cached for 24 hours.  Only rebuilds ``_valid_product_ids`` — the set
+        of product IDs that actually exist on Coinbase.  This lets
+        ``get_current_price`` skip API calls for delisted/invalid pairs
+        (preventing 404 spam) without ever caching *prices*.
+        """
         import time as _time
         now = _time.time()
         with self._product_cache_lock:
@@ -625,11 +643,30 @@ class CoinbaseClient(ExchangeClient):
             try:
                 resp = self._throttled_request("get_products")
                 pdata = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
-                self._product_cache = pdata.get("products", [])
+                products = pdata.get("products", [])
+                self._product_cache = products
                 self._product_cache_ts = now
+
+                # Rebuild the valid-product-ID set (existence only, no prices)
+                valid_ids: set[str] = set()
+                for prod in products:
+                    pid = prod.get("product_id", "")
+                    if pid:
+                        valid_ids.add(pid)
+                self._valid_product_ids = valid_ids
+                logger.info(
+                    f"📦 Product catalogue refreshed: {len(valid_ids)} products"
+                )
             except Exception as e:
-                logger.warning(f"⚠️ Product cache refresh failed: {e}")
+                logger.warning(f"⚠️ Product catalogue refresh failed: {e}")
             return self._product_cache
+
+    # ── Helpers built on the catalogue cache ─────────────────────────────
+
+    def _is_known_product(self, pair: str) -> bool:
+        """Return True if *pair* exists in the Coinbase product catalogue."""
+        self._refresh_product_cache()
+        return pair in self._valid_product_ids
 
     def discover_all_pairs_detailed(
         self,
@@ -742,11 +779,13 @@ class CoinbaseClient(ExchangeClient):
     def _currency_to_usd(self, currency: str, amount: float) -> float:
         """
         Convert a currency amount to its approximate USD value.
+        Uses **live** prices via ``get_current_price`` (which is 404-safe).
+
         Order of preference:
           1. USD / known stablecoins → 1:1
           2. EUR-pegged stablecoins (EURC) → via EUR→USD rate
-          3. Cached price for {currency}-USD or {currency}-EUR→USD
-          4. Live fetch from Coinbase (try -USD then -EUR→USD)
+          3. Live price for {currency}-USD
+          4. Live price for {currency}-EUR → EUR→USD conversion
           5. Live fiat exchange rate from Frankfurter (ECB)
           6. Return 0
         """
@@ -759,19 +798,15 @@ class CoinbaseClient(ExchangeClient):
             eur_to_usd = _get_fiat_rate_usd("EUR")
             return amount * eur_to_usd if eur_to_usd > 0 else amount
 
-        # Try {currency}-USD directly
+        # Try {currency}-USD directly (404-safe via catalogue guard)
         pair_usd = f"{currency}-USD"
-        price = self._last_prices.get(pair_usd, 0)
-        if price == 0:
-            price = self.get_current_price(pair_usd)
+        price = self.get_current_price(pair_usd)
         if price > 0:
             return amount * price
 
         # Try {currency}-EUR → convert EUR value to USD
         pair_eur = f"{currency}-EUR"
-        price_eur = self._last_prices.get(pair_eur, 0)
-        if price_eur == 0:
-            price_eur = self.get_current_price(pair_eur)
+        price_eur = self.get_current_price(pair_eur)
         if price_eur > 0:
             eur_to_usd = _get_fiat_rate_usd("EUR")  # USD per EUR
             if eur_to_usd > 0:
@@ -792,7 +827,7 @@ class CoinbaseClient(ExchangeClient):
     def _currency_to_native(self, currency: str, amount: float, native: str) -> float:
         """
         Convert a currency amount to *native* account currency (e.g. EUR).
-        For display purposes — avoids the double-conversion error.
+        Uses **live** prices via ``get_current_price`` (which is 404-safe).
         """
         if amount <= 0:
             return 0.0
@@ -810,11 +845,9 @@ class CoinbaseClient(ExchangeClient):
             if rate_eur > 0 and rate_nat > 0:
                 return amount * (rate_eur / rate_nat)
 
-        # Try direct pair: {currency}-{native}  (e.g. ATOM-EUR)
+        # Try direct pair: {currency}-{native}  (e.g. ATOM-EUR) — 404-safe
         pair = f"{currency}-{native}"
-        price = self._last_prices.get(pair, 0)
-        if price == 0:
-            price = self.get_current_price(pair)
+        price = self.get_current_price(pair)
         if price > 0:
             return amount * price
 
@@ -827,9 +860,7 @@ class CoinbaseClient(ExchangeClient):
 
         # Fallback: try USD pair and convert USD→native
         pair_usd = f"{currency}-USD"
-        price_usd = self._last_prices.get(pair_usd, 0)
-        if price_usd == 0:
-            price_usd = self.get_current_price(pair_usd)
+        price_usd = self.get_current_price(pair_usd)
         if price_usd > 0 and native in _KNOWN_FIAT:
             rate_nat = _get_fiat_rate_usd(native)
             if rate_nat > 0:

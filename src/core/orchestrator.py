@@ -31,6 +31,7 @@ from src.core.health import check_component_health, update_health, start_health_
 from src.core.fee_manager import FeeManager
 from src.core.high_stakes import HighStakesManager
 from src.core.portfolio_rotator import PortfolioRotator
+from src.core.portfolio_scaler import PortfolioScaler
 from src.core.route_finder import RouteFinder
 from src.analysis.fear_greed import FearGreedIndex
 from src.analysis.multi_timeframe import MultiTimeframeAnalyzer
@@ -162,10 +163,19 @@ class Orchestrator:
         self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
         self.interval = config.get("trading", {}).get("interval", 120)
 
+        # Portfolio scaler — adapts limits based on account tier
+        self.portfolio_scaler = PortfolioScaler(config)
+
+        # Wire scaler into the rules engine so tier-aware limits are used
+        rules.set_portfolio_scaler(self.portfolio_scaler)
+
         # Initialize agents
         self.market_analyst = MarketAnalystAgent(llm, self.state, config)
         self.strategist = StrategistAgent(llm, self.state, config)
-        self.risk_manager = RiskManagerAgent(llm, self.state, config, rules)
+        self.risk_manager = RiskManagerAgent(
+            llm, self.state, config, rules,
+            portfolio_scaler=self.portfolio_scaler,
+        )
         self.executor = ExecutorAgent(llm, self.state, config, exchange, rules, telegram=telegram_bot)
         self.settings_advisor = SettingsAdvisorAgent(
             llm, self.state, config, rules,
@@ -530,6 +540,27 @@ class Orchestrator:
                     continue
                 self._ollama_skip_count = 0
 
+                # ─── Portfolio Tier Scaling ────────────────────────────
+                # Recompute tier so position limits, pair caps, etc. reflect
+                # the current portfolio value (micro → whale auto-adapt).
+                _pv = (
+                    self.state.live_portfolio_value
+                    if self.state.live_portfolio_value > 0
+                    else self.state.portfolio_value
+                )
+                tier = self.portfolio_scaler.update(_pv)
+                # Log tier summary once every 20 cycles
+                if cycle_count % 20 == 1:
+                    logger.info(self.portfolio_scaler.summary())
+
+                # --- Apply tier-scaled limits ---
+                # max_active_pairs: clamp by both tier and RPM budget
+                tier_max_pairs = tier.max_active_pairs
+                rpm_max_pairs = self._rpm_entity_cap
+                effective_max_active = min(tier_max_pairs, rpm_max_pairs)
+                # Fee manager: update min_gain_after_fees for current tier
+                self.fee_manager.min_gain_after_fees_pct = tier.min_gain_after_fees_pct
+
                 # Run pipelines — parallelised across pairs using asyncio
                 # Sort pairs: planning-preferred first, then normal, avoid last
                 priority_map = getattr(self, "_pair_priority_map", {})
@@ -550,7 +581,9 @@ class Orchestrator:
                     logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
 
                 # Effective pairs: screener-selected (if any) or configured seed list
-                effective_pairs = self._screener_active_pairs or self.pairs[:self._max_active_pairs]
+                # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
+                effective_pairs = self._screener_active_pairs or self.pairs[:effective_max_active]
+                effective_pairs = effective_pairs[:effective_max_active]  # enforce cap
                 if not effective_pairs:
                     logger.warning(
                         "⚠️ No active pairs to trade this cycle "

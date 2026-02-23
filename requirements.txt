@@ -58,7 +58,7 @@ colorama>=0.4.6
 rich>=14.3.3
 
 # Interactive Brokers (optional — only needed for live IBKR trading)
-# ib_insync>=0.9.86
+ib_insync>=0.9.86
 
 # Testing
 pytest>=9.0.2

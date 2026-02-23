@@ -11,6 +11,7 @@ from typing import Any
 
 from src.agents.base_agent import BaseAgent
 from src.core.rules import AbsoluteRules
+from src.core.portfolio_scaler import PortfolioScaler
 from src.models.trade import TradeAction
 from src.utils.logger import get_logger
 
@@ -29,9 +30,11 @@ class RiskManagerAgent(BaseAgent):
       4. Cap by max_position_pct config
     """
 
-    def __init__(self, llm, state, config, rules: AbsoluteRules):
+    def __init__(self, llm, state, config, rules: AbsoluteRules,
+                 portfolio_scaler: PortfolioScaler | None = None):
         super().__init__("risk_manager", llm, state, config)
         self.rules = rules
+        self.scaler = portfolio_scaler
         self.risk_config = config.get("risk", {})
         self.trading_config = config.get("trading", {})
         self.stop_loss_pct = self.risk_config.get("stop_loss_pct", 0.03)
@@ -80,8 +83,10 @@ class RiskManagerAgent(BaseAgent):
         # Apply fraction (half-Kelly by default)
         position_frac = kelly_f * self.kelly_fraction
 
-        # Cap at config max
-        max_pct = self.risk_config.get("max_position_pct", 0.05)
+        # Cap at tier-aware max (caller may further cap via effective_max_position_pct)
+        config_max = self.risk_config.get("max_position_pct", 0.05)
+        tier_max = self.scaler.tier.max_position_pct if self.scaler else config_max
+        max_pct = max(config_max, tier_max)  # Use the larger of config/tier
         position_frac = min(position_frac, max_pct)
 
         self.logger.info(
@@ -187,6 +192,21 @@ class RiskManagerAgent(BaseAgent):
         if action == "hold":
             return {"approved": True, "action": "hold", "reason": "No trade proposed"}
 
+        # ─── Portfolio-tier scaling ───────────────────────────────
+        # Override static config values with tier-appropriate ones.
+        if self.scaler and portfolio_value > 0:
+            self.scaler.update(portfolio_value)
+            tier = self.scaler.tier
+            effective_stop_loss_pct = tier.stop_loss_pct
+            effective_take_profit_pct = tier.take_profit_pct
+            effective_max_position_pct = tier.max_position_pct
+            effective_max_open = tier.max_open_positions
+        else:
+            effective_stop_loss_pct = self.stop_loss_pct
+            effective_take_profit_pct = self.take_profit_pct
+            effective_max_position_pct = self.risk_config.get("max_position_pct", 0.05)
+            effective_max_open = self.trading_config.get("max_open_positions", 3)
+
         pair = proposal.get("pair", "BTC-EUR")
         quote_amount = float(proposal.get("quote_amount", proposal.get("usd_amount", 0)) or 0)
         price = float(proposal.get("current_price", 0) or self.state.current_prices.get(pair, 0))
@@ -209,9 +229,9 @@ class RiskManagerAgent(BaseAgent):
                 "reason": "No valid trade amount specified",
             }
 
-        # Enforce max_open_positions for buy orders
+        # Enforce max_open_positions for buy orders (tier-scaled)
         if action == "buy":
-            max_positions = self.trading_config.get("max_open_positions", 3)
+            max_positions = effective_max_open
             current_positions = len(self.state.open_positions)
             if current_positions >= max_positions:
                 self.logger.info(
@@ -229,7 +249,7 @@ class RiskManagerAgent(BaseAgent):
                     ),
                 }
 
-        # Ensure stop-loss
+        # Ensure stop-loss (tier-scaled)
         has_stop_loss = stop_loss is not None
         if not has_stop_loss and action == "buy" and price > 0:
             if atr:
@@ -238,11 +258,11 @@ class RiskManagerAgent(BaseAgent):
                 stop_loss = max(price - (2 * float_atr), 0.0)
                 self.logger.info(f"Added ATR-based stop-loss (2x ATR={float_atr:.2f}): {stop_loss:,.2f}")
             else:
-                stop_loss = price * (1 - self.stop_loss_pct)
-                self.logger.info(f"Added default percentage stop-loss: {stop_loss:,.2f}")
+                stop_loss = price * (1 - effective_stop_loss_pct)
+                self.logger.info(f"Added default percentage stop-loss ({effective_stop_loss_pct:.1%}): {stop_loss:,.2f}")
             has_stop_loss = True
 
-        # Ensure take-profit
+        # Ensure take-profit (tier-scaled)
         if take_profit is None and action == "buy" and price > 0:
             if atr:
                 # Use 3x ATR for take profit (1.5 risk/reward)
@@ -250,8 +270,8 @@ class RiskManagerAgent(BaseAgent):
                 take_profit = price + (3 * float_atr)
                 self.logger.info(f"Added ATR-based take-profit (3x ATR={float_atr:.2f}): {take_profit:,.2f}")
             else:
-                take_profit = price * (1 + self.take_profit_pct)
-                self.logger.info(f"Added default percentage take-profit: {take_profit:,.2f}")
+                take_profit = price * (1 + effective_take_profit_pct)
+                self.logger.info(f"Added default percentage take-profit ({effective_take_profit_pct:.1%}): {take_profit:,.2f}")
 
         # ===== CHECK ABSOLUTE RULES =====
         trade_action = TradeAction.BUY if action == "buy" else TradeAction.SELL
@@ -276,15 +296,17 @@ class RiskManagerAgent(BaseAgent):
                 "violations": [str(v) for v in violations],
             }
 
-        # ===== POSITION SIZING =====
-        # Step 1: Start with Kelly Criterion or config max
+        # ===== POSITION SIZING (tier-scaled) =====
+        # Step 1: Start with Kelly Criterion or tier max
         if self.use_kelly and action == "buy" and portfolio_value > 0:
             kelly_frac = self._compute_kelly_size(
                 portfolio_value, win_rate, avg_win, avg_loss
             )
+            # Cap Kelly by the tier's max_position_pct, not just config
+            kelly_frac = min(kelly_frac, effective_max_position_pct)
             max_position = portfolio_value * kelly_frac
         else:
-            max_position = portfolio_value * self.risk_config.get("max_position_pct", 0.05)
+            max_position = portfolio_value * effective_max_position_pct
 
         # Step 2: ATR volatility adjustment
         if atr and price > 0 and action == "buy":
