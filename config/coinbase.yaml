@@ -73,17 +73,6 @@ llm:
     specified limits. When uncertain, you recommend holding or waiting for better
     setups. '
   providers:
-  - api_key_env: GEMINI_API_KEY
-    api_key_set: true
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-    cooldown_seconds: 65
-    daily_token_limit: 950000
-    enabled: true
-    model: gemini-2.0-flash
-    name: gemini
-    rpm_limit: 14
-    tier: free
-    timeout: 30
   - api_key_env: OPENROUTER_API_KEY
     api_key_set: true
     base_url: https://openrouter.ai/api/v1
@@ -95,12 +84,24 @@ llm:
     rpm_limit: 20
     tier: free
     timeout: 45
+  - api_key_env: GEMINI_API_KEY
+    api_key_set: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    cooldown_seconds: 120
+    daily_token_limit: 500000
+    enabled: true
+    model: gemini-2.0-flash
+    name: gemini
+    reserve_for_priority: high
+    rpm_limit: 10
+    tier: free
+    timeout: 30
   - api_key_env: OPENAI_API_KEY
     api_key_set: false
     base_url: https://api.openai.com/v1
     cooldown_seconds: 30
     daily_token_limit: 0
-    enabled: true
+    enabled: false
     model: gpt-4o-mini
     name: openai
     rpm_limit: 450

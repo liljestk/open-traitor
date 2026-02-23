@@ -60,17 +60,6 @@ llm:
     to available capital and never skip opportunities because the amounts seem small.
     '
   providers:
-  - name: gemini
-    enabled: true
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-    api_key_env: GEMINI_API_KEY
-    model: gemini-2.0-flash
-    timeout: 30
-    rpm_limit: 14
-    daily_token_limit: 950000
-    cooldown_seconds: 65
-    tier: free          # change to 'paid' when on a paid Gemini plan
-    api_key_set: true
   - name: openrouter
     enabled: true
     base_url: https://openrouter.ai/api/v1
@@ -82,8 +71,20 @@ llm:
     cooldown_seconds: 30
     tier: free
     api_key_set: true
-  - name: openai
+  - name: gemini
     enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.0-flash
+    timeout: 30
+    rpm_limit: 10
+    daily_token_limit: 500000
+    cooldown_seconds: 120
+    tier: free          # change to 'paid' when on a paid Gemini plan
+    reserve_for_priority: high   # only used for strategist, risk_manager, telegram
+    api_key_set: true
+  - name: openai
+    enabled: false
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     model: gpt-4o-mini

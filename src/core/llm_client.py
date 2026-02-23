@@ -150,6 +150,7 @@ class LLMProvider:
     daily_token_limit: int = 0  # 0 = unlimited
     cooldown_seconds: int = 60
     tier: str = "free"          # "free" or "paid" — controls smart routing
+    reserve_for_priority: str = ""  # "" = available for all; "high" = only high-priority calls
     # Mutable tracking state
     cooldown_until: float = 0.0
     daily_tokens: int = 0
@@ -239,6 +240,7 @@ def build_providers(
             )
 
         tier = pc.get("tier", "free")
+        reserve_for = pc.get("reserve_for_priority", "")
         providers.append(LLMProvider(
             name=name,
             client=client,
@@ -248,10 +250,12 @@ def build_providers(
             daily_token_limit=pc.get("daily_token_limit", 0),
             cooldown_seconds=pc.get("cooldown_seconds", 60),
             tier=tier,
+            reserve_for_priority=reserve_for,
         ))
 
         logger.info(
             f"  Provider '{name}' ready | model={model} | local={is_local} | tier={tier}"
+            + (f" | reserved={reserve_for}" if reserve_for else "")
         )
 
     # Ensure at least one provider (Ollama fallback)
@@ -407,9 +411,18 @@ class LLMClient:
 
         For OpenRouter on free tier: rotate to next free model before cooldown,
         so we can keep trying different free models.
+
+        For Gemini on free tier: use escalating cooldown (2x configured) since
+        the free tier is very restrictive and we don't want to keep hammering it.
         """
+        cooldown_secs = p.cooldown_seconds
+
+        # Gemini free tier: escalate cooldown on repeated 429s
+        if p.name == "gemini" and p.tier == "free":
+            cooldown_secs = min(cooldown_secs * 2, 600)  # cap at 10 minutes
+
         with p._lock:
-            p.cooldown_until = time.monotonic() + p.cooldown_seconds
+            p.cooldown_until = time.monotonic() + cooldown_secs
 
         # OpenRouter free-model rotation: if one free model is rate-limited,
         # try the next one before giving up entirely
@@ -417,7 +430,7 @@ class LLMClient:
             self._rotate_openrouter_model(p, reason)
 
         logger.warning(
-            f"⏸️ Provider '{p.name}' cooldown ({p.cooldown_seconds}s): {reason}"
+            f"⏸️ Provider '{p.name}' cooldown ({cooldown_secs}s): {reason}"
         )
 
     def _rotate_openrouter_model(self, p: LLMProvider, reason: str) -> None:
@@ -473,26 +486,61 @@ class LLMClient:
     def _select_providers(
         self, agent_name: Optional[str] = None, priority: Optional[str] = None,
     ) -> list[LLMProvider]:
-        """Return the provider list — always cloud-first, local as fallback.
+        """Return the provider list, filtered by call priority.
 
-        The original "smart routing" logic sent normal/low priority calls to
-        Ollama first when all cloud providers were on the free tier.  In
-        practice this made Ollama the *default* for the majority of calls
-        (market_analyst, executor, settings_advisor) instead of the intended
-        fallback.  Cloud providers handle rate-limit exhaustion via natural
-        fallback in the retry loop, so reordering is unnecessary.
+        Priority-aware routing:
+          - Providers with ``reserve_for_priority`` set (e.g. "high") are only
+            included in the chain when the call's priority matches.  This
+            preserves rate-limited providers (like free-tier Gemini) for the
+            calls where quality matters most (strategist, risk_manager,
+            telegram_chat).
+          - For normal / low priority calls the reserved provider is skipped
+            entirely, so the chain typically becomes: OpenRouter → Ollama.
 
         Args:
             agent_name: the calling agent (mapped via AGENT_PRIORITIES).
             priority:   explicit override — if set, agent_name mapping is ignored.
         """
-        with self._providers_lock:
-            providers = list(self._providers)
+        effective_priority = priority or self.AGENT_PRIORITIES.get(
+            agent_name or "", "normal"
+        )
 
-        # Always return the configured order (cloud first, local last).
-        # The retry loop in chat()/chat_json() already falls through to
-        # the next provider on rate-limit / quota errors.
-        return providers
+        # Priority hierarchy for matching: high > normal > low
+        _PRIORITY_RANK = {"high": 3, "normal": 2, "low": 1}
+        call_rank = _PRIORITY_RANK.get(effective_priority, 2)
+
+        with self._providers_lock:
+            all_providers = list(self._providers)
+
+        result: list[LLMProvider] = []
+        for p in all_providers:
+            if p.reserve_for_priority:
+                # Only include this provider if the call meets the reservation
+                required_rank = _PRIORITY_RANK.get(p.reserve_for_priority, 2)
+                if call_rank < required_rank:
+                    continue
+            result.append(p)
+
+        # Safety: always include at least one provider (local fallback)
+        if not result:
+            for p in all_providers:
+                if p.is_local:
+                    result.append(p)
+                    break
+            if not result:
+                result = all_providers  # shouldn't happen, but don't break
+
+        if logger.isEnabledFor(10):  # DEBUG
+            names = [p.name for p in result]
+            skipped = [p.name for p in all_providers if p not in result]
+            if skipped:
+                logger.debug(
+                    f"Provider chain for {agent_name or 'unknown'} "
+                    f"(priority={effective_priority}): "
+                    f"{' → '.join(names)} (skipped: {', '.join(skipped)})"
+                )
+
+        return result
 
     @staticmethod
     def _is_rate_or_quota_error(exc: Exception) -> bool:
@@ -1072,6 +1120,7 @@ class LLMClient:
                 "is_local": p.is_local,
                 "available": self._is_provider_available(p),
                 "tier": p.tier,
+                "reserve_for_priority": p.reserve_for_priority,
             }
             if not p.is_local:
                 status.update({
