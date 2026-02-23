@@ -484,7 +484,7 @@ def _open_conn(db) -> sqlite3.Connection:
     Avoids relying on the thread-local connection inside StatsDB, which is
     not safe to share across FastAPI's async threadpool workers.
     """
-    conn = sqlite3.connect(db._db_path, check_same_thread=False)
+    conn = sqlite3.connect(db.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -2218,10 +2218,6 @@ def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-def _utcnow_str() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ---------------------------------------------------------------------------
 # REST — Portfolio History & Analytics
 # ---------------------------------------------------------------------------
@@ -2674,6 +2670,25 @@ def get_tracked_pairs(profile: str = Query(""), db=Depends(_get_profile_db)):
         return db.get_tracked_pairs(quote_currency=qc)
     except Exception as exc:
         logger.exception("tracked pairs error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/predictions/pair-history", summary="Price history with prediction overlay for a single pair")
+def get_pair_prediction_history(
+    pair: str = Query(..., description="Trading pair, e.g. BTC-EUR"),
+    days: int = Query(30, ge=1, le=365),
+    profile: str = Query(""),
+    db=Depends(_get_profile_db),
+):
+    """Return actual price time-series with prediction markers overlaid for a single pair.
+
+    Used by the Prediction Overlay chart to show predicted vs actual prices.
+    """
+    try:
+        result = db.get_pair_prediction_history(pair=pair.upper(), days=days)
+        return _sanitize_floats(result)
+    except Exception as exc:
+        logger.exception("pair prediction history error")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

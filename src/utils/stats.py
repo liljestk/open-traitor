@@ -45,6 +45,7 @@ class StatsDB:
             db_path = get_db_path()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._db_path = db_path
+        self.db_path: str = db_path  # Public accessor for external consumers
         self._local = threading.local()
         self._connections: list[sqlite3.Connection] = []  # Track all thread-local connections
         self._conn_lock = threading.Lock()
@@ -1273,7 +1274,11 @@ class StatsDB:
             return {
                 "predictions": [],
                 "per_pair": {},
-                "overall": {"total": 0, "correct": 0, "accuracy_pct": 0},
+                "overall": {
+                    "total": 0, "correct_24h": 0, "evaluated_24h": 0,
+                    "correct_1h": 0, "evaluated_1h": 0,
+                    "accuracy_24h_pct": None, "accuracy_1h_pct": None,
+                },
                 "by_signal_type": {},
                 "confidence_calibration": [],
                 "daily_accuracy": [],
@@ -1432,7 +1437,8 @@ class StatsDB:
         # 7. Confidence calibration buckets (0-20%, 20-40%, …, 80-100%)
         buckets: dict[str, dict] = {}
         for r in results:
-            bucket = f"{int(r['confidence'] * 100 // 20) * 20}-{int(r['confidence'] * 100 // 20) * 20 + 20}%"
+            bucket_idx = min(int(r['confidence'] * 100 // 20), 4)  # clamp to 0-4
+            bucket = f"{bucket_idx * 20}-{bucket_idx * 20 + 20}%"
             if bucket not in buckets:
                 buckets[bucket] = {"confidence_range": bucket, "total": 0, "correct": 0, "evaluated": 0}
             buckets[bucket]["total"] += 1
@@ -1468,6 +1474,136 @@ class StatsDB:
             "by_signal_type": by_signal,
             "confidence_calibration": calibration,
             "daily_accuracy": daily_list,
+        }
+
+    def get_pair_prediction_history(self, pair: str, days: int = 30) -> dict:
+        """Return price time-series with prediction markers for a single pair.
+
+        Used by the Prediction Overlay chart. Returns:
+          - price_history: [{ts, price}] from portfolio snapshots
+          - predictions: [{ts, signal_type, confidence, entry_price, suggested_tp,
+                          suggested_sl, is_bullish, outcomes}]
+        """
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        # 1. Price history from portfolio snapshots
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
+
+        price_history: list[dict] = []
+        pair_upper = pair.upper()
+        seen_hours: set[str] = set()  # deduplicate to ~hourly
+        for snap in snapshots:
+            try:
+                prices = json.loads(snap["current_prices"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            price = None
+            for key in [pair_upper, pair_upper.replace("-", "/"), pair_upper.replace("/", "-")]:
+                if key in prices and prices[key]:
+                    price = float(prices[key])
+                    break
+            if price and price > 0:
+                hour_key = snap["ts"][:13]  # YYYY-MM-DDTHH
+                if hour_key not in seen_hours:
+                    seen_hours.add(hour_key)
+                    price_history.append({"ts": snap["ts"], "price": round(price, 8)})
+
+        # 2. Prediction markers
+        predictions_raw = conn.execute(
+            """SELECT ts, signal_type, confidence, reasoning_json
+               FROM agent_reasoning
+               WHERE agent_name = 'market_analyst'
+                 AND UPPER(pair) = ?
+                 AND ts >= ?
+               ORDER BY ts ASC""",
+            (pair_upper, cutoff),
+        ).fetchall()
+
+        predictions: list[dict] = []
+        for pred in predictions_raw:
+            try:
+                reasoning = json.loads(pred["reasoning_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                reasoning = {}
+
+            signal = pred["signal_type"] or "neutral"
+            confidence = pred["confidence"] or 0.0
+
+            entry_price = None
+            for key in ["suggested_entry", "current_price"]:
+                val = reasoning.get(key)
+                if val and float(val) > 0:
+                    entry_price = float(val)
+                    break
+
+            # Try to find price from snapshot if not in reasoning
+            if not entry_price:
+                pred_ts = pred["ts"]
+                for ph in price_history:
+                    if ph["ts"] >= pred_ts:
+                        entry_price = ph["price"]
+                        break
+
+            if not entry_price:
+                continue
+
+            is_bullish = signal in ("strong_buy", "buy", "weak_buy")
+            is_bearish = signal in ("strong_sell", "sell", "weak_sell")
+
+            # Find outcome prices at various horizons
+            def _find_price_at(target_ts: str) -> float | None:
+                for ph in price_history:
+                    if ph["ts"] >= target_ts:
+                        return ph["price"]
+                return None
+
+            def _ts_plus_hours(ts_str: str, hours: int) -> str:
+                try:
+                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    return (dt + timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+                except Exception:
+                    return ts_str
+
+            pred_ts = pred["ts"]
+            outcomes: dict[str, dict | None] = {}
+            for label, hours in {"1h": 1, "4h": 4, "24h": 24, "7d": 168}.items():
+                future_ts = _ts_plus_hours(pred_ts, hours)
+                actual_price = _find_price_at(future_ts)
+                if actual_price and actual_price > 0:
+                    pct_change = (actual_price - entry_price) / entry_price * 100
+                    price_went_up = actual_price > entry_price
+                    correct = (is_bullish and price_went_up) or (is_bearish and not price_went_up)
+                    outcomes[label] = {
+                        "actual_price": round(actual_price, 8),
+                        "pct_change": round(pct_change, 4),
+                        "correct": correct,
+                    }
+                else:
+                    outcomes[label] = None
+
+            predictions.append({
+                "ts": pred_ts,
+                "signal_type": signal,
+                "confidence": round(confidence, 3),
+                "entry_price": round(entry_price, 8),
+                "suggested_tp": reasoning.get("suggested_take_profit"),
+                "suggested_sl": reasoning.get("suggested_stop_loss"),
+                "is_bullish": is_bullish,
+                "outcomes": outcomes,
+            })
+
+        return {
+            "pair": pair_upper,
+            "price_history": price_history,
+            "predictions": predictions,
+            "total_predictions": len(predictions),
         }
 
     def cleanup_bad_snapshots(self) -> int:
