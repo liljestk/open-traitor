@@ -326,23 +326,10 @@ async def lifespan(application: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Dashboard exchange client not available: {e}")
 
-    # Also try IBKR client in lifespan if not already set
-    global _ibkr_exchange_client
-    if not globals().get("_ibkr_exchange_client"):
-        try:
-            ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
-            ib_port = int(os.environ.get("IBKR_PORT", "4002"))
-            ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
-            from src.core.ib_client import IBClient
-            _ibkr_exchange_client = IBClient(
-                paper_mode=False,
-                ib_host=ib_host,
-                ib_port=ib_port,
-                ib_client_id=ib_client_id + 10,
-            )
-            logger.info("✅ Dashboard IBKR price client ready (lifespan)")
-        except Exception as e:
-            logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
+    # IBKR client is lazy-initialized by _ensure_ibkr_client() on first
+    # request that needs it — no need to block the lifespan here.
+    # (IBClient.__init__ runs ib_insync's sync connect which creates its own
+    # event loop, clashing with uvicorn's loop if called from async context.)
 
     yield
     if task:
@@ -744,6 +731,22 @@ def get_stats_summary(
             "quote_currency",
             PROFILE_CURRENCIES.get(resolved, "EUR"),
         )
+
+        # For equity profiles, override portfolio value with live data from the
+        # exchange client — the DB snapshots may contain stale/default values.
+        if _is_equity_profile(profile):
+            try:
+                client = _client_for_profile(profile)
+                if client:
+                    live_pv = client.get_portfolio_value()
+                    if live_pv > 0:
+                        if "portfolio" not in stats or not stats["portfolio"]:
+                            stats["portfolio"] = {"portfolio_value": live_pv, "total_pnl": 0.0, "ts": _utcnow()}
+                        else:
+                            stats["portfolio"]["portfolio_value"] = live_pv
+            except Exception as _pv_err:
+                logger.debug(f"Live portfolio value fetch failed for {profile}: {_pv_err}")
+
         return stats
     except Exception as exc:
         logger.exception("stats/summary error")
@@ -753,29 +756,144 @@ def get_stats_summary(
 
 
 # ---------------------------------------------------------------------------
+# REST — Exchange client routing helpers
+# ---------------------------------------------------------------------------
+
+# Known equity exchanges — pairs on these never go to Coinbase
+_EQUITY_EXCHANGES: set[str] = {"ibkr", "nordnet"}
+
+import threading as _threading
+
+_ibkr_init_lock = _threading.Lock()
+_ibkr_init_attempted = False
+
+
+def _ensure_ibkr_client():
+    """Lazily initialize the IBKR client in a dedicated thread if not yet set.
+
+    IBClient.__init__ calls ib_insync's synchronous connect(), which creates its
+    own asyncio event loop.  That clashes with uvicorn's already-running loop
+    when called from an async context.  Running in a separate thread (which has
+    no event loop) avoids the conflict.
+    """
+    global _ibkr_exchange_client, _ibkr_init_attempted
+    if _ibkr_exchange_client is not None:
+        return _ibkr_exchange_client
+    if _ibkr_init_attempted:
+        return None  # Already tried and failed
+
+    with _ibkr_init_lock:
+        # Double-check after acquiring lock
+        if _ibkr_exchange_client is not None:
+            return _ibkr_exchange_client
+        if _ibkr_init_attempted:
+            return None
+        _ibkr_init_attempted = True
+
+        result: list = [None]
+
+        def _do_init():
+            try:
+                ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+                ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+                ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+                from src.core.ib_client import IBClient
+                result[0] = IBClient(
+                    paper_mode=False,
+                    ib_host=ib_host,
+                    ib_port=ib_port,
+                    ib_client_id=ib_client_id + 10,
+                )
+                logger.info("✅ Dashboard IBKR price client ready (lazy init)")
+            except Exception as e:
+                logger.info(f"ℹ️ Dashboard IBKR client not available (lazy init): {e}")
+
+        t = _threading.Thread(target=_do_init, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        if result[0] is not None:
+            _ibkr_exchange_client = result[0]
+        return _ibkr_exchange_client
+
+
+def _client_for_profile(profile: str = ""):
+    """Return the correct exchange client for the given profile.
+
+    - ibkr / nordnet → _ibkr_exchange_client (lazy-initialized if needed)
+    - coinbase / default → _exchange_client (Coinbase)
+    """
+    resolved = _resolve_profile(profile)
+    if resolved in _EQUITY_EXCHANGES:
+        client = _ensure_ibkr_client()
+        if client:
+            return client
+    return _exchange_client
+
+
+def _is_equity_profile(profile: str) -> bool:
+    return _resolve_profile(profile) in _EQUITY_EXCHANGES
+
+
+# ---------------------------------------------------------------------------
 # REST — Simulated Trades
 # ---------------------------------------------------------------------------
 
-def _get_live_price(pair: str) -> float:
-    """Fetch the current price for a pair via ExchangeClient (or return 0 on failure)."""
-    if _exchange_client:
+def _get_live_price(pair: str, profile: str = "") -> float:
+    """Fetch the current price for a pair via the appropriate exchange client."""
+    client = _client_for_profile(profile)
+    if client:
         try:
-            return _exchange_client.get_current_price(pair)
+            return client.get_current_price(pair)
+        except Exception:
+            pass
+    # Fallback: try the other client
+    fallback = _ibkr_exchange_client if client is _exchange_client else _exchange_client
+    if fallback:
+        try:
+            return fallback.get_current_price(pair)
         except Exception:
             pass
     return 0.0
 
 
-@app.get("/api/products", summary="List tradable Coinbase products")
-def list_products():
-    """Return all online, tradable products from Coinbase Advanced Trade.
+def _get_products_for_profile(profile: str) -> list[dict]:
+    """Return tradable products for the given profile.
 
-    Response: ``{"products": [{"id": "BTC-EUR", "base": "BTC", "quote": "EUR"}, ...]}``
-    Each entry is a product that is *online* and not disabled on the exchange.
+    For equity profiles (IBKR/Nordnet), returns pairs from the config file
+    since these exchanges don't have a Coinbase-style product catalog.
+    For crypto profiles, queries the Coinbase REST API.
     """
-    if not getattr(_exchange_client, "_rest_client", None):
-        return {"products": []}
+    resolved = _resolve_profile(profile)
+    if resolved in _EQUITY_EXCHANGES:
+        cfg = _get_config_for_profile(profile)
+        pairs = cfg.get("trading", {}).get("pairs", [])
+        qc = cfg.get("trading", {}).get("quote_currency", "EUR")
+        products = []
+        for p in pairs:
+            parts = p.split("-")
+            if len(parts) == 2:
+                products.append({"id": p, "base": parts[0], "quote": parts[1]})
 
+        # Also include any human-followed pairs from the DB
+        try:
+            db = _require_db(profile)
+            follows = db.get_pair_follows(quote_currency=qc)
+            existing_ids = {prod["id"].upper() for prod in products}
+            for f in follows:
+                fpair = f["pair"].upper()
+                if fpair not in existing_ids:
+                    fparts = fpair.split("-")
+                    if len(fparts) == 2:
+                        products.append({"id": fpair, "base": fparts[0], "quote": fparts[1]})
+                        existing_ids.add(fpair)
+        except Exception:
+            pass
+        products.sort(key=lambda x: x["id"])
+        return products
+
+    # Coinbase / default: query REST API
+    if not getattr(_exchange_client, "_rest_client", None):
+        return []
     try:
         resp = _exchange_client._rest_client.get_products()
         raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
@@ -793,19 +911,54 @@ def list_products():
                     "quote": p.get("quote_currency_id", ""),
                 })
         products.sort(key=lambda x: x["id"])
-        return {"products": products}
+        return products
     except Exception as e:
         logger.warning(f"⚠️ Failed to list products: {e}")
-        return {"products": []}
+        return []
+
+
+@app.get("/api/products", summary="List tradable products for the active profile")
+def list_products(profile: str = Query("", description="Exchange profile")):
+    """Return tradable products for the active exchange profile.
+
+    For crypto profiles: queries Coinbase Advanced Trade.
+    For equity profiles (IBKR): returns configured pairs from the config file.
+    """
+    return {"products": _get_products_for_profile(profile)}
 
 
 @app.get("/api/products/search", summary="Search tradable products by keyword")
-def search_products(q: str = Query("", min_length=1, description="Search query (symbol or name)")):
+def search_products(
+    q: str = Query("", min_length=1, description="Search query (symbol or name)"),
+    profile: str = Query("", description="Exchange profile"),
+):
     """Search products by base currency / product ID substring.
 
     Returns up to 25 matches sorted alphabetically.
-    Falls back to an empty list when the exchange client is unavailable.
+    For equity profiles, searches the config pair list.
+    For crypto profiles, queries Coinbase.
     """
+    resolved = _resolve_profile(profile)
+    query = q.upper().strip()
+
+    if resolved in _EQUITY_EXCHANGES:
+        all_products = _get_products_for_profile(profile)
+        results = []
+        for p in all_products:
+            pid = p["id"].upper()
+            base = p["base"].upper()
+            if query in pid or query in base:
+                results.append({
+                    "id": p["id"],
+                    "base": p["base"],
+                    "quote": p["quote"],
+                    "display_name": p["base"],
+                    "volume_24h": 0,
+                    "price_change_24h": 0,
+                })
+        return {"results": results[:25], "query": q}
+
+    # Coinbase search
     if not getattr(_exchange_client, "_rest_client", None):
         return {"results": [], "query": q}
 
@@ -813,7 +966,6 @@ def search_products(q: str = Query("", min_length=1, description="Search query (
         resp = _exchange_client._rest_client.get_products()
         raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
         items = raw.get("products", [])
-        query = q.upper().strip()
         results = []
         for p in items:
             if (
@@ -834,7 +986,6 @@ def search_products(q: str = Query("", min_length=1, description="Search query (
                     "volume_24h": float(p.get("volume_24h", 0) or 0),
                     "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
                 })
-        # Sort by 24h volume desc so the most traded pairs appear first
         results.sort(key=lambda x: x["volume_24h"], reverse=True)
         return {"results": results[:25], "query": q}
     except Exception as e:
@@ -843,9 +994,12 @@ def search_products(q: str = Query("", min_length=1, description="Search query (
 
 
 @app.get("/api/market/price", summary="Live price for a trading pair")
-def get_market_price(pair: str = Query(..., description="e.g. BTC-EUR")):
+def get_market_price(
+    pair: str = Query(..., description="e.g. BTC-EUR"),
+    profile: str = Query("", description="Exchange profile"),
+):
     """Returns the current best-estimate price for the given pair."""
-    price = _get_live_price(pair)
+    price = _get_live_price(pair, profile=profile)
     return {"pair": pair, "price": price, "ts": _utcnow()}
 
 
@@ -859,7 +1013,7 @@ class SimulatedTradeCreate(_BaseModel):
 
 
 @app.post("/api/simulated-trades", summary="Open a new simulated trade")
-def create_simulated_trade(body: SimulatedTradeCreate, db=Depends(_get_profile_db)):
+def create_simulated_trade(body: SimulatedTradeCreate, profile: str = Query(""), db=Depends(_get_profile_db)):
     """
     Opens a new paper simulation. The server fetches the live entry price,
     computes the implied quantity, and persists the record.
@@ -884,7 +1038,7 @@ def create_simulated_trade(body: SimulatedTradeCreate, db=Depends(_get_profile_d
     else:
         to_currency = base  # Best guess
 
-    entry_price = _get_live_price(pair)
+    entry_price = _get_live_price(pair, profile=profile)
     if entry_price <= 0:
         raise HTTPException(status_code=503, detail=f"Cannot fetch live price for {pair}")
 
@@ -933,7 +1087,7 @@ def list_simulated_trades(
     # Enrich open rows with live PnL
     for row in rows:
         if row["status"] == "open":
-            current_price = _get_live_price(row["pair"])
+            current_price = _get_live_price(row["pair"], profile=profile)
             if current_price > 0 and row["entry_price"] > 0:
                 # Determine direction: if from_currency is the quote (e.g. USD),
                 # user bought the base (long). Otherwise they sold base (short).
@@ -965,7 +1119,7 @@ def list_simulated_trades(
 
 
 @app.delete("/api/simulated-trades/{sim_id}", summary="Close a simulated trade")
-def close_simulated_trade_route(sim_id: int, db=Depends(_get_profile_db)):
+def close_simulated_trade_route(sim_id: int, profile: str = Query(""), db=Depends(_get_profile_db)):
     """
     Closes an open simulation by recording the current live price as the
     close price and computing the final PnL.
@@ -977,7 +1131,7 @@ def close_simulated_trade_route(sim_id: int, db=Depends(_get_profile_db)):
     if not target:
         raise HTTPException(status_code=404, detail=f"Open simulation {sim_id} not found")
 
-    close_price = _get_live_price(target["pair"])
+    close_price = _get_live_price(target["pair"], profile=profile)
     if close_price <= 0:
         close_price = target["entry_price"]  # Fallback to entry price
 
@@ -1042,193 +1196,11 @@ def get_executive_summary():
         }
     }
 
-
 # ---------------------------------------------------------------------------
-# REST — Strategic context (planning)
+# REST — Planning routes (extracted to routes/planning.py)
 # ---------------------------------------------------------------------------
-
-@app.get("/api/strategic", summary="Recent strategic plans from Temporal workflows")
-def get_strategic(
-    horizon: Optional[str] = Query(None, description="daily | weekly | monthly"),
-    limit: int = Query(20, ge=1, le=100),
-    db=Depends(_get_profile_db),
-):
-    """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    conn = _open_conn(db)
-    try:
-        if horizon:
-            rows = conn.execute(
-                """SELECT id, horizon, plan_json, summary_text, ts,
-                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                   FROM strategic_context
-                   WHERE horizon = ?
-                   ORDER BY ts DESC LIMIT ?""",
-                (horizon, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT id, horizon, plan_json, summary_text, ts,
-                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                   FROM strategic_context
-                   ORDER BY ts DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
-
-        result = []
-        for r in rows:
-            row = dict(r)
-            try:
-                row["plan_json"] = json.loads(row["plan_json"] or "{}")
-            except Exception:
-                pass
-            row["langfuse_url"] = _langfuse_url(row.get("langfuse_trace_id"))
-            result.append(row)
-        return {"plans": result, "count": len(result)}
-    except Exception as exc:
-        logger.exception("strategic error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# REST — Temporal workflow replay
-# ---------------------------------------------------------------------------
-
-@app.get("/api/temporal/runs", summary="List recent Temporal planning workflow runs")
-async def list_temporal_runs(
-    limit: int = Query(50, ge=1, le=200),
-    workflow_type: Optional[str] = Query(None, description="DailyPlanWorkflow | WeeklyReviewWorkflow | MonthlyReviewWorkflow"),
-):
-    """Returns recent workflow executions from Temporal with their status."""
-    if _temporal_client is None:
-        return {"runs": [], "error": "Temporal client not available"}
-    try:
-        query = " OR ".join(
-            f"WorkflowType = '{wt}'"
-            for wt in ("DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow")
-        )
-        _ALLOWED_WORKFLOW_TYPES = {"DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow"}
-        if workflow_type:
-            if workflow_type not in _ALLOWED_WORKFLOW_TYPES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid workflow_type. Allowed: {sorted(_ALLOWED_WORKFLOW_TYPES)}",
-                )
-            query = f"WorkflowType = '{workflow_type}'"
-
-        runs = []
-        async for wf in _temporal_client.list_workflows(query=query):
-            runs.append({
-                "workflow_id": wf.id,
-                "run_id": wf.run_id,
-                "workflow_type": wf.workflow_type,
-                "status": str(wf.status),
-                "start_time": wf.start_time.isoformat() if wf.start_time else None,
-                "close_time": wf.close_time.isoformat() if wf.close_time else None,
-            })
-            if len(runs) >= limit:
-                break
-        return {"runs": runs, "count": len(runs)}
-    except Exception as exc:
-        logger.exception("temporal/runs error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/api/temporal/replay/{workflow_id}/{run_id}", summary="Full Temporal workflow event history")
-async def get_temporal_replay(workflow_id: str, run_id: str):
-    """
-    Fetches the complete event history for a Temporal workflow run.
-    Each event records input, LLM call, output, timing — enabling full step-by-step replay.
-    """
-    if _temporal_client is None:
-        raise HTTPException(status_code=503, detail="Temporal client not available")
-    try:
-        handle = _temporal_client.get_workflow_handle(workflow_id, run_id=run_id)
-        history = await handle.fetch_history()
-        events = []
-        for event in history.events:
-            events.append({
-                "event_id": event.event_id,
-                "event_type": str(event.event_type),
-                "event_time": event.event_time.isoformat() if event.event_time else None,
-                "attributes": _serialize_event_attrs(event),
-            })
-
-        # Cross-link with Langfuse trace ID from StatsDB
-        langfuse_trace_id = None
-        if _stats_db:
-            conn = _fresh_conn()
-            try:
-                row = conn.execute(
-                    """SELECT langfuse_trace_id FROM strategic_context
-                       WHERE temporal_workflow_id = ? AND temporal_run_id = ?
-                       LIMIT 1""",
-                    (workflow_id, run_id),
-                ).fetchone()
-                if row:
-                    langfuse_trace_id = row[0]
-            finally:
-                conn.close()
-
-        return {
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-            "event_count": len(events),
-            "langfuse_trace_id": langfuse_trace_id,
-            "langfuse_url": _langfuse_url(langfuse_trace_id),
-            "events": events,
-        }
-    except Exception as exc:
-        logger.exception("temporal/replay error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/temporal/rerun/{workflow_id}/{run_id}", summary="Trigger a fresh planning workflow run")
-async def rerun_temporal_workflow(workflow_id: str, run_id: str):
-    """
-    Starts a new execution of the same workflow type with a fresh run ID.
-    Useful for debugging or forcing an out-of-schedule planning run.
-    """
-    if _temporal_client is None:
-        raise HTTPException(status_code=503, detail="Temporal client not available")
-
-    # Determine workflow class from the original run
-    try:
-        handle = _temporal_client.get_workflow_handle(workflow_id, run_id=run_id)
-        desc = await handle.describe()
-        workflow_type = desc.workflow_type
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"Cannot find workflow: {exc}")
-
-    from src.planning.workflows import DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow
-    _wf_map = {
-        "DailyPlanWorkflow": DailyPlanWorkflow,
-        "WeeklyReviewWorkflow": WeeklyReviewWorkflow,
-        "MonthlyReviewWorkflow": MonthlyReviewWorkflow,
-    }
-    wf_cls = _wf_map.get(workflow_type)
-    if not wf_cls:
-        raise HTTPException(status_code=400, detail=f"Unknown workflow type: {workflow_type!r}")
-
-    import uuid
-    new_wf_id = f"manual-rerun-{workflow_type}-{uuid.uuid4().hex[:8]}"
-    try:
-        new_handle = await _temporal_client.start_workflow(
-            wf_cls.run,
-            id=new_wf_id,
-            task_queue="planning",
-        )
-        return {
-            "status": "started",
-            "new_workflow_id": new_wf_id,
-            "new_run_id": new_handle.first_execution_run_id,
-            "original_workflow_id": workflow_id,
-            "original_run_id": run_id,
-        }
-    except Exception as exc:
-        logger.exception("temporal/rerun error")
-        raise HTTPException(status_code=500, detail="Internal server error")
+from src.dashboard.routes.planning import router as _planning_router
+app.include_router(_planning_router)
 
 
 # ---------------------------------------------------------------------------
@@ -2349,6 +2321,18 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(_get_profile_db)
         prices = data.get("current_prices") or {}
         portfolio_val = data.get("portfolio_value") or 1
 
+        # For equity profiles, override portfolio value with live data
+        if _is_equity_profile(profile):
+            try:
+                client = _client_for_profile(profile)
+                if client:
+                    live_pv = client.get_portfolio_value()
+                    if live_pv > 0:
+                        data["portfolio_value"] = live_pv
+                        portfolio_val = live_pv
+            except Exception:
+                pass
+
         # Filter positions by quote currency when a profile is active
         if qc:
             positions = {
@@ -2594,10 +2578,11 @@ def get_watchlist(
         all_pairs = list(dict.fromkeys(pairs + human_followed))  # preserve order, dedup
 
         # Fetch live prices for ALL pairs (config + human-followed), capped at 30
-        if _exchange_client and all_pairs:
+        price_client = _client_for_profile(profile)
+        if price_client and all_pairs:
             for pair in all_pairs[:30]:
                 try:
-                    live_prices[pair] = _exchange_client.get_current_price(pair)
+                    live_prices[pair] = price_client.get_current_price(pair)
                 except Exception:
                     pass
 
@@ -2757,12 +2742,14 @@ def get_candles(
     pair: str = Query(..., description="Trading pair, e.g. BTC-EUR"),
     granularity: str = Query("ONE_HOUR", description="Candle granularity"),
     limit: int = Query(200, ge=10, le=1000),
+    profile: str = Query("", description="Exchange profile"),
 ):
     """Returns OHLCV candle data from the exchange for charting."""
-    if not _exchange_client:
+    client = _client_for_profile(profile)
+    if not client:
         raise HTTPException(status_code=503, detail="Exchange client not available")
     try:
-        candles = _exchange_client.get_candles(pair, granularity=granularity, limit=limit)
+        candles = client.get_candles(pair, granularity=granularity, limit=limit)
         if not candles:
             return {"candles": [], "pair": pair}
         return _sanitize_floats({"candles": candles, "pair": pair, "count": len(candles)})
