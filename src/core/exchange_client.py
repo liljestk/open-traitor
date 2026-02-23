@@ -268,3 +268,25 @@ class ExchangeClient(abc.ABC):
         Default: returns empty list.
         """
         return []
+
+    def get_news(self, pair: str, limit: int = 5) -> list[dict]:
+        """
+        Fetch news articles for a specific pair from the exchange's news feed.
+
+        Args:
+            pair: The trading pair (e.g. 'AAPL-EUR', 'BTC-USD').
+            limit: Maximum number of articles to return.
+
+        Returns a list of dicts with keys: time, headline, provider, article_id.
+        Default: returns empty list.  Exchanges with built-in news (e.g. IBKR)
+        should override this.
+        """
+        return []
+
+    def get_news_providers(self) -> list[str]:
+        """
+        Return a list of available news provider codes on this exchange.
+
+        Default: returns empty list.  IBKR overrides with reqNewsProviders().
+        """
+        return []

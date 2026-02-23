@@ -181,13 +181,41 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     # ── Market data ──────────────────────────────────────────────────────
 
     def _get_contract(self, pair: str):
-        """Helper to create and qualify an ib_insync Stock contract."""
+        """
+        Helper to create and qualify an ib_insync Stock contract.
+        
+        Pair format: 'AAPL-USD', 'MSFT-EUR', or just 'AAPL'.
+        For US stocks, currency should be USD even if the account holds EUR
+        (IBKR handles FX conversion automatically on trade execution).
+        """
         from ib_insync import Stock
         parts = pair.upper().split("-")
         symbol = parts[0]
-        currency = parts[1] if len(parts) > 1 else self._native_currency
+        currency = parts[1] if len(parts) > 1 else "USD"
+        
+        # US equities always trade in USD on SMART routing
         contract = Stock(symbol, 'SMART', currency)
-        self.ib.qualifyContracts(contract)
+        qualified = self.ib.qualifyContracts(contract)
+        
+        if not qualified or not contract.conId:
+            # Retry with USD if alternate currency failed
+            if currency != "USD":
+                contract = Stock(symbol, 'SMART', 'USD')
+                qualified = self.ib.qualifyContracts(contract)
+                if qualified and contract.conId:
+                    logger.debug(f"Contract {symbol} not available in {currency}, using USD")
+            
+            # Try specific exchanges for European stocks
+            if not qualified or not contract.conId:
+                for exch_currency in ["EUR", "GBP", "CHF"]:
+                    if exch_currency == currency:
+                        continue
+                    contract = Stock(symbol, 'SMART', exch_currency)
+                    qualified = self.ib.qualifyContracts(contract)
+                    if qualified and contract.conId:
+                        logger.debug(f"Contract {symbol} found with currency {exch_currency}")
+                        break
+        
         return contract
 
     def get_current_price(self, pair: str) -> float:
@@ -609,6 +637,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     ) -> list[str]:
         """
         In live mode, use IB Scanner (Top % Gainers) to find active tickers.
+        Returns pairs with their actual trading currency (usually USD for US stocks).
         """
         if only_trade:
             return list(only_trade)
@@ -621,7 +650,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             
         from ib_insync import ScannerSubscription
         try:
-            # Find Top % Gainers on US Equities as an example of dynamic discovery
+            # Find Top % Gainers on US Equities
             sub = ScannerSubscription(
                 instrument='STK',
                 locationCode='STK.US.MAJOR',
@@ -630,11 +659,13 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             scan_data = self.ib.reqScannerData(sub)
             
             pairs = []
-            quote = self._native_currency
             
             for item in scan_data:
-                sym = item.contractDetails.contract.symbol
-                pair = f"{sym}-{quote}"
+                contract = item.contractDetails.contract
+                sym = contract.symbol
+                # Use the contract's actual currency (USD for US stocks)
+                cur = contract.currency or "USD"
+                pair = f"{sym}-{cur}"
                 
                 if never_trade and pair in never_trade:
                     continue
@@ -648,24 +679,34 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             return []
 
     def get_news(self, pair: str, limit: int = 5) -> list[dict]:
-        """Fetch news for a specific pair via IBKR."""
+        """Fetch news for a specific pair via IBKR News API."""
         if self.paper_mode:
             return []
-            
+
         try:
             contract = self._get_contract(pair)
             self.ib.qualifyContracts(contract)
-            
-            # Some connections require specifying the provider, 'BRF' is commonly available
-            # Get available providers if needed: providers = self.ib.reqNewsProviders()
+
+            # Discover available news providers if not cached
+            if not hasattr(self, '_news_providers_str') or not self._news_providers_str:
+                try:
+                    providers = self.ib.reqNewsProviders()
+                    if providers:
+                        self._news_providers_str = '+'.join(p.code for p in providers)
+                        logger.info(f"IBKR news providers: {self._news_providers_str}")
+                    else:
+                        self._news_providers_str = 'BRF+DJNL+BST'  # Common defaults
+                except Exception:
+                    self._news_providers_str = 'BRF+DJNL+BST'
+
             news = self.ib.reqHistoricalNews(
                 conId=contract.conId,
-                providerCodes='BRF',
+                providerCodes=self._news_providers_str,
                 startDateTime='',
                 endDateTime='',
                 totalResults=limit
             )
-            
+
             results = []
             for n in news:
                 results.append({
@@ -679,8 +720,34 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             logger.error(f"Failed to fetch IBKR news for {pair}: {e}")
             return []
 
+    def get_news_providers(self) -> list[str]:
+        """Return available news provider codes from IBKR."""
+        if self.paper_mode:
+            return []
+        try:
+            providers = self.ib.reqNewsProviders()
+            return [p.code for p in providers]
+        except Exception as e:
+            logger.error(f"Failed to fetch IBKR news providers: {e}")
+            return []
+
+    def get_news_article_body(self, provider_code: str, article_id: str) -> str:
+        """Fetch the full text body of a news article by ID."""
+        if self.paper_mode:
+            return ""
+        try:
+            article = self.ib.reqNewsArticle(provider_code, article_id)
+            return article.articleText if article else ""
+        except Exception as e:
+            logger.error(f"Failed to fetch article body {article_id}: {e}")
+            return ""
+
     def adapt_pairs_to_account(
         self, pairs: list[str], native_currency: str
     ) -> list[str]:
-        """IB pairs use the configured currency — no adaptation needed."""
+        """
+        IB pairs trade in the stock's native currency (e.g. AAPL trades in USD).
+        IBKR handles FX conversion automatically when the account is in EUR.
+        Do NOT rewrite USD→EUR for stock tickers.
+        """
         return pairs

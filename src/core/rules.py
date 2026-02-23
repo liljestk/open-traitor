@@ -220,6 +220,8 @@ class AbsoluteRules:
         """Inner implementation — caller must hold self._lock."""
         self._reset_daily_if_needed()
 
+        is_buy = action == TradeAction.BUY
+
         # Tier-scaled limits
         eff_cash_pct, eff_risk_pct, eff_emerg = self._get_effective_limits(portfolio_value)
 
@@ -227,7 +229,7 @@ class AbsoluteRules:
         needs_approval = False
         now = datetime.now(timezone.utc)
 
-        # --- Rule: Blacklisted pairs ---
+        # --- Rule: Blacklisted pairs (applies to BUY + SELL) ---
         if pair in self.never_trade_pairs:
             violations.append(RuleViolation(
                 "never_trade_pair",
@@ -235,7 +237,7 @@ class AbsoluteRules:
                 f"The pair {pair} is in the never_trade_pairs list",
             ))
 
-        # --- Rule: Whitelist (if set) ---
+        # --- Rule: Whitelist (applies to BUY + SELL) ---
         if self.only_trade_pairs and pair not in self.only_trade_pairs:
             violations.append(RuleViolation(
                 "only_trade_pairs",
@@ -243,8 +245,12 @@ class AbsoluteRules:
                 f"Only these pairs are allowed: {self.only_trade_pairs}",
             ))
 
-        # --- Rule: Max single trade ---
-        if quote_value > self.max_single_trade:
+        # ── BUY-only rules ───────────────────────────────────────────────
+        # Sells reduce exposure and should never be blocked by risk limits.
+        # Only pair blacklist/whitelist checks apply to sells.
+
+        # --- Rule: Max single trade (BUY only) ---
+        if is_buy and quote_value > self.max_single_trade:
             violations.append(RuleViolation(
                 "max_single_trade",
                 f"Trade value {quote_value:,.2f} exceeds max {self.max_single_trade:,.0f}",
@@ -252,31 +258,31 @@ class AbsoluteRules:
             ))
 
         # --- Rule: Max daily spend (BUY only — sells are returns, not expenses) ---
-        if action == TradeAction.BUY and self._daily_spend + quote_value > self.max_daily_spend:
+        if is_buy and self._daily_spend + quote_value > self.max_daily_spend:
             violations.append(RuleViolation(
                 "max_daily_spend",
                 f"Daily spend would be {self._daily_spend + quote_value:,.2f}, max is {self.max_daily_spend:,.0f}",
                 f"Already spent today: {self._daily_spend:,.2f}",
             ))
 
-        # --- Rule: Max daily loss ---
-        if self._daily_loss >= self.max_daily_loss:
+        # --- Rule: Max daily loss (BUY only — don't prevent exits) ---
+        if is_buy and self._daily_loss >= self.max_daily_loss:
             violations.append(RuleViolation(
                 "max_daily_loss",
                 f"Daily loss limit reached: {self._daily_loss:,.2f}",
                 "Trading suspended until tomorrow",
             ))
 
-        # --- Rule: Max trades per day ---
-        if self._daily_trade_count >= self.max_trades_per_day:
+        # --- Rule: Max trades per day (BUY only — never prevent exits) ---
+        if is_buy and self._daily_trade_count >= self.max_trades_per_day:
             violations.append(RuleViolation(
                 "max_trades_per_day",
                 f"Max {self.max_trades_per_day} trades/day reached",
                 f"Trades today: {self._daily_trade_count}",
             ))
 
-        # --- Rule: Min trade interval ---
-        if self._last_trade_time:
+        # --- Rule: Min trade interval (BUY only — sells must be timely) ---
+        if is_buy and self._last_trade_time:
             elapsed = (now - self._last_trade_time).total_seconds()
             if elapsed < self.min_trade_interval_seconds:
                 violations.append(RuleViolation(
@@ -286,7 +292,7 @@ class AbsoluteRules:
                 ))
 
         # --- Rule: Max cash per trade (BUY only, tier-scaled) ---
-        if action == TradeAction.BUY and cash_balance > 0:
+        if is_buy and cash_balance > 0:
             cash_pct = quote_value / cash_balance
             if cash_pct > eff_cash_pct:
                 violations.append(RuleViolation(
@@ -295,16 +301,16 @@ class AbsoluteRules:
                     f"Cash: {cash_balance:,.2f}, Trade: {quote_value:,.2f}",
                 ))
 
-        # --- Rule: Emergency portfolio stop (disabled for micro/small tiers) ---
-        if eff_emerg > 0 and portfolio_value < eff_emerg:
+        # --- Rule: Emergency portfolio stop (BUY only — always allow exits) ---
+        if is_buy and eff_emerg > 0 and portfolio_value < eff_emerg:
             violations.append(RuleViolation(
                 "emergency_stop",
                 f"Portfolio {portfolio_value:,.2f} below emergency stop {eff_emerg:,.0f}",
                 "ALL TRADING HALTED",
             ))
 
-        # --- Rule: Portfolio risk (tier-scaled) ---
-        if portfolio_value > 0:
+        # --- Rule: Portfolio risk (BUY only, tier-scaled) ---
+        if is_buy and portfolio_value > 0:
             risk_pct = quote_value / portfolio_value
             if risk_pct > eff_risk_pct:
                 violations.append(RuleViolation(
@@ -313,16 +319,16 @@ class AbsoluteRules:
                     "Reduce position size",
                 ))
 
-        # --- Rule: Stop-loss required ---
-        if self.always_use_stop_loss and action == TradeAction.BUY and not has_stop_loss:
+        # --- Rule: Stop-loss required (BUY only) ---
+        if self.always_use_stop_loss and is_buy and not has_stop_loss:
             violations.append(RuleViolation(
                 "always_use_stop_loss",
                 "Stop-loss is required for all buy orders",
                 "Set a stop-loss before opening a position",
             ))
 
-        # --- Check: Needs approval ---
-        if quote_value > self.require_approval_above and not violations:
+        # --- Check: Needs approval (BUY only — sells are urgent) ---
+        if is_buy and quote_value > self.require_approval_above and not violations:
             needs_approval = True
             logger.info(
                 f"⚠️ Trade {quote_value:,.2f} exceeds approval threshold "

@@ -4,7 +4,7 @@ trading:
   quote_currencies:
   - EUR
   - EURC
-  pairs: []  # cleared for fresh LLM-driven rediscovery
+  pairs: []
   quote_currency: EUR
   interval: 120
   min_confidence: 0.55
@@ -51,14 +51,14 @@ llm:
   max_retries: 3
   timeout: 60
   recovery_check_interval: 120
-  persona: 'You are a sharp, tactical cryptocurrency trading assistant focused on growing
-    the account balance no matter how small the starting capital. You scale your thinking to
-    the actual account size — whether trading cents or hundreds. You actively look for
-    profitable opportunities and balance risk-reward optimally. You are decisive and make
-    trades when the data aligns, rather than waiting for perfect conditions. Every micro-gain
-    compounds. Always use what is available to its fullest potential. Adapt position sizes
-    to available capital and never skip opportunities because the amounts seem small.
-    '
+  persona: 'You are a sharp, tactical cryptocurrency trading assistant focused on
+    growing the account balance no matter how small the starting capital. You scale
+    your thinking to the actual account size — whether trading cents or hundreds.
+    You actively look for profitable opportunities and balance risk-reward optimally.
+    You are decisive and make trades when the data aligns, rather than waiting for
+    perfect conditions. Every micro-gain compounds. Always use what is available to
+    its fullest potential. Adapt position sizes to available capital and never skip
+    opportunities because the amounts seem small. '
   providers:
   - name: openrouter
     enabled: true
@@ -80,8 +80,8 @@ llm:
     rpm_limit: 10
     daily_token_limit: 500000
     cooldown_seconds: 120
-    tier: free          # change to 'paid' when on a paid Gemini plan
-    reserve_for_priority: high   # only used for strategist, risk_manager, telegram
+    tier: free
+    reserve_for_priority: high
     api_key_set: true
   - name: openai
     enabled: false
@@ -92,7 +92,7 @@ llm:
     rpm_limit: 450
     daily_token_limit: 0
     cooldown_seconds: 30
-    tier: free          # change to 'paid' when on a paid OpenAI plan
+    tier: free
     api_key_set: false
   - name: ollama
     enabled: true
@@ -188,7 +188,7 @@ fees:
   maker_fee_pct: 0.004
   safety_margin: 1.5
   min_gain_after_fees_pct: 0.005
-  min_trade_quote: 50
+  min_trade_quote: 0.0
   swap_cooldown_seconds: 3600
 high_stakes:
   trade_size_multiplier: 2.5

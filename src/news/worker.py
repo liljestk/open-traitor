@@ -115,10 +115,46 @@ def main():
         "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
     }
 
+    # Try to create an IBKR client for fetching exchange-native news
+    ibkr_client = None
+    if "ibkr" in profile_configs:
+        ibkr_news_cfg = profile_configs["ibkr"]
+        if ibkr_news_cfg.get("ibkr_news_enabled", True):
+            try:
+                from src.core.ib_client import IBClient
+                ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+                ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+                ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+                ibkr_client = IBClient(
+                    paper_mode=False,
+                    ib_host=ib_host,
+                    ib_port=ib_port,
+                    ib_client_id=ib_client_id + 20,  # Offset to avoid ID collision
+                )
+                logger.info("✅ IBKR client connected for news fetching")
+            except Exception as e:
+                logger.warning(f"⚠️ IBKR client not available for news: {e}")
+
+    # Load IBKR trading config for pairs (needed by fetch_ibkr_news)
+    ibkr_full_config = {}
+    if "ibkr" in profile_configs:
+        try:
+            ibkr_cfg_path = Path(config_dir) / "ibkr.yaml"
+            with open(ibkr_cfg_path) as f:
+                ibkr_full_config = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
+    # Inject IBKR trading pairs into merged config for news fetching
+    if ibkr_full_config.get("trading", {}).get("pairs"):
+        merged_config["trading"] = ibkr_full_config.get("trading", {})
+
     # Single aggregator with merged sources (avoids duplicate HTTP requests)
     aggregator = NewsAggregator(
         config=merged_config,
         redis_client=redis_client,
+        exchange_client=ibkr_client,
+        profile="ibkr" if ibkr_client else None,
         **reddit_creds,
     )
 

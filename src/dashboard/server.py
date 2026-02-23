@@ -67,6 +67,7 @@ _temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
 _temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
 _config: dict = {}
 _exchange_client = None   # ExchangeClient instance (optional, for price lookups)
+_ibkr_exchange_client = None  # IBClient instance (optional, for IBKR price/news)
 
 _ws_connections: list[tuple[WebSocket, str | None]] = []  # (ws, quote_currency_filter)
 
@@ -100,7 +101,7 @@ PROFILE_CURRENCIES: dict[str, str] = {
     "": "EUR",
     "coinbase": "EUR",
     "nordnet": "SEK",
-    "ibkr": "USD",
+    "ibkr": "EUR",
 }
 
 
@@ -192,6 +193,23 @@ def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: di
         logger.info("✅ Dashboard Coinbase price client ready")
     except Exception as e:
         logger.warning(f"⚠️ Dashboard Exchange client not available: {e}")
+
+    # Also try to create an IBKR client for IBKR profile price lookups
+    _ibkr_exchange_client = None
+    try:
+        ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+        ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+        ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+        from src.core.ib_client import IBClient
+        _ibkr_exchange_client = IBClient(
+            paper_mode=False,
+            ib_host=ib_host,
+            ib_port=ib_port,
+            ib_client_id=ib_client_id + 10,  # Offset to avoid ID collision with agent
+        )
+        logger.info("✅ Dashboard IBKR price client ready")
+    except Exception as e:
+        logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +325,24 @@ async def lifespan(application: FastAPI):
             logger.info("✅ Dashboard exchange price client ready")
         except Exception as e:
             logger.warning(f"⚠️ Dashboard exchange client not available: {e}")
+
+    # Also try IBKR client in lifespan if not already set
+    global _ibkr_exchange_client
+    if not globals().get("_ibkr_exchange_client"):
+        try:
+            ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+            ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+            ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+            from src.core.ib_client import IBClient
+            _ibkr_exchange_client = IBClient(
+                paper_mode=False,
+                ib_host=ib_host,
+                ib_port=ib_port,
+                ib_client_id=ib_client_id + 10,
+            )
+            logger.info("✅ Dashboard IBKR price client ready (lifespan)")
+        except Exception as e:
+            logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
 
     yield
     if task:
@@ -676,8 +712,13 @@ def get_stats_summary(
         snapshot_sql = """SELECT portfolio_value, total_pnl, ts
                FROM portfolio_snapshots"""
         snapshot_params: list = []
-        if qc:
-            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+        resolved_p = _resolve_profile(profile)
+        if resolved_p:
+            # Use profile name directly as exchange filter
+            snapshot_sql += " WHERE exchange = ?"
+            snapshot_params.append(resolved_p)
+        elif qc:
+            _qc_exchange_map = {"SEK": "nordnet"}
             exchange = _qc_exchange_map.get(qc.upper())
             if exchange:
                 snapshot_sql += " WHERE exchange = ?"
@@ -2279,8 +2320,12 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(_get_profile_db)
                       high_stakes_active, ts
                FROM portfolio_snapshots"""
         params: list = []
-        if qc:
-            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+        resolved_p = _resolve_profile(profile)
+        if resolved_p:
+            base_sql += " WHERE exchange = ?"
+            params.append(resolved_p)
+        elif qc:
+            _qc_exchange_map = {"SEK": "nordnet"}
             exchange = _qc_exchange_map.get(qc.upper())
             if exchange:
                 base_sql += " WHERE exchange = ?"
@@ -2615,8 +2660,8 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(_get
     # Detect exchange from profile or pair suffix
     resolved = _resolve_profile(profile)
     qc = _quote_currency_for(profile)
-    _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
-    exchange = body.exchange or _qc_exchange_map.get((qc or "").upper(), resolved or "coinbase")
+    _qc_fallback = {"SEK": "nordnet"}
+    exchange = body.exchange or resolved or _qc_fallback.get((qc or "").upper(), "coinbase")
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}

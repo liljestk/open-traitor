@@ -1,17 +1,17 @@
 absolute_rules:
   always_use_stop_loss: true
-  emergency_stop_portfolio: 80000
-  max_cash_per_trade_pct: 0.2
-  max_daily_loss: 5000
-  max_daily_spend: 20000
-  max_portfolio_risk_pct: 0.15
-  max_single_trade: 5000
+  emergency_stop_portfolio: 5
+  max_cash_per_trade_pct: 0.5
+  max_daily_loss: 3
+  max_daily_spend: 10
+  max_portfolio_risk_pct: 0.3
+  max_single_trade: 10
   max_stop_loss_pct: 0.08
-  max_trades_per_day: 30
-  min_trade_interval_seconds: 120
+  max_trades_per_day: 10
+  min_trade_interval_seconds: 300
   never_trade_pairs: []
   only_trade_pairs: []
-  require_approval_above: 2000
+  require_approval_above: 10
 analysis:
   sentiment:
     enabled: true
@@ -44,10 +44,10 @@ fear_greed:
   cache_ttl: 600
   enabled: false
 fees:
-  max_fee_pct: 0.01
+  max_fee_pct: 0.02
   min_fee: 0.35
   min_gain_after_fees_pct: 0.005
-  min_trade_quote: 100
+  min_trade_quote: 1
   model_type: equity_per_share
   per_share_fee: 0.0035
   safety_margin: 1.5
@@ -55,11 +55,11 @@ fees:
 health:
   port: 8082
 high_stakes:
-  auto_approve_up_to: 5000
-  min_confidence: 0.55
+  auto_approve_up_to: 10
+  min_confidence: 0.6
   min_swap_gain_pct: 0.02
   swap_allocation_multiplier: 1.0
-  trade_size_multiplier: 2.0
+  trade_size_multiplier: 1.5
 journal:
   data_dir: data
   enabled: true
@@ -67,14 +67,16 @@ llm:
   max_retries: 3
   max_tokens: 2000
   model: llama3.1:8b
-  persona: 'You are a cautious, analytical equity trading assistant focused on US
-    and global equity markets via Interactive Brokers. You prioritize capital preservation
-    over aggressive gains. You always consider risk-reward ratios before suggesting
-    trades. You never recommend trading with more than the user''s specified limits.
-    When uncertain, you recommend holding or waiting for better setups. '
+  persona: 'You are a sharp, tactical equity trading assistant focused on European and US
+    equity markets via Interactive Brokers. The account has only 10 EUR starting capital.
+    You scale your thinking to this tiny account — look for fractional share opportunities
+    or very cheap stocks. You prioritize capital preservation but actively seek micro-gains
+    that compound. Every cent counts. Always consider fees (IBKR minimum $0.35/trade) vs
+    potential gain. When uncertain, you recommend holding cash rather than risking the
+    small balance on marginal setups. Use IBKR news data for informed decisions.'
   providers:
   - api_key_env: OPENROUTER_API_KEY
-    api_key_set: false
+    api_key_set: true
     base_url: https://openrouter.ai/api/v1
     cooldown_seconds: 30
     daily_token_limit: 0
@@ -127,23 +129,29 @@ multi_timeframe:
   enabled: true
   min_alignment: 3
 news:
-  articles_for_analysis: 10
+  articles_for_analysis: 15
   fetch_interval: 600
-  max_articles: 50
+  ibkr_news_enabled: true
+  ibkr_news_providers: ''
+  max_articles: 80
   reddit_subreddits:
   - stocks
   - wallstreetbets
   - investing
   - options
+  - stockmarket
+  - europeanstocks
   rss_feeds:
   - https://feeds.finance.yahoo.com/rss/2.0/headline
   - https://www.cnbc.com/id/100003114/device/rss/rss.html
+  - https://feeds.marketwatch.com/marketwatch/topstories
+  - https://feeds.bloomberg.com/markets/news.rss
 risk:
   loss_cooldown_seconds: 600
-  max_drawdown_pct: 0.12
-  max_position_pct: 0.1
-  max_total_exposure_pct: 0.4
-  max_trades_per_hour: 6
+  max_drawdown_pct: 0.2
+  max_position_pct: 0.5
+  max_total_exposure_pct: 0.8
+  max_trades_per_hour: 4
   stop_loss_pct: 0.05
   take_profit_pct: 0.1
   trailing_stop_pct: 0.05
@@ -175,11 +183,11 @@ trading:
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
   pairs:
-  - AAPL-EUR
-  - MSFT-EUR
-  - GOOGL-EUR
-  - AMZN-EUR
-  - NVDA-EUR
+  - AAPL-USD
+  - MSFT-USD
+  - GOOGL-USD
+  - AMZN-USD
+  - NVDA-USD
   paper_slippage_pct: 0.0003
   quote_currencies:
   - EUR

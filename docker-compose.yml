@@ -193,6 +193,13 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      # Override IBKR_HOST: inside Docker, 127.0.0.1 = container itself.
+      # host.docker.internal resolves to the Windows host where IB Gateway runs.
+      - IBKR_HOST=host.docker.internal
+      - TZ=Europe/Helsinki
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -232,6 +239,11 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
+      # Allow dashboard to reach IB Gateway for IBKR price/news lookups
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config
       - ./data:/app/data
@@ -268,6 +280,11 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      # Allow IBKR news fetching from within Docker
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
