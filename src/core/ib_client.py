@@ -1,8 +1,8 @@
 """
 Interactive Brokers Exchange Client – trades US/EU equities & options via IBKR.
 
-Currently implements **paper mode only**.  Live trading will be added once
-the IB Gateway / TWS API connection is configured.
+Supports both **paper mode** (simulated execution via Yahoo Finance prices)
+and **live mode** (real execution via IB Gateway / TWS + ib_insync).
 
 The paper engine uses the same balance / order-tracking pattern as
 CoinbaseClient's paper mode but with USD-denominated defaults and
@@ -11,6 +11,7 @@ IBKR's tiered commission schedule.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, Optional
 
@@ -29,6 +30,17 @@ except ImportError:
 from src.core.exchange_client import ExchangeClient
 from src.core.paper_trading import PaperTradingMixin
 from src.core import equity_feed
+
+
+def _safe_float(val) -> float:
+    """Convert IB ticker value to float, returning 0.0 for NaN/None."""
+    if val is None:
+        return 0.0
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class IBClient(PaperTradingMixin, ExchangeClient):
@@ -79,6 +91,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         self._paper_fee_min: float = 0.35
         self._paper_fee_max_pct: float = 0.01
         self._last_prices: dict[str, float] = {}
+        self._known_pairs: set[str] = set()
 
         if not paper_mode:
             self._init_live_session()
@@ -89,7 +102,21 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             )
 
     # ------------------------------------------------------------------
-    # Live-session placeholder
+    # Known-pairs bookkeeping
+    # ------------------------------------------------------------------
+
+    def seed_known_pairs(self, pairs: list[str]) -> None:
+        """Seed the known-pairs set with configured / discovered pairs.
+
+        Called by main.py after boot-time pair resolution so that
+        ``discover_all_pairs_detailed()`` always has a baseline universe
+        even if the IB Scanner is unavailable.
+        """
+        self._known_pairs.update(p.upper() for p in pairs)
+        logger.debug(f"Seeded {len(self._known_pairs)} known pairs")
+
+    # ------------------------------------------------------------------
+    # Live-session setup
     # ------------------------------------------------------------------
 
     def _init_live_session(self) -> None:
@@ -658,7 +685,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         Returns pairs with their actual trading currency (usually USD for US stocks).
         """
         if only_trade:
-            return list(only_trade)
+            result = list(only_trade)
+            self._known_pairs.update(p.upper() for p in result)
+            return result
         if self.paper_mode:
             pairs = equity_feed.discover_pairs(
                 exchange_id=self.exchange_id,
@@ -669,36 +698,39 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 f"discover_all_pairs: paper mode discovered {len(pairs)} equity pairs via yfinance"
             )
             return pairs
-            
-        from ib_insync import ScannerSubscription
+
+        # ── Live mode: IB Scanner + known-pairs fallback ─────────────
+        never_set = set(never_trade) if never_trade else set()
+        found: set[str] = set()
+
+        # 1) Always include previously-known pairs (seeded from YAML config)
+        for p in self._known_pairs:
+            if p not in never_set:
+                found.add(p)
+
+        # 2) Augment with IB Scanner results (top % gainers)
         try:
-            # Find Top % Gainers on US Equities
+            from ib_insync import ScannerSubscription
             sub = ScannerSubscription(
                 instrument='STK',
                 locationCode='STK.US.MAJOR',
-                scanCode='TOP_PERC_GAIN'
+                scanCode='TOP_PERC_GAIN',
             )
             scan_data = self.ib.reqScannerData(sub)
-            
-            pairs = []
-            
             for item in scan_data:
                 contract = item.contractDetails.contract
                 sym = contract.symbol
-                # Use the contract's actual currency (USD for US stocks)
                 cur = contract.currency or "USD"
                 pair = f"{sym}-{cur}"
-                
-                if never_trade and pair in never_trade:
-                    continue
-                    
-                pairs.append(pair)
-            
-            logger.info(f"IB Scanner found {len(pairs)} pairs")
-            return list(set(pairs))
+                if pair not in never_set:
+                    found.add(pair)
+            logger.info(f"IB Scanner found {len(scan_data)} tickers; merged total = {len(found)}")
         except Exception as e:
-            logger.error(f"IB Scanner discovery failed: {e}")
-            return []
+            logger.warning(f"IB Scanner discovery failed (using known pairs only): {e}")
+
+        result = sorted(found)
+        self._known_pairs.update(result)
+        return result
 
     def get_news(self, pair: str, limit: int = 5) -> list[dict]:
         """Fetch news for a specific pair via IBKR News API."""
@@ -782,8 +814,119 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 never_trade=list(never_trade) if never_trade else None,
                 only_trade=list(only_trade) if only_trade else None,
             )
-        # Live mode: TODO use IB Scanner for detailed metadata
-        return []
+
+        # ── Live mode: enrich pairs with IB market-data snapshots ────
+        pairs = self.discover_all_pairs(
+            quote_currencies=quote_currencies,
+            never_trade=never_trade,
+            only_trade=only_trade,
+        )
+        if not pairs:
+            logger.warning("discover_all_pairs_detailed: no pairs to enrich")
+            return []
+
+        # Qualify contracts (skip any that fail)
+        contracts_map: dict[str, Any] = {}
+        for pair in pairs:
+            try:
+                contract = self._get_contract(pair)
+                if contract.conId:
+                    contracts_map[pair] = contract
+                else:
+                    logger.debug(f"Skipping {pair}: contract has no conId")
+            except Exception as e:
+                logger.debug(f"Skipping {pair}: contract qualification failed: {e}")
+
+        if not contracts_map:
+            logger.warning(
+                "discover_all_pairs_detailed: no contracts qualified — "
+                "returning pairs with zero metadata"
+            )
+            return [
+                self._empty_pair_meta(pair) for pair in pairs
+            ]
+
+        # Request market-data snapshots for all qualified contracts
+        ticker_by_conid: dict[int, Any] = {}
+        try:
+            self.ib.reqMarketDataType(3)  # 3 = delayed (free, 15-min lag)
+            tickers = self.ib.reqTickers(*contracts_map.values())
+            ticker_by_conid = {
+                t.contract.conId: t for t in tickers if t.contract
+            }
+        except Exception as e:
+            logger.error(f"reqTickers batch failed: {e}")
+
+        results: list[dict] = []
+        for pair, contract in contracts_map.items():
+            t = ticker_by_conid.get(contract.conId)
+
+            last_price = 0.0
+            prev_close = 0.0
+            volume = 0.0
+
+            if t:
+                last_price = (
+                    _safe_float(t.last)
+                    or _safe_float(t.close)
+                    or _safe_float(t.prevClose)
+                )
+                prev_close = _safe_float(t.prevClose)
+                volume = _safe_float(t.volume)
+
+            pct_change = 0.0
+            if prev_close > 0 and last_price > 0:
+                pct_change = ((last_price - prev_close) / prev_close) * 100.0
+
+            notional_vol = (
+                volume * last_price if (last_price > 0 and volume > 0) else 0.0
+            )
+
+            parts = pair.upper().split("-")
+            base = parts[0]
+            quote = parts[1] if len(parts) > 1 else "USD"
+
+            results.append({
+                "product_id": pair,
+                "base_currency_id": base,
+                "quote_currency_id": quote,
+                "base_min_size": "1",
+                "quote_min_size": "1.00",
+                "volume_24h": str(round(notional_vol, 2)),
+                "price_percentage_change_24h": str(round(pct_change, 4)),
+            })
+
+        # Also include unqualified pairs so they appear in the universe
+        qualified_set = set(contracts_map.keys())
+        for pair in pairs:
+            if pair not in qualified_set:
+                results.append(self._empty_pair_meta(pair))
+
+        logger.info(
+            f"discover_all_pairs_detailed: enriched {len(results)} pairs "
+            f"with IB market data ({len(ticker_by_conid)} had snapshots)"
+        )
+        return results
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _empty_pair_meta(pair: str) -> dict:
+        """Return a universe-scanner dict with zero metadata for *pair*."""
+        parts = pair.upper().split("-")
+        base = parts[0]
+        quote = parts[1] if len(parts) > 1 else "USD"
+        return {
+            "product_id": pair,
+            "base_currency_id": base,
+            "quote_currency_id": quote,
+            "base_min_size": "1",
+            "quote_min_size": "1.00",
+            "volume_24h": "0",
+            "price_percentage_change_24h": "0",
+        }
 
     def adapt_pairs_to_account(
         self, pairs: list[str], native_currency: str

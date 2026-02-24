@@ -356,6 +356,12 @@ def main():
             else:
                 logger.info(f"✓ Trading pairs unchanged: {adapted_pairs}")
 
+    # Seed known pairs so live-mode discover_all_pairs_detailed() has a
+    # baseline universe even when the IB Scanner is unavailable.
+    resolved_pairs = config.get("trading", {}).get("pairs", [])
+    if hasattr(exchange, "seed_known_pairs") and resolved_pairs:
+        exchange.seed_known_pairs(list(resolved_pairs))
+
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).
     if getattr(exchange, "paper_mode", False) and native_currency != "USD" and hasattr(exchange, "_paper_balance"):
