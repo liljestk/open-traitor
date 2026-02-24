@@ -79,8 +79,9 @@ llm:
   - api_key_env: OPENROUTER_API_KEY
     api_key_set: true
     base_url: https://openrouter.ai/api/v1
-    cooldown_seconds: 30
+    cooldown_seconds: 60
     daily_token_limit: 0
+    daily_request_limit: 300
     enabled: true
     model: meta-llama/llama-3.3-70b-instruct:free
     name: openrouter

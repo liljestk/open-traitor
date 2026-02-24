@@ -140,12 +140,14 @@ class LLMProvider:
     is_local: bool = False
     rpm_limit: int = 0          # 0 = no local RPM tracking
     daily_token_limit: int = 0  # 0 = unlimited
+    daily_request_limit: int = 0  # 0 = unlimited; max requests/day for this provider
     cooldown_seconds: int = 60
     tier: str = "free"          # "free" or "paid" — controls smart routing
     reserve_for_priority: str = ""  # "" = available for all; "high" = only high-priority calls
     # Mutable tracking state
     cooldown_until: float = 0.0
     daily_tokens: int = 0
+    daily_requests: int = 0     # requests made today (reset on day rollover)
     daily_date: str = ""
     rpm_timestamps: list[float] = field(default_factory=list)
     # Per-provider lock for thread-safe rate/quota tracking (H1 fix)
@@ -240,6 +242,7 @@ def build_providers(
             is_local=is_local,
             rpm_limit=pc.get("rpm_limit", 0),
             daily_token_limit=pc.get("daily_token_limit", 0),
+            daily_request_limit=pc.get("daily_request_limit", 0),
             cooldown_seconds=pc.get("cooldown_seconds", 60),
             tier=tier,
             reserve_for_priority=reserve_for,

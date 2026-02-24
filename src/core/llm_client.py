@@ -144,12 +144,19 @@ class LLMClient:
             if now < p.cooldown_until:
                 return False
 
-            # Daily token budget
+            # Day rollover — reset daily counters
             today = dt_date.today().isoformat()
             if p.daily_date != today:
                 p.daily_tokens = 0
+                p.daily_requests = 0
                 p.daily_date = today
+
+            # Daily token budget
             if p.daily_token_limit > 0 and p.daily_tokens >= p.daily_token_limit:
+                return False
+
+            # Daily request budget
+            if p.daily_request_limit > 0 and p.daily_requests >= p.daily_request_limit:
                 return False
 
             # RPM check
@@ -170,8 +177,10 @@ class LLMClient:
             today = dt_date.today().isoformat()
             if p.daily_date != today:
                 p.daily_tokens = 0
+                p.daily_requests = 0
                 p.daily_date = today
             p.daily_tokens += total_tokens
+            p.daily_requests += 1
 
     def _activate_cooldown(self, p: LLMProvider, reason: str) -> None:
         """Put a provider on cooldown after a rate-limit or quota error.
@@ -704,6 +713,7 @@ class LLMClient:
                 if old and not np.is_local:
                     with old._lock:
                         np.daily_tokens = old.daily_tokens
+                        np.daily_requests = old.daily_requests
                         np.daily_date = old.daily_date
                         np.rpm_timestamps = list(old.rpm_timestamps)
                         # Preserve cooldown only if still active
@@ -794,15 +804,21 @@ class LLMClient:
                     )
                 p._was_in_cooldown = in_cooldown  # type: ignore[attr-defined]
 
-                # Check daily token budget recovery (date rollover)
+                # Check daily budget recovery (date rollover)
                 today = dt_date.today().isoformat()
-                if p.daily_token_limit > 0 and p.daily_date != today:
-                    if p.daily_tokens >= p.daily_token_limit:
+                if p.daily_date != today:
+                    if p.daily_token_limit > 0 and p.daily_tokens >= p.daily_token_limit:
                         logger.info(
                             f"♻️ Provider '{p.name}' daily token budget reset "
                             f"({p.daily_tokens:,} → 0) — new day {today}"
                         )
+                    if p.daily_request_limit > 0 and p.daily_requests >= p.daily_request_limit:
+                        logger.info(
+                            f"♻️ Provider '{p.name}' daily request budget reset "
+                            f"({p.daily_requests} → 0) — new day {today}"
+                        )
                     p.daily_tokens = 0
+                    p.daily_requests = 0
                     p.daily_date = today
 
     async def _recovery_poll_loop(self) -> None:
@@ -895,6 +911,8 @@ class LLMClient:
                     "cooldown_remaining_s": max(0, int(p.cooldown_until - now)),
                     "daily_tokens": p.daily_tokens,
                     "daily_token_limit": p.daily_token_limit,
+                    "daily_requests": p.daily_requests,
+                    "daily_request_limit": p.daily_request_limit,
                     "rpm_limit": p.rpm_limit,
                     "rpm_current": len([
                         t for t in p.rpm_timestamps if t > time.time() - 60

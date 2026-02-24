@@ -69,7 +69,8 @@ llm:
     timeout: 45
     rpm_limit: 20
     daily_token_limit: 0
-    cooldown_seconds: 30
+    daily_request_limit: 300
+    cooldown_seconds: 60
     tier: free
     api_key_set: false
   - name: gemini
