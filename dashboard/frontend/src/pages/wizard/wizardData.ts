@@ -53,7 +53,7 @@ export const INITIAL_STATE: WizardState = {
   cryptoPairs: ['BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'LINK-EUR', 'DOGE-EUR'],
   customCryptoPair: '',
   ibkrPairs: ['AAPL-USD', 'MSFT-USD', 'GOOGL-USD'],
-  customIbkrPair: '',,
+  customIbkrPair: '',
   coinbaseApiKey: '',
   coinbaseApiSecret: '',
   ibkrHost: '127.0.0.1',
