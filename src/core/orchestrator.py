@@ -186,7 +186,7 @@ class Orchestrator:
         self.multi_tf = MultiTimeframeAnalyzer(config, exchange)
         self.trailing_stops = TrailingStopManager(
             default_trail_pct=config.get("risk", {}).get("trailing_stop_pct", 0.03),
-            enable_tiers=config.get("risk", {}).get("enable_tiered_stops", False),
+            enable_tiers=config.get("risk", {}).get("enable_tiered_stops", True),
         )
 
         # Sentiment analysis (keyword-based, no external deps)
@@ -472,6 +472,33 @@ class Orchestrator:
         logger.info(f"  Mode: {'📝 PAPER' if getattr(exchange, 'paper_mode', False) else '💰 LIVE'}")
         logger.info("═══════════════════════════════════════════")
 
+    def _check_circuit_breakers(self) -> None:
+        """Trip circuit breaker on max drawdown OR daily loss limit breach."""
+        if self.state.circuit_breaker_triggered:
+            return
+        # Drawdown check
+        max_dd_pct = self.config.get("risk", {}).get("max_drawdown_pct", 0.10)
+        if self.state.max_drawdown >= max_dd_pct:
+            reason, value = "max_drawdown", self.state.max_drawdown
+            msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(value)} reached!"
+        # Daily loss check
+        elif self.rules._daily_loss >= self.rules.max_daily_loss:
+            reason, value = "daily_loss", self.rules._daily_loss
+            msg = (
+                f"🛑 CIRCUIT BREAKER: Daily loss {format_currency(value)} "
+                f"reached limit {format_currency(self.rules.max_daily_loss)}!"
+            )
+        else:
+            return
+
+        self.state.circuit_breaker_triggered = True
+        logger.warning(msg)
+        self.audit.log_circuit_breaker(reason, value)
+        self.chat_handler.queue_event(f"CRITICAL: {msg}")
+        if self.telegram:
+            self.telegram.send_alert(msg)
+        self.event_manager.trigger_emergency_replan(f"Circuit breaker: {reason} {value}")
+
     def run_forever(self) -> None:
         """Main loop — runs continuously until stopped."""
         logger.info("🚀 Starting main trading loop...")
@@ -754,18 +781,8 @@ class Orchestrator:
                 except Exception as _snap_err:
                     logger.debug(f"Portfolio snapshot persistence failed: {_snap_err}")
 
-                # Check circuit breaker
-                if self.state.max_drawdown >= self.config.get("risk", {}).get("max_drawdown_pct", 0.10):
-                    self.state.circuit_breaker_triggered = True
-                    msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(self.state.max_drawdown)} reached!"
-                    logger.warning(msg)
-                    self.audit.log_circuit_breaker("max_drawdown", self.state.max_drawdown)
-                    self.chat_handler.queue_event(f"CRITICAL: {msg}")
-                    if self.telegram:
-                        self.telegram.send_alert(msg)
-                    self.event_manager.trigger_emergency_replan(
-                        f"Circuit breaker: drawdown {format_percentage(self.state.max_drawdown)}"
-                    )
+                # Check circuit breakers (drawdown + daily loss)
+                self._check_circuit_breakers()
 
                 # Save state periodically
                 self.state.save_state()
