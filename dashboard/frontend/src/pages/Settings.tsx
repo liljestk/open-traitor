@@ -12,6 +12,8 @@ import {
   Server, Cloud, ToggleLeft, ToggleRight,
   Eye, EyeOff, Key, DollarSign, Sparkles,
   RefreshCw, Search, Settings2,
+  Minus, Plus, Activity, ShieldCheck,
+  TrendingUp, Target, Timer, Gauge, Sliders,
 } from 'lucide-react'
 import PageTransition from '../components/PageTransition'
 import {
@@ -108,7 +110,26 @@ function LLMProvidersSection() {
           <ChevronDown size={14} />
         </span>
         <Zap size={15} style={{ color: '#f59e0b' }} />
-        <span style={{ fontWeight: 600, fontSize: 14, flex: 1, textAlign: 'left' }}>LLM Provider Chain</span>
+        <span style={{ fontWeight: 600, fontSize: 14, flexShrink: 0 }}>LLM Provider Chain</span>
+        {!open && (
+          <div style={{ display: 'flex', gap: 4, flex: 1, alignItems: 'center' }}>
+            {providers.filter(p => p.enabled).map(p => {
+              const badge = statusBadge(p)
+              return (
+                <span key={p.name} style={{
+                  fontSize: 10, padding: '2px 7px', borderRadius: 8,
+                  background: '#161b22', border: '1px solid #21262d',
+                  display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap',
+                }}>
+                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: badge.color, flexShrink: 0 }} />
+                  <span style={{ color: '#484f58' }}>{p.name}:</span>
+                  <span style={{ color: '#c9d1d9', fontWeight: 500 }}>{badge.label}</span>
+                </span>
+              )
+            })}
+          </div>
+        )}
+        {open && <div style={{ flex: 1 }} />}
         <span style={{
           fontSize: 9, padding: '2px 7px', borderRadius: 10,
           background: '#22c55e15', color: '#22c55e', fontWeight: 600,
@@ -132,7 +153,6 @@ function LLMProvidersSection() {
 
       {open && (
         <div style={{ padding: '0 16px 16px', borderTop: '1px solid #21262d' }}>
-          {/* Explanation */}
           <div style={{ fontSize: 12, color: '#8b949e', padding: '12px 0 8px', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
             <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
             <span>
@@ -142,7 +162,6 @@ function LLMProvidersSection() {
             </span>
           </div>
 
-          {/* Action bar */}
           <div style={{ display: 'flex', gap: 8, padding: '4px 0 10px', justifyContent: 'flex-end' }}>
             {!editing ? (
               <button onClick={startEdit} style={{ ...btnStyle('#21262d'), borderColor: '#30363d' }}>
@@ -158,7 +177,6 @@ function LLMProvidersSection() {
             )}
           </div>
 
-          {/* Provider cards */}
           {displayProviders.map((p, idx) => {
             const badge = statusBadge(p)
             const provIcon = p.is_local
@@ -171,7 +189,6 @@ function LLMProvidersSection() {
                 borderRadius: 10, padding: '12px 16px', marginBottom: 8,
                 opacity: p.enabled ? 1 : 0.5, transition: 'all 0.15s',
               }}>
-                {/* Provider header */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{
                     width: 24, height: 24, borderRadius: '50%', background: '#30363d',
@@ -222,9 +239,7 @@ function LLMProvidersSection() {
                   )}
                 </div>
 
-                {/* Detail grid */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: '6px 20px', marginTop: 10, fontSize: 12 }}>
-                  {/* Model */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                     <span style={{ color: '#8b949e' }}>Model</span>
                     {editing ? (
@@ -237,7 +252,6 @@ function LLMProvidersSection() {
                     )}
                   </div>
 
-                  {/* API Key */}
                   {!p.is_local && p.api_key_env && (
                     <div style={{
                       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -271,7 +285,6 @@ function LLMProvidersSection() {
                     </div>
                   )}
 
-                  {/* Tier (edit mode) */}
                   {editing && !p.is_local && (
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                       <span style={{ color: '#8b949e' }}>Tier</span>
@@ -287,7 +300,6 @@ function LLMProvidersSection() {
                     </div>
                   )}
 
-                  {/* OpenRouter Credits */}
                   {!editing && p.name.toLowerCase().includes('openrouter') && p.enabled && orCredits?.ok && (
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                       <span style={{ color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -303,7 +315,6 @@ function LLMProvidersSection() {
                     </div>
                   )}
 
-                  {/* Free model indicator */}
                   {!editing && p.live_status?.is_free_model && (
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                       <span style={{ color: '#8b949e' }}>Model Type</span>
@@ -313,7 +324,6 @@ function LLMProvidersSection() {
                     </div>
                   )}
 
-                  {/* Timeout */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                     <span style={{ color: '#8b949e' }}>Timeout</span>
                     {editing ? (
@@ -324,7 +334,6 @@ function LLMProvidersSection() {
                     ) : <span style={{ color: '#e6edf3' }}>{p.timeout ?? 60}s</span>}
                   </div>
 
-                  {/* Rate limits (cloud) */}
                   {!p.is_local && (<>
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                       <span style={{ color: '#8b949e' }}>RPM</span>
@@ -400,6 +409,550 @@ function LLMProvidersSection() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Quick Settings — always-visible panel for the 8 most critical settings
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+interface QuickDraft {
+  mode: string
+  interval: number
+  min_confidence: number
+  max_active_pairs: number
+  stop_loss_pct: number
+  take_profit_pct: number
+  max_single_trade: number
+  max_daily_loss: number
+}
+
+function initQuickDraft(
+  trading: Record<string, unknown>,
+  risk: Record<string, unknown>,
+  absolute: Record<string, unknown>,
+): QuickDraft {
+  return {
+    mode: String(trading.mode ?? 'paper'),
+    interval: Number(trading.interval ?? 120),
+    min_confidence: Number(trading.min_confidence ?? 0.55),
+    max_active_pairs: Number(trading.max_active_pairs ?? 5),
+    stop_loss_pct: Number(risk.stop_loss_pct ?? 0.04),
+    take_profit_pct: Number(risk.take_profit_pct ?? 0.06),
+    max_single_trade: Number(absolute.max_single_trade ?? 500),
+    max_daily_loss: Number(absolute.max_daily_loss ?? 500),
+  }
+}
+
+function Stepper({
+  value, onChange, min, max, step = 1, format,
+}: { value: number; onChange: (v: number) => void; min: number; max: number; step?: number; format?: (v: number) => string }) {
+  const stepBtn: React.CSSProperties = {
+    width: 26, height: 26, borderRadius: 6, border: '1px solid #30363d',
+    background: '#161b22', color: '#8b949e', cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontSize: 12, fontWeight: 700, transition: 'all 0.1s', flexShrink: 0,
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <button onClick={() => onChange(Math.max(min, parseFloat((value - step).toFixed(4))))}
+        disabled={value <= min} style={{ ...stepBtn, opacity: value <= min ? 0.3 : 1 }}>
+        <Minus size={11} />
+      </button>
+      <span style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', minWidth: 44, textAlign: 'center' }}>
+        {format ? format(value) : value}
+      </span>
+      <button onClick={() => onChange(Math.min(max, parseFloat((value + step).toFixed(4))))}
+        disabled={value >= max} style={{ ...stepBtn, opacity: value >= max ? 0.3 : 1 }}>
+        <Plus size={11} />
+      </button>
+    </div>
+  )
+}
+
+function SegmentedControl({
+  value, options, onChange,
+}: { value: string | number; options: Array<{ label: string; value: string | number }>; onChange: (v: string | number) => void }) {
+  return (
+    <div style={{ display: 'flex', background: '#0d1117', borderRadius: 8, padding: 2, border: '1px solid #21262d', gap: 2 }}>
+      {options.map(opt => (
+        <button key={String(opt.value)} onClick={() => onChange(opt.value)} style={{
+          flex: 1, padding: '5px 8px', borderRadius: 6, border: 'none',
+          background: value === opt.value ? '#21262d' : 'transparent',
+          color: value === opt.value ? '#e6edf3' : '#6e7681',
+          cursor: 'pointer', fontSize: 11, fontWeight: value === opt.value ? 600 : 400,
+          transition: 'all 0.12s', whiteSpace: 'nowrap',
+        }}>
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function QuickSettings({
+  settings,
+  liveData,
+  onSave,
+}: {
+  settings: Record<string, unknown>
+  liveData: unknown
+  onSave: (section: string, updates: Record<string, unknown>) => Promise<void>
+}) {
+  const trading = (settings.trading ?? {}) as Record<string, unknown>
+  const risk = (settings.risk ?? {}) as Record<string, unknown>
+  const absolute = (settings.absolute_rules ?? {}) as Record<string, unknown>
+
+  const [draft, setDraft] = useState<QuickDraft>(() => initQuickDraft(trading, risk, absolute))
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  // Reset draft whenever live settings change (e.g. preset applied)
+  useEffect(() => {
+    setDraft(initQuickDraft(
+      (settings.trading ?? {}) as Record<string, unknown>,
+      (settings.risk ?? {}) as Record<string, unknown>,
+      (settings.absolute_rules ?? {}) as Record<string, unknown>,
+    ))
+  }, [liveData]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = <K extends keyof QuickDraft>(k: K, v: QuickDraft[K]) =>
+    setDraft(prev => ({ ...prev, [k]: v }))
+
+  const changedCount = useMemo(() => {
+    let n = 0
+    if (draft.mode !== String(trading.mode ?? 'paper')) n++
+    if (draft.interval !== Number(trading.interval ?? 120)) n++
+    if (draft.min_confidence !== Number(trading.min_confidence ?? 0.55)) n++
+    if (draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5)) n++
+    if (draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04)) n++
+    if (draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06)) n++
+    if (draft.max_single_trade !== Number(absolute.max_single_trade ?? 500)) n++
+    if (draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500)) n++
+    return n
+  }, [draft, trading, risk, absolute])
+
+  const handleApply = async () => {
+    setSaving(true)
+    setMsg(null)
+    try {
+      const tradingChanges: Record<string, unknown> = {}
+      if (draft.mode !== String(trading.mode ?? 'paper')) tradingChanges.mode = draft.mode
+      if (draft.interval !== Number(trading.interval ?? 120)) tradingChanges.interval = draft.interval
+      if (draft.min_confidence !== Number(trading.min_confidence ?? 0.55)) tradingChanges.min_confidence = draft.min_confidence
+      if (draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5)) tradingChanges.max_active_pairs = draft.max_active_pairs
+
+      const riskChanges: Record<string, unknown> = {}
+      if (draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04)) riskChanges.stop_loss_pct = draft.stop_loss_pct
+      if (draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06)) riskChanges.take_profit_pct = draft.take_profit_pct
+
+      const absoluteChanges: Record<string, unknown> = {}
+      if (draft.max_single_trade !== Number(absolute.max_single_trade ?? 500)) absoluteChanges.max_single_trade = draft.max_single_trade
+      if (draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500)) absoluteChanges.max_daily_loss = draft.max_daily_loss
+
+      await Promise.all([
+        Object.keys(tradingChanges).length ? onSave('trading', tradingChanges) : Promise.resolve(),
+        Object.keys(riskChanges).length ? onSave('risk', riskChanges) : Promise.resolve(),
+        Object.keys(absoluteChanges).length ? onSave('absolute_rules', absoluteChanges) : Promise.resolve(),
+      ])
+      setMsg({ ok: true, text: `${changedCount} setting${changedCount !== 1 ? 's' : ''} applied live` })
+      setTimeout(() => setMsg(null), 3000)
+    } catch (e: unknown) {
+      setMsg({ ok: false, text: (e instanceof Error ? e.message : String(e)) || 'Apply failed' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleReset = () => {
+    setDraft(initQuickDraft(trading, risk, absolute))
+    setMsg(null)
+  }
+
+  const isLive = draft.mode === 'live'
+  const pctFmt = (v: number) => `${(v * 100).toFixed(1)}%`
+  const labelStyle: React.CSSProperties = { fontSize: 11, color: '#6e7681', fontWeight: 500, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }
+  const cellStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column' }
+  const changedDot = (changed: boolean) => changed ? (
+    <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#f59e0b', display: 'inline-block', marginLeft: 2 }} title="Changed" />
+  ) : null
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg, #0d111788, #0d1117)',
+      border: '1px solid #21262d', borderRadius: 12, marginBottom: 16, overflow: 'hidden',
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '12px 20px',
+        borderBottom: '1px solid #21262d',
+        background: 'linear-gradient(90deg, #58a6ff08, transparent)',
+      }}>
+        <Sliders size={15} style={{ color: '#58a6ff' }} />
+        <span style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3' }}>Quick Settings</span>
+        <span style={{ fontSize: 11, color: '#6e7681', marginLeft: 4 }}>
+          Most-used settings — change and apply without opening sections
+        </span>
+        <div style={{ flex: 1 }} />
+        {msg && (
+          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 4 }}>
+            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
+          </span>
+        )}
+      </div>
+
+      {/* Controls grid */}
+      <div style={{ padding: '16px 20px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px 24px', marginBottom: 16 }}>
+
+          {/* Trading Mode */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <TrendingUp size={11} /> Trading Mode
+              {changedDot(draft.mode !== String(trading.mode ?? 'paper'))}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <SegmentedControl
+                value={draft.mode}
+                options={[{ label: '📝 Paper', value: 'paper' }, { label: '⚡ Live', value: 'live' }]}
+                onChange={v => set('mode', String(v))}
+              />
+              {isLive && (
+                <span style={{ fontSize: 10, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 3 }}>
+                  <AlertTriangle size={9} /> Real money at risk
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Cycle Interval */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <Timer size={11} /> Cycle Interval
+              {changedDot(draft.interval !== Number(trading.interval ?? 120))}
+            </div>
+            <SegmentedControl
+              value={draft.interval}
+              options={[
+                { label: '1m', value: 60 },
+                { label: '2m', value: 120 },
+                { label: '5m', value: 300 },
+                { label: '10m', value: 600 },
+              ]}
+              onChange={v => set('interval', Number(v))}
+            />
+          </div>
+
+          {/* Min Confidence */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <Activity size={11} /> Min Confidence
+              {changedDot(draft.min_confidence !== Number(trading.min_confidence ?? 0.55))}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range" min={0.3} max={0.95} step={0.05}
+                  value={draft.min_confidence}
+                  onChange={e => set('min_confidence', parseFloat(e.target.value))}
+                  style={{ flex: 1, accentColor: '#22c55e', cursor: 'pointer' }}
+                />
+                <span style={{
+                  fontSize: 13, fontWeight: 700, color: '#e6edf3',
+                  minWidth: 38, textAlign: 'right',
+                }}>
+                  {pctFmt(draft.min_confidence)}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#484f58' }}>
+                <span>30% permissive</span>
+                <span>95% strict</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Max Active Pairs */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <Gauge size={11} /> Max Active Pairs
+              {changedDot(draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5))}
+            </div>
+            <Stepper value={draft.max_active_pairs} min={1} max={30} onChange={v => set('max_active_pairs', v)} />
+          </div>
+
+          {/* Stop Loss */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <span style={{ fontSize: 10 }}>🛑</span> Stop Loss
+              {changedDot(draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04))}
+            </div>
+            <Stepper
+              value={draft.stop_loss_pct}
+              min={0.005}
+              max={0.25}
+              step={0.005}
+              format={pctFmt}
+              onChange={v => set('stop_loss_pct', v)}
+            />
+          </div>
+
+          {/* Take Profit */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <Target size={11} /> Take Profit
+              {changedDot(draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06))}
+            </div>
+            <Stepper
+              value={draft.take_profit_pct}
+              min={0.005}
+              max={0.5}
+              step={0.005}
+              format={pctFmt}
+              onChange={v => set('take_profit_pct', v)}
+            />
+          </div>
+
+          {/* Max Single Trade */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <DollarSign size={11} /> Max Single Trade
+              {changedDot(draft.max_single_trade !== Number(absolute.max_single_trade ?? 500))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+              <span style={{
+                padding: '5px 8px', background: '#161b22', border: '1px solid #30363d',
+                borderRight: 'none', borderRadius: '6px 0 0 6px',
+                fontSize: 12, color: '#6e7681', flexShrink: 0,
+              }}>€</span>
+              <input
+                type="number" value={draft.max_single_trade} min={1} step={10}
+                onChange={e => set('max_single_trade', Number(e.target.value))}
+                style={{ ...inputBase, borderRadius: '0 6px 6px 0', width: '100%', fontSize: 13, fontWeight: 600 }}
+              />
+            </div>
+          </div>
+
+          {/* Max Daily Loss */}
+          <div style={cellStyle}>
+            <div style={labelStyle}>
+              <span style={{ fontSize: 10 }}>📉</span> Max Daily Loss
+              {changedDot(draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+              <span style={{
+                padding: '5px 8px', background: '#161b22', border: '1px solid #30363d',
+                borderRight: 'none', borderRadius: '6px 0 0 6px',
+                fontSize: 12, color: '#6e7681', flexShrink: 0,
+              }}>€</span>
+              <input
+                type="number" value={draft.max_daily_loss} min={1} step={10}
+                onChange={e => set('max_daily_loss', Number(e.target.value))}
+                style={{ ...inputBase, borderRadius: '0 6px 6px 0', width: '100%', fontSize: 13, fontWeight: 600 }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Footer action bar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8,
+          paddingTop: 12, borderTop: '1px solid #21262d',
+        }}>
+          {changedCount > 0 && (
+            <span style={{ fontSize: 11, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 4, marginRight: 'auto' }}>
+              <AlertTriangle size={11} /> {changedCount} unsaved change{changedCount !== 1 ? 's' : ''}
+            </span>
+          )}
+          <button onClick={handleReset} disabled={changedCount === 0} style={{
+            ...btnStyle('#21262d'), borderColor: '#30363d',
+            opacity: changedCount === 0 ? 0.4 : 1,
+          }}>
+            <RefreshCw size={12} /> Reset
+          </button>
+          <button
+            onClick={handleApply}
+            disabled={saving || changedCount === 0}
+            style={{
+              ...btnStyle(changedCount > 0 ? '#238636' : '#21262d'),
+              opacity: changedCount === 0 ? 0.4 : 1,
+              padding: '7px 18px', fontSize: 13, fontWeight: 600,
+            }}
+          >
+            <Check size={13} />
+            {saving ? 'Applying…' : changedCount > 0 ? `Apply ${changedCount} change${changedCount !== 1 ? 's' : ''}` : 'No changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Config Health Panel — contextual warnings about current configuration
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+interface HealthIssue {
+  type: 'error' | 'warning' | 'info'
+  icon: string
+  message: string
+  detail?: string
+}
+
+function ConfigHealthPanel({ settings }: { settings: Record<string, unknown> }) {
+  const trading = (settings.trading ?? {}) as Record<string, unknown>
+  const risk = (settings.risk ?? {}) as Record<string, unknown>
+  const absolute = (settings.absolute_rules ?? {}) as Record<string, unknown>
+
+  const issues = useMemo((): HealthIssue[] => {
+    const list: HealthIssue[] = []
+
+    const sl = Number(risk.stop_loss_pct ?? 0)
+    const tp = Number(risk.take_profit_pct ?? 0)
+    const conf = Number(trading.min_confidence ?? 0)
+    const drawdown = Number(risk.max_drawdown_pct ?? 0)
+    const activePairs = Number(trading.max_active_pairs ?? 0)
+    const mode = String(trading.mode ?? 'paper')
+    const dailyLoss = Number(absolute.max_daily_loss ?? 0)
+    const dailySpend = Number(absolute.max_daily_spend ?? 0)
+
+    if (sl > 0 && tp > 0 && sl >= tp) {
+      list.push({
+        type: 'error',
+        icon: '🚨',
+        message: `Stop Loss (${(sl * 100).toFixed(1)}%) ≥ Take Profit (${(tp * 100).toFixed(1)}%) — inverted risk/reward ratio`,
+        detail: 'Every profitable trade could be cut short while losses run. Swap these values.',
+      })
+    }
+
+    if (conf < 0.45) {
+      list.push({
+        type: 'warning',
+        icon: '⚠️',
+        message: `Very low confidence threshold (${(conf * 100).toFixed(0)}%) — expect high trade frequency with weaker signals`,
+        detail: 'Consider raising to at least 0.50 to filter out noise.',
+      })
+    } else if (conf > 0.85) {
+      list.push({
+        type: 'info',
+        icon: 'ℹ️',
+        message: `High confidence threshold (${(conf * 100).toFixed(0)}%) — bot may trade infrequently`,
+        detail: 'This is conservative and safe, but may miss opportunities in volatile markets.',
+      })
+    }
+
+    if (drawdown > 0.25) {
+      list.push({
+        type: 'warning',
+        icon: '⚠️',
+        message: `Drawdown tolerance is very high (${(drawdown * 100).toFixed(0)}%) — significant portfolio loss allowed before halting`,
+        detail: 'Consider lowering to 15–20% to protect capital.',
+      })
+    }
+
+    if (mode === 'live' && activePairs > 15) {
+      list.push({
+        type: 'warning',
+        icon: '⚠️',
+        message: `${activePairs} active pairs in live mode — high monitoring cost and trade complexity`,
+        detail: 'Start with fewer pairs in live mode and scale up gradually.',
+      })
+    }
+
+    if (dailyLoss > 0 && dailySpend > 0 && dailyLoss > dailySpend * 0.9) {
+      list.push({
+        type: 'info',
+        icon: 'ℹ️',
+        message: `Daily loss cap (€${dailyLoss}) is ${Math.round((dailyLoss / dailySpend) * 100)}% of daily spend (€${dailySpend}) — effectively the same limit`,
+        detail: 'Consider setting a meaningful gap between spend and loss limits.',
+      })
+    }
+
+    if (mode === 'paper') {
+      list.push({
+        type: 'info',
+        icon: '📝',
+        message: 'Running in paper mode — all trades are simulated, no real money at risk',
+        detail: undefined,
+      })
+    }
+
+    return list
+  }, [trading, risk, absolute])
+
+  const typeColors: Record<string, string> = {
+    error: '#ef4444',
+    warning: '#f59e0b',
+    info: '#58a6ff',
+  }
+  const typeBgs: Record<string, string> = {
+    error: '#ef444410',
+    warning: '#f59e0b10',
+    info: '#58a6ff10',
+  }
+
+  const hasProblems = issues.some(i => i.type === 'error' || i.type === 'warning')
+
+  if (issues.length === 0) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
+        background: '#22c55e10', border: '1px solid #22c55e22', borderRadius: 10,
+        marginBottom: 16,
+      }}>
+        <ShieldCheck size={14} style={{ color: '#22c55e', flexShrink: 0 }} />
+        <span style={{ fontSize: 13, color: '#22c55e', fontWeight: 500 }}>Configuration looks healthy</span>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      border: `1px solid ${hasProblems ? '#f59e0b33' : '#21262d'}`,
+      borderRadius: 10, marginBottom: 16, overflow: 'hidden',
+      background: hasProblems ? '#f59e0b08' : '#0d111788',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
+        borderBottom: issues.length > 1 ? '1px solid #21262d' : undefined,
+      }}>
+        {hasProblems
+          ? <AlertTriangle size={14} style={{ color: '#f59e0b', flexShrink: 0 }} />
+          : <Info size={14} style={{ color: '#58a6ff', flexShrink: 0 }} />}
+        <span style={{ fontSize: 13, fontWeight: 600, color: hasProblems ? '#f59e0b' : '#58a6ff' }}>
+          {issues.filter(i => i.type === 'error').length > 0
+            ? `${issues.filter(i => i.type === 'error').length} config error${issues.filter(i => i.type === 'error').length > 1 ? 's' : ''} detected`
+            : hasProblems
+              ? `${issues.filter(i => i.type === 'warning').length} config warning${issues.filter(i => i.type === 'warning').length > 1 ? 's' : ''}`
+              : `${issues.length} configuration note${issues.length > 1 ? 's' : ''}`}
+        </span>
+      </div>
+      <div style={{ padding: '6px 0' }}>
+        {issues.map((issue, i) => (
+          <div key={i} style={{
+            display: 'flex', gap: 10, padding: '8px 16px',
+            background: i % 2 === 0 ? 'transparent' : '#0d111720',
+            borderLeft: `3px solid ${typeColors[issue.type]}`,
+            marginLeft: 0,
+          }}>
+            <span style={{ fontSize: 13, flexShrink: 0, marginTop: 1 }}>{issue.icon}</span>
+            <div>
+              <div style={{
+                fontSize: 12, color: '#c9d1d9', fontWeight: 500,
+                background: typeBgs[issue.type], display: 'inline',
+                padding: '1px 0',
+              }}>
+                {issue.message}
+              </div>
+              {issue.detail && (
+                <div style={{ fontSize: 11, color: '#8b949e', marginTop: 3, lineHeight: 1.4 }}>
+                  {issue.detail}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Main Settings Page
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -416,17 +969,25 @@ export default function Settings() {
   const [activeTab, setActiveTab] = useState<CategoryKey>('trading')
   const [searchQuery, setSearchQuery] = useState('')
   const [hoveredPreset, setHoveredPreset] = useState<string | null>(null)
+  const [pendingPreset, setPendingPreset] = useState<string | null>(null)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const handlePreset = async (preset: string) => {
+    setPendingPreset(preset) // optimistic — highlight immediately
     try {
       await mutation.mutateAsync({ preset })
       setToast({ message: `${preset.charAt(0).toUpperCase() + preset.slice(1)} preset applied — changes are live!`, type: 'success' })
     } catch (e: unknown) {
+      setPendingPreset(null) // revert on failure
       setToast({ message: `Failed to apply preset: ${e instanceof Error ? e.message : String(e)}`, type: 'error' })
     }
   }
+
+  // Once fresh settings arrive, hand back to server-side detection
+  useEffect(() => {
+    if (pendingPreset !== null) setPendingPreset(null)
+  }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSaveSection = async (section: string, updates: Record<string, unknown>) => {
     const settings = data?.settings ?? {}
@@ -452,7 +1013,9 @@ export default function Settings() {
 
   const settings = data?.settings ?? {}
   const presets = presetsData?.presets ?? {}
-  const activePreset = useMemo(() => detectActivePreset(settings, presets), [settings, presets])
+  const detectedPreset = useMemo(() => detectActivePreset(settings, presets), [settings, presets])
+  // Use optimistic value while waiting for server confirmation, then fall back to detection
+  const activePreset = pendingPreset ?? detectedPreset
 
   // Ctrl+K to focus search
   useEffect(() => {
@@ -497,16 +1060,58 @@ export default function Settings() {
   const panelDiff = panelPreset ? buildPresetDiff(settings, panelPreset) : []
   const isComparison = hoveredPreset !== null && hoveredPreset !== activePreset
 
+  // Status chips for header
+  const tradingSettings = (settings.trading ?? {}) as Record<string, unknown>
+  const riskSettings = (settings.risk ?? {}) as Record<string, unknown>
+  const statusChips = [
+    {
+      label: tradingSettings.mode === 'live' ? '⚡ Live mode' : '📝 Paper mode',
+      color: tradingSettings.mode === 'live' ? '#22c55e' : '#8b949e',
+      bg: tradingSettings.mode === 'live' ? '#22c55e15' : '#8b949e15',
+    },
+    {
+      label: `${tradingSettings.max_active_pairs ?? '?'} pairs`,
+      color: '#58a6ff',
+      bg: '#58a6ff12',
+    },
+    {
+      label: `${((Number(tradingSettings.min_confidence ?? 0)) * 100).toFixed(0)}% confidence`,
+      color: '#a78bfa',
+      bg: '#a78bfa12',
+    },
+    {
+      label: `every ${Number(tradingSettings.interval ?? 120) >= 60 ? `${Number(tradingSettings.interval ?? 120) / 60}m` : `${tradingSettings.interval}s`}`,
+      color: '#f59e0b',
+      bg: '#f59e0b12',
+    },
+    {
+      label: `SL ${((Number(riskSettings.stop_loss_pct ?? 0)) * 100).toFixed(1)}% / TP ${((Number(riskSettings.take_profit_pct ?? 0)) * 100).toFixed(1)}%`,
+      color: '#e6edf3',
+      bg: '#e6edf312',
+    },
+  ]
+
   return (
     <PageTransition>
     <div style={{ padding: '20px 24px', maxWidth: 960 }}>
 
       {/* ─── Header ─── */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e6edf3', margin: 0 }}>Settings</h1>
-        <p style={{ fontSize: 13, color: '#8b949e', margin: '4px 0 0' }}>
-          All changes are validated, saved to disk, and applied to the running service instantly — no restarts needed.
+        <p style={{ fontSize: 13, color: '#8b949e', margin: '4px 0 10px' }}>
+          All changes are validated, saved to disk, and applied to the running service instantly.
         </p>
+        {/* Status chips */}
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {statusChips.map((chip, i) => (
+            <span key={i} style={{
+              fontSize: 11, padding: '3px 10px', borderRadius: 20, fontWeight: 500,
+              color: chip.color, background: chip.bg, border: `1px solid ${chip.color}22`,
+            }}>
+              {chip.label}
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* ─── Trading Status Banner ─── */}
@@ -541,19 +1146,9 @@ export default function Settings() {
         </button>
       </div>
 
-      {/* ─── RPM Entity Budget (trading & intelligence tabs) ─── */}
-      {data.rpm_budget && !searchQuery && (activeTab === 'trading' || activeTab === 'intelligence') && (
-        <RpmBudgetCard
-          rpm_budget={data.rpm_budget}
-          current_pairs={(settings.trading as Record<string, unknown>)?.pairs
-            ? ((settings.trading as Record<string, unknown>).pairs as string[]).length
-            : 0}
-        />
-      )}
-
       {/* ─── Quick Presets ─── */}
       <div style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <span style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
             Quick Presets
           </span>
@@ -571,37 +1166,40 @@ export default function Settings() {
             }}>Custom configuration</span>
           )}
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {Object.entries(PRESET_CONFIG).map(([key, cfg]) => {
             const isActive = key === activePreset
+            const isHovered = hoveredPreset === key
             return (
               <button key={key}
                 onClick={() => !isActive && handlePreset(key)}
                 onMouseEnter={() => setHoveredPreset(key)}
                 onMouseLeave={() => setHoveredPreset(null)}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 8, position: 'relative',
-                  background: isActive ? cfg.color + '14' : '#0d1117',
-                  border: isActive ? `2px solid ${cfg.color}88` : `1px solid ${cfg.color}33`,
-                  borderRadius: 10,
-                  padding: isActive ? '10px 16px' : '11px 17px',
+                  display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
+                  background: isActive
+                    ? `linear-gradient(135deg, ${cfg.color}12, ${cfg.color}20)`
+                    : isHovered ? `${cfg.color}08` : '#0d1117',
+                  border: isActive ? `2px solid ${cfg.color}99` : `1px solid ${cfg.color}44`,
+                  borderRadius: 12,
+                  padding: isActive ? '12px 18px' : '13px 19px',
                   cursor: isActive ? 'default' : 'pointer',
-                  color: '#e6edf3', minWidth: 150, transition: 'all 0.2s',
-                  boxShadow: isActive ? `0 0 16px ${cfg.color}20` : 'none',
+                  color: '#e6edf3', minWidth: 160, transition: 'all 0.2s',
+                  boxShadow: isActive ? `0 0 24px ${cfg.color}25, inset 0 1px 0 ${cfg.color}20` : 'none',
                 }}
               >
-                <span style={{ color: cfg.color }}>{cfg.icon}</span>
+                <span style={{ color: cfg.color, fontSize: 22 }}>{cfg.icon}</span>
                 <div style={{ textAlign: 'left' }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{cfg.label}</div>
-                  <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#6e7681' }}>{cfg.desc}</div>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{cfg.label}</div>
+                  <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#6e7681', marginTop: 1 }}>{cfg.desc}</div>
                 </div>
                 {isActive && (
                   <span style={{
-                    position: 'absolute', top: -7, right: -7,
-                    width: 20, height: 20, borderRadius: '50%',
+                    position: 'absolute', top: -8, right: -8,
+                    width: 22, height: 22, borderRadius: '50%',
                     background: cfg.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    boxShadow: `0 0 8px ${cfg.color}60`,
-                  }}><Check size={11} color="#fff" strokeWidth={3} /></span>
+                    boxShadow: `0 0 10px ${cfg.color}70, 0 0 4px ${cfg.color}`,
+                  }}><Check size={12} color="#fff" strokeWidth={3} /></span>
                 )}
               </button>
             )
@@ -611,28 +1209,28 @@ export default function Settings() {
         {/* Preset impact preview */}
         {panelKey && panelDiff.length > 0 && (
           <div style={{
-            marginTop: 10, padding: '12px 16px',
-            background: '#0d1117', border: `1px solid ${PRESET_CONFIG[panelKey]?.color ?? '#30363d'}22`,
+            marginTop: 12, padding: '14px 18px',
+            background: '#0d1117', border: `1px solid ${PRESET_CONFIG[panelKey]?.color ?? '#30363d'}33`,
             borderRadius: 10, transition: 'all 0.15s',
           }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
               {isComparison
-                ? `Switching to ${PRESET_CONFIG[panelKey]?.label} would change:`
+                ? `Switching to ${PRESET_CONFIG[panelKey]?.label} would change ${panelDiff.filter(r => r.changed).length} setting${panelDiff.filter(r => r.changed).length !== 1 ? 's' : ''}:`
                 : `${PRESET_CONFIG[panelKey]?.label} preset values:`}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: '4px 20px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '4px 20px' }}>
               {panelDiff.map(row => (
                 <div key={row.key} style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '4px 0', fontSize: 12, borderBottom: '1px solid #161b22',
+                  padding: '5px 0', fontSize: 12, borderBottom: '1px solid #161b22',
                 }}>
-                  <span style={{ color: '#8b949e' }}>{row.label}</span>
+                  <span style={{ color: row.changed && isComparison ? '#c9d1d9' : '#8b949e' }}>{row.label}</span>
                   {isComparison && row.changed ? (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span style={{ color: '#484f58', textDecoration: 'line-through', fontSize: 11 }}>{formatFieldValue(row.key, row.current)}</span>
                       <ArrowRight size={10} style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
-                      <span style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#e6edf3', fontWeight: 600 }}>{formatFieldValue(row.key, row.target)}</span>
+                      <span style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#e6edf3', fontWeight: 700, fontSize: 13 }}>{formatFieldValue(row.key, row.target)}</span>
                     </span>
                   ) : (
                     <span style={{ color: row.changed ? '#f59e0b' : '#c9d1d9', fontWeight: row.changed ? 600 : 400 }}>
@@ -646,6 +1244,28 @@ export default function Settings() {
           </div>
         )}
       </div>
+
+      {/* ─── RPM Entity Budget (trading & intelligence tabs) ─── */}
+      {data.rpm_budget && !searchQuery && (activeTab === 'trading' || activeTab === 'intelligence') && (
+        <RpmBudgetCard
+          rpm_budget={data.rpm_budget}
+          current_pairs={(settings.trading as Record<string, unknown>)?.pairs
+            ? ((settings.trading as Record<string, unknown>).pairs as string[]).length
+            : 0}
+        />
+      )}
+
+      {/* ─── Quick Settings ─── */}
+      {!searchQuery && (
+        <QuickSettings
+          settings={settings}
+          liveData={data}
+          onSave={handleSaveSection}
+        />
+      )}
+
+      {/* ─── Config Health ─── */}
+      {!searchQuery && <ConfigHealthPanel settings={settings} />}
 
       {/* ─── Search bar ─── */}
       <div style={{

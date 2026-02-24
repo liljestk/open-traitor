@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.utils.qc_filter import qc_where
+
 
 class SimulatedMixin:
     """Mixin for simulated-trade, scan-result and pair-follow helpers."""
@@ -32,29 +34,20 @@ class SimulatedMixin:
         conn.commit()
         return cursor.lastrowid
 
-    def get_simulated_trades(self, include_closed: bool = False, quote_currency: str | None = None) -> list[dict]:
+    def get_simulated_trades(self, include_closed: bool = False, quote_currency: str | list[str] | None = None) -> list[dict]:
         """Return all (open, or all including closed) simulated trades."""
         conn = self._get_conn()
+        qc_frag, qc_params = qc_where(quote_currency)
         if include_closed:
-            if quote_currency:
-                rows = conn.execute(
-                    "SELECT * FROM simulated_trades WHERE UPPER(pair) LIKE ? ORDER BY ts DESC",
-                    (f"%-{quote_currency.upper()}",),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM simulated_trades ORDER BY ts DESC"
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM simulated_trades WHERE 1=1" + qc_frag + " ORDER BY ts DESC",
+                qc_params,
+            ).fetchall()
         else:
-            if quote_currency:
-                rows = conn.execute(
-                    "SELECT * FROM simulated_trades WHERE status = 'open' AND UPPER(pair) LIKE ? ORDER BY ts DESC",
-                    (f"%-{quote_currency.upper()}",),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM simulated_trades WHERE status = 'open' ORDER BY ts DESC"
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM simulated_trades WHERE status = 'open'" + qc_frag + " ORDER BY ts DESC",
+                qc_params,
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def close_simulated_trade(
@@ -155,20 +148,17 @@ class SimulatedMixin:
 
     # ─── Pair Follows ──────────────────────────────────────────────────────
 
-    def get_pair_follows(self, exchange: str | None = None, quote_currency: str | None = None) -> list[dict]:
+    def get_pair_follows(self, exchange: str | None = None, quote_currency: str | list[str] | None = None) -> list[dict]:
         """Get all followed pairs, optionally filtered by exchange or quote currency."""
         conn = self._get_conn()
-        sql = "SELECT pair, exchange, followed_by, ts FROM pair_follows"
-        conditions: list[str] = []
+        sql = "SELECT pair, exchange, followed_by, ts FROM pair_follows WHERE 1=1"
         params: list = []
         if exchange:
-            conditions.append("exchange = ?")
+            sql += " AND exchange = ?"
             params.append(exchange)
-        if quote_currency:
-            conditions.append("UPPER(pair) LIKE ?")
-            params.append(f"%-{quote_currency.upper()}")
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
+        qc_frag, qc_params = qc_where(quote_currency)
+        sql += qc_frag
+        params.extend(qc_params)
         sql += " ORDER BY pair, followed_by"
         rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
@@ -197,19 +187,16 @@ class SimulatedMixin:
         conn.commit()
         return cursor.rowcount > 0
 
-    def get_followed_pairs_set(self, followed_by: str | None = None, quote_currency: str | None = None) -> set[str]:
+    def get_followed_pairs_set(self, followed_by: str | None = None, quote_currency: str | list[str] | None = None) -> set[str]:
         """Return a set of followed pair names for quick lookup."""
         conn = self._get_conn()
-        sql = "SELECT DISTINCT pair FROM pair_follows"
-        conditions: list[str] = []
+        sql = "SELECT DISTINCT pair FROM pair_follows WHERE 1=1"
         params: list = []
         if followed_by:
-            conditions.append("followed_by = ?")
+            sql += " AND followed_by = ?"
             params.append(followed_by)
-        if quote_currency:
-            conditions.append("UPPER(pair) LIKE ?")
-            params.append(f"%-{quote_currency.upper()}")
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
+        qc_frag, qc_params = qc_where(quote_currency)
+        sql += qc_frag
+        params.extend(qc_params)
         rows = conn.execute(sql, params).fetchall()
         return {r["pair"] for r in rows}

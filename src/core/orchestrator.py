@@ -274,7 +274,9 @@ class Orchestrator:
         self._holdings_dust_threshold: float = float(trading_cfg.get("holdings_dust_threshold", 0.01))
 
         # Initial sync on startup (live mode only)
-        if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False):
+        # Note: live_coinbase_snapshot() is Coinbase-specific; skip for other exchanges
+        _is_coinbase = exchange.__class__.__name__ in ("CoinbaseClient", "CoinbasePaperClient")
+        if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False) and _is_coinbase:
             try:
                 snapshot = self.holdings_manager.live_coinbase_snapshot()
                 self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)

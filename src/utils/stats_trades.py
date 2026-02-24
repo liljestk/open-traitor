@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.utils.qc_filter import qc_where
+
 
 class TradesMixin:
     """Mixin providing trade, event, and scheduled-report persistence."""
@@ -44,7 +46,7 @@ class TradesMixin:
         conn.commit()
         return cursor.lastrowid
 
-    def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50, quote_currency: str | None = None) -> list[dict]:
+    def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50, quote_currency: str | list[str] | None = None) -> list[dict]:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         if pair:
@@ -52,20 +54,15 @@ class TradesMixin:
                 "SELECT * FROM trades WHERE ts >= ? AND pair = ? ORDER BY ts DESC LIMIT ?",
                 (cutoff, pair, limit),
             ).fetchall()
-        elif quote_currency:
-            suffix = f"%-{quote_currency.upper()}"
-            rows = conn.execute(
-                "SELECT * FROM trades WHERE ts >= ? AND UPPER(pair) LIKE ? ORDER BY ts DESC LIMIT ?",
-                (cutoff, suffix, limit),
-            ).fetchall()
         else:
+            qc_frag, qc_params = qc_where(quote_currency)
             rows = conn.execute(
-                "SELECT * FROM trades WHERE ts >= ? ORDER BY ts DESC LIMIT ?",
-                (cutoff, limit),
+                "SELECT * FROM trades WHERE ts >= ?" + qc_frag + " ORDER BY ts DESC LIMIT ?",
+                (cutoff, *qc_params, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_trade_stats(self, hours: int = 24, quote_currency: str | None = None) -> dict:
+    def get_trade_stats(self, hours: int = 24, quote_currency: str | list[str] | None = None) -> dict:
         """Get aggregate trade statistics."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -82,10 +79,8 @@ class TradesMixin:
                 COALESCE(SUM(fee_quote), 0) as total_fees,
                 COALESCE(AVG(confidence), 0) as avg_confidence
                FROM trades WHERE ts >= ?"""
-        if quote_currency:
-            row = conn.execute(base_sql + " AND UPPER(pair) LIKE ?", (cutoff, f"%-{quote_currency.upper()}")).fetchone()
-        else:
-            row = conn.execute(base_sql, (cutoff,)).fetchone()
+        qc_frag, qc_params = qc_where(quote_currency)
+        row = conn.execute(base_sql + qc_frag, (cutoff, *qc_params)).fetchone()
         return dict(row) if row else {}
 
     def get_pair_stats(self, pair: str, hours: int = 168) -> dict:
@@ -105,7 +100,7 @@ class TradesMixin:
         ).fetchone()
         return dict(row) if row else {}
 
-    def get_win_loss_stats(self, hours: int = 720, quote_currency: str | None = None) -> dict:
+    def get_win_loss_stats(self, hours: int = 720, quote_currency: str | list[str] | None = None) -> dict:
         """
         Get win rate and average win/loss for Kelly Criterion position sizing.
         Default look-back: 30 days (720 hours).
@@ -124,10 +119,8 @@ class TradesMixin:
                 COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
                 COALESCE(AVG(CASE WHEN pnl < 0 THEN ABS(pnl) END), 0) as avg_loss
                FROM trades WHERE ts >= ? AND pnl IS NOT NULL AND pnl != 0"""
-        if quote_currency:
-            row = conn.execute(base_sql + " AND UPPER(pair) LIKE ?", (cutoff, f"%-{quote_currency.upper()}")).fetchone()
-        else:
-            row = conn.execute(base_sql, (cutoff,)).fetchone()
+        qc_frag, qc_params = qc_where(quote_currency)
+        row = conn.execute(base_sql + qc_frag, (cutoff, *qc_params)).fetchone()
         if not row or row["total"] == 0:
             return {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
         return {

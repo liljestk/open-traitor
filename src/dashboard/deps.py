@@ -58,12 +58,6 @@ PROFILE_CONFIG_FILES: dict[str, str] = {
     "ibkr": "config/ibkr.yaml",
 }
 
-PROFILE_CURRENCIES: dict[str, str] = {
-    "": "EUR",
-    "coinbase": "EUR",
-    "ibkr": "EUR",
-}
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Profile helpers
@@ -77,12 +71,24 @@ def resolve_profile(profile: str) -> str:
     return PROFILE_ALIASES.get(p, p)
 
 
-def quote_currency_for(profile: str) -> str | None:
-    """Return the quote currency for a profile, or None for 'Default / All'."""
+def quote_currency_for(profile: str) -> list[str] | None:
+    """Return the quote currencies for a profile, read dynamically from YAML config.
+
+    Returns None for 'Default / All' (no filtering).
+    Returns a list like ``["EUR"]`` or ``["EUR", "USD"]`` for specific profiles.
+    """
     resolved = resolve_profile(profile)
     if not resolved:
         return None
-    return PROFILE_CURRENCIES.get(resolved)
+    cfg = get_config_for_profile(profile)
+    currencies = cfg.get("trading", {}).get("quote_currencies", [])
+    if currencies:
+        return [c.upper() for c in currencies]
+    # Fallback: read singular quote_currency
+    single = cfg.get("trading", {}).get("quote_currency")
+    if single:
+        return [single.upper()]
+    return None
 
 
 def get_config_for_profile(profile: str = "") -> dict:

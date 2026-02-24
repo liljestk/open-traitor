@@ -337,3 +337,72 @@ export const SECTION_ORDER = [
   'routing', 'telegram', 'news', 'fear_greed', 'multi_timeframe',
   'llm', 'analysis', 'logging', 'journal', 'audit', 'health', 'dashboard',
 ]
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Section summary chips — key fields shown in collapsed headers
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export const SECTION_SUMMARY: Record<string, Array<{ key: string; label: string }>> = {
+  absolute_rules: [
+    { key: 'max_single_trade', label: 'Max Trade' },
+    { key: 'max_daily_loss', label: 'Max Loss/Day' },
+    { key: 'require_approval_above', label: 'Approval >' },
+  ],
+  trading: [
+    { key: 'mode', label: 'Mode' },
+    { key: 'interval', label: 'Interval' },
+    { key: 'max_open_positions', label: 'Open Pos' },
+    { key: 'max_active_pairs', label: 'Active Pairs' },
+  ],
+  risk: [
+    { key: 'stop_loss_pct', label: 'Stop Loss' },
+    { key: 'take_profit_pct', label: 'Take Profit' },
+    { key: 'max_drawdown_pct', label: 'Drawdown' },
+  ],
+  rotation: [
+    { key: 'enabled', label: 'Enabled' },
+    { key: 'autonomous_allocation_pct', label: 'Auto Alloc' },
+  ],
+  fees: [
+    { key: 'trade_fee_pct', label: 'Taker Fee' },
+    { key: 'min_gain_after_fees_pct', label: 'Min Gain' },
+  ],
+  high_stakes: [
+    { key: 'min_confidence', label: 'Min Conf' },
+    { key: 'trade_size_multiplier', label: 'Size ×' },
+  ],
+  telegram: [
+    { key: 'notify_on_trade', label: 'Trade Alerts' },
+    { key: 'daily_summary', label: 'Daily Summary' },
+  ],
+  llm: [
+    { key: 'temperature', label: 'Temp' },
+    { key: 'max_tokens', label: 'Max Tokens' },
+  ],
+  news: [
+    { key: 'fetch_interval', label: 'Fetch Every' },
+    { key: 'articles_for_analysis', label: 'Articles' },
+  ],
+  multi_timeframe: [
+    { key: 'enabled', label: 'Enabled' },
+    { key: 'min_alignment', label: 'Min Align' },
+  ],
+  fear_greed: [{ key: 'enabled', label: 'Enabled' }],
+  logging: [{ key: 'level', label: 'Level' }, { key: 'file_enabled', label: 'File Logs' }],
+  health: [{ key: 'port', label: 'Port' }],
+  dashboard: [{ key: 'enabled', label: 'Enabled' }, { key: 'port', label: 'Port' }],
+}
+
+export function formatSummaryValue(key: string, val: unknown): string {
+  if (val === null || val === undefined) return '—'
+  if (typeof val === 'boolean') return val ? 'On' : 'Off'
+  if (key.endsWith('_pct') && typeof val === 'number') return `${(val * 100).toFixed(1)}%`
+  if ((key === 'interval' || key === 'fetch_interval') && typeof val === 'number') return `${val}s`
+  if (key === 'status_update_interval' && typeof val === 'number') return `${Math.round(val / 60)}m`
+  if (typeof val === 'number') {
+    if (['max_single_trade', 'max_daily_spend', 'max_daily_loss', 'require_approval_above',
+         'approval_threshold', 'auto_approve_up_to'].includes(key)) return `€${val}`
+    return String(val)
+  }
+  return String(val)
+}

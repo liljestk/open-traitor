@@ -8,8 +8,8 @@ import {
 import type { SectionSchema, FieldSchema, RpmBudget } from '../../api'
 import { useLiveStore, type Density } from '../../store'
 import {
-  SECTION_ICONS, TIER_COLORS, TIER_LABELS,
-  formatKey, getFieldDesc, renderValue,
+  SECTION_ICONS, TIER_COLORS, TIER_LABELS, SECTION_SUMMARY,
+  formatKey, getFieldDesc, renderValue, formatSummaryValue,
   btnStyle, codeStyle, inputBase,
 } from './settingsData'
 
@@ -203,7 +203,28 @@ export function SectionCard({ name, label, values, schema, telegramTier, onSave,
           <ChevronDown size={14} />
         </span>
         <span style={{ color: tierColor + 'cc' }}>{icon}</span>
-        <span style={{ fontWeight: 600, fontSize: 14, flex: 1, textAlign: 'left' }}>{label}</span>
+        <span style={{ fontWeight: 600, fontSize: 14, flexShrink: 0 }}>{label}</span>
+
+        {/* Summary chips — visible only when collapsed */}
+        {!open && !editing && SECTION_SUMMARY[name] && (
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', flex: 1, alignItems: 'center' }}>
+            {SECTION_SUMMARY[name].map(({ key, label: chipLabel }) => {
+              const val = values[key]
+              if (val === undefined) return null
+              return (
+                <span key={key} style={{
+                  fontSize: 10, padding: '2px 7px', borderRadius: 8,
+                  background: '#161b22', color: '#8b949e', border: '1px solid #21262d',
+                  display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap',
+                }}>
+                  <span style={{ color: '#484f58' }}>{chipLabel}:</span>
+                  <span style={{ color: '#c9d1d9', fontWeight: 500 }}>{formatSummaryValue(key, val)}</span>
+                </span>
+              )
+            })}
+          </div>
+        )}
+        {(open || editing) && <div style={{ flex: 1 }} />}
 
         {/* Live-reload badge */}
         <span style={{

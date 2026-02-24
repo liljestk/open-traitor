@@ -80,8 +80,8 @@ llm:
     api_key_set: true
     base_url: https://openrouter.ai/api/v1
     cooldown_seconds: 60
-    daily_token_limit: 0
     daily_request_limit: 1000
+    daily_token_limit: 0
     enabled: true
     model: meta-llama/llama-3.3-70b-instruct:free
     name: openrouter
@@ -177,7 +177,7 @@ trading:
   include_crypto_quotes: false
   interval: 300
   invalidate_strategic_context: false
-  live_holdings_sync: true
+  live_holdings_sync: false
   max_active_pairs: 8
   max_open_positions: 10
   min_confidence: 0.6
