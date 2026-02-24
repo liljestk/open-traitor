@@ -1,7 +1,7 @@
 """
 Background news worker — runs as a separate process in Docker.
 
-Discovers *all* exchange profile configs (coinbase.yaml, ibkr.yaml, nordnet.yaml)
+Discovers *all* exchange profile configs (coinbase.yaml, ibkr.yaml)
 and aggregates news from each profile's configured sources (subreddits + RSS feeds).
 
 Writes to Redis:
@@ -32,7 +32,6 @@ from src.utils.logger import setup_logger, get_logger
 _PROFILE_FILES: dict[str, str] = {
     "coinbase.yaml": "coinbase",
     "ibkr.yaml": "ibkr",
-    "nordnet.yaml": "nordnet",
 }
 
 

@@ -11,7 +11,7 @@ import {
 } from 'lucide-react'
 import {
   type WizardState,
-  POPULAR_CRYPTO, POPULAR_STOCKS, POPULAR_IBKR_STOCKS, OLLAMA_MODELS,
+  POPULAR_CRYPTO, POPULAR_IBKR_STOCKS, OLLAMA_MODELS,
   card, inputBase, mono, isValidTelegramToken,
 } from './wizardData'
 import {
@@ -51,7 +51,7 @@ export function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {[
-            { icon: <BarChart3 size={14} />, text: 'Exchange account (Coinbase + optionally NordNet or IBKR)', required: true },
+            { icon: <BarChart3 size={14} />, text: 'Exchange account (Coinbase + optionally IBKR)', required: true },
             { icon: <Sparkles size={14} />, text: 'LLM API key (or use local Ollama)', required: false },
             { icon: <MessageSquare size={14} />, text: 'Telegram account (for alerts)', required: false },
             { icon: <Shield size={14} />, text: 'Docker Desktop installed', required: true },
@@ -77,7 +77,7 @@ export function StepWelcome({ onStart }: { onStart: () => void }) {
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {[
-            ['Exchange connection', 'Coinbase crypto + NordNet or IBKR equities'],
+            ['Exchange connection', 'Coinbase crypto + IBKR equities'],
             ['Trading mode', 'Paper (simulated) or Live (real money)'],
             ['Asset universe', 'Which crypto & stocks the agent monitors'],
             ['AI brain', 'Multi-provider LLM chain (Gemini / OpenRouter / Ollama)'],
@@ -125,16 +125,11 @@ export function StepWelcome({ onStart }: { onStart: () => void }) {
 
 export function StepExchange({ state, update }: { state: WizardState; update: (p: Partial<WizardState>) => void }) {
   const { exchanges } = state
-  const cards: { key: 'coinbase' | 'nordnet' | 'ibkr'; icon: typeof Coins; color: string; title: string; sub: string; desc: string; tags: string[] }[] = [
+  const cards: { key: 'coinbase' | 'ibkr'; icon: typeof Coins; color: string; title: string; sub: string; desc: string; tags: string[] }[] = [
     {
       key: 'coinbase', icon: Coins, color: '#3b82f6',
       title: 'Coinbase', sub: 'Cryptocurrency', desc: 'Trade crypto assets like BTC, ETH, SOL on Coinbase Advanced Trade. Supports paper and live trading with real-time WebSocket price feeds.',
       tags: ['BTC', 'ETH', 'SOL', 'ADA', 'DOGE'],
-    },
-    {
-      key: 'nordnet', icon: TrendingUp, color: '#22c55e',
-      title: 'Nordnet', sub: 'OMX Stockholm Equities', desc: 'Trade Swedish equities on OMX Stockholm. Currently paper-mode only. SEK-denominated with Courtage Mini fee model.',
-      tags: ['VOLV-B', 'ERIC-B', 'ABB', 'H&M', 'SEB'],
     },
     {
       key: 'ibkr', icon: BarChart3, color: '#e11d48',
@@ -143,15 +138,9 @@ export function StepExchange({ state, update }: { state: WizardState; update: (p
     },
   ]
 
-  const selectExchange = (key: 'coinbase' | 'nordnet' | 'ibkr') => {
-    // Coinbase toggles independently; NordNet & IBKR are mutually exclusive (pick one shares broker)
-    if (key === 'coinbase') {
-      update({ exchanges: { ...exchanges, coinbase: !exchanges.coinbase } })
-    } else {
-      // Shares broker: toggle selected, deselect the other
-      const alreadyActive = exchanges[key]
-      update({ exchanges: { ...exchanges, nordnet: key === 'nordnet' ? !alreadyActive : false, ibkr: key === 'ibkr' ? !alreadyActive : false } })
-    }
+  const selectExchange = (key: 'coinbase' | 'ibkr') => {
+    // Both toggle independently
+    update({ exchanges: { ...exchanges, [key]: !exchanges[key] } })
   }
 
   return (
@@ -159,9 +148,9 @@ export function StepExchange({ state, update }: { state: WizardState; update: (p
       <SectionHeader
         icon={<BarChart3 size={22} />}
         title="Choose Your Exchanges"
-        subtitle="Pick Coinbase for crypto, plus optionally one shares broker (NordNet or IBKR — not both)."
+        subtitle="Pick Coinbase for crypto, plus optionally IBKR for equities."
       />
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         {cards.map(c => {
           const Icon = c.icon
           const active = exchanges[c.key]
@@ -217,11 +206,8 @@ export function StepExchange({ state, update }: { state: WizardState; update: (p
           )
         })}
       </div>
-      {!exchanges.coinbase && !exchanges.nordnet && !exchanges.ibkr && (
+      {!exchanges.coinbase && !exchanges.ibkr && (
         <div style={{ marginTop: 16 }}><Warning>Please select at least one exchange to continue.</Warning></div>
-      )}
-      {exchanges.nordnet && exchanges.ibkr && (
-        <div style={{ marginTop: 16 }}><Warning>Pick one shares broker — NordNet or IBKR, not both.</Warning></div>
       )}
     </>
   )
@@ -313,7 +299,7 @@ export function StepTradingMode({ state, update }: { state: WizardState; update:
 export function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardState; update: (p: Partial<WizardState>) => void; onSkip: () => void }) {
   const toggle = (list: string[], id: string) =>
     list.includes(id) ? list.filter(p => p !== id) : [...list, id]
-  const addCustom = (field: 'cryptoPairs' | 'stockPairs' | 'ibkrPairs', inputField: 'customCryptoPair' | 'customStockPair' | 'customIbkrPair') => {
+  const addCustom = (field: 'cryptoPairs' | 'ibkrPairs', inputField: 'customCryptoPair' | 'customIbkrPair') => {
     const v = (state[inputField] as string).trim().toUpperCase()
     if (v && !(state[field] as string[]).includes(v)) {
       update({ [field]: [...(state[field] as string[]), v], [inputField]: '' })
@@ -323,8 +309,8 @@ export function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardSt
   const renderPairSection = (opts: {
     title: string; icon: ReactNode; color: string;
     items: { id: string; name: string; symbol?: string; sector?: string }[];
-    pairs: string[]; pairsKey: 'cryptoPairs' | 'stockPairs' | 'ibkrPairs';
-    custom: string; customKey: 'customCryptoPair' | 'customStockPair' | 'customIbkrPair';
+    pairs: string[]; pairsKey: 'cryptoPairs' | 'ibkrPairs';
+    custom: string; customKey: 'customCryptoPair' | 'customIbkrPair';
     placeholder: string; subtitle: string;
   }) => (
     <div style={{ ...card, marginBottom: 16 }}>
@@ -402,13 +388,6 @@ export function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardSt
           custom: state.customCryptoPair, customKey: 'customCryptoPair',
           placeholder: 'Add custom pair (e.g. PEPE-EUR)',
           subtitle: 'Select which crypto assets to monitor on Coinbase.',
-        })}
-        {state.exchanges.nordnet && renderPairSection({
-          title: 'OMX Stockholm Stocks', icon: <TrendingUp size={18} />, color: '#22c55e',
-          items: POPULAR_STOCKS, pairs: state.stockPairs, pairsKey: 'stockPairs',
-          custom: state.customStockPair, customKey: 'customStockPair',
-          placeholder: 'Add custom ticker (e.g. SSAB-A.ST)',
-          subtitle: 'Select which Swedish equities to monitor. All SEK-denominated.',
         })}
         {state.exchanges.ibkr && renderPairSection({
           title: 'US Equities (IBKR)', icon: <BarChart3 size={18} />, color: '#e11d48',
@@ -728,30 +707,6 @@ export function StepTelegram({ state, update, onSkip }: { state: WizardState; up
                 </FormField>
                 <FormField label="Chat ID" help={`Defaults to your User ID (${state.telegramUserId || '...'})`}>
                   <input value={state.telegramCoinbaseChatId} onChange={e => update({ telegramCoinbaseChatId: e.target.value })}
-                    placeholder={state.telegramUserId || 'Same as User ID'} style={mono} className="at-input" />
-                </FormField>
-              </div>
-            </div>
-          )}
-
-          {state.exchanges.nordnet && (
-            <div style={card}>
-              <h3 style={{ margin: '0 0 6px 0', fontSize: 15, fontWeight: 700, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Bot size={16} /> Equities Bot (Nordnet)
-                {state.telegramNordnetBotToken && (
-                  <span style={{ marginLeft: 'auto' }}>
-                    <ValidationBadge valid={tokenValid(state.telegramNordnetBotToken)} label={isValidTelegramToken(state.telegramNordnetBotToken) ? 'Valid format' : 'Invalid format'} />
-                  </span>
-                )}
-              </h3>
-              <p style={{ margin: '0 0 14px 0', fontSize: 13, color: '#8b949e' }}>Create a Telegram bot via @BotFather.</p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <FormField label="Bot Token" required>
-                  <PasswordInput value={state.telegramNordnetBotToken} onChange={v => update({ telegramNordnetBotToken: v })}
-                    placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz" useMono />
-                </FormField>
-                <FormField label="Chat ID" help={`Defaults to your User ID (${state.telegramUserId || '...'})`}>
-                  <input value={state.telegramNordnetChatId} onChange={e => update({ telegramNordnetChatId: e.target.value })}
                     placeholder={state.telegramUserId || 'Same as User ID'} style={mono} className="at-input" />
                 </FormField>
               </div>

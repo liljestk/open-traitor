@@ -55,14 +55,12 @@ PROFILE_USE_DEFAULT_DB: set[str] = {"settings"}
 
 PROFILE_CONFIG_FILES: dict[str, str] = {
     "coinbase": "config/coinbase.yaml",
-    "nordnet": "config/nordnet.yaml",
     "ibkr": "config/ibkr.yaml",
 }
 
 PROFILE_CURRENCIES: dict[str, str] = {
     "": "EUR",
     "coinbase": "EUR",
-    "nordnet": "SEK",
     "ibkr": "EUR",
 }
 
@@ -220,7 +218,7 @@ def require_db(profile: str = ""):
 
 
 def get_profile_db(
-    profile: str = Query("", description="Exchange profile (e.g. 'coinbase', 'nordnet', 'ibkr')"),
+    profile: str = Query("", description="Exchange profile (e.g. 'coinbase', 'ibkr')"),
 ):
     """FastAPI dependency — resolves the StatsDB for the requested profile."""
     return require_db(profile)
@@ -345,14 +343,14 @@ def ensure_ibkr_client():
 def client_for_profile(profile: str):
     """Return the exchange client for the given profile."""
     resolved = resolve_profile(profile)
-    if resolved in ("ibkr", "nordnet"):
+    if resolved == "ibkr":
         return ensure_ibkr_client()
     return exchange_client
 
 
 def is_equity_profile(profile: str) -> bool:
     """Return True if the profile is an equity exchange."""
-    return resolve_profile(profile) in ("ibkr", "nordnet")
+    return resolve_profile(profile) == "ibkr"
 
 
 def get_live_price(pair: str, profile: str = "") -> float | None:

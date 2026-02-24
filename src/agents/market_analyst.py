@@ -82,7 +82,7 @@ ACCOUNT-SIZE AWARENESS:
 
 def _get_system_prompt(exchange: str) -> str:
     """Return the appropriate system prompt based on exchange/asset class."""
-    if exchange in ("ibkr", "nordnet"):
+    if exchange == "ibkr":
         return MARKET_ANALYSIS_SYSTEM_PROMPT_EQUITY
     return MARKET_ANALYSIS_SYSTEM_PROMPT_CRYPTO
 
@@ -318,7 +318,7 @@ PRICE CHANGES:
 - 1 hour: {_1h_str}
 - 24 hours: {_24h_str}
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
-RECENT {"EQUITY" if exchange in ("ibkr", "nordnet") else "CRYPTO"} NEWS:
+RECENT {"EQUITY" if exchange == "ibkr" else "CRYPTO"} NEWS:
 {news}
 {strategy_section}{acct_section}
 Provide your analysis as JSON."""

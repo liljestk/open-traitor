@@ -117,7 +117,7 @@ class PortfolioMixin:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
         if quote_currency:
-            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            _qc_exchange_map = {"EUR": "coinbase", "USD": "ibkr"}
             exchange = _qc_exchange_map.get(quote_currency.upper())
             if exchange:
                 # Try filtering by exchange; fall back if column doesn't exist
@@ -165,7 +165,7 @@ class PortfolioMixin:
         params: list = [cutoff]
         if quote_currency:
             # Map quote currency → exchange name stored in the exchange column
-            _qc_exchange_map = {"EUR": "coinbase", "SEK": "nordnet", "USD": "ibkr"}
+            _qc_exchange_map = {"EUR": "coinbase", "USD": "ibkr"}
             exchange = _qc_exchange_map.get(quote_currency.upper())
             if exchange:
                 base_sql += " AND exchange = ?"

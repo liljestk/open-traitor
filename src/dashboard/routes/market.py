@@ -21,7 +21,7 @@ router = APIRouter(tags=["Market"])
 def _get_products_for_profile(profile: str) -> list[dict]:
     """Return tradable products for the given profile.
 
-    For equity profiles (IBKR/Nordnet), returns pairs from the config file
+    For equity profiles (IBKR), returns pairs from the config file
     since these exchanges don't have a Coinbase-style product catalog.
     For crypto profiles, queries the Coinbase REST API.
     """

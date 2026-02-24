@@ -58,12 +58,10 @@ function StepReview({ state, initialServerState, stepsWithValidation: _stepsWith
     // Exchanges
     const wasEx = [
       initialServerState.exchanges.coinbase ? 'Coinbase' : null,
-      initialServerState.exchanges.nordnet ? 'Nordnet' : null,
       initialServerState.exchanges.ibkr ? 'IBKR' : null,
     ].filter(Boolean).join(' + ') || 'None'
     const nowEx = [
       state.exchanges.coinbase ? 'Coinbase' : null,
-      state.exchanges.nordnet ? 'Nordnet' : null,
       state.exchanges.ibkr ? 'IBKR' : null,
     ].filter(Boolean).join(' + ') || 'None'
     if (wasEx !== nowEx) diffs.push({ label: 'Exchanges', oldValue: wasEx, newValue: nowEx })
@@ -77,11 +75,6 @@ function StepReview({ state, initialServerState, stepsWithValidation: _stepsWith
     const wasCrypto = initialServerState.cryptoPairs.join(', ') || 'None'
     const nowCrypto = state.cryptoPairs.join(', ') || 'None'
     if (wasCrypto !== nowCrypto) diffs.push({ label: 'Crypto Pairs', oldValue: wasCrypto, newValue: nowCrypto })
-
-    // Stock Pairs
-    const wasStocks = initialServerState.stockPairs.join(', ') || 'None'
-    const nowStocks = state.stockPairs.join(', ') || 'None'
-    if (wasStocks !== nowStocks) diffs.push({ label: 'Stock Pairs', oldValue: wasStocks, newValue: nowStocks })
 
     // IBKR Pairs
     const wasIbkr = initialServerState.ibkrPairs.join(', ') || 'None'
@@ -102,14 +95,12 @@ function StepReview({ state, initialServerState, stepsWithValidation: _stepsWith
     const s: { title: string; icon: ReactNode; items: { label: string; value: string; ok: boolean }[] }[] = []
     const ex: string[] = []
     if (state.exchanges.coinbase) ex.push('Coinbase (Crypto)')
-    if (state.exchanges.nordnet) ex.push('Nordnet (Equities)')
     if (state.exchanges.ibkr) ex.push('Interactive Brokers (US Equities)')
     s.push({ title: 'Exchanges', icon: <BarChart3 size={14} />, items: [{ label: 'Active', value: ex.join(' + '), ok: ex.length > 0 }] })
     s.push({ title: 'Trading Mode', icon: <Settings2 size={14} />, items: [{ label: 'Mode', value: state.tradingMode === 'paper' ? 'Paper (simulated)' : 'LIVE (real money)', ok: state.tradingMode === 'paper' || state.liveConfirmed }] })
 
     const assets: { label: string; value: string; ok: boolean }[] = []
     if (state.exchanges.coinbase) assets.push({ label: 'Crypto', value: `${state.cryptoPairs.length} pairs`, ok: state.cryptoPairs.length > 0 })
-    if (state.exchanges.nordnet) assets.push({ label: 'Stocks', value: `${state.stockPairs.length} pairs`, ok: state.stockPairs.length > 0 })
     if (state.exchanges.ibkr) assets.push({ label: 'IBKR Stocks', value: `${state.ibkrPairs.length} pairs`, ok: state.ibkrPairs.length > 0 })
     s.push({ title: 'Assets', icon: <TrendingUp size={14} />, items: assets })
 
@@ -139,7 +130,6 @@ function StepReview({ state, initialServerState, stepsWithValidation: _stepsWith
       const tg: { label: string; value: string; ok: boolean }[] = []
       tg.push({ label: 'User ID', value: state.telegramUserId || 'MISSING', ok: !!state.telegramUserId })
       if (state.exchanges.coinbase) tg.push({ label: 'Crypto Bot', value: state.telegramCoinbaseBotToken ? (isValidTelegramToken(state.telegramCoinbaseBotToken) ? 'Valid' : 'Bad format') : 'MISSING', ok: isValidTelegramToken(state.telegramCoinbaseBotToken) })
-      if (state.exchanges.nordnet) tg.push({ label: 'Stock Bot', value: state.telegramNordnetBotToken ? (isValidTelegramToken(state.telegramNordnetBotToken) ? 'Valid' : 'Bad format') : 'MISSING', ok: isValidTelegramToken(state.telegramNordnetBotToken) })
       if (state.exchanges.ibkr) tg.push({ label: 'IBKR Bot', value: state.telegramIbkrBotToken ? (isValidTelegramToken(state.telegramIbkrBotToken) ? 'Valid' : 'Bad format') : 'MISSING', ok: isValidTelegramToken(state.telegramIbkrBotToken) })
       s.push({ title: 'Telegram', icon: <MessageSquare size={14} />, items: tg })
     } else {
@@ -296,7 +286,7 @@ export default function SetupWizard() {
   // Auto-save to localStorage (skip secrets and infraSecrets)
   useEffect(() => {
     const { coinbaseApiKey, coinbaseApiSecret, geminiApiKey, openrouterApiKey, openaiApiKey,
-      telegramCoinbaseBotToken, telegramNordnetBotToken, telegramIbkrBotToken, redditClientSecret, infraSecrets, ...safe } = state
+      telegramCoinbaseBotToken, telegramIbkrBotToken, redditClientSecret, infraSecrets, ...safe } = state
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(safe)) } catch { /* ignore */ }
   }, [state])
 
@@ -373,7 +363,7 @@ export default function SetupWizard() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           config_env: parse(envContent), root_env: parse(rootEnvContent),
-          assets: { coinbase_pairs: state.exchanges.coinbase ? state.cryptoPairs : [], nordnet_pairs: state.exchanges.nordnet ? state.stockPairs : [], ibkr_pairs: state.exchanges.ibkr ? state.ibkrPairs : [] },
+          assets: { coinbase_pairs: state.exchanges.coinbase ? state.cryptoPairs : [], ibkr_pairs: state.exchanges.ibkr ? state.ibkrPairs : [] },
         }),
       })
       if (!res.ok) throw new Error(`Server error: ${await res.text()}`)

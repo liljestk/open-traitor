@@ -164,7 +164,7 @@ def _update_env_file(env_path: str, updates: dict[str, str]) -> None:
 class _SetupConfigBody(_BaseModel):
     config_env: dict[str, str]  # env vars for config/.env
     root_env: dict[str, str]  # env vars for root .env (Docker Compose)
-    assets: dict | None = None  # {coinbase_pairs: [...], nordnet_pairs: [...], ibkr_pairs: [...]}
+    assets: dict | None = None  # {coinbase_pairs: [...], ibkr_pairs: [...]}
 
 
 class _SettingsUpdateBody(_BaseModel):
@@ -240,13 +240,12 @@ def get_setup_config():
         # credentials / tokens must be configured in the env file.
         _EXCHANGE_CRED_KEYS: dict[str, list[str]] = {
             "coinbase": ["COINBASE_API_KEY"],
-            "nordnet": ["TELEGRAM_BOT_TOKEN_NORDNET", "NORDNET_USERNAME", "NORDNET_API_KEY"],
             "ibkr": ["TELEGRAM_BOT_TOKEN_IBKR", "IBKR_ACCOUNT"],
         }
-        exchanges = {"coinbase": False, "nordnet": False, "ibkr": False}
+        exchanges = {"coinbase": False, "ibkr": False}
         yaml_pairs: dict[str, list[str]] = {}
         exchange_currencies: dict[str, str] = {}
-        for exch, fname in [("coinbase", "coinbase.yaml"), ("nordnet", "nordnet.yaml"), ("ibkr", "ibkr.yaml")]:
+        for exch, fname in [("coinbase", "coinbase.yaml"), ("ibkr", "ibkr.yaml")]:
             ypath = os.path.join("config", fname)
             if not os.path.exists(ypath):
                 continue
@@ -300,8 +299,6 @@ def get_setup_config():
             "liveConfirmed": live_confirmed,
             "cryptoPairs": yaml_pairs.get("coinbase", []),
             "customCryptoPair": "",
-            "stockPairs": yaml_pairs.get("nordnet", []),
-            "customStockPair": "",
             "ibkrPairs": yaml_pairs.get("ibkr", []),
             "customIbkrPair": "",
             "coinbaseApiKey": env("COINBASE_API_KEY", ""),
@@ -322,8 +319,6 @@ def get_setup_config():
             "telegramAdditionalUsers": additional_users,
             "telegramCoinbaseBotToken": env("TELEGRAM_BOT_TOKEN_COINBASE", ""),
             "telegramCoinbaseChatId": env("TELEGRAM_CHAT_ID_COINBASE", ""),
-            "telegramNordnetBotToken": env("TELEGRAM_BOT_TOKEN_NORDNET", ""),
-            "telegramNordnetChatId": env("TELEGRAM_CHAT_ID_NORDNET", ""),
             "telegramIbkrBotToken": env("TELEGRAM_BOT_TOKEN_IBKR", ""),
             "telegramIbkrChatId": env("TELEGRAM_CHAT_ID_IBKR", ""),
             "redditEnabled": env("REDDIT_CLIENT_ID", "") != "",
@@ -454,18 +449,6 @@ def setup_config(body: _SetupConfigBody, request: Request):
                         yaml.dump(cb_cfg, f, default_flow_style=False, allow_unicode=True)
                     updated_yamls.append("coinbase.yaml")
 
-            nordnet_pairs = body.assets.get("nordnet_pairs")
-            if nordnet_pairs and isinstance(nordnet_pairs, list):
-                nn_path = os.path.join("config", "nordnet.yaml")
-                if os.path.exists(nn_path):
-                    with open(nn_path, "r", encoding="utf-8") as f:
-                        nn_cfg = yaml.safe_load(f) or {}
-                    if "trading" in nn_cfg:
-                        nn_cfg["trading"]["pairs"] = nordnet_pairs
-                    with open(nn_path, "w", encoding="utf-8") as f:
-                        yaml.dump(nn_cfg, f, default_flow_style=False, allow_unicode=True)
-                    updated_yamls.append("nordnet.yaml")
-
             ibkr_pairs = body.assets.get("ibkr_pairs")
             if ibkr_pairs and isinstance(ibkr_pairs, list):
                 ib_path = os.path.join("config", "ibkr.yaml")
@@ -492,7 +475,6 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",
             "DASHBOARD_API_KEY", "DASHBOARD_COMMAND_SIGNING_KEY",
             "LOG_LEVEL", "PAPER_MODE",
-            "NORDNET_USERNAME", "NORDNET_PASSWORD",
             "IBKR_HOST", "IBKR_PORT", "IBKR_CLIENT_ID", "IBKR_CURRENCY",
         }
         for key, value in body.config_env.items():

@@ -88,7 +88,7 @@ Rules:
 
 def _get_strategy_prompt(exchange: str) -> str:
     """Return the appropriate system prompt based on exchange/asset class."""
-    if exchange in ("ibkr", "nordnet"):
+    if exchange == "ibkr":
         return STRATEGY_SYSTEM_PROMPT_EQUITY
     return STRATEGY_SYSTEM_PROMPT_CRYPTO
 

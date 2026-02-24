@@ -430,7 +430,7 @@ class PredictionsMixin:
 
         # Classify pairs
         crypto_suffixes = {"-USD", "-EUR", "-BTC", "-ETH", "-USDT", "-USDC", "-GBP"}
-        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordnet equities
+        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordic equities
 
         crypto_pairs = []
         equity_pairs = []

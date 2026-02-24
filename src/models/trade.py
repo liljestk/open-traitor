@@ -35,7 +35,7 @@ class Trade(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     pair: str
-    exchange: str = "coinbase"  # Exchange identifier ("coinbase", "nordnet", …)
+    exchange: str = "coinbase"  # Exchange identifier ("coinbase", "ibkr", …)
     action: TradeAction
     status: TradeStatus = TradeStatus.PENDING
     quantity: float

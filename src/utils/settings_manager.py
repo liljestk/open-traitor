@@ -53,7 +53,7 @@ _RULE_SCHEMA: dict[str, dict[str, Any]] = {
 
 _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "mode":                         {"type": str, "enum": ["paper", "live"]},
-    "exchange":                     {"type": str, "enum": ["coinbase", "nordnet", "ibkr"]},
+    "exchange":                     {"type": str, "enum": ["coinbase", "ibkr"]},
     "pairs":                        {"type": list},
     "pair_discovery":               {"type": str, "enum": ["all", "configured"]},
     "quote_currency":               {"type": str},

@@ -10,7 +10,7 @@ Supports pluggable fee models:
       Tier 3 (<$50K):   Taker 0.25%, Maker 0.15%
 
   - ``equity_flat_plus_pct``: Flat minimum fee per trade plus a percentage.
-    Typical for Scandinavian stock brokers (e.g. Nordnet Courtage Mini).
+    Typical for Scandinavian stock brokers (flat + percentage model).
 
 A swap (sell A → buy B) costs TWO trades worth of fees.
 We must ensure expected gain > total fees or we lose money.

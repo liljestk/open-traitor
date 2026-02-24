@@ -214,7 +214,7 @@ class NewsAggregator:
     ):
         self.config = config
         self.redis = redis_client
-        self.profile = profile  # e.g. "coinbase", "nordnet" — used for Redis key
+        self.profile = profile  # e.g. "coinbase", "ibkr" — used for Redis key
         self.exchange_client = exchange_client
 
         # Reddit config

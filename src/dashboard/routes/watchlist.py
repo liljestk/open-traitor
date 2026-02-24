@@ -165,8 +165,7 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
     # Detect exchange from profile or pair suffix
     resolved = deps.resolve_profile(profile)
     qc = deps.quote_currency_for(profile)
-    _qc_fallback = {"SEK": "nordnet"}
-    exchange = body.exchange or resolved or _qc_fallback.get((qc or "").upper(), "coinbase")
+    exchange = body.exchange or resolved or "coinbase"
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}

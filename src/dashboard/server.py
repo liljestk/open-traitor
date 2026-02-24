@@ -149,7 +149,6 @@ async def lifespan(application: FastAPI):
             from src.utils.stats import StatsDB
             _candidates = [
                 ("data/stats_coinbase.db", "coinbase"),
-                ("data/stats_nordnet.db", "nordnet"),
                 ("data/stats_ibkr.db", "ibkr"),
             ]
             _best_path = None

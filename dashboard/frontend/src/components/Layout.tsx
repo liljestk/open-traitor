@@ -12,7 +12,6 @@ import { openLiveSocket, fetchSetupConfig } from '../api'
 const ALL_PROFILES: { id: string; label: string; exchange: string | null }[] = [
   { id: '', label: 'Default', exchange: null },
   { id: 'crypto', label: 'Crypto', exchange: 'coinbase' },
-  { id: 'nordnet', label: 'Equities', exchange: 'nordnet' },
   { id: 'ibkr', label: 'Equities', exchange: 'ibkr' },
 ]
 

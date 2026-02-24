@@ -48,7 +48,6 @@ def print_banner(mode: str, exchange_type: str = "") -> None:
     exchange_labels = {
         "coinbase": "Crypto",
         "ibkr": "Equities",
-        "nordnet": "Equities",
     }
     agent_label = exchange_labels.get(exchange_type.lower(), "Trading")
     banner = f"""
@@ -103,14 +102,6 @@ def main():
 
     # Load environment
     load_dotenv(os.path.join("config", ".env"))
-
-    # Smart override: If profile is nordnet but nordnet bot is not configured, and IBKR is, switch to IBKR
-    if profile == "nordnet" and not os.environ.get("TELEGRAM_BOT_TOKEN_NORDNET") and os.environ.get("TELEGRAM_BOT_TOKEN_IBKR"):
-        print("💡 Nordnet API not configured but IBKR is. Auto-switching profile to IBKR...")
-        args.config = args.config.replace("nordnet", "ibkr")
-        profile = "ibkr"
-        os.environ["AUTO_TRAITOR_PROFILE"] = profile
-        os.environ["AUTO_TRAITOR_CONFIG"] = args.config
 
     # Load config
     config = load_config()
@@ -258,21 +249,7 @@ def main():
     # Exchange Client Selection
     exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
     
-    if exchange_type == "nordnet":
-        try:
-            from src.core.nordnet_client import NordnetClient
-            exchange: ExchangeClient = NordnetClient(
-                paper_mode=paper_mode,
-                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
-            )
-        except NotImplementedError as e:
-            logger.warning(f"⚠️ Live trading not supported for Nordnet yet: {e}. Forcing paper mode.")
-            paper_mode = True
-            exchange = NordnetClient(paper_mode=True, paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005))
-        except ImportError:
-            logger.error("NordnetClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
-            exchange = CoinbaseClient(paper_mode=True)
-    elif exchange_type == "ibkr":
+    if exchange_type == "ibkr":
         try:
             from src.core.ib_client import IBClient
             exchange: ExchangeClient = IBClient(

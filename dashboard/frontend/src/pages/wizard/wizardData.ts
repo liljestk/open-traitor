@@ -11,13 +11,11 @@ import { type CSSProperties } from 'react'
 export const STORAGE_KEY = 'auto_traitor_setup_wizard'
 
 export interface WizardState {
-  exchanges: { coinbase: boolean; nordnet: boolean; ibkr: boolean }
+  exchanges: { coinbase: boolean; ibkr: boolean }
   tradingMode: 'paper' | 'live'
   liveConfirmed: boolean
   cryptoPairs: string[]
   customCryptoPair: string
-  stockPairs: string[]
-  customStockPair: string
   ibkrPairs: string[]
   customIbkrPair: string
   coinbaseApiKey: string
@@ -38,8 +36,6 @@ export interface WizardState {
   telegramAdditionalUsers: string
   telegramCoinbaseBotToken: string
   telegramCoinbaseChatId: string
-  telegramNordnetBotToken: string
-  telegramNordnetChatId: string
   telegramIbkrBotToken: string
   telegramIbkrChatId: string
   redditEnabled: boolean
@@ -51,15 +47,13 @@ export interface WizardState {
 }
 
 export const INITIAL_STATE: WizardState = {
-  exchanges: { coinbase: true, nordnet: false, ibkr: false },
+  exchanges: { coinbase: true, ibkr: false },
   tradingMode: 'paper',
   liveConfirmed: false,
   cryptoPairs: ['BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'LINK-EUR', 'DOGE-EUR'],
   customCryptoPair: '',
-  stockPairs: ['VOLV-B.ST', 'ERIC-B.ST', 'ABB.ST'],
-  customStockPair: '',
   ibkrPairs: ['AAPL-USD', 'MSFT-USD', 'GOOGL-USD'],
-  customIbkrPair: '',
+  customIbkrPair: '',,
   coinbaseApiKey: '',
   coinbaseApiSecret: '',
   ibkrHost: '127.0.0.1',
@@ -78,8 +72,6 @@ export const INITIAL_STATE: WizardState = {
   telegramAdditionalUsers: '',
   telegramCoinbaseBotToken: '',
   telegramCoinbaseChatId: '',
-  telegramNordnetBotToken: '',
-  telegramNordnetChatId: '',
   telegramIbkrBotToken: '',
   telegramIbkrChatId: '',
   redditEnabled: false,
@@ -111,20 +103,6 @@ export const POPULAR_CRYPTO = [
   { id: 'FIL-EUR', name: 'Filecoin', symbol: 'FIL' },
 ]
 
-export const POPULAR_STOCKS = [
-  { id: 'VOLV-B.ST', name: 'Volvo B', sector: 'Industrials' },
-  { id: 'ERIC-B.ST', name: 'Ericsson B', sector: 'Telecom' },
-  { id: 'ABB.ST', name: 'ABB Ltd', sector: 'Industrials' },
-  { id: 'HM-B.ST', name: 'H&M B', sector: 'Retail' },
-  { id: 'SEB-A.ST', name: 'SEB A', sector: 'Finance' },
-  { id: 'SWED-A.ST', name: 'Swedbank A', sector: 'Finance' },
-  { id: 'ATCO-A.ST', name: 'Atlas Copco A', sector: 'Industrials' },
-  { id: 'SAND.ST', name: 'Sandvik', sector: 'Industrials' },
-  { id: 'HEXA-B.ST', name: 'Hexagon B', sector: 'Technology' },
-  { id: 'INVE-B.ST', name: 'Investor B', sector: 'Finance' },
-  { id: 'ASSA-B.ST', name: 'ASSA ABLOY B', sector: 'Industrials' },
-  { id: 'TELIA.ST', name: 'Telia Company', sector: 'Telecom' },
-]
 
 export const POPULAR_IBKR_STOCKS = [
   { id: 'AAPL-USD', name: 'Apple', sector: 'Technology' },
@@ -188,15 +166,13 @@ export function validateStep(stepId: string, state: WizardState): StepValidation
   const issues: string[] = []
   switch (stepId) {
     case 'exchange':
-      if (!state.exchanges.coinbase && !state.exchanges.nordnet && !state.exchanges.ibkr) issues.push('Select at least one exchange')
-      if (state.exchanges.nordnet && state.exchanges.ibkr) issues.push('Pick one shares broker — NordNet or IBKR, not both')
+      if (!state.exchanges.coinbase && !state.exchanges.ibkr) issues.push('Select at least one exchange')
       break
     case 'mode':
       if (state.tradingMode === 'live' && !state.liveConfirmed) issues.push('Confirm live trading risks')
       break
     case 'assets':
       if (state.exchanges.coinbase && state.cryptoPairs.length === 0) issues.push('Select crypto pairs')
-      if (state.exchanges.nordnet && state.stockPairs.length === 0) issues.push('Select stock pairs')
       if (state.exchanges.ibkr && state.ibkrPairs.length === 0) issues.push('Select IBKR stock pairs')
       break
     case 'coinbase':
@@ -216,10 +192,8 @@ export function validateStep(stepId: string, state: WizardState): StepValidation
       if (state.telegramEnabled) {
         if (!state.telegramUserId) issues.push('User ID required')
         if (state.exchanges.coinbase && !state.telegramCoinbaseBotToken) issues.push('Coinbase bot token required')
-        if (state.exchanges.nordnet && !state.telegramNordnetBotToken) issues.push('Nordnet bot token required')
         if (state.exchanges.ibkr && !state.telegramIbkrBotToken) issues.push('IBKR bot token required')
         if (state.telegramCoinbaseBotToken && !isValidTelegramToken(state.telegramCoinbaseBotToken)) issues.push('Coinbase token format invalid')
-        if (state.telegramNordnetBotToken && !isValidTelegramToken(state.telegramNordnetBotToken)) issues.push('Nordnet token format invalid')
         if (state.telegramIbkrBotToken && !isValidTelegramToken(state.telegramIbkrBotToken)) issues.push('IBKR token format invalid')
       }
       break
@@ -282,18 +256,11 @@ export function generateEnvContent(state: WizardState): string {
       add('TELEGRAM_CHAT_ID', cid)
       blank()
     }
-    if (state.exchanges.nordnet && state.telegramNordnetBotToken) {
-      const cid = state.telegramNordnetChatId || state.telegramUserId
-      add('TELEGRAM_BOT_TOKEN_NORDNET', state.telegramNordnetBotToken, 'Telegram Bot — Nordnet agent')
-      add('TELEGRAM_CHAT_ID_NORDNET', cid)
-      if (!state.exchanges.coinbase) { add('TELEGRAM_BOT_TOKEN', state.telegramNordnetBotToken, 'Generic fallback'); add('TELEGRAM_CHAT_ID', cid) }
-      blank()
-    }
     if (state.exchanges.ibkr && state.telegramIbkrBotToken) {
       const cid = state.telegramIbkrChatId || state.telegramUserId
       add('TELEGRAM_BOT_TOKEN_IBKR', state.telegramIbkrBotToken, 'Telegram Bot — IBKR agent')
       add('TELEGRAM_CHAT_ID_IBKR', cid)
-      if (!state.exchanges.coinbase && !state.exchanges.nordnet) { add('TELEGRAM_BOT_TOKEN', state.telegramIbkrBotToken, 'Generic fallback'); add('TELEGRAM_CHAT_ID', cid) }
+      if (!state.exchanges.coinbase) { add('TELEGRAM_BOT_TOKEN', state.telegramIbkrBotToken, 'Generic fallback'); add('TELEGRAM_CHAT_ID', cid) }
       blank()
     }
   } else { lines.push('# TELEGRAM_BOT_TOKEN= (not configured)', '# TELEGRAM_CHAT_ID=', '# TELEGRAM_AUTHORIZED_USERS='); blank() }

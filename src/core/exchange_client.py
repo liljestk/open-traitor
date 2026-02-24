@@ -1,7 +1,7 @@
 """
 Abstract Base Class for Exchange Clients.
 
-Provides a unified interface for both Crypto (e.g. Coinbase) and Shares (e.g. Nordnet)
+Provides a unified interface for both Crypto (e.g. Coinbase) and Shares (e.g. IBKR)
 trading clients, allowing the orchestrator and agents to operate agnostically.
 """
 
@@ -23,7 +23,7 @@ class ExchangeClient(abc.ABC):
     @abc.abstractmethod
     def exchange_id(self) -> str:
         """
-        Unique short identifier for this exchange (e.g. ``"coinbase"``, ``"nordnet"``).
+        Unique short identifier for this exchange (e.g. ``"coinbase"``, ``"ibkr"``).
         Used as a key in per-exchange state, stats, config, and logging.
         """
 

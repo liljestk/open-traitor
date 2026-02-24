@@ -117,54 +117,6 @@ services:
           cpus: "2.0"
 
   # =========================================================================
-  # Trading Agent — Nordnet (Equities / OMX Stockholm)
-  # Only starts with: docker compose --profile nordnet up
-  # =========================================================================
-  agent-nordnet:
-    profiles: ["nordnet"]
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: auto-traitor-agent-nordnet
-    restart: unless-stopped
-    depends_on:
-      ollama:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      langfuse-web:
-        condition: service_healthy
-    env_file:
-      - config/.env
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - PYTHONUNBUFFERED=1
-      - PYTHONDONTWRITEBYTECODE=1
-      - LANGFUSE_HOST=http://langfuse-web:3000
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
-      - TEMPORAL_HOST=temporal:7233
-      - TEMPORAL_NAMESPACE=default
-    volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./logs:/app/logs
-    ports:
-      - "127.0.0.1:8081:8081" # Health check (different port)
-    # Security: read-only filesystem, drop capabilities
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    command: python -m src.main --config config/nordnet.yaml --mode daemon
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: "1.0"
-
-  # =========================================================================
   # Trading Agent — Interactive Brokers (US/EU Equities)
   # Only starts with: docker compose --profile ibkr up
   # =========================================================================

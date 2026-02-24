@@ -34,7 +34,7 @@ const EQUITY_FALLBACK_PRODUCTS: CoinbaseProduct[] = [
     { id: 'TSLA-USD', base: 'TSLA', quote: 'USD' },
 ]
 
-const EQUITY_PROFILES = new Set(['ibkr', 'nordnet'])
+const EQUITY_PROFILES = new Set(['ibkr'])
 
 function pnlColor(pnl: number): string {
     if (pnl > 0) return 'text-green-400'

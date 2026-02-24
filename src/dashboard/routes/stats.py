@@ -80,12 +80,6 @@ def get_stats_summary(
             # Use profile name directly as exchange filter
             snapshot_sql += " WHERE exchange = ?"
             snapshot_params.append(resolved_p)
-        elif qc:
-            _qc_exchange_map = {"SEK": "nordnet"}
-            exchange = _qc_exchange_map.get(qc.upper())
-            if exchange:
-                snapshot_sql += " WHERE exchange = ?"
-                snapshot_params.append(exchange)
         snapshot_sql += " ORDER BY ts DESC LIMIT 1"
         snapshot = conn.execute(snapshot_sql, snapshot_params).fetchone()
 
@@ -257,12 +251,6 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
         if resolved_p:
             base_sql += " WHERE exchange = ?"
             params.append(resolved_p)
-        elif qc:
-            _qc_exchange_map = {"SEK": "nordnet"}
-            exchange = _qc_exchange_map.get(qc.upper())
-            if exchange:
-                base_sql += " WHERE exchange = ?"
-                params.append(exchange)
         base_sql += " ORDER BY ts DESC LIMIT 1"
         row = conn.execute(base_sql, params).fetchone()
         if not row:

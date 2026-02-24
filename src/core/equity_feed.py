@@ -2,15 +2,14 @@
 Equity Market Data Feed — free Yahoo Finance data for paper-mode equity trading.
 
 Provides real price data, OHLCV candles, and instrument discovery for
-IBClient and NordnetClient paper modes so the analysis pipeline, universe
-scanner, and LLM screener actually have data to work with.
+IBClient paper mode so the analysis pipeline, universe scanner, and LLM
+screener actually have data to work with.
 
 Uses the Yahoo Finance v8 chart API directly via ``requests`` (no yfinance
 dependency needed).  This avoids the ``curl_cffi`` / ``fc.yahoo.com`` cookie
 issues that plague ``yfinance`` inside Docker containers.
 
-This module is **only** used in paper mode.  Live IBKR uses ``ib_insync``
-and live Nordnet will use its own REST API.
+This module is **only** used in paper mode.  Live IBKR uses ``ib_insync``.
 """
 
 from __future__ import annotations
@@ -113,14 +112,7 @@ US_UNIVERSE = [
     "GE", "DE", "BA", "AMAT", "ADP",
 ]
 
-# OMX Stockholm (top Nordic blue chips)
-OMX_UNIVERSE = [
-    "VOLV-B.ST", "ERIC-B.ST", "ABB.ST", "ASSA-B.ST", "ATCO-A.ST",
-    "SEB-A.ST", "SHB-A.ST", "SWED-A.ST", "SAND.ST", "SKF-B.ST",
-    "HEXA-B.ST", "ALFA.ST", "INVE-B.ST", "ESSITY-B.ST", "BOL.ST",
-    "ELUX-B.ST", "TELIA.ST", "KINV-B.ST", "HM-B.ST", "SINCH.ST",
-    "SAAB-B.ST", "NIBE-B.ST", "SWMA.ST", "EVO.ST", "GETI-B.ST",
-]
+
 
 
 # ── Caching layer (avoid hammering Yahoo on every cycle) ─────────────────
@@ -301,13 +293,8 @@ def discover_pairs(
 
     never = set(never_trade or [])
 
-    # Pick the right universe based on exchange
-    if exchange_id == "nordnet":
-        raw_tickers = list(OMX_UNIVERSE)
-        default_currency = "SEK"
-    else:
-        raw_tickers = list(US_UNIVERSE)
-        default_currency = "USD"
+    raw_tickers = list(US_UNIVERSE)
+    default_currency = "USD"
 
     # Convert to internal pair format
     pairs = [yahoo_to_pair(t, default_currency) for t in raw_tickers]

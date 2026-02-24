@@ -43,7 +43,7 @@ export const useLiveStore = create<LiveStore>((set, get) => ({
   profile: initialProfile,
   currency: FALLBACK_CURRENCY,
   density: initialDensity,
-  availableExchanges: { coinbase: false, nordnet: false, ibkr: false },
+  availableExchanges: { coinbase: false, ibkr: false },
   exchangeCurrencies: {},
   setProfile: (profile) => {
     localStorage.setItem('auto_traitor_profile', profile)

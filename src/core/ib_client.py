@@ -5,7 +5,7 @@ Currently implements **paper mode only**.  Live trading will be added once
 the IB Gateway / TWS API connection is configured.
 
 The paper engine uses the same balance / order-tracking pattern as
-NordnetClient's paper mode but with USD-denominated defaults and
+CoinbaseClient's paper mode but with USD-denominated defaults and
 IBKR's tiered commission schedule.
 """
 
