@@ -6,8 +6,6 @@ Manages tasks, handles Telegram commands, and runs autonomously.
 from __future__ import annotations
 
 import json
-import hashlib
-import hmac
 import os
 import re
 import threading
@@ -57,6 +55,7 @@ from src.core.managers.universe_scanner import UniverseScanner
 from src.core.managers.holdings_manager import HoldingsManager
 from src.core.managers.context_manager import ContextManager
 from src.core.managers.event_manager import EventManager
+from src.core.managers.dashboard_commands import DashboardCommandManager
 import asyncio
 
 logger = get_logger("core.orchestrator")
@@ -251,6 +250,7 @@ class Orchestrator:
         self.holdings_manager = HoldingsManager(self)
         self.context_manager = ContextManager(self)
         self.event_manager = EventManager(self)
+        self.dashboard_commands = DashboardCommandManager(self)
         
         self._pending_approvals: dict[str, dict] = {}
         self._pending_approvals_lock = threading.Lock()
@@ -881,10 +881,10 @@ class Orchestrator:
                 self.state_manager.sync_to_redis()
 
                 # Publish trailing stop state to Redis for dashboard
-                self._publish_trailing_stops()
+                self.dashboard_commands.publish_trailing_stops()
 
                 # Process any HITL commands from dashboard
-                self._process_dashboard_commands()
+                self.dashboard_commands.process_commands()
 
                 # Prune stale pending approvals (> 1 hour old)
                 self.state_manager.prune_stale_approvals()
@@ -1089,173 +1089,4 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Rotation error: {e}", exc_info=True)
 
-    # =========================================================================
-    # Dashboard Integration — HITL Commands & Trailing Stop State Publishing
-    # =========================================================================
 
-    def _publish_trailing_stops(self) -> None:
-        """Publish current trailing stop state to Redis for the dashboard."""
-        if not self.redis:
-            return
-        try:
-            stops = self.trailing_stops.get_all_stops()
-            import json as _json
-            self.redis.set(
-                "trailing_stops:state",
-                _json.dumps(stops, default=str),
-                ex=300,  # 5 min TTL
-            )
-        except Exception as e:
-            logger.debug(f"Failed to publish trailing stops: {e}")
-
-    def _process_dashboard_commands(self) -> None:
-        """Check Redis for HITL commands published by the dashboard."""
-        if not self.redis:
-            return
-        try:
-            import json as _json
-            # Process up to 5 commands per cycle to avoid blocking
-            for _ in range(5):
-                raw = self.redis.lpop("dashboard:commands_queue")
-                if not raw:
-                    break
-                try:
-                    cmd = _json.loads(raw)
-                except Exception:
-                    continue
-
-                valid, reason = self._validate_dashboard_command(cmd)
-                if not valid:
-                    logger.warning(f"Rejected dashboard command: {reason}")
-                    continue
-
-                action = cmd.get("action")
-                pair = cmd.get("pair", "")
-                logger.info(f"📥 Dashboard HITL command: {action} for {pair}")
-
-                if action == "liquidate":
-                    self._handle_liquidate(pair)
-                elif action == "tighten_stop":
-                    self._handle_tighten_stop(pair)
-                elif action == "pause":
-                    self._handle_pause_pair(pair)
-                else:
-                    logger.warning(f"Unknown dashboard command: {action}")
-        except Exception as e:
-            logger.warning(f"Dashboard command processing error: {e}")
-
-    def _validate_dashboard_command(self, cmd: dict) -> tuple[bool, str]:
-        """Validate signature and freshness of dashboard-originated commands."""
-        if not isinstance(cmd, dict):
-            return False, "payload is not a JSON object"
-
-        if not self._dashboard_command_signing_key:
-            return False, "signing key not configured"
-
-        action = str(cmd.get("action", ""))
-        pair = str(cmd.get("pair", ""))
-        ts = str(cmd.get("ts", ""))
-        source = str(cmd.get("source", ""))
-        nonce = str(cmd.get("nonce", ""))
-        signature = str(cmd.get("signature", ""))
-
-        if source != "dashboard":
-            return False, f"invalid source: {source!r}"
-
-        if not all([action, pair, ts, nonce, signature]):
-            return False, "missing required signed fields"
-
-        try:
-            normalized_ts = ts.replace("Z", "+00:00")
-            parsed_ts = datetime.fromisoformat(normalized_ts)
-            if parsed_ts.tzinfo is None:
-                parsed_ts = parsed_ts.replace(tzinfo=timezone.utc)
-            age_seconds = (datetime.now(timezone.utc) - parsed_ts.astimezone(timezone.utc)).total_seconds()
-            if age_seconds < -30:
-                return False, "timestamp is in the future"
-            if age_seconds > self._dashboard_command_max_age_seconds:
-                return False, "timestamp is stale"
-        except Exception:
-            return False, "invalid timestamp"
-
-        payload = f"{action}|{pair}|{ts}|{source}|{nonce}"
-        expected = hmac.new(
-            self._dashboard_command_signing_key.encode("utf-8"),
-            payload.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac.compare_digest(signature, expected):
-            return False, "invalid signature"
-
-        # M20 fix: reject replayed nonces
-        now = time.monotonic()
-        with self._nonce_lock:
-            # Prune nonces older than the max command age + 30s grace
-            cutoff = now - self._dashboard_command_max_age_seconds - 30
-            stale = [n for n, t in self._used_nonces.items() if t < cutoff]
-            for n in stale:
-                del self._used_nonces[n]
-            if nonce in self._used_nonces:
-                return False, "nonce already used (replay detected)"
-            self._used_nonces[nonce] = now
-
-        return True, "ok"
-
-    def _handle_liquidate(self, pair: str) -> None:
-        """Emergency liquidate a position."""
-        try:
-            price = self.state.current_prices.get(pair, 0)
-            result = self.executor.close_position_by_pair(pair, price, "dashboard_liquidate")
-            if result:
-                self.trailing_stops.remove_stop(pair)
-                pnl = result.get("pnl", 0)
-                msg = f"🔴 Dashboard liquidation: {pair} at {format_currency(price)} — PnL: {format_currency(pnl or 0)}"
-                logger.warning(msg)
-                if self.telegram:
-                    self.telegram.send_alert(msg)
-                self.chat_handler.queue_event(msg)
-            else:
-                logger.warning(f"Dashboard liquidation: no open position for {pair}")
-        except Exception as e:
-            logger.error(f"Dashboard liquidation failed for {pair}: {e}")
-
-    def _handle_tighten_stop(self, pair: str) -> None:
-        """Move trailing stop to breakeven."""
-        try:
-            stop = self.trailing_stops.tighten_to_breakeven(pair)
-            if stop:
-                entry = stop["entry_price"]  # H3 fix: tighten_to_breakeven returns dict
-                msg = f"🎯 Dashboard tightened stop on {pair} to breakeven ({format_currency(entry)})"
-                logger.info(msg)
-                if self.telegram:
-                    self.telegram.send_alert(msg)
-                self.chat_handler.queue_event(msg)
-            else:
-                logger.warning(f"No trailing stop found for {pair}")
-        except Exception as e:
-            logger.error(f"Dashboard tighten-stop failed for {pair}: {e}")
-
-    def _handle_pause_pair(self, pair: str) -> None:
-        """Exclude a pair from trading."""
-        try:
-            from src.utils.settings_manager import load_settings, save_section
-            settings = load_settings()
-            excluded = settings.get("absolute_rules", {}).get("never_trade_pairs", [])
-            if pair not in excluded:
-                excluded.append(pair)
-                save_section("absolute_rules", {"never_trade_pairs": excluded})
-                self.rules.never_trade_pairs = set(excluded)
-                with self._pairs_lock:
-                    if pair in self.pairs:
-                        self.pairs = [p for p in self.pairs if p != pair]
-                        self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))  # M23 fix
-                msg = f"⏸️ Dashboard paused trading on {pair}"
-                logger.info(msg)
-                if self.telegram:
-                    self.telegram.send_alert(msg)
-                self.chat_handler.queue_event(msg)
-            else:
-                logger.info(f"{pair} already in never_trade list")
-        except Exception as e:
-            logger.error(f"Dashboard pause-pair failed for {pair}: {e}")

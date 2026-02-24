@@ -102,6 +102,46 @@ class EquityFlatPlusPctFeeModel(BaseFeeModel):
         return self.estimate_trade_fee(quote_amount) / quote_amount
 
 
+class EquityPerShareFeeModel(BaseFeeModel):
+    """
+    Per-share fee model (typical for IBKR).
+
+    Fee = max(min_fee, shares × per_share_fee)
+    IBKR US equities: $0.0035/share, $0.35 minimum per order.
+    """
+
+    def __init__(
+        self,
+        per_share_fee: float = 0.0035,
+        min_fee: float = 0.35,
+        max_fee_pct: float = 0.01,  # 1% cap on fees
+    ):
+        self.per_share_fee = per_share_fee
+        self.min_fee = min_fee
+        self.max_fee_pct = max_fee_pct
+
+    def estimate_trade_fee(self, quote_amount: float, is_maker: bool = False) -> float:
+        # Approximate shares from quote amount assuming typical prices
+        # The actual per-share calc is: shares × per_share_fee
+        # We approximate: fee = max(min_fee, quote_amount × effective_rate)
+        # With avg share price ~$50, 100 shares = $5000, fee = $0.35
+        # effective rate ≈ 0.007% for large orders
+        fee = max(self.min_fee, quote_amount * self.per_share_fee / 50.0)
+        # Cap at max_fee_pct of trade value
+        return min(fee, quote_amount * self.max_fee_pct)
+
+    def estimate_trade_fee_shares(
+        self, n_shares: float, price_per_share: float
+    ) -> float:
+        """Precise fee calculation when share count is known."""
+        return max(self.min_fee, n_shares * self.per_share_fee)
+
+    def effective_fee_pct(self, quote_amount: float, is_maker: bool = False) -> float:
+        if quote_amount <= 0:
+            return 0.0
+        return self.estimate_trade_fee(quote_amount) / quote_amount
+
+
 def _build_fee_model(config: dict) -> BaseFeeModel:
     """Instantiate the correct fee model from the ``fees`` config block."""
     model_type = config.get("model_type", "crypto_percentage")
@@ -111,6 +151,13 @@ def _build_fee_model(config: dict) -> BaseFeeModel:
             flat_fee_min=config.get("flat_fee_min", 39.0),
             percent_fee=config.get("percent_fee", 0.0015),
             currency_conversion_pct=config.get("currency_conversion_pct", 0.0025),
+        )
+
+    if model_type == "equity_per_share":
+        return EquityPerShareFeeModel(
+            per_share_fee=config.get("per_share_fee", 0.0035),
+            min_fee=config.get("min_fee", 0.35),
+            max_fee_pct=config.get("max_fee_pct", 0.01),
         )
 
     # Default / "crypto_percentage"
@@ -274,16 +321,22 @@ class FeeManager:
             swap_legs = n_legs if n_legs is not None else 2
             estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs)
         else:
-            fee_quote = self.estimate_trade_fees(quote_amount)
-            eff_pct = self._fee_model.effective_fee_pct(quote_amount)
+            # Round-trip fee: a buy must eventually be sold.
+            # Total cost = buy fee + sell fee = 2 × one-way fee.
+            buy_fee_quote = self.estimate_trade_fees(quote_amount)
+            sell_fee_quote = self.estimate_trade_fees(quote_amount)
+            total_fee_quote = buy_fee_quote + sell_fee_quote
+            buy_fee_pct = self._fee_model.effective_fee_pct(quote_amount)
+            sell_fee_pct = self._fee_model.effective_fee_pct(quote_amount)
+            total_fee_pct = buy_fee_pct + sell_fee_pct
             estimate = FeeEstimate(
-                sell_fee_pct=eff_pct,
-                buy_fee_pct=0,
-                total_fee_pct=eff_pct,
-                sell_fee_quote=fee_quote,
-                buy_fee_quote=0,
-                total_fee_quote=fee_quote,
-                breakeven_move_pct=eff_pct * self.fee_safety_margin,
+                sell_fee_pct=sell_fee_pct,
+                buy_fee_pct=buy_fee_pct,
+                total_fee_pct=total_fee_pct,
+                sell_fee_quote=sell_fee_quote,
+                buy_fee_quote=buy_fee_quote,
+                total_fee_quote=total_fee_quote,
+                breakeven_move_pct=total_fee_pct * self.fee_safety_margin,
                 is_profitable=False,
             )
 

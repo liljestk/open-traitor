@@ -60,10 +60,32 @@ const SIGNAL_LABELS: Record<string, string> = {
   strong_sell: 'Strong Sell',
 }
 
+// Well-known crypto base symbols
+const KNOWN_CRYPTO = new Set([
+  'BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOGE', 'DOT', 'AVAX', 'MATIC',
+  'LINK', 'UNI', 'SHIB', 'LTC', 'BCH', 'ATOM', 'FIL', 'NEAR', 'APT',
+  'ARB', 'OP', 'ICP', 'XLM', 'ALGO', 'AAVE', 'CRV', 'MKR', 'COMP',
+  'SNX', 'PEPE', 'BONK', 'WIF', 'JUP', 'RENDER', 'FET', 'TAO', 'USDT',
+  'USDC', 'DAI', 'BUSD', 'TUSD', 'RNDR', 'GRT', 'SUI', 'SEI', 'TIA',
+  'INJ', 'PYTH', 'STX', 'HBAR', 'VET', 'EOS', 'TRX', 'XMR', 'ZEC',
+])
+
+// Equity-associated quote currencies
+const EQUITY_QUOTES = new Set(['SEK', 'NOK', 'DKK', 'GBP', 'CHF'])
+
 // Classify a pair as crypto or equity
 function classifyPair(pair: string): 'crypto' | 'equity' {
   const upper = pair.toUpperCase()
-  if (upper.endsWith('-SEK') || upper.endsWith('-NOK') || upper.endsWith('-DKK')) return 'equity'
+  const parts = upper.split('-')
+  const base = parts[0] ?? ''
+  const quote = parts[1] ?? ''
+
+  // Scandinavian / European equity exchange currencies → always equity
+  if (EQUITY_QUOTES.has(quote)) return 'equity'
+  // Known crypto symbols → crypto
+  if (KNOWN_CRYPTO.has(base)) return 'crypto'
+  // Short all-letter ticker not known as crypto → likely equity (e.g. AAPL-USD, MSFT-EUR)
+  if (/^[A-Z]{1,5}$/.test(base)) return 'equity'
   return 'crypto'
 }
 

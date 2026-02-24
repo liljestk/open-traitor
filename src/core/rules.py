@@ -229,7 +229,19 @@ class AbsoluteRules:
         needs_approval = False
         now = datetime.now(timezone.utc)
 
-        # --- Rule: Blacklisted pairs (applies to BUY + SELL) ---
+        # ══════════════════════════════════════════════════════════════════
+        # CRITICAL INVARIANT: Sell/exit orders are NEVER blocked.
+        # The system must always be able to get out of a position.
+        # Only BUY orders are subject to gating rules.
+        # ══════════════════════════════════════════════════════════════════
+        if not is_buy:
+            # Sells are always allowed — log and return immediately
+            logger.debug(f"✅ SELL/EXIT order for {pair} — always allowed (invariant)")
+            return True, [], False
+
+        # ── BUY-only rules below ─────────────────────────────────────────
+
+        # --- Rule: Blacklisted pairs ---
         if pair in self.never_trade_pairs:
             violations.append(RuleViolation(
                 "never_trade_pair",
@@ -237,17 +249,13 @@ class AbsoluteRules:
                 f"The pair {pair} is in the never_trade_pairs list",
             ))
 
-        # --- Rule: Whitelist (applies to BUY + SELL) ---
+        # --- Rule: Whitelist ---
         if self.only_trade_pairs and pair not in self.only_trade_pairs:
             violations.append(RuleViolation(
                 "only_trade_pairs",
                 f"Pair {pair} is not whitelisted",
                 f"Only these pairs are allowed: {self.only_trade_pairs}",
             ))
-
-        # ── BUY-only rules ───────────────────────────────────────────────
-        # Sells reduce exposure and should never be blocked by risk limits.
-        # Only pair blacklist/whitelist checks apply to sells.
 
         # --- Rule: Max single trade (BUY only) ---
         if is_buy and quote_value > self.max_single_trade:

@@ -1,0 +1,611 @@
+import { useState, useMemo, useEffect, type ReactNode } from 'react'
+import {
+  ToggleLeft, ToggleRight, ChevronDown, Save, X,
+  AlertTriangle, Check, Zap, Settings2,
+  Gauge, Bot, ExternalLink, Lock,
+  Maximize2, Minimize2,
+} from 'lucide-react'
+import type { SectionSchema, FieldSchema, RpmBudget } from '../../api'
+import { useLiveStore, type Density } from '../../store'
+import {
+  SECTION_ICONS, TIER_COLORS, TIER_LABELS,
+  formatKey, getFieldDesc, renderValue,
+  btnStyle, codeStyle, inputBase,
+} from './settingsData'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Toast notification
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export function Toast({ message, type, onDismiss }: { message: string; type: 'success' | 'error'; onDismiss: () => void }) {
+  useEffect(() => { const t = setTimeout(onDismiss, 4000); return () => clearTimeout(t) }, [onDismiss])
+  return (
+    <div style={{
+      position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '12px 20px', borderRadius: 10,
+      background: type === 'success' ? '#16291f' : '#2d1318',
+      border: `1px solid ${type === 'success' ? '#22c55e55' : '#ef444455'}`,
+      color: type === 'success' ? '#4ade80' : '#f87171',
+      fontSize: 13, fontWeight: 500,
+      boxShadow: `0 8px 32px ${type === 'success' ? '#22c55e20' : '#ef444420'}`,
+      animation: 'toastSlideIn 0.3s ease-out',
+    }}>
+      {type === 'success' ? <Check size={14} /> : <AlertTriangle size={14} />}
+      {message}
+      <button onClick={onDismiss} style={{
+        background: 'none', border: 'none', color: 'inherit', cursor: 'pointer',
+        padding: '0 0 0 8px', opacity: 0.6,
+      }}><X size={12} /></button>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Field input renderer
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function FieldInput({ fieldKey, value, schema, onChange }: {
+  fieldKey: string; value: unknown; schema: FieldSchema | undefined
+  onChange: (key: string, val: unknown) => void
+}) {
+  const type = schema?.type ?? (typeof value)
+
+  if (type === 'bool' || typeof value === 'boolean') {
+    return (
+      <button onClick={() => onChange(fieldKey, !value)} style={{
+        background: value ? '#22c55e18' : '#6e768118',
+        border: `1px solid ${value ? '#22c55e44' : '#30363d'}`,
+        borderRadius: 20, cursor: 'pointer', padding: '3px 12px',
+        color: value ? '#22c55e' : '#6e7681',
+        display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 500,
+        transition: 'all 0.15s',
+      }} title={value ? 'Click to disable' : 'Click to enable'}>
+        {value ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+        {value ? 'Enabled' : 'Disabled'}
+      </button>
+    )
+  }
+
+  if (schema?.enum) {
+    return (
+      <select value={String(value)} onChange={e => onChange(fieldKey, e.target.value)}
+        style={{ ...inputBase, minWidth: 120, cursor: 'pointer' }}>
+        {schema.enum.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    )
+  }
+
+  if (type === 'list' || Array.isArray(value)) {
+    return (
+      <input type="text"
+        value={Array.isArray(value) ? value.join(', ') : String(value ?? '')}
+        onChange={e => onChange(fieldKey, e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+        placeholder="Comma-separated values"
+        style={{ ...inputBase, width: '100%', minWidth: 180 }}
+      />
+    )
+  }
+
+  if (type === 'str' || type === 'string') {
+    const isLong = typeof value === 'string' && value.length > 60
+    if (isLong)
+      return (
+        <textarea value={String(value ?? '')}
+          onChange={e => onChange(fieldKey, e.target.value)} rows={3}
+          style={{ ...inputBase, width: '100%', resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+        />
+      )
+    return (
+      <input type="text" value={String(value ?? '')}
+        onChange={e => onChange(fieldKey, e.target.value)}
+        style={{ ...inputBase, minWidth: 180 }}
+      />
+    )
+  }
+
+  // Number (int / float)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <input type="number" value={value as number ?? ''}
+        step={type === 'float' ? 0.01 : 1} min={schema?.min} max={schema?.max}
+        onChange={e => {
+          const v = e.target.value
+          onChange(fieldKey, v === '' ? '' : type === 'int' ? parseInt(v, 10) : parseFloat(v))
+        }}
+        style={{ ...inputBase, width: 120 }}
+      />
+      {schema?.min !== undefined && schema?.max !== undefined && (
+        <span style={{ fontSize: 10, color: '#484f58', whiteSpace: 'nowrap' }}>
+          {schema.min}–{schema.max}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Section Card — collapsible with descriptions, change indicators
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export function SectionCard({ name, label, values, schema, telegramTier, onSave, searchQuery }: {
+  name: string; label: string; values: Record<string, unknown>
+  schema?: SectionSchema; telegramTier: string
+  onSave: (section: string, updates: Record<string, unknown>) => Promise<void>
+  searchQuery: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const startEdit = () => { setDraft(JSON.parse(JSON.stringify(values))); setEditing(true); setMsg(null) }
+  const cancel = () => { setEditing(false); setMsg(null) }
+  const handleChange = (key: string, val: unknown) => setDraft(prev => ({ ...prev, [key]: val }))
+
+  const changedCount = useMemo(() => {
+    if (!editing) return 0
+    return Object.entries(draft).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(values[k])).length
+  }, [editing, draft, values])
+
+  const handleSave = async () => {
+    const changes: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(draft))
+      if (JSON.stringify(v) !== JSON.stringify(values[k])) changes[k] = v
+    if (!Object.keys(changes).length) { setEditing(false); return }
+    setSaving(true)
+    try {
+      await onSave(name, changes)
+      setEditing(false)
+      setMsg({ ok: true, text: `${Object.keys(changes).length} setting${Object.keys(changes).length > 1 ? 's' : ''} saved & applied live` })
+      setTimeout(() => setMsg(null), 4000)
+    } catch (e: unknown) {
+      setMsg({ ok: false, text: (e instanceof Error ? e.message : String(e)) || 'Save failed' })
+    } finally { setSaving(false) }
+  }
+
+  const fields = schema?.fields ?? {}
+  const fieldEntries = Object.entries(editing ? draft : values)
+  const tierColor = TIER_COLORS[telegramTier] ?? '#6e7681'
+  const icon = SECTION_ICONS[name]
+  const nested = schema?.nested ?? null
+
+  // Filter by search
+  const q = searchQuery.toLowerCase()
+  const filteredEntries = searchQuery
+    ? fieldEntries.filter(([key]) =>
+        key.toLowerCase().includes(q) || formatKey(key).toLowerCase().includes(q) ||
+        (getFieldDesc(name, key) ?? '').toLowerCase().includes(q)
+      )
+    : fieldEntries
+
+  // Auto-open on search match
+  useEffect(() => {
+    if (searchQuery && filteredEntries.length > 0 && !open) setOpen(true)
+  }, [searchQuery]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (searchQuery && filteredEntries.length === 0 && !nested) return null
+
+  return (
+    <div style={{
+      background: '#0d1117', border: '1px solid #21262d', borderRadius: 10,
+      marginBottom: 10, overflow: 'hidden', transition: 'border-color 0.2s',
+      ...(editing ? { borderColor: '#30363d' } : {}),
+    }}>
+      {/* Header */}
+      <button onClick={() => setOpen(!open)} style={{
+        width: '100%', background: open ? '#161b2240' : 'none', border: 'none', cursor: 'pointer',
+        display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px',
+        color: '#e6edf3', transition: 'background 0.15s',
+      }}>
+        <span style={{ color: '#8b949e', transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+          <ChevronDown size={14} />
+        </span>
+        <span style={{ color: tierColor + 'cc' }}>{icon}</span>
+        <span style={{ fontWeight: 600, fontSize: 14, flex: 1, textAlign: 'left' }}>{label}</span>
+
+        {/* Live-reload badge */}
+        <span style={{
+          fontSize: 9, padding: '2px 7px', borderRadius: 10,
+          background: '#22c55e15', color: '#22c55e', fontWeight: 600,
+          display: 'flex', alignItems: 'center', gap: 3, border: '1px solid #22c55e22',
+        }}><Zap size={8} /> Live reload</span>
+
+        {/* Telegram tier */}
+        <span style={{
+          fontSize: 9, padding: '2px 7px', borderRadius: 10,
+          background: tierColor + '15', color: tierColor, fontWeight: 600,
+          border: `1px solid ${tierColor}22`,
+        }}>{TIER_LABELS[telegramTier] ?? telegramTier}</span>
+
+        {msg && (
+          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 3 }}>
+            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
+          </span>
+        )}
+      </button>
+
+      {/* Body */}
+      {open && (
+        <div style={{ padding: '0 16px 16px', borderTop: '1px solid #21262d' }}>
+          {/* Action bar */}
+          <div style={{ display: 'flex', gap: 8, padding: '12px 0 8px', justifyContent: 'flex-end', alignItems: 'center' }}>
+            {editing && changedCount > 0 && (
+              <span style={{ fontSize: 11, color: '#f59e0b', marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <AlertTriangle size={11} /> {changedCount} unsaved change{changedCount > 1 ? 's' : ''}
+              </span>
+            )}
+            {!editing ? (
+              <button onClick={startEdit} style={{ ...btnStyle('#21262d'), borderColor: '#30363d' }}>
+                <Settings2 size={12} /> Edit settings
+              </button>
+            ) : (
+              <>
+                <button onClick={cancel} style={btnStyle('#21262d')}><X size={12} /> Cancel</button>
+                <button onClick={handleSave} disabled={saving || changedCount === 0}
+                  style={{ ...btnStyle(changedCount > 0 ? '#238636' : '#21262d'), opacity: changedCount === 0 ? 0.5 : 1 }}>
+                  <Save size={12} /> {saving ? 'Saving…' : `Save & Apply${changedCount > 0 ? ` (${changedCount})` : ''}`}
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Fields (flat section) */}
+          {!nested ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {filteredEntries.map(([key, val]) => {
+                const desc = getFieldDesc(name, key)
+                const isChanged = editing && JSON.stringify(draft[key]) !== JSON.stringify(values[key])
+                return (
+                  <div key={key} style={{
+                    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '8px 8px',
+                    borderRadius: 6, background: isChanged ? '#f59e0b08' : 'transparent',
+                    borderLeft: isChanged ? '2px solid #f59e0b' : '2px solid transparent',
+                    transition: 'all 0.15s',
+                  }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, justifyContent: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{formatKey(key)}</span>
+                        {fields[key]?.min !== undefined && (
+                          <span style={{ fontSize: 9, color: '#484f58', padding: '1px 5px', background: '#161b22', borderRadius: 4 }}>
+                            {fields[key].min}–{fields[key].max}
+                          </span>
+                        )}
+                      </div>
+                      {desc && <span style={{ fontSize: 11, color: '#6e7681', lineHeight: 1.3 }}>{desc}</span>}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                      {editing
+                        ? <FieldInput fieldKey={key} value={draft[key] ?? val} schema={fields[key]} onChange={handleChange} />
+                        : <span style={{ fontSize: 13, color: '#c9d1d9' }}>{renderValue(val)}</span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            /* Nested sections (e.g. analysis → technical + sentiment) */
+            Object.entries(values as Record<string, Record<string, unknown>>).map(([subName, subValues]) => {
+              const subFields = nested[subName]?.fields ?? {}
+              return (
+                <div key={subName} style={{ marginBottom: 14 }}>
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase',
+                    letterSpacing: '0.06em', padding: '10px 0 6px',
+                    borderBottom: '1px solid #161b22', marginBottom: 4,
+                  }}>{formatKey(subName)}</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {Object.entries(subValues).map(([key, val]) => {
+                      const desc = getFieldDesc(`${name}.${subName}`, key)
+                      const isChanged = editing && JSON.stringify((draft[subName] as Record<string, unknown>)?.[key]) !== JSON.stringify(val)
+                      return (
+                        <div key={key} style={{
+                          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
+                          padding: '8px 8px 8px 16px', borderRadius: 6,
+                          background: isChanged ? '#f59e0b08' : 'transparent',
+                          borderLeft: isChanged ? '2px solid #f59e0b' : '2px solid transparent',
+                        }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, justifyContent: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: '#e6edf3', fontWeight: 500 }}>{formatKey(key)}</span>
+                              {subFields[key]?.min !== undefined && (
+                                <span style={{ fontSize: 9, color: '#484f58', padding: '1px 5px', background: '#161b22', borderRadius: 4 }}>
+                                  {subFields[key].min}–{subFields[key].max}
+                                </span>
+                              )}
+                            </div>
+                            {desc && <span style={{ fontSize: 11, color: '#6e7681', lineHeight: 1.3 }}>{desc}</span>}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                            {editing
+                              ? <FieldInput fieldKey={key}
+                                  value={editing ? (draft[subName] as Record<string, unknown>)?.[key] ?? val : val}
+                                  schema={subFields[key]}
+                                  onChange={(k, v) => setDraft(prev => ({
+                                    ...prev,
+                                    [subName]: { ...(prev[subName] as Record<string, unknown> ?? subValues), [k]: v },
+                                  }))}
+                                />
+                              : <span style={{ fontSize: 13, color: '#c9d1d9' }}>{renderValue(val)}</span>}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RPM Budget Card — shows entity tracking capacity based on LLM RPM limits
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export function RpmBudgetCard({ rpm_budget, current_pairs }: { rpm_budget: RpmBudget; current_pairs: number }) {
+  const effective = rpm_budget.effective_max
+  const usagePct = effective > 0 ? Math.round((current_pairs / effective) * 100) : 0
+  const isAtLimit = current_pairs >= effective
+  const isOverLimit = current_pairs > effective
+  const isLocal = rpm_budget.provider === 'local-only'
+  const barColor = isOverLimit ? '#ef4444' : isAtLimit ? '#f59e0b' : '#22c55e'
+
+  return (
+    <div style={{
+      padding: '16px 20px', background: '#0d111788', border: `1px solid ${isOverLimit ? '#ef444433' : '#21262d'}`,
+      borderRadius: 10, marginBottom: 16,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Gauge size={16} style={{ color: barColor }} />
+          <span style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3' }}>RPM Entity Budget</span>
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 10,
+            background: `${barColor}18`, color: barColor, fontWeight: 600,
+            border: `1px solid ${barColor}22`,
+          }}>
+            {current_pairs} / {effective} pairs
+          </span>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ height: 6, background: '#161b22', borderRadius: 3, overflow: 'hidden', marginBottom: 12 }}>
+        <div style={{
+          height: '100%', borderRadius: 3, background: barColor,
+          width: `${Math.min(usagePct, 100)}%`, transition: 'width 0.3s ease',
+        }} />
+      </div>
+
+      {/* Stats grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Provider</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.provider}</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>RPM Limit</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{isLocal ? '∞ (local)' : rpm_budget.rpm}</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Cycle Interval</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.interval}s</div>
+        </div>
+        <div>
+          <div style={{ color: '#6e7681', marginBottom: 2 }}>Max from RPM</div>
+          <div style={{ color: '#e6edf3', fontWeight: 600 }}>{rpm_budget.max_entities}</div>
+        </div>
+      </div>
+
+      {/* Explanation */}
+      <div style={{ marginTop: 12, fontSize: 11, color: '#6e7681', lineHeight: 1.5 }}>
+        {isLocal ? (
+          <>Local models (Ollama) have no RPM limit — entity cap is set to <strong style={{ color: '#8b949e' }}>max_active_pairs ({rpm_budget.configured_max})</strong> from your settings.</>
+        ) : (
+          <>
+            Your <strong style={{ color: '#8b949e' }}>{rpm_budget.provider}</strong> provider allows{' '}
+            <strong style={{ color: '#8b949e' }}>{rpm_budget.rpm} requests/min</strong>.
+            With a <strong style={{ color: '#8b949e' }}>{rpm_budget.interval}s</strong> cycle,
+            that's ~{rpm_budget.available_per_cycle} calls/cycle — minus {rpm_budget.overhead} overhead = budget for{' '}
+            <strong style={{ color: '#8b949e' }}>{rpm_budget.max_entities} entities</strong> (2 LLM calls each).
+            {rpm_budget.configured_max < rpm_budget.max_entities && (
+              <> Your <strong style={{ color: '#8b949e' }}>max_active_pairs = {rpm_budget.configured_max}</strong> setting further limits this to <strong style={{ color: '#22c55e' }}>{effective}</strong>.</>
+            )}
+            {rpm_budget.configured_max > rpm_budget.max_entities && (
+              <> Your <strong style={{ color: '#f59e0b' }}>max_active_pairs = {rpm_budget.configured_max}</strong> exceeds the RPM budget, so the system auto-clamps to <strong style={{ color: '#f59e0b' }}>{effective}</strong>.</>
+            )}
+          </>
+        )}
+      </div>
+
+      {isOverLimit && (
+        <div style={{
+          marginTop: 10, padding: '8px 12px', background: '#ef444415',
+          border: '1px solid #ef444433', borderRadius: 8,
+          fontSize: 12, color: '#f87171', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <AlertTriangle size={14} />
+          <span>You have <strong>{current_pairs - effective} pair(s)</strong> over the limit. The agent will only actively trade the top {effective}. Remove excess pairs or upgrade your LLM provider for more capacity.</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Telegram Setup Guide
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export function TelegramSetupGuide() {
+  const [open, setOpen] = useState(false)
+
+  const Step = ({ n, title, children, done }: { n: number | string; title: string; children: ReactNode; done?: boolean }) => (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+        <span style={{
+          width: 26, height: 26, borderRadius: '50%',
+          background: done ? '#22c55e22' : '#58a6ff22',
+          color: done ? '#22c55e' : '#58a6ff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 12, fontWeight: 700, flexShrink: 0,
+        }}>{n}</span>
+        <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3' }}>{title}</span>
+      </div>
+      <div style={{ paddingLeft: 36, color: '#8b949e', fontSize: 13, lineHeight: 1.7 }}>{children}</div>
+    </div>
+  )
+
+  return (
+    <div style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, marginBottom: 10, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(!open)} style={{
+        width: '100%', background: open ? '#161b2240' : 'none', border: 'none', cursor: 'pointer',
+        display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', color: '#e6edf3', transition: 'background 0.15s',
+      }}>
+        <span style={{ color: '#8b949e', transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+          <ChevronDown size={14} />
+        </span>
+        <Bot size={15} style={{ color: '#58a6ff' }} />
+        <span style={{ fontWeight: 600, fontSize: 14, flex: 1, textAlign: 'left' }}>Telegram Bot Setup Guide</span>
+        <span style={{
+          fontSize: 9, padding: '2px 7px', borderRadius: 10,
+          background: '#58a6ff15', color: '#58a6ff', fontWeight: 600, border: '1px solid #58a6ff22',
+        }}>Tutorial</span>
+      </button>
+
+      {open && (
+        <div style={{ padding: '0 16px 20px', borderTop: '1px solid #21262d' }}>
+          <div style={{ padding: '16px 0' }}>
+
+            <Step n={1} title="Create a Bot with BotFather">
+              <p style={{ margin: '0 0 6px' }}>
+                Open Telegram and search for{' '}
+                <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer"
+                  style={{ color: '#58a6ff', textDecoration: 'none' }}>
+                  @BotFather <ExternalLink size={10} style={{ display: 'inline', verticalAlign: 'middle' }} />
+                </a>
+              </p>
+              <p style={{ margin: '0 0 6px' }}>Send <code style={codeStyle}>/newbot</code> and follow the prompts:</p>
+              <ul style={{ margin: '0 0 6px', paddingLeft: 20 }}>
+                <li>Choose a display name (e.g. &quot;Auto Traitor Bot&quot;)</li>
+                <li>Choose a username ending in &quot;bot&quot; (e.g. &quot;auto_traitor_bot&quot;)</li>
+              </ul>
+              <p style={{ margin: 0 }}>
+                BotFather will give you a <strong style={{ color: '#c9d1d9' }}>Bot Token</strong> like{' '}
+                <code style={codeStyle}>123456:ABC-DEF1234ghIkl</code> — copy it.
+              </p>
+            </Step>
+
+            <Step n={2} title="Get Your Chat ID">
+              <p style={{ margin: '0 0 6px' }}>Send any message to your new bot, then visit:</p>
+              <code style={{ ...codeStyle, display: 'block', padding: '8px 12px', marginBottom: 6 }}>
+                https://api.telegram.org/bot&lt;YOUR_TOKEN&gt;/getUpdates
+              </code>
+              <p style={{ margin: '0 0 6px' }}>
+                Look for <code style={codeStyle}>&quot;chat&quot;: {'{'}&quot;id&quot;: 123456789{'}'}</code> — that number is your <strong style={{ color: '#c9d1d9' }}>Chat ID</strong>.
+              </p>
+              <p style={{ margin: 0 }}>For a group chat, add the bot to the group and use the group&apos;s negative ID.</p>
+            </Step>
+
+            <Step n={3} title="Configure Environment Variables">
+              <p style={{ margin: '0 0 8px' }}>Add these to your <code style={codeStyle}>.env</code> file or environment:</p>
+              <div style={{
+                background: '#161b22', border: '1px solid #21262d', borderRadius: 8,
+                padding: '10px 14px', fontFamily: 'var(--font-mono, monospace)', fontSize: 12, lineHeight: 1.8,
+              }}>
+                <div><span style={{ color: '#79c0ff' }}>TELEGRAM_BOT_TOKEN</span>=<span style={{ color: '#a5d6ff' }}>your-bot-token-here</span></div>
+                <div><span style={{ color: '#79c0ff' }}>TELEGRAM_CHAT_ID</span>=<span style={{ color: '#a5d6ff' }}>your-chat-id-here</span></div>
+                <div><span style={{ color: '#79c0ff' }}>TELEGRAM_AUTHORIZED_USERS</span>=<span style={{ color: '#a5d6ff' }}>your-user-id</span></div>
+              </div>
+            </Step>
+
+            <Step n={4} title="Get Your User ID (for Authorization)">
+              <p style={{ margin: '0 0 6px' }}>
+                Send a message to{' '}
+                <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer"
+                  style={{ color: '#58a6ff', textDecoration: 'none' }}>
+                  @userinfobot <ExternalLink size={10} style={{ display: 'inline', verticalAlign: 'middle' }} />
+                </a>
+                {' '}to get your numeric user ID.
+              </p>
+              <p style={{ margin: 0 }}>
+                Add this to <code style={codeStyle}>TELEGRAM_AUTHORIZED_USERS</code>. Multiple users: comma-separated.
+                Only authorized users can send commands —{' '}
+                <strong style={{ color: '#f59e0b' }}>this is mandatory for security</strong>.
+              </p>
+            </Step>
+
+            <Step n="✓" title="Configure Notifications Below" done>
+              <p style={{ margin: '0 0 6px' }}>
+                Once set up, use the <strong style={{ color: '#c9d1d9' }}>Telegram section</strong> below to configure:
+              </p>
+              <ul style={{ margin: 0, paddingLeft: 20 }}>
+                <li>Trade notifications (get alerted on every buy/sell)</li>
+                <li>Daily summaries (scheduled performance reports)</li>
+                <li>Signal alerts (high-confidence signal notifications)</li>
+                <li>Status update frequency</li>
+              </ul>
+            </Step>
+
+            {/* Security reminder */}
+            <div style={{
+              marginTop: 4, padding: '10px 14px', borderRadius: 8,
+              background: '#f59e0b10', border: '1px solid #f59e0b22',
+              display: 'flex', gap: 10, alignItems: 'flex-start',
+            }}>
+              <Lock size={14} style={{ color: '#f59e0b', flexShrink: 0, marginTop: 2 }} />
+              <div style={{ fontSize: 12, color: '#f59e0b', lineHeight: 1.5 }}>
+                <strong>Security Note:</strong> The <code style={{ ...codeStyle, color: '#f59e0b' }}>TELEGRAM_AUTHORIZED_USERS</code> environment
+                variable is mandatory. Without it, the bot will reject all commands. Never add fallback auth paths.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Density Toggle
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export function DensityToggle() {
+  const density = useLiveStore(s => s.density)
+  const setDensity = useLiveStore(s => s.setDensity)
+
+  return (
+    <div style={{
+      background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, padding: '16px 20px',
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
+        UI Density
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        {([
+          ['comfortable', 'Comfortable', <Maximize2 key="c" size={14} />, 'More spacious layout with larger elements'],
+          ['compact', 'Compact', <Minimize2 key="m" size={14} />, 'Tighter spacing, more data visible at once'],
+        ] as const).map(([val, label, icon, desc]) => (
+          <button key={val} onClick={() => setDensity(val as Density)} style={{
+            display: 'flex', alignItems: 'center', gap: 8, flex: 1,
+            padding: '10px 16px', fontSize: 13, fontWeight: 500, borderRadius: 8,
+            border: density === val ? '1px solid #22c55e55' : '1px solid #30363d',
+            background: density === val ? '#22c55e12' : '#161b22',
+            color: density === val ? '#22c55e' : '#8b949e',
+            cursor: 'pointer', transition: 'all 0.15s', textAlign: 'left',
+          }}>
+            {icon}
+            <div>
+              <div style={{ fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>{desc}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}

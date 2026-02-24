@@ -11,9 +11,10 @@ import {
 } from '../api'
 import type { CoinbaseProduct } from '../api'
 import PageTransition from '../components/PageTransition'
+import { useLiveStore } from '../store'
 
-// Sensible fallback pairs when Coinbase API is unavailable
-const FALLBACK_PRODUCTS: CoinbaseProduct[] = [
+// Profile-aware fallback products
+const CRYPTO_FALLBACK_PRODUCTS: CoinbaseProduct[] = [
     { id: 'BTC-EUR', base: 'BTC', quote: 'EUR' },
     { id: 'ETH-EUR', base: 'ETH', quote: 'EUR' },
     { id: 'SOL-EUR', base: 'SOL', quote: 'EUR' },
@@ -23,6 +24,17 @@ const FALLBACK_PRODUCTS: CoinbaseProduct[] = [
     { id: 'ETH-BTC', base: 'ETH', quote: 'BTC' },
     { id: 'SOL-BTC', base: 'SOL', quote: 'BTC' },
 ]
+
+const EQUITY_FALLBACK_PRODUCTS: CoinbaseProduct[] = [
+    { id: 'AAPL-USD', base: 'AAPL', quote: 'USD' },
+    { id: 'MSFT-USD', base: 'MSFT', quote: 'USD' },
+    { id: 'GOOGL-USD', base: 'GOOGL', quote: 'USD' },
+    { id: 'AMZN-USD', base: 'AMZN', quote: 'USD' },
+    { id: 'NVDA-USD', base: 'NVDA', quote: 'USD' },
+    { id: 'TSLA-USD', base: 'TSLA', quote: 'USD' },
+]
+
+const EQUITY_PROFILES = new Set(['ibkr', 'nordnet'])
 
 function pnlColor(pnl: number): string {
     if (pnl > 0) return 'text-green-400'
@@ -38,20 +50,24 @@ function pnlBg(pnl: number): string {
 
 export default function SimulatedTrades() {
     const qc = useQueryClient()
-    const [buyAsset, setBuyAsset] = useState('BTC')
-    const [quoteCurrency, setQuoteCurrency] = useState('EUR')
+    const profile = useLiveStore((s) => s.profile)
+    const isEquity = EQUITY_PROFILES.has(profile.toLowerCase())
+    const [buyAsset, setBuyAsset] = useState(isEquity ? 'AAPL' : 'BTC')
+    const [quoteCurrency, setQuoteCurrency] = useState(isEquity ? 'USD' : 'EUR')
     const [amount, setAmount] = useState('1000')
     const [notes, setNotes] = useState('')
     const [showClosed, setShowClosed] = useState(false)
 
-    // Fetch all tradable products from Coinbase
+    // Fetch tradable products (profile-aware via apiFetch)
     const { data: productsData } = useQuery({
-        queryKey: ['coinbase-products'],
+        queryKey: ['products', profile],
         queryFn: fetchProducts,
         staleTime: 5 * 60_000, // cache for 5 min
     })
 
-    const products = productsData?.products?.length ? productsData.products : FALLBACK_PRODUCTS
+    const products = productsData?.products?.length
+        ? productsData.products
+        : isEquity ? EQUITY_FALLBACK_PRODUCTS : CRYPTO_FALLBACK_PRODUCTS
 
     // Derive available assets and quote currencies from product list
     const { baseAssets, quotesForBase, pairId } = useMemo(() => {

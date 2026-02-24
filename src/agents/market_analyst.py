@@ -22,7 +22,7 @@ from src.utils.logger import get_logger
 logger = get_logger("agent.market_analyst")
 
 
-MARKET_ANALYSIS_SYSTEM_PROMPT = """You are an expert cryptocurrency market analyst.
+MARKET_ANALYSIS_SYSTEM_PROMPT_CRYPTO = """You are an expert cryptocurrency market analyst.
 Your job is to analyze technical indicators and news sentiment to produce a clear market assessment.
 
 Given the technical indicators and recent crypto news, provide your analysis as JSON:
@@ -50,6 +50,41 @@ ACCOUNT-SIZE AWARENESS:
 - When account context is provided, calibrate stop-loss and take-profit levels to be realistic for the account size.
 - For micro/small accounts, tighter stops (closer to entry) reduce the capital at risk per trade.
 - Suggest entry amounts that make sense relative to the portfolio (don't suggest €100 entries on a €7 account)."""
+
+MARKET_ANALYSIS_SYSTEM_PROMPT_EQUITY = """You are an expert equities market analyst specializing in US and European stocks.
+Your job is to analyze technical indicators, market data, and news to produce a clear assessment for individual stocks or ETFs.
+
+Given the technical indicators and recent market news, provide your analysis as JSON:
+
+{
+    "signal_type": "strong_buy" | "buy" | "weak_buy" | "neutral" | "weak_sell" | "sell" | "strong_sell",
+    "confidence": 0.0-1.0,
+    "market_condition": "strongly_bullish" | "bullish" | "slightly_bullish" | "neutral" | "slightly_bearish" | "bearish" | "strongly_bearish" | "volatile",
+    "sentiment_overall": "bullish" | "bearish" | "neutral",
+    "sentiment_score": -1.0 to 1.0,
+    "key_factors": ["factor1", "factor2", ...],
+    "reasoning": "Detailed explanation of your analysis",
+    "suggested_entry": price or null,
+    "suggested_stop_loss": price or null,
+    "suggested_take_profit": price or null
+}
+
+Be objective. Follow the technical indicators closely.
+Consider earnings, macro conditions, sector rotation, and institutional flows.
+Balance risk with opportunity — equities are less volatile than crypto, so calibrate stop distances accordingly.
+If a strategic context is provided, use it as regime background but do not override technical evidence.
+
+ACCOUNT-SIZE AWARENESS:
+- Calibrate position sizes and stop distances to the account size.
+- For smaller accounts, consider fractional shares and minimum lot sizes.
+- Suggest realistic entry amounts relative to the portfolio."""
+
+
+def _get_system_prompt(exchange: str) -> str:
+    """Return the appropriate system prompt based on exchange/asset class."""
+    if exchange in ("ibkr", "nordnet"):
+        return MARKET_ANALYSIS_SYSTEM_PROMPT_EQUITY
+    return MARKET_ANALYSIS_SYSTEM_PROMPT_CRYPTO
 
 
 class MarketAnalystAgent(BaseAgent):
@@ -113,19 +148,21 @@ class MarketAnalystAgent(BaseAgent):
             native_currency=native_currency,
             portfolio_value=portfolio_value,
             cash_balance=cash_balance,
+            exchange=exchange,
         )
 
         # Create a tracing span for this LLM call
         span = None
+        system_prompt = _get_system_prompt(exchange)
         if trace_ctx is not None:
             span = trace_ctx.start_span(
                 self.name,
-                input_data={"system": MARKET_ANALYSIS_SYSTEM_PROMPT[:500], "user": user_message[:500]},
+                input_data={"system": system_prompt[:500], "user": user_message[:500]},
                 model=self.llm.model,
             )
 
         llm_response = await self.llm.chat_json(
-            system_prompt=MARKET_ANALYSIS_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_message=user_message,
             span=span,
             agent_name=self.name,
@@ -185,6 +222,7 @@ class MarketAnalystAgent(BaseAgent):
         native_currency: str = "USD",
         portfolio_value: float = 0,
         cash_balance: float = 0,
+        exchange: str = "coinbase",
     ) -> str:
         """Build the analysis prompt for the LLM."""
         sym = currency_symbol
@@ -280,7 +318,7 @@ PRICE CHANGES:
 - 1 hour: {_1h_str}
 - 24 hours: {_24h_str}
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
-RECENT CRYPTO NEWS:
+RECENT {"EQUITY" if exchange in ("ibkr", "nordnet") else "CRYPTO"} NEWS:
 {news}
 {strategy_section}{acct_section}
 Provide your analysis as JSON."""
@@ -344,38 +382,100 @@ Provide your analysis as JSON."""
     def _technical_only_signal(
         self, pair: str, price: float, indicators: dict
     ) -> dict:
-        """Fallback signal based on technicals only (no LLM)."""
-        # Simple scoring system
+        """Fallback signal based on technicals only (no LLM).
+        
+        Uses all available indicators for a comprehensive score:
+        RSI, MACD, Bollinger Bands, EMA, Volume, ADX.
+        """
         score = 0
+        factors = []
+
+        # RSI signal (weight: 2)
         rsi_signal = indicators.get("rsi_signal", "neutral")
         if rsi_signal == "oversold":
             score += 2
-        elif rsi_signal == "bearish":
-            score -= 1
+            factors.append("RSI oversold")
         elif rsi_signal == "overbought":
             score -= 2
+            factors.append("RSI overbought")
         elif rsi_signal == "bullish":
             score += 1
+            factors.append("RSI bullish")
+        elif rsi_signal == "bearish":
+            score -= 1
+            factors.append("RSI bearish")
 
+        # MACD signal (weight: 1)
         macd_signal = indicators.get("macd_signal", "neutral")
         if "bullish" in macd_signal:
             score += 1
+            factors.append("MACD bullish")
         elif "bearish" in macd_signal:
             score -= 1
+            factors.append("MACD bearish")
 
-        if score >= 2:
+        # Bollinger Bands (weight: 1)
+        bb_signal = indicators.get("bb_signal", "neutral")
+        if bb_signal in ("oversold", "lower_band"):
+            score += 1
+            factors.append("BB lower band")
+        elif bb_signal in ("overbought", "upper_band"):
+            score -= 1
+            factors.append("BB upper band")
+
+        # EMA alignment (weight: 1)
+        ema_signal = indicators.get("ema_signal", "neutral")
+        if "bullish" in str(ema_signal):
+            score += 1
+            factors.append("EMA bullish")
+        elif "bearish" in str(ema_signal):
+            score -= 1
+            factors.append("EMA bearish")
+
+        # Volume confirmation (weight: 1)
+        vol_signal = indicators.get("volume_signal", "normal")
+        vol_ratio = indicators.get("volume_ratio", 1.0)
+        if isinstance(vol_ratio, (int, float)) and vol_ratio > 1.5:
+            # High volume confirms the direction
+            if score > 0:
+                score += 1
+                factors.append("High volume confirms bullish")
+            elif score < 0:
+                score -= 1
+                factors.append("High volume confirms bearish")
+
+        # ADX trend strength (weight: modifier)
+        adx = indicators.get("adx")
+        if isinstance(adx, (int, float)) and adx > 25:
+            factors.append(f"Strong trend (ADX={adx:.0f})")
+            # Amplify directional signals in trending markets
+            if abs(score) >= 2:
+                score = int(score * 1.2)
+
+        # Score → signal type mapping
+        if score >= 4:
+            signal_type = SignalType.STRONG_BUY
+        elif score >= 2:
             signal_type = SignalType.BUY
+        elif score >= 1:
+            signal_type = SignalType.WEAK_BUY
+        elif score <= -4:
+            signal_type = SignalType.STRONG_SELL
         elif score <= -2:
             signal_type = SignalType.SELL
+        elif score <= -1:
+            signal_type = SignalType.WEAK_SELL
         else:
             signal_type = SignalType.NEUTRAL
+
+        confidence = min(abs(score) * 0.15, 0.75)
 
         signal = Signal(
             pair=pair,
             current_price=price,
             signal_type=signal_type,
-            confidence=min(abs(score) * 0.2, 0.6),  # Low confidence for fallback
-            reasoning="Technical-only analysis (LLM unavailable)",
+            confidence=confidence,
+            reasoning=f"Technical-only fallback (LLM unavailable). Score={score}. Factors: {', '.join(factors) or 'none'}",
         )
         self.state.add_signal(signal)
         return {"signal": signal.model_dump(mode="json"), "fallback": True}

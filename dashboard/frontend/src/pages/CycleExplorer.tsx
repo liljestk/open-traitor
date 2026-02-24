@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
-import { fetchCycles, fetchStatsSummary, type CycleSummary } from '../api'
+import { fetchCycles, fetchStatsSummary, fetchWatchlist, type CycleSummary } from '../api'
 import StatCard from '../components/StatCard'
 import { SkeletonTable, SkeletonStatCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
@@ -32,7 +32,13 @@ export default function CycleExplorer() {
     return `${sign}${fmtCurrency(pnl)}`
   }
 
-  const pairs = ['', 'BTC-EUR', 'ETH-EUR', 'SOL-EUR', 'XRP-EUR']
+  // Dynamic pair filter from watchlist (profile-aware via apiFetch)
+  const { data: watchlistData } = useQuery({
+    queryKey: ['watchlist-pairs-filter'],
+    queryFn: fetchWatchlist,
+    staleTime: 60_000,
+  })
+  const pairs = ['', ...(watchlistData?.active_pairs ?? [])]
 
   const { data: cyclesData, isLoading: cyclesLoading } = useQuery({
     queryKey: ['cycles', pair, offset],
