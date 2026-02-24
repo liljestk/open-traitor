@@ -161,9 +161,13 @@ class LLMClient:
 
             # RPM check
             if p.rpm_limit > 0:
-                cutoff = time.time() - 60.0
+                now_wall = time.time()
+                cutoff = now_wall - 60.0
                 p.rpm_timestamps = [t for t in p.rpm_timestamps if t > cutoff]
                 if len(p.rpm_timestamps) >= p.rpm_limit:
+                    return False
+                # Per-second spacing: OpenRouter allows ~1 req/3s on free tier
+                if p.rpm_timestamps and (now_wall - p.rpm_timestamps[-1]) < 3.0:
                     return False
 
         return True
