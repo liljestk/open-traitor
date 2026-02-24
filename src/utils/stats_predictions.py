@@ -4,6 +4,8 @@ import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from src.utils.qc_filter import qc_where
+
 
 # ── Module-level helpers (extracted from nested definitions) ───────────
 
@@ -53,7 +55,7 @@ class PredictionsMixin:
 
     # ─── Prediction Accuracy ───────────────────────────────────────────────
 
-    def get_prediction_accuracy(self, days: int = 30, quote_currency: str | None = None) -> dict:
+    def get_prediction_accuracy(self, days: int = 30, quote_currency: str | list[str] | None = None) -> dict:
         """
         Compute signal prediction accuracy by comparing market_analyst signals
         with actual price movements over subsequent hours.
@@ -61,37 +63,24 @@ class PredictionsMixin:
         Uses the current_prices stored in portfolio_snapshots to determine what
         actually happened after each prediction.
 
-        If *quote_currency* is given (e.g. "EUR"), only pairs ending in
-        "-EUR" are included.
+        If *quote_currency* is given (e.g. "EUR" or ["EUR", "USD"]), only pairs
+        ending in those currency suffixes are included.
         """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         # 1. Get all market_analyst predictions with signal details
-        if quote_currency:
-            suffix = f"-{quote_currency.upper()}"
-            predictions = conn.execute(
-                """SELECT
-                    ar.ts, ar.pair, ar.signal_type, ar.confidence,
-                    ar.reasoning_json, ar.cycle_id
-                   FROM agent_reasoning ar
-                   WHERE ar.agent_name = 'market_analyst'
-                     AND ar.ts >= ?
-                     AND UPPER(ar.pair) LIKE ?
-                   ORDER BY ar.ts ASC""",
-                (cutoff, f"%{suffix}"),
-            ).fetchall()
-        else:
-            predictions = conn.execute(
-                """SELECT
-                    ar.ts, ar.pair, ar.signal_type, ar.confidence,
-                    ar.reasoning_json, ar.cycle_id
-                   FROM agent_reasoning ar
-                   WHERE ar.agent_name = 'market_analyst'
-                     AND ar.ts >= ?
-                   ORDER BY ar.ts ASC""",
-                (cutoff,),
-            ).fetchall()
+        qc_frag, qc_params = qc_where(quote_currency)
+        predictions = conn.execute(
+            """SELECT
+                ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                ar.reasoning_json, ar.cycle_id
+               FROM agent_reasoning ar
+               WHERE ar.agent_name = 'market_analyst'
+                 AND ar.ts >= ?""" + qc_frag + """
+               ORDER BY ar.ts ASC""",
+            (cutoff, *qc_params),
+        ).fetchall()
 
         if not predictions:
             return {
@@ -390,43 +379,30 @@ class PredictionsMixin:
             "total_predictions": len(predictions),
         }
 
-    def get_tracked_pairs(self, quote_currency: str | None = None) -> dict:
+    def get_tracked_pairs(self, quote_currency: str | list[str] | None = None) -> dict:
         """Return pairs the LLM system has analyzed, grouped by asset class.
 
         Looks at agent_reasoning entries to see what pairs were actually
         predicted on, and classifies them as crypto or equity.
 
-        If *quote_currency* is given (e.g. "EUR"), only pairs ending in
-        that currency suffix are returned.
+        If *quote_currency* is given (e.g. "EUR" or ["EUR", "USD"]),
+        only pairs ending in those currency suffixes are returned.
         """
         conn = self._get_conn()
 
         # Get all pairs with prediction counts from last 7 days
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        if quote_currency:
-            suffix = f"-{quote_currency.upper()}"
-            rows = conn.execute(
-                """SELECT pair, COUNT(*) as prediction_count,
-                          MAX(ts) as last_predicted,
-                          GROUP_CONCAT(DISTINCT signal_type) as signal_types
-                   FROM agent_reasoning
-                   WHERE agent_name = 'market_analyst' AND ts >= ?
-                     AND UPPER(pair) LIKE ?
-                   GROUP BY pair
-                   ORDER BY prediction_count DESC""",
-                (cutoff, f"%{suffix}"),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT pair, COUNT(*) as prediction_count,
-                          MAX(ts) as last_predicted,
-                          GROUP_CONCAT(DISTINCT signal_type) as signal_types
-                   FROM agent_reasoning
-                   WHERE agent_name = 'market_analyst' AND ts >= ?
-                   GROUP BY pair
-                   ORDER BY prediction_count DESC""",
-                (cutoff,),
-            ).fetchall()
+        qc_frag, qc_params = qc_where(quote_currency)
+        rows = conn.execute(
+            """SELECT pair, COUNT(*) as prediction_count,
+                      MAX(ts) as last_predicted,
+                      GROUP_CONCAT(DISTINCT signal_type) as signal_types
+               FROM agent_reasoning
+               WHERE agent_name = 'market_analyst' AND ts >= ?""" + qc_frag + """
+               GROUP BY pair
+               ORDER BY prediction_count DESC""",
+            (cutoff, *qc_params),
+        ).fetchall()
 
         # Classify pairs
         crypto_suffixes = {"-USD", "-EUR", "-BTC", "-ETH", "-USDT", "-USDC", "-GBP"}

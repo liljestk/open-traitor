@@ -62,21 +62,43 @@ llm:
   providers:
   - name: openrouter
     enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
     model: meta-llama/llama-3.3-70b-instruct:free
-    api_key_set: true
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
   - name: gemini
     enabled: false
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
     model: gemini-2.0-flash
-    api_key_set: true
+    timeout: 30
+    rpm_limit: 10
+    daily_token_limit: 500000
+    cooldown_seconds: 120
+    tier: free
+    reserve_for_priority: high
   - name: openai
     enabled: false
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
     model: gpt-4o-mini
-    api_key_set: false
+    timeout: 45
+    rpm_limit: 450
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    tier: free
   - name: ollama
     enabled: true
+    base_url_env: OLLAMA_BASE_URL
+    model_env: OLLAMA_MODEL
     model: llama3.1:8b
+    timeout: 60
     is_local: true
-    api_key_set: true
 analysis:
   technical:
     rsi_period: 14

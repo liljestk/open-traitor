@@ -727,8 +727,20 @@ def get_llm_providers():
             for ps in deps.llm_client.provider_status():
                 live_status[ps["name"]] = ps
 
-        # Fields safe to expose to the dashboard (redact base_url, api_key_env, etc.)
-        _SAFE_PROVIDER_FIELDS = {"name", "model", "is_local", "enabled", "priority"}
+        # All non-secret config fields (actual API key values are never exposed)
+        _SAFE_PROVIDER_FIELDS = {
+            "name", "model", "is_local", "enabled", "priority",
+            "base_url", "base_url_env", "api_key_env", "model_env",
+            "rpm_limit", "daily_token_limit", "daily_request_limit",
+            "cooldown_seconds", "tier", "timeout",
+            "reserve_for_priority",
+        }
+        # Import env resolver to check config/.env as well as os.environ
+        try:
+            from src.core.llm_providers import _resolve_env as _llm_resolve_env
+        except Exception:
+            _llm_resolve_env = lambda var, default="": os.environ.get(var, default)  # noqa: E731
+
         result = []
         for pc in providers_config:
             name = pc.get("name", "")
@@ -736,10 +748,10 @@ def get_llm_providers():
             # Add live status if available
             if name in live_status:
                 entry["live_status"] = live_status[name]
-            # Indicate whether the API key is set (don't expose the env var name)
+            # Indicate whether the API key is set (check both os.environ and config/.env)
             api_key_env = pc.get("api_key_env", "")
             if api_key_env:
-                entry["api_key_set"] = bool(os.environ.get(api_key_env, ""))
+                entry["api_key_set"] = bool(_llm_resolve_env(api_key_env))
             else:
                 entry["api_key_set"] = pc.get("is_local", False)
             result.append(entry)
@@ -772,8 +784,14 @@ def update_llm_providers(body: _ProvidersUpdateBody):
     Accepts a full ordered providers list. Validates, persists to settings.yaml,
     and hot-reloads the LLMClient's provider chain.
     """
+    # Strip runtime-only fields that should never be persisted to YAML
+    _RUNTIME_ONLY = {"api_key_set", "live_status"}
+    clean_providers = [
+        {k: v for k, v in p.items() if k not in _RUNTIME_ONLY}
+        for p in body.providers
+    ]
     try:
-        ok, err, saved = _sm_update_providers(body.providers)
+        ok, err, saved = _sm_update_providers(clean_providers)
         if not ok:
             raise HTTPException(status_code=400, detail=err)
 

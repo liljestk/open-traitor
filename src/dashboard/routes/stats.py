@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.dashboard import deps
 from src.utils.logger import get_logger
+from src.utils.qc_filter import qc_where
 
 logger = get_logger("dashboard.routes.stats")
 
@@ -28,6 +29,7 @@ def get_stats_summary(
     """High-level stats: win-rate, PnL, active pairs, recent activity."""
     conn = deps.open_conn(db)
     qc = deps.quote_currency_for(profile)
+    qc_frag, qc_params = qc_where(qc)
     try:
         # Overall trade stats
         trade_sql = """SELECT
@@ -40,10 +42,7 @@ def get_stats_summary(
                 ROUND(MIN(pnl), 2) as worst_trade
                FROM trades
                WHERE pnl IS NOT NULL"""
-        if qc:
-            trade_row = conn.execute(trade_sql + " AND UPPER(pair) LIKE ?", (f"%-{qc.upper()}",)).fetchone()
-        else:
-            trade_row = conn.execute(trade_sql).fetchone()
+        trade_row = conn.execute(trade_sql + qc_frag, qc_params).fetchone()
 
         # Last 24h
         cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -52,24 +51,15 @@ def get_stats_summary(
                 ROUND(SUM(pnl), 2) as pnl_24h
                FROM trades
                WHERE ts >= ? AND pnl IS NOT NULL"""
-        if qc:
-            recent_row = conn.execute(recent_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
-        else:
-            recent_row = conn.execute(recent_sql, (cutoff_24h,)).fetchone()
+        recent_row = conn.execute(recent_sql + qc_frag, (cutoff_24h, *qc_params)).fetchone()
 
         # Active pairs
         pairs_sql = "SELECT COUNT(DISTINCT pair) as active_pairs FROM agent_reasoning WHERE ts >= ?"
-        if qc:
-            pairs_row = conn.execute(pairs_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
-        else:
-            pairs_row = conn.execute(pairs_sql, (cutoff_24h,)).fetchone()
+        pairs_row = conn.execute(pairs_sql + qc_frag, (cutoff_24h, *qc_params)).fetchone()
 
         # Cycle count last 24h
         cycle_sql = "SELECT COUNT(DISTINCT cycle_id) as cycles_24h FROM agent_reasoning WHERE ts >= ?"
-        if qc:
-            cycle_row = conn.execute(cycle_sql + " AND UPPER(pair) LIKE ?", (cutoff_24h, f"%-{qc.upper()}")).fetchone()
-        else:
-            cycle_row = conn.execute(cycle_sql, (cutoff_24h,)).fetchone()
+        cycle_row = conn.execute(cycle_sql + qc_frag, (cutoff_24h, *qc_params)).fetchone()
 
         # Latest portfolio snapshot (filtered by exchange when profile is set)
         snapshot_sql = """SELECT portfolio_value, total_pnl, ts
@@ -97,10 +87,7 @@ def get_stats_summary(
         # Use profile-specific config for currency
         resolved = deps.resolve_profile(profile)
         cfg = deps.get_config_for_profile(profile)
-        stats["currency"] = cfg.get("trading", {}).get(
-            "quote_currency",
-            deps.PROFILE_CURRENCIES.get(resolved, "EUR"),
-        )
+        stats["currency"] = cfg.get("trading", {}).get("quote_currency", "EUR")
 
         # For equity profiles, override portfolio value with live data from the
         # exchange client — the DB snapshots may contain stale/default values.
@@ -195,7 +182,8 @@ def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), profile: str =
     """Returns portfolio snapshots as time-series data for charting."""
     try:
         qc = deps.quote_currency_for(profile)
-        rows = db.get_portfolio_history(hours=hours, quote_currency=qc)
+        resolved = deps.resolve_profile(profile)
+        rows = db.get_portfolio_history(hours=hours, quote_currency=qc, exchange=resolved or None)
         return deps.sanitize_floats({"history": rows, "count": len(rows)})
     except Exception as exc:
         logger.exception("portfolio/history error")
@@ -207,10 +195,11 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760), profile: str = Query("
     """Combined analytics dashboard data: performance, best/worst, daily summaries, win/loss stats."""
     try:
         qc = deps.quote_currency_for(profile)
+        resolved = deps.resolve_profile(profile)
         perf = db.get_performance_summary(hours=hours, quote_currency=qc)
         best_worst = db.get_best_worst_trades(hours=hours, quote_currency=qc)
         days = max(1, hours // 24)
-        summaries = db.get_daily_summaries(days=days, quote_currency=qc)
+        summaries = db.get_daily_summaries(days=days, quote_currency=qc, exchange=resolved or None)
         win_loss = db.get_win_loss_stats(hours=hours, quote_currency=qc)
         portfolio_range = db.get_portfolio_range(hours=hours, quote_currency=qc)
 
@@ -284,13 +273,14 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
 
         # Filter positions by quote currency when a profile is active
         if qc:
+            suffixes = [f"-{c.upper()}" for c in (qc if isinstance(qc, list) else [qc])]
             positions = {
                 pair: pos for pair, pos in positions.items()
-                if pair.upper().endswith(f"-{qc.upper()}")
+                if any(pair.upper().endswith(s) for s in suffixes)
             }
             prices = {
                 pair: p for pair, p in prices.items()
-                if pair.upper().endswith(f"-{qc.upper()}")
+                if any(pair.upper().endswith(s) for s in suffixes)
             }
 
         breakdown = []

@@ -234,9 +234,17 @@ class HoldingsManager:
         """
         Reconcile TradingState.positions against actual Coinbase balances (live mode only).
         Corrects drift caused by partial fills, crashes, or external account changes.
+        Also discovers NEW holdings on Coinbase that aren't tracked yet.
         Runs every reconcile_every_cycles cycles (~20 min at default 120s interval).
         """
         orch = self.orchestrator
+
+        # Read configured quote currency for fallback pair construction
+        trading_cfg = orch.config.get("trading", {})
+        default_quote = (
+            trading_cfg.get("quote_currency", "USD") or "USD"
+        ).upper()
+
         try:
             # Reconcile fiat-quoted pairs (USD, EUR, GBP, etc.).
             base_to_pair: dict[str, str] = {}
@@ -254,8 +262,8 @@ class HoldingsManager:
                 for d in result["discrepancies"]:
                     currency = d["currency"]
                     actual_qty = d["actual"]
-                    # Reconstruct the original pair (e.g. ATOM-EUR, not ATOM-USD)
-                    pair = base_to_pair.get(currency, f"{currency}-USD")
+                    # Reconstruct the original pair using config quote currency
+                    pair = base_to_pair.get(currency, f"{currency}-{default_quote}")
 
                     # Correct state to match actual Coinbase balance
                     with orch.state._lock:
@@ -286,6 +294,49 @@ class HoldingsManager:
                         orch.telegram.send_alert(msg)
             else:
                 logger.debug("✅ Position reconciliation: no discrepancies")
+
+            # --- Discover new holdings not currently tracked ---
+            actual_balances: dict[str, float] = result.get("actual", {})
+            fiat_skip = _KNOWN_FIAT | _ALL_STABLECOINS
+            dust_threshold = orch._holdings_dust_threshold if hasattr(orch, "_holdings_dust_threshold") else 0.50
+
+            for currency, amount in actual_balances.items():
+                if currency in fiat_skip:
+                    continue
+                if currency in base_to_pair:
+                    continue  # already tracked
+                if amount <= 1e-8:
+                    continue
+
+                # Build pair from configured quote currency
+                new_pair = f"{currency}-{default_quote}"
+
+                # Check if the balance is above dust threshold (value-wise)
+                try:
+                    _get_rate_limiter().wait("coinbase_rest")
+                    price = orch.exchange.get_current_price(new_pair)
+                except Exception:
+                    price = 0.0
+
+                value = amount * price if price > 0 else 0.0
+                if value < dust_threshold:
+                    continue  # too small to track
+
+                with orch.state._lock:
+                    orch.state.positions[new_pair] = amount
+
+                msg = (
+                    f"🆕 Discovered new holding: {new_pair} "
+                    f"qty={amount:.6f} value≈{value:.2f} {default_quote}"
+                )
+                logger.info(msg)
+                orch.stats_db.record_event(
+                    event_type="reconciliation_discovery",
+                    message=msg,
+                    severity="info",
+                    pair=new_pair,
+                    data={"currency": currency, "amount": amount, "value": value},
+                )
 
         except Exception as e:
             logger.warning(f"Position reconciliation failed: {e}")

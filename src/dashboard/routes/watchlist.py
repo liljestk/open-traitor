@@ -33,10 +33,12 @@ def get_watchlist(
         scan = db.get_latest_scan_results()
         pairs = config.get("trading", {}).get("pairs", [])
 
+        # Fetch all follows once — used for both LLM merge and follow status
+        all_follows = db.get_pair_follows(quote_currency=qc)
+
         # Also include LLM-followed pairs from the DB (runtime-discovered by the screener)
-        llm_follows = db.get_pair_follows(quote_currency=qc)
         llm_db_pairs = [
-            f["pair"] for f in llm_follows if f.get("followed_by") == "llm"
+            f["pair"] for f in all_follows if f.get("followed_by") == "llm"
         ]
         # Merge: config pairs + DB LLM pairs (dedup, preserve order)
         seen = {p.upper() for p in pairs}
@@ -64,34 +66,32 @@ def get_watchlist(
 
             # Filter scan results by quote currency if a specific profile is selected
             if qc:
-                suffix = f"-{qc.upper()}"
+                suffixes = [f"-{c.upper()}" for c in (qc if isinstance(qc, list) else [qc])]
                 if isinstance(scan_data.get("results_json"), dict):
                     scan_data["results_json"] = {
                         k: v for k, v in scan_data["results_json"].items()
-                        if k.upper().endswith(suffix)
+                        if any(k.upper().endswith(s) for s in suffixes)
                     }
                 if isinstance(scan_data.get("top_movers"), list):
                     scan_data["top_movers"] = [
                         m for m in scan_data["top_movers"]
-                        if isinstance(m, dict) and m.get("pair", "").upper().endswith(suffix)
+                        if isinstance(m, dict) and any(m.get("pair", "").upper().endswith(s) for s in suffixes)
                     ]
 
         # Filter active pairs by quote currency
         if qc:
-            suffix = f"-{qc.upper()}"
-            pairs = [p for p in pairs if p.upper().endswith(suffix)]
-            live_prices = {k: v for k, v in live_prices.items() if k.upper().endswith(suffix)}
+            suffixes = [f"-{c.upper()}" for c in (qc if isinstance(qc, list) else [qc])]
+            pairs = [p for p in pairs if any(p.upper().endswith(s) for s in suffixes)]
+            live_prices = {k: v for k, v in live_prices.items() if any(k.upper().endswith(s) for s in suffixes)}
 
-        # Build follow status for each pair (LLM-chosen pairs come from config)
-        follows = db.get_pair_follows(quote_currency=qc)
+        # Build follow status for each pair from the DB
         # Index follows by pair → set of followed_by values
         follow_map: dict[str, set[str]] = {}
-        for f in follows:
+        for f in all_follows:
             follow_map.setdefault(f["pair"].upper(), set()).add(f["followed_by"])
 
-        # Config pairs are considered LLM-followed
-        for p in pairs:
-            follow_map.setdefault(p.upper(), set()).add("llm")
+        # Config pairs are marked as "config" source — don't fake an LLM badge
+        config_pairs_upper = {p.upper() for p in config.get("trading", {}).get("pairs", [])}
 
         # Human-followed pairs that aren't in the config list
         human_followed = sorted({
@@ -114,10 +114,12 @@ def get_watchlist(
         pair_info = []
         for p in all_pairs:
             sources = follow_map.get(p.upper(), set())
+            is_config = p.upper() in config_pairs_upper
             pair_info.append({
                 "pair": p,
                 "followed_by_llm": "llm" in sources,
                 "followed_by_human": "human" in sources,
+                "is_config_pair": is_config,
                 "price": live_prices.get(p),
             })
 
@@ -164,7 +166,6 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
 
     # Detect exchange from profile or pair suffix
     resolved = deps.resolve_profile(profile)
-    qc = deps.quote_currency_for(profile)
     exchange = body.exchange or resolved or "coinbase"
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)

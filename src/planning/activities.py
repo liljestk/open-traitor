@@ -96,9 +96,19 @@ def _get_planning_tracer():
 
 # --- Helpers ------------------------------------------------------------------
 
-def _get_conn() -> sqlite3.Connection:
-    from src.utils.stats import get_db_path
-    conn = sqlite3.connect(get_db_path(), timeout=5)
+def _get_conn(profile: str = "") -> sqlite3.Connection:
+    """Get a DB connection for the given profile.
+
+    If *profile* is given (e.g. "coinbase", "ibkr"), uses
+    ``data/stats_{profile}.db``.  Otherwise falls back to the env-var
+    based ``get_db_path()`` for backward compatibility.
+    """
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+    else:
+        from src.utils.stats import get_db_path
+        db_path = get_db_path()
+    conn = sqlite3.connect(db_path, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -107,10 +117,10 @@ def _get_conn() -> sqlite3.Connection:
 # --- Activities ---------------------------------------------------------------
 
 @activity.defn
-async def fetch_trade_history(days: int = 7, pair: str | None = None) -> list[dict]:
+async def fetch_trade_history(days: int = 7, pair: str | None = None, profile: str = "") -> list[dict]:
     """Fetch closed trade history from StatsDB for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    with closing(_get_conn()) as conn:
+    with closing(_get_conn(profile)) as conn:
         if pair:
             rows = conn.execute(
                 """SELECT ts, pair, action, price, quote_amount, confidence,
@@ -131,11 +141,11 @@ async def fetch_trade_history(days: int = 7, pair: str | None = None) -> list[di
 
 
 @activity.defn
-async def fetch_portfolio_history(days: int = 7) -> dict:
+async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
     """Fetch portfolio performance summary for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    with closing(_get_conn()) as conn:
+    with closing(_get_conn(profile)) as conn:
         trade_stats = conn.execute(
             """SELECT
                 COUNT(*) as total_trades,
@@ -182,25 +192,33 @@ async def fetch_portfolio_history(days: int = 7) -> dict:
             (cutoff,),
         ).fetchall()
 
-    # Detect native currency from settings (same logic as Orchestrator)
+    # Detect native currency from profile-specific config (or fallback to settings)
     currency_symbol = "$"
     native_currency = "USD"
     try:
+        # Try profile-specific config first
+        config_paths = []
+        if profile:
+            config_paths.append(os.path.join("config", f"{profile}.yaml"))
         from src.utils.settings_manager import get_settings_path
-        settings_path = get_settings_path()
-        if os.path.exists(settings_path):
-            with open(settings_path) as f:
-                _cfg = yaml.safe_load(f) or {}
-            pairs = _cfg.get("trading", {}).get("pairs", [])
-            _known_fiat = {"USD", "EUR", "GBP", "CAD", "AUD", "CHF", "JPY"}
-            _currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
-            for pair in pairs:
-                if "-" in pair:
-                    _, quote = pair.rsplit("-", 1)
-                    if quote in _known_fiat:
-                        native_currency = quote
-                        currency_symbol = _currency_symbols.get(quote, quote + " ")
-                        break
+        config_paths.append(get_settings_path())
+
+        for cfg_path in config_paths:
+            if os.path.exists(cfg_path):
+                with open(cfg_path) as f:
+                    _cfg = yaml.safe_load(f) or {}
+                pairs = _cfg.get("trading", {}).get("pairs", [])
+                _known_fiat = {"USD", "EUR", "GBP", "CAD", "AUD", "CHF", "JPY"}
+                _currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
+                for pair in pairs:
+                    if "-" in pair:
+                        _, quote = pair.rsplit("-", 1)
+                        if quote in _known_fiat:
+                            native_currency = quote
+                            currency_symbol = _currency_symbols.get(quote, quote + " ")
+                            break
+                if native_currency != "USD":
+                    break  # found a match
     except Exception:
         pass  # fallback to USD/$
 
@@ -419,7 +437,7 @@ Generate the {horizon} plan as JSON."""
 
 
 @activity.defn
-async def evaluate_previous_plan(horizon: str) -> dict:
+async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
     """
     Evaluate how well the previous plan's predictions matched reality.
 
@@ -428,7 +446,7 @@ async def evaluate_previous_plan(horizon: str) -> dict:
     since that plan was written, and returns an accuracy breakdown that
     the next planning LLM call can learn from.
     """
-    with closing(_get_conn()) as conn:
+    with closing(_get_conn(profile)) as conn:
         row = conn.execute(
             """SELECT * FROM strategic_context WHERE horizon = ?
                ORDER BY ts DESC LIMIT 1""",
@@ -557,10 +575,15 @@ async def write_strategic_context(
     summary_text: str = "",
     temporal_workflow_id: str = "",
     temporal_run_id: str = "",
+    profile: str = "",
 ) -> int:
     """Persist a planning workflow result to StatsDB."""
     from src.utils.stats import StatsDB  # import here to use existing singleton logic
-    db = StatsDB()
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+        db = StatsDB(db_path=db_path)
+    else:
+        db = StatsDB()
     langfuse_trace_id = plan_json.pop("_langfuse_trace_id", None)
     row_id = db.save_strategic_context(
         horizon=horizon,
@@ -575,10 +598,14 @@ async def write_strategic_context(
 
 
 @activity.defn
-async def write_daily_plan(date: str, plan_text: str) -> None:
+async def write_daily_plan(date: str, plan_text: str, profile: str = "") -> None:
     """Write the daily plan text into daily_summaries."""
     from src.utils.stats import StatsDB
-    db = StatsDB()
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+        db = StatsDB(db_path=db_path)
+    else:
+        db = StatsDB()
     db.write_daily_plan(date=date, plan_text=plan_text)
     logger.info(f"Wrote daily plan for {date}: {plan_text[:80]}")
 
@@ -622,11 +649,15 @@ async def fetch_pair_universe() -> dict:
 
 
 @activity.defn
-async def fetch_universe_scan_summary() -> dict:
+async def fetch_universe_scan_summary(profile: str = "") -> dict:
     """Fetch the latest universe scan results from StatsDB."""
     try:
         from src.utils.stats import StatsDB
-        db = StatsDB()
+        if profile:
+            db_path = os.path.join("data", f"stats_{profile}.db")
+            db = StatsDB(db_path=db_path)
+        else:
+            db = StatsDB()
         scan = db.get_latest_scan_results()
         if scan:
             return {

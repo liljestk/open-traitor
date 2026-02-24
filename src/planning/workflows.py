@@ -50,8 +50,8 @@ class DailyPlanWorkflow:
     """
 
     @workflow.run
-    async def run(self) -> dict:
-        workflow.logger.info("DailyPlanWorkflow: starting daily review")
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"DailyPlanWorkflow: starting daily review (profile={profile!r})")
 
         workflow_id = workflow.info().workflow_id
         run_id = workflow.info().run_id
@@ -59,7 +59,7 @@ class DailyPlanWorkflow:
         # Evaluate how well yesterday's plan performed
         evaluation = await workflow.execute_activity(
             evaluate_previous_plan,
-            args=["daily"],
+            args=["daily", profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -67,7 +67,7 @@ class DailyPlanWorkflow:
         # Fetch last 7 days of trade + portfolio data
         portfolio_data = await workflow.execute_activity(
             fetch_portfolio_history,
-            args=[7],
+            args=[7, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -78,6 +78,7 @@ class DailyPlanWorkflow:
         # Inject universe scan summary for pair-awareness
         scan_summary = await workflow.execute_activity(
             fetch_universe_scan_summary,
+            args=[profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -96,7 +97,7 @@ class DailyPlanWorkflow:
         # Persist to strategic_context (with Temporal + Langfuse IDs)
         await workflow.execute_activity(
             write_strategic_context,
-            args=["daily", plan, summary, workflow_id, run_id],
+            args=["daily", plan, summary, workflow_id, run_id, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -110,7 +111,7 @@ class DailyPlanWorkflow:
         )
         await workflow.execute_activity(
             write_daily_plan,
-            args=[today, plan_text],
+            args=[today, plan_text, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -129,8 +130,8 @@ class WeeklyReviewWorkflow:
     """
 
     @workflow.run
-    async def run(self) -> dict:
-        workflow.logger.info("WeeklyReviewWorkflow: starting weekly review")
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"WeeklyReviewWorkflow: starting weekly review (profile={profile!r})")
 
         workflow_id = workflow.info().workflow_id
         run_id = workflow.info().run_id
@@ -138,7 +139,7 @@ class WeeklyReviewWorkflow:
         # Evaluate how well last week's plan performed
         evaluation = await workflow.execute_activity(
             evaluate_previous_plan,
-            args=["weekly"],
+            args=["weekly", profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -146,14 +147,14 @@ class WeeklyReviewWorkflow:
         # Fetch last 30 days of data
         portfolio_data = await workflow.execute_activity(
             fetch_portfolio_history,
-            args=[30],
+            args=[30, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
 
         trade_history = await workflow.execute_activity(
             fetch_trade_history,
-            args=[30, None],
+            args=[30, None, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -173,6 +174,7 @@ class WeeklyReviewWorkflow:
         )
         scan_summary = await workflow.execute_activity(
             fetch_universe_scan_summary,
+            args=[profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -190,7 +192,7 @@ class WeeklyReviewWorkflow:
 
         await workflow.execute_activity(
             write_strategic_context,
-            args=["weekly", plan, summary, workflow_id, run_id],
+            args=["weekly", plan, summary, workflow_id, run_id, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -210,8 +212,8 @@ class MonthlyReviewWorkflow:
     """
 
     @workflow.run
-    async def run(self) -> dict:
-        workflow.logger.info("MonthlyReviewWorkflow: starting monthly review")
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"MonthlyReviewWorkflow: starting monthly review (profile={profile!r})")
 
         workflow_id = workflow.info().workflow_id
         run_id = workflow.info().run_id
@@ -219,7 +221,7 @@ class MonthlyReviewWorkflow:
         # Primary: last 90 days
         portfolio_90d = await workflow.execute_activity(
             fetch_portfolio_history,
-            args=[90],
+            args=[90, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -227,7 +229,7 @@ class MonthlyReviewWorkflow:
         # YTD: approximate as last 365 days (sufficient for cycle analysis)
         portfolio_ytd = await workflow.execute_activity(
             fetch_portfolio_history,
-            args=[365],
+            args=[365, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )
@@ -249,7 +251,7 @@ class MonthlyReviewWorkflow:
 
         await workflow.execute_activity(
             write_strategic_context,
-            args=["monthly", plan, summary, workflow_id, run_id],
+            args=["monthly", plan, summary, workflow_id, run_id, profile],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_RETRY,
         )

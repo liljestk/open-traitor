@@ -2,26 +2,23 @@ import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
-  fetchLLMProviders, updateLLMProviders, updateApiKeys,
-  fetchOpenRouterCredits,
-  type LLMProviderConfig, type OpenRouterCreditsInfo,
 } from '../api'
 import {
-  ChevronDown, Save, X, AlertTriangle, Check,
-  Info, ArrowRight, ArrowUp, ArrowDown, Zap,
-  Server, Cloud, ToggleLeft, ToggleRight,
-  Eye, EyeOff, Key, DollarSign, Sparkles,
-  RefreshCw, Search, Settings2,
+  X, AlertTriangle, Check,
+  Info, ArrowRight, Zap,
+  DollarSign,
+  RefreshCw, Search,
   Minus, Plus, Activity, ShieldCheck,
-  TrendingUp, Target, Timer, Gauge, Sliders,
+  Sliders,
 } from 'lucide-react'
+import { LLMProvidersSection } from './settings/LLMProviders'
 import PageTransition from '../components/PageTransition'
 import {
   SECTION_CATEGORIES, SECTION_ORDER, PRESET_CONFIG,
   TIER_COLORS, TIER_LABELS,
   type CategoryKey,
   detectActivePreset, buildPresetDiff, formatFieldValue,
-  btnStyle, codeStyle, inputBase,
+  btnStyle, inputBase,
 } from './settings/settingsData'
 import {
   Toast, SectionCard, RpmBudgetCard,
@@ -29,387 +26,7 @@ import {
 } from './settings/SettingsComponents'
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   LLM Providers Section
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function LLMProvidersSection() {
-  const queryClient = useQueryClient()
-  const { data, isLoading } = useQuery({ queryKey: ['llm-providers'], queryFn: fetchLLMProviders })
-  const [open, setOpen] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState<LLMProviderConfig[]>([])
-  const [saving, setSaving] = useState(false)
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
-  const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
-
-  const providers = data?.providers ?? []
-
-  const { data: orCredits } = useQuery<OpenRouterCreditsInfo>({
-    queryKey: ['openrouter-credits'],
-    queryFn: fetchOpenRouterCredits,
-    refetchInterval: 300_000,
-    enabled: providers.some(p => p.enabled && p.name.toLowerCase().includes('openrouter')),
-  })
-
-  const mutation = useMutation({ mutationFn: updateLLMProviders, onSuccess: () => {
-    queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
-    queryClient.invalidateQueries({ queryKey: ['settings'] })
-  }})
-  const keysMutation = useMutation({ mutationFn: updateApiKeys, onSuccess: () => {
-    queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
-  }})
-
-  const startEdit = () => { setDraft(providers.map(p => ({ ...p }))); setKeyDrafts({}); setVisibleKeys({}); setEditing(true); setMsg(null) }
-  const cancel = () => { setEditing(false); setKeyDrafts({}); setVisibleKeys({}); setMsg(null) }
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await mutation.mutateAsync(draft)
-      const keysToSave: Record<string, string> = {}
-      for (const [envVar, val] of Object.entries(keyDrafts))
-        if (val.trim()) keysToSave[envVar] = val.trim()
-      if (Object.keys(keysToSave).length > 0)
-        await keysMutation.mutateAsync(keysToSave)
-      setEditing(false); setKeyDrafts({}); setVisibleKeys({})
-      setMsg({ ok: true, text: 'Provider chain saved & hot-reloaded' })
-      setTimeout(() => setMsg(null), 4000)
-    } catch (e: unknown) {
-      setMsg({ ok: false, text: (e instanceof Error ? e.message : String(e)) || 'Save failed' })
-    } finally { setSaving(false) }
-  }
-
-  const moveProvider = (idx: number, dir: -1 | 1) => {
-    const next = [...draft]; const target = idx + dir
-    if (target < 0 || target >= next.length) return
-    ;[next[idx], next[target]] = [next[target], next[idx]]
-    setDraft(next)
-  }
-
-  const updateField = (idx: number, field: string, value: unknown) =>
-    setDraft(prev => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p))
-
-  const displayProviders = editing ? draft : providers
-
-  const statusBadge = (p: LLMProviderConfig) => {
-    if (!p.enabled) return { label: 'Disabled', color: '#6e7681' }
-    if (!p.api_key_set && !p.is_local) return { label: 'No API Key', color: '#f59e0b' }
-    if (p.live_status?.in_cooldown) return { label: 'Cooldown', color: '#f59e0b' }
-    if (p.live_status?.available === false) return { label: 'Unavailable', color: '#ef4444' }
-    return { label: 'Active', color: '#22c55e' }
-  }
-
-  return (
-    <div style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 10, marginBottom: 10, overflow: 'hidden' }}>
-      <button onClick={() => setOpen(!open)} style={{
-        width: '100%', background: open ? '#161b2240' : 'none', border: 'none', cursor: 'pointer',
-        display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', color: '#e6edf3', transition: 'background 0.15s',
-      }}>
-        <span style={{ color: '#8b949e', transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
-          <ChevronDown size={14} />
-        </span>
-        <Zap size={15} style={{ color: '#f59e0b' }} />
-        <span style={{ fontWeight: 600, fontSize: 14, flexShrink: 0 }}>LLM Provider Chain</span>
-        {!open && (
-          <div style={{ display: 'flex', gap: 4, flex: 1, alignItems: 'center' }}>
-            {providers.filter(p => p.enabled).map(p => {
-              const badge = statusBadge(p)
-              return (
-                <span key={p.name} style={{
-                  fontSize: 10, padding: '2px 7px', borderRadius: 8,
-                  background: '#161b22', border: '1px solid #21262d',
-                  display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap',
-                }}>
-                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: badge.color, flexShrink: 0 }} />
-                  <span style={{ color: '#484f58' }}>{p.name}:</span>
-                  <span style={{ color: '#c9d1d9', fontWeight: 500 }}>{badge.label}</span>
-                </span>
-              )
-            })}
-          </div>
-        )}
-        {open && <div style={{ flex: 1 }} />}
-        <span style={{
-          fontSize: 9, padding: '2px 7px', borderRadius: 10,
-          background: '#22c55e15', color: '#22c55e', fontWeight: 600,
-          display: 'flex', alignItems: 'center', gap: 3, border: '1px solid #22c55e22',
-        }}><Zap size={8} /> Live reload</span>
-        <span style={{
-          fontSize: 9, padding: '2px 7px', borderRadius: 10,
-          background: '#ef444415', color: '#ef4444', fontWeight: 600, border: '1px solid #ef444422',
-        }}>Dashboard Only</span>
-        {!isLoading && (
-          <span style={{ fontSize: 11, color: '#8b949e' }}>
-            {providers.filter(p => p.enabled && (p.api_key_set || p.is_local)).length}/{providers.length} active
-          </span>
-        )}
-        {msg && (
-          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 3 }}>
-            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div style={{ padding: '0 16px 16px', borderTop: '1px solid #21262d' }}>
-          <div style={{ fontSize: 12, color: '#8b949e', padding: '12px 0 8px', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-            <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-            <span>
-              Providers are tried <strong style={{ color: '#c9d1d9' }}>top-to-bottom</strong>. The first available provider handles each LLM call.
-              If a provider hits rate limits or errors, it enters cooldown and the next one is tried.
-              Drag to reorder priority. API keys are stored securely in <code style={codeStyle}>config/.env</code>.
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, padding: '4px 0 10px', justifyContent: 'flex-end' }}>
-            {!editing ? (
-              <button onClick={startEdit} style={{ ...btnStyle('#21262d'), borderColor: '#30363d' }}>
-                <Settings2 size={12} /> Edit providers
-              </button>
-            ) : (
-              <>
-                <button onClick={cancel} style={btnStyle('#21262d')}><X size={12} /> Cancel</button>
-                <button onClick={handleSave} disabled={saving} style={btnStyle('#238636')}>
-                  <Save size={12} /> {saving ? 'Saving…' : 'Save & Hot-Reload'}
-                </button>
-              </>
-            )}
-          </div>
-
-          {displayProviders.map((p, idx) => {
-            const badge = statusBadge(p)
-            const provIcon = p.is_local
-              ? <Server size={16} style={{ color: '#8b949e' }} />
-              : <Cloud size={16} style={{ color: '#58a6ff' }} />
-
-            return (
-              <div key={p.name} style={{
-                background: '#161b22', border: `1px solid ${p.enabled ? '#21262d' : '#21262d80'}`,
-                borderRadius: 10, padding: '12px 16px', marginBottom: 8,
-                opacity: p.enabled ? 1 : 0.5, transition: 'all 0.15s',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{
-                    width: 24, height: 24, borderRadius: '50%', background: '#30363d',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 11, fontWeight: 700, color: '#e6edf3',
-                  }}>{idx + 1}</span>
-                  {provIcon}
-                  <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3', flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {p.name}
-                    {p.is_local && <span style={{ fontSize: 10, color: '#6e7681', fontWeight: 400 }}>local</span>}
-                    {(p.tier || p.live_status?.tier) && (
-                      <span style={{
-                        fontSize: 9, padding: '1px 7px', borderRadius: 10, fontWeight: 600,
-                        background: (p.tier || p.live_status?.tier) === 'free' ? '#22c55e12' : '#58a6ff12',
-                        color: (p.tier || p.live_status?.tier) === 'free' ? '#22c55e' : '#58a6ff',
-                        border: `1px solid ${(p.tier || p.live_status?.tier) === 'free' ? '#22c55e22' : '#58a6ff22'}`,
-                      }}>{(p.tier || p.live_status?.tier)?.toUpperCase()}</span>
-                    )}
-                  </span>
-                  <span style={{
-                    fontSize: 10, padding: '3px 10px', borderRadius: 12,
-                    background: badge.color + '18', color: badge.color, fontWeight: 600,
-                    border: `1px solid ${badge.color}22`,
-                  }}>{badge.label}</span>
-
-                  {editing && (
-                    <button onClick={() => updateField(idx, 'enabled', !p.enabled)} style={{
-                      background: p.enabled ? '#22c55e18' : 'transparent',
-                      border: `1px solid ${p.enabled ? '#22c55e44' : '#30363d'}`,
-                      borderRadius: 20, cursor: 'pointer', padding: '3px 10px',
-                      color: p.enabled ? '#22c55e' : '#6e7681',
-                      display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 500,
-                    }}>
-                      {p.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
-                      {p.enabled ? 'On' : 'Off'}
-                    </button>
-                  )}
-
-                  {editing && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <button onClick={() => moveProvider(idx, -1)} disabled={idx === 0}
-                        style={{ background: 'none', border: 'none', cursor: idx === 0 ? 'default' : 'pointer', padding: 0, color: idx === 0 ? '#21262d' : '#8b949e' }}
-                        title="Move up (higher priority)"><ArrowUp size={14} /></button>
-                      <button onClick={() => moveProvider(idx, 1)} disabled={idx === displayProviders.length - 1}
-                        style={{ background: 'none', border: 'none', cursor: idx === displayProviders.length - 1 ? 'default' : 'pointer', padding: 0, color: idx === displayProviders.length - 1 ? '#21262d' : '#8b949e' }}
-                        title="Move down (lower priority)"><ArrowDown size={14} /></button>
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: '6px 20px', marginTop: 10, fontSize: 12 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                    <span style={{ color: '#8b949e' }}>Model</span>
-                    {editing ? (
-                      <input type="text" value={p.model}
-                        onChange={e => updateField(idx, 'model', e.target.value)}
-                        style={{ ...inputBase, width: 130, textAlign: 'right', padding: '2px 8px', fontSize: 12 }}
-                      />
-                    ) : (
-                      <span style={{ color: '#e6edf3', fontFamily: 'var(--font-mono, monospace)', fontSize: 11 }}>{p.model}</span>
-                    )}
-                  </div>
-
-                  {!p.is_local && p.api_key_env && (
-                    <div style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      padding: '4px 0', borderBottom: '1px solid #21262d',
-                      gridColumn: editing ? '1 / -1' : undefined,
-                    }}>
-                      <span style={{ color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Key size={11} /> API Key
-                      </span>
-                      {editing ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-mono, monospace)' }}>{p.api_key_env}</span>
-                          <input
-                            type={visibleKeys[p.api_key_env!] ? 'text' : 'password'}
-                            value={keyDrafts[p.api_key_env!] ?? ''}
-                            onChange={e => setKeyDrafts(prev => ({ ...prev, [p.api_key_env!]: e.target.value }))}
-                            placeholder={p.api_key_set ? '••••••••  (unchanged)' : 'Paste API key'}
-                            style={{ ...inputBase, width: 220, padding: '3px 10px', fontSize: 12 }}
-                          />
-                          <button onClick={() => setVisibleKeys(prev => ({ ...prev, [p.api_key_env!]: !prev[p.api_key_env!] }))}
-                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#8b949e' }}
-                            title={visibleKeys[p.api_key_env!] ? 'Hide' : 'Show'}>
-                            {visibleKeys[p.api_key_env!] ? <EyeOff size={13} /> : <Eye size={13} />}
-                          </button>
-                        </div>
-                      ) : (
-                        <span style={{ color: p.api_key_set ? '#22c55e' : '#f59e0b', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
-                          {p.api_key_set ? <><Check size={11} /> Configured</> : <><AlertTriangle size={11} /> Not set</>}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {editing && !p.is_local && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>Tier</span>
-                      <select
-                        value={p.tier || ''}
-                        onChange={e => updateField(idx, 'tier', e.target.value || undefined)}
-                        style={{ ...inputBase, width: 90, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                      >
-                        <option value="">—</option>
-                        <option value="free">Free</option>
-                        <option value="paid">Paid</option>
-                      </select>
-                    </div>
-                  )}
-
-                  {!editing && p.name.toLowerCase().includes('openrouter') && p.enabled && orCredits?.ok && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <DollarSign size={11} /> Credits
-                      </span>
-                      <span style={{ color: orCredits.is_free_tier ? '#22c55e' : '#e6edf3', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        {orCredits.is_free_tier
-                          ? <><Sparkles size={10} /> Free tier</>
-                          : orCredits.credits_remaining != null
-                            ? `$${orCredits.credits_remaining.toFixed(4)}`
-                            : 'Unknown'}
-                      </span>
-                    </div>
-                  )}
-
-                  {!editing && p.live_status?.is_free_model && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>Model Type</span>
-                      <span style={{ color: '#22c55e', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Sparkles size={10} /> Free model
-                      </span>
-                    </div>
-                  )}
-
-                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                    <span style={{ color: '#8b949e' }}>Timeout</span>
-                    {editing ? (
-                      <input type="number" value={p.timeout ?? 60} min={5} max={600}
-                        onChange={e => updateField(idx, 'timeout', parseInt(e.target.value, 10))}
-                        style={{ ...inputBase, width: 60, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                      />
-                    ) : <span style={{ color: '#e6edf3' }}>{p.timeout ?? 60}s</span>}
-                  </div>
-
-                  {!p.is_local && (<>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>RPM</span>
-                      {editing ? (
-                        <input type="number" value={p.rpm_limit ?? 0} min={0}
-                          onChange={e => updateField(idx, 'rpm_limit', parseInt(e.target.value, 10))}
-                          style={{ ...inputBase, width: 60, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                        />
-                      ) : (
-                        <span style={{ color: '#e6edf3' }}>
-                          {p.live_status?.rpm_current !== undefined
-                            ? <>{p.live_status.rpm_current}<span style={{ color: '#484f58' }}>/{p.rpm_limit ?? 0}</span></>
-                            : (p.rpm_limit ?? 0)}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>Daily Tokens</span>
-                      {editing ? (
-                        <input type="number" value={p.daily_token_limit ?? 0} min={0} step={10000}
-                          onChange={e => updateField(idx, 'daily_token_limit', parseInt(e.target.value, 10))}
-                          style={{ ...inputBase, width: 90, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                        />
-                      ) : (
-                        <span style={{ color: '#e6edf3' }}>
-                          {p.live_status?.daily_tokens !== undefined
-                            ? <>{(p.live_status.daily_tokens / 1000).toFixed(0)}k<span style={{ color: '#484f58' }}> / {p.daily_token_limit ? `${(p.daily_token_limit / 1000).toFixed(0)}k` : '∞'}</span></>
-                            : p.daily_token_limit ? `${(p.daily_token_limit / 1000).toFixed(0)}k` : '∞'}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>Daily Requests</span>
-                      {editing ? (
-                        <input type="number" value={p.daily_request_limit ?? 0} min={0} step={100}
-                          onChange={e => updateField(idx, 'daily_request_limit', parseInt(e.target.value, 10))}
-                          style={{ ...inputBase, width: 90, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                        />
-                      ) : (
-                        <span style={{ color: '#e6edf3' }}>
-                          {p.live_status?.daily_requests !== undefined
-                            ? <>{p.live_status.daily_requests}<span style={{ color: '#484f58' }}> / {p.daily_request_limit ? p.daily_request_limit : '∞'}</span></>
-                            : p.daily_request_limit ? p.daily_request_limit : '∞'}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
-                      <span style={{ color: '#8b949e' }}>Cooldown</span>
-                      {editing ? (
-                        <input type="number" value={p.cooldown_seconds ?? 60} min={5}
-                          onChange={e => updateField(idx, 'cooldown_seconds', parseInt(e.target.value, 10))}
-                          style={{ ...inputBase, width: 60, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
-                        />
-                      ) : (
-                        <span style={{ color: '#e6edf3' }}>
-                          {p.live_status?.in_cooldown
-                            ? <span style={{ color: '#f59e0b' }}>{p.live_status.cooldown_remaining_s}s left</span>
-                            : `${p.cooldown_seconds ?? 60}s`}
-                        </span>
-                      )}
-                    </div>
-                  </>)}
-                </div>
-              </div>
-            )
-          })}
-
-          {isLoading && <div style={{ padding: 16, color: '#8b949e', fontSize: 13, textAlign: 'center' }}>Loading providers…</div>}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Quick Settings — always-visible panel for the 8 most critical settings
+   Quick Settings helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
 interface QuickDraft {
@@ -423,528 +40,273 @@ interface QuickDraft {
   max_daily_loss: number
 }
 
-function initQuickDraft(
-  trading: Record<string, unknown>,
-  risk: Record<string, unknown>,
-  absolute: Record<string, unknown>,
-): QuickDraft {
+function initQuickDraft(settings: Record<string, unknown>): QuickDraft {
+  const t = (settings.trading ?? {}) as Record<string, unknown>
+  const r = (settings.risk ?? {}) as Record<string, unknown>
+  const a = (settings.absolute_rules ?? {}) as Record<string, unknown>
   return {
-    mode: String(trading.mode ?? 'paper'),
-    interval: Number(trading.interval ?? 120),
-    min_confidence: Number(trading.min_confidence ?? 0.55),
-    max_active_pairs: Number(trading.max_active_pairs ?? 5),
-    stop_loss_pct: Number(risk.stop_loss_pct ?? 0.04),
-    take_profit_pct: Number(risk.take_profit_pct ?? 0.06),
-    max_single_trade: Number(absolute.max_single_trade ?? 500),
-    max_daily_loss: Number(absolute.max_daily_loss ?? 500),
+    mode: String(t.mode ?? 'paper'),
+    interval: Number(t.interval ?? 120),
+    min_confidence: Number(t.min_confidence ?? 0.55),
+    max_active_pairs: Number(t.max_active_pairs ?? 5),
+    stop_loss_pct: Number(r.stop_loss_pct ?? 0.04),
+    take_profit_pct: Number(r.take_profit_pct ?? 0.06),
+    max_single_trade: Number(a.max_single_trade ?? 500),
+    max_daily_loss: Number(a.max_daily_loss ?? 500),
   }
 }
 
-function Stepper({
-  value, onChange, min, max, step = 1, format,
-}: { value: number; onChange: (v: number) => void; min: number; max: number; step?: number; format?: (v: number) => string }) {
-  const stepBtn: React.CSSProperties = {
-    width: 26, height: 26, borderRadius: 6, border: '1px solid #30363d',
-    background: '#161b22', color: '#8b949e', cursor: 'pointer',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: 12, fontWeight: 700, transition: 'all 0.1s', flexShrink: 0,
-  }
+function Stepper({ value, onChange, min, max, step, format }: {
+  value: number; onChange: (v: number) => void
+  min?: number; max?: number; step?: number
+  format?: (v: number) => string
+}) {
+  const s = step ?? 1
+  const fmt = format ?? String
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-      <button onClick={() => onChange(Math.max(min, parseFloat((value - step).toFixed(4))))}
-        disabled={value <= min} style={{ ...stepBtn, opacity: value <= min ? 0.3 : 1 }}>
-        <Minus size={11} />
+      <button onClick={() => onChange(Math.max(min ?? -Infinity, parseFloat((value - s).toFixed(6))))}
+        style={{ ...btnStyle('#21262d'), padding: '4px 8px' }}>
+        <Minus size={12} />
       </button>
-      <span style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', minWidth: 44, textAlign: 'center' }}>
-        {format ? format(value) : value}
+      <span style={{ minWidth: 54, textAlign: 'center', fontSize: 13, fontWeight: 600, color: '#e6edf3' }}>
+        {fmt(value)}
       </span>
-      <button onClick={() => onChange(Math.min(max, parseFloat((value + step).toFixed(4))))}
-        disabled={value >= max} style={{ ...stepBtn, opacity: value >= max ? 0.3 : 1 }}>
-        <Plus size={11} />
+      <button onClick={() => onChange(Math.min(max ?? Infinity, parseFloat((value + s).toFixed(6))))}
+        style={{ ...btnStyle('#21262d'), padding: '4px 8px' }}>
+        <Plus size={12} />
       </button>
     </div>
   )
 }
 
-function SegmentedControl({
-  value, options, onChange,
-}: { value: string | number; options: Array<{ label: string; value: string | number }>; onChange: (v: string | number) => void }) {
+function SegmentedControl({ value, options, onChange }: {
+  value: string | number
+  options: Array<{ value: string | number; label: string }>
+  onChange: (v: string | number) => void
+}) {
   return (
-    <div style={{ display: 'flex', background: '#0d1117', borderRadius: 8, padding: 2, border: '1px solid #21262d', gap: 2 }}>
+    <div style={{ display: 'flex', gap: 2, background: '#0d1117', borderRadius: 8, padding: 2, border: '1px solid #21262d' }}>
       {options.map(opt => (
         <button key={String(opt.value)} onClick={() => onChange(opt.value)} style={{
-          flex: 1, padding: '5px 8px', borderRadius: 6, border: 'none',
+          padding: '5px 10px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: 6,
+          cursor: 'pointer', transition: 'all 0.15s',
           background: value === opt.value ? '#21262d' : 'transparent',
           color: value === opt.value ? '#e6edf3' : '#6e7681',
-          cursor: 'pointer', fontSize: 11, fontWeight: value === opt.value ? 600 : 400,
-          transition: 'all 0.12s', whiteSpace: 'nowrap',
-        }}>
-          {opt.label}
-        </button>
+          boxShadow: value === opt.value ? '0 1px 3px #00000040' : 'none',
+        }}>{opt.label}</button>
       ))}
     </div>
   )
 }
 
-function QuickSettings({
-  settings,
-  liveData,
-  onSave,
-}: {
+function QuickSettings({ settings, liveData, onSave }: {
   settings: Record<string, unknown>
-  liveData: unknown
+  liveData: { settings: Record<string, unknown> }
   onSave: (section: string, updates: Record<string, unknown>) => Promise<void>
 }) {
-  const trading = (settings.trading ?? {}) as Record<string, unknown>
-  const risk = (settings.risk ?? {}) as Record<string, unknown>
-  const absolute = (settings.absolute_rules ?? {}) as Record<string, unknown>
-
-  const [draft, setDraft] = useState<QuickDraft>(() => initQuickDraft(trading, risk, absolute))
+  const [draft, setDraft] = useState<QuickDraft>(() => initQuickDraft(settings))
   const [saving, setSaving] = useState(false)
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
-  // Reset draft whenever live settings change (e.g. preset applied)
   useEffect(() => {
-    setDraft(initQuickDraft(
-      (settings.trading ?? {}) as Record<string, unknown>,
-      (settings.risk ?? {}) as Record<string, unknown>,
-      (settings.absolute_rules ?? {}) as Record<string, unknown>,
-    ))
+    setDraft(initQuickDraft(liveData.settings))
   }, [liveData]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const set = <K extends keyof QuickDraft>(k: K, v: QuickDraft[K]) =>
-    setDraft(prev => ({ ...prev, [k]: v }))
+  const live = initQuickDraft(settings)
+  const changedKeys = (Object.keys(draft) as (keyof QuickDraft)[]).filter(
+    k => String(draft[k]) !== String(live[k])
+  )
+  const changedCount = changedKeys.length
 
-  const changedCount = useMemo(() => {
-    let n = 0
-    if (draft.mode !== String(trading.mode ?? 'paper')) n++
-    if (draft.interval !== Number(trading.interval ?? 120)) n++
-    if (draft.min_confidence !== Number(trading.min_confidence ?? 0.55)) n++
-    if (draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5)) n++
-    if (draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04)) n++
-    if (draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06)) n++
-    if (draft.max_single_trade !== Number(absolute.max_single_trade ?? 500)) n++
-    if (draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500)) n++
-    return n
-  }, [draft, trading, risk, absolute])
+  function set<K extends keyof QuickDraft>(key: K, val: QuickDraft[K]) {
+    setDraft(d => ({ ...d, [key]: val }))
+  }
 
   const handleApply = async () => {
+    if (!changedCount) return
     setSaving(true)
-    setMsg(null)
     try {
       const tradingChanges: Record<string, unknown> = {}
-      if (draft.mode !== String(trading.mode ?? 'paper')) tradingChanges.mode = draft.mode
-      if (draft.interval !== Number(trading.interval ?? 120)) tradingChanges.interval = draft.interval
-      if (draft.min_confidence !== Number(trading.min_confidence ?? 0.55)) tradingChanges.min_confidence = draft.min_confidence
-      if (draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5)) tradingChanges.max_active_pairs = draft.max_active_pairs
-
       const riskChanges: Record<string, unknown> = {}
-      if (draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04)) riskChanges.stop_loss_pct = draft.stop_loss_pct
-      if (draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06)) riskChanges.take_profit_pct = draft.take_profit_pct
-
       const absoluteChanges: Record<string, unknown> = {}
-      if (draft.max_single_trade !== Number(absolute.max_single_trade ?? 500)) absoluteChanges.max_single_trade = draft.max_single_trade
-      if (draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500)) absoluteChanges.max_daily_loss = draft.max_daily_loss
-
+      for (const key of changedKeys) {
+        if (['mode', 'interval', 'min_confidence', 'max_active_pairs'].includes(key))
+          tradingChanges[key] = draft[key]
+        else if (['stop_loss_pct', 'take_profit_pct'].includes(key))
+          riskChanges[key] = draft[key]
+        else if (['max_single_trade', 'max_daily_loss'].includes(key))
+          absoluteChanges[key] = draft[key]
+      }
       await Promise.all([
-        Object.keys(tradingChanges).length ? onSave('trading', tradingChanges) : Promise.resolve(),
-        Object.keys(riskChanges).length ? onSave('risk', riskChanges) : Promise.resolve(),
-        Object.keys(absoluteChanges).length ? onSave('absolute_rules', absoluteChanges) : Promise.resolve(),
-      ])
-      setMsg({ ok: true, text: `${changedCount} setting${changedCount !== 1 ? 's' : ''} applied live` })
-      setTimeout(() => setMsg(null), 3000)
-    } catch (e: unknown) {
-      setMsg({ ok: false, text: (e instanceof Error ? e.message : String(e)) || 'Apply failed' })
+        Object.keys(tradingChanges).length ? onSave('trading', tradingChanges) : null,
+        Object.keys(riskChanges).length ? onSave('risk', riskChanges) : null,
+        Object.keys(absoluteChanges).length ? onSave('absolute_rules', absoluteChanges) : null,
+      ].filter(Boolean))
     } finally {
       setSaving(false)
     }
   }
 
-  const handleReset = () => {
-    setDraft(initQuickDraft(trading, risk, absolute))
-    setMsg(null)
-  }
-
-  const isLive = draft.mode === 'live'
-  const pctFmt = (v: number) => `${(v * 100).toFixed(1)}%`
-  const labelStyle: React.CSSProperties = { fontSize: 11, color: '#6e7681', fontWeight: 500, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }
-  const cellStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column' }
-  const changedDot = (changed: boolean) => changed ? (
-    <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#f59e0b', display: 'inline-block', marginLeft: 2 }} title="Changed" />
-  ) : null
-
-  return (
-    <div style={{
-      background: 'linear-gradient(135deg, #0d111788, #0d1117)',
-      border: '1px solid #21262d', borderRadius: 12, marginBottom: 16, overflow: 'hidden',
-    }}>
-      {/* Header */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '12px 20px',
-        borderBottom: '1px solid #21262d',
-        background: 'linear-gradient(90deg, #58a6ff08, transparent)',
-      }}>
-        <Sliders size={15} style={{ color: '#58a6ff' }} />
-        <span style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3' }}>Quick Settings</span>
-        <span style={{ fontSize: 11, color: '#6e7681', marginLeft: 4 }}>
-          Most-used settings — change and apply without opening sections
-        </span>
-        <div style={{ flex: 1 }} />
-        {msg && (
-          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 4 }}>
-            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
-          </span>
-        )}
-      </div>
-
-      {/* Controls grid */}
-      <div style={{ padding: '16px 20px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px 24px', marginBottom: 16 }}>
-
-          {/* Trading Mode */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <TrendingUp size={11} /> Trading Mode
-              {changedDot(draft.mode !== String(trading.mode ?? 'paper'))}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <SegmentedControl
-                value={draft.mode}
-                options={[{ label: '📝 Paper', value: 'paper' }, { label: '⚡ Live', value: 'live' }]}
-                onChange={v => set('mode', String(v))}
-              />
-              {isLive && (
-                <span style={{ fontSize: 10, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 3 }}>
-                  <AlertTriangle size={9} /> Real money at risk
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Cycle Interval */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <Timer size={11} /> Cycle Interval
-              {changedDot(draft.interval !== Number(trading.interval ?? 120))}
-            </div>
-            <SegmentedControl
-              value={draft.interval}
-              options={[
-                { label: '1m', value: 60 },
-                { label: '2m', value: 120 },
-                { label: '5m', value: 300 },
-                { label: '10m', value: 600 },
-              ]}
-              onChange={v => set('interval', Number(v))}
-            />
-          </div>
-
-          {/* Min Confidence */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <Activity size={11} /> Min Confidence
-              {changedDot(draft.min_confidence !== Number(trading.min_confidence ?? 0.55))}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range" min={0.3} max={0.95} step={0.05}
-                  value={draft.min_confidence}
-                  onChange={e => set('min_confidence', parseFloat(e.target.value))}
-                  style={{ flex: 1, accentColor: '#22c55e', cursor: 'pointer' }}
-                />
-                <span style={{
-                  fontSize: 13, fontWeight: 700, color: '#e6edf3',
-                  minWidth: 38, textAlign: 'right',
-                }}>
-                  {pctFmt(draft.min_confidence)}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#484f58' }}>
-                <span>30% permissive</span>
-                <span>95% strict</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Max Active Pairs */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <Gauge size={11} /> Max Active Pairs
-              {changedDot(draft.max_active_pairs !== Number(trading.max_active_pairs ?? 5))}
-            </div>
-            <Stepper value={draft.max_active_pairs} min={1} max={30} onChange={v => set('max_active_pairs', v)} />
-          </div>
-
-          {/* Stop Loss */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <span style={{ fontSize: 10 }}>🛑</span> Stop Loss
-              {changedDot(draft.stop_loss_pct !== Number(risk.stop_loss_pct ?? 0.04))}
-            </div>
-            <Stepper
-              value={draft.stop_loss_pct}
-              min={0.005}
-              max={0.25}
-              step={0.005}
-              format={pctFmt}
-              onChange={v => set('stop_loss_pct', v)}
-            />
-          </div>
-
-          {/* Take Profit */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <Target size={11} /> Take Profit
-              {changedDot(draft.take_profit_pct !== Number(risk.take_profit_pct ?? 0.06))}
-            </div>
-            <Stepper
-              value={draft.take_profit_pct}
-              min={0.005}
-              max={0.5}
-              step={0.005}
-              format={pctFmt}
-              onChange={v => set('take_profit_pct', v)}
-            />
-          </div>
-
-          {/* Max Single Trade */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <DollarSign size={11} /> Max Single Trade
-              {changedDot(draft.max_single_trade !== Number(absolute.max_single_trade ?? 500))}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-              <span style={{
-                padding: '5px 8px', background: '#161b22', border: '1px solid #30363d',
-                borderRight: 'none', borderRadius: '6px 0 0 6px',
-                fontSize: 12, color: '#6e7681', flexShrink: 0,
-              }}>€</span>
-              <input
-                type="number" value={draft.max_single_trade} min={1} step={10}
-                onChange={e => set('max_single_trade', Number(e.target.value))}
-                style={{ ...inputBase, borderRadius: '0 6px 6px 0', width: '100%', fontSize: 13, fontWeight: 600 }}
-              />
-            </div>
-          </div>
-
-          {/* Max Daily Loss */}
-          <div style={cellStyle}>
-            <div style={labelStyle}>
-              <span style={{ fontSize: 10 }}>📉</span> Max Daily Loss
-              {changedDot(draft.max_daily_loss !== Number(absolute.max_daily_loss ?? 500))}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-              <span style={{
-                padding: '5px 8px', background: '#161b22', border: '1px solid #30363d',
-                borderRight: 'none', borderRadius: '6px 0 0 6px',
-                fontSize: 12, color: '#6e7681', flexShrink: 0,
-              }}>€</span>
-              <input
-                type="number" value={draft.max_daily_loss} min={1} step={10}
-                onChange={e => set('max_daily_loss', Number(e.target.value))}
-                style={{ ...inputBase, borderRadius: '0 6px 6px 0', width: '100%', fontSize: 13, fontWeight: 600 }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Footer action bar */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8,
-          paddingTop: 12, borderTop: '1px solid #21262d',
-        }}>
-          {changedCount > 0 && (
-            <span style={{ fontSize: 11, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 4, marginRight: 'auto' }}>
-              <AlertTriangle size={11} /> {changedCount} unsaved change{changedCount !== 1 ? 's' : ''}
-            </span>
-          )}
-          <button onClick={handleReset} disabled={changedCount === 0} style={{
-            ...btnStyle('#21262d'), borderColor: '#30363d',
-            opacity: changedCount === 0 ? 0.4 : 1,
-          }}>
-            <RefreshCw size={12} /> Reset
-          </button>
-          <button
-            onClick={handleApply}
-            disabled={saving || changedCount === 0}
-            style={{
-              ...btnStyle(changedCount > 0 ? '#238636' : '#21262d'),
-              opacity: changedCount === 0 ? 0.4 : 1,
-              padding: '7px 18px', fontSize: 13, fontWeight: 600,
-            }}
-          >
-            <Check size={13} />
-            {saving ? 'Applying…' : changedCount > 0 ? `Apply ${changedCount} change${changedCount !== 1 ? 's' : ''}` : 'No changes'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Config Health Panel — contextual warnings about current configuration
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-interface HealthIssue {
-  type: 'error' | 'warning' | 'info'
-  icon: string
-  message: string
-  detail?: string
-}
-
-function ConfigHealthPanel({ settings }: { settings: Record<string, unknown> }) {
-  const trading = (settings.trading ?? {}) as Record<string, unknown>
-  const risk = (settings.risk ?? {}) as Record<string, unknown>
-  const absolute = (settings.absolute_rules ?? {}) as Record<string, unknown>
-
-  const issues = useMemo((): HealthIssue[] => {
-    const list: HealthIssue[] = []
-
-    const sl = Number(risk.stop_loss_pct ?? 0)
-    const tp = Number(risk.take_profit_pct ?? 0)
-    const conf = Number(trading.min_confidence ?? 0)
-    const drawdown = Number(risk.max_drawdown_pct ?? 0)
-    const activePairs = Number(trading.max_active_pairs ?? 0)
-    const mode = String(trading.mode ?? 'paper')
-    const dailyLoss = Number(absolute.max_daily_loss ?? 0)
-    const dailySpend = Number(absolute.max_daily_spend ?? 0)
-
-    if (sl > 0 && tp > 0 && sl >= tp) {
-      list.push({
-        type: 'error',
-        icon: '🚨',
-        message: `Stop Loss (${(sl * 100).toFixed(1)}%) ≥ Take Profit (${(tp * 100).toFixed(1)}%) — inverted risk/reward ratio`,
-        detail: 'Every profitable trade could be cut short while losses run. Swap these values.',
-      })
-    }
-
-    if (conf < 0.45) {
-      list.push({
-        type: 'warning',
-        icon: '⚠️',
-        message: `Very low confidence threshold (${(conf * 100).toFixed(0)}%) — expect high trade frequency with weaker signals`,
-        detail: 'Consider raising to at least 0.50 to filter out noise.',
-      })
-    } else if (conf > 0.85) {
-      list.push({
-        type: 'info',
-        icon: 'ℹ️',
-        message: `High confidence threshold (${(conf * 100).toFixed(0)}%) — bot may trade infrequently`,
-        detail: 'This is conservative and safe, but may miss opportunities in volatile markets.',
-      })
-    }
-
-    if (drawdown > 0.25) {
-      list.push({
-        type: 'warning',
-        icon: '⚠️',
-        message: `Drawdown tolerance is very high (${(drawdown * 100).toFixed(0)}%) — significant portfolio loss allowed before halting`,
-        detail: 'Consider lowering to 15–20% to protect capital.',
-      })
-    }
-
-    if (mode === 'live' && activePairs > 15) {
-      list.push({
-        type: 'warning',
-        icon: '⚠️',
-        message: `${activePairs} active pairs in live mode — high monitoring cost and trade complexity`,
-        detail: 'Start with fewer pairs in live mode and scale up gradually.',
-      })
-    }
-
-    if (dailyLoss > 0 && dailySpend > 0 && dailyLoss > dailySpend * 0.9) {
-      list.push({
-        type: 'info',
-        icon: 'ℹ️',
-        message: `Daily loss cap (€${dailyLoss}) is ${Math.round((dailyLoss / dailySpend) * 100)}% of daily spend (€${dailySpend}) — effectively the same limit`,
-        detail: 'Consider setting a meaningful gap between spend and loss limits.',
-      })
-    }
-
-    if (mode === 'paper') {
-      list.push({
-        type: 'info',
-        icon: '📝',
-        message: 'Running in paper mode — all trades are simulated, no real money at risk',
-        detail: undefined,
-      })
-    }
-
-    return list
-  }, [trading, risk, absolute])
-
-  const typeColors: Record<string, string> = {
-    error: '#ef4444',
-    warning: '#f59e0b',
-    info: '#58a6ff',
-  }
-  const typeBgs: Record<string, string> = {
-    error: '#ef444410',
-    warning: '#f59e0b10',
-    info: '#58a6ff10',
-  }
-
-  const hasProblems = issues.some(i => i.type === 'error' || i.type === 'warning')
-
-  if (issues.length === 0) {
+  const field = (label: string, key: keyof QuickDraft, control: React.ReactNode) => {
+    const changed = String(draft[key]) !== String(live[key])
     return (
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
-        background: '#22c55e10', border: '1px solid #22c55e22', borderRadius: 10,
-        marginBottom: 16,
-      }}>
-        <ShieldCheck size={14} style={{ color: '#22c55e', flexShrink: 0 }} />
-        <span style={{ fontSize: 13, color: '#22c55e', fontWeight: 500 }}>Configuration looks healthy</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ fontSize: 11, color: '#8b949e', fontWeight: 500 }}>{label}</span>
+          {changed && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b', flexShrink: 0 }} />}
+        </div>
+        {control}
       </div>
     )
   }
 
   return (
     <div style={{
-      border: `1px solid ${hasProblems ? '#f59e0b33' : '#21262d'}`,
-      borderRadius: 10, marginBottom: 16, overflow: 'hidden',
-      background: hasProblems ? '#f59e0b08' : '#0d111788',
+      background: '#0d1117', border: '1px solid #21262d', borderRadius: 12,
+      padding: '16px 20px', marginBottom: 16,
     }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
-        borderBottom: issues.length > 1 ? '1px solid #21262d' : undefined,
-      }}>
-        {hasProblems
-          ? <AlertTriangle size={14} style={{ color: '#f59e0b', flexShrink: 0 }} />
-          : <Info size={14} style={{ color: '#58a6ff', flexShrink: 0 }} />}
-        <span style={{ fontSize: 13, fontWeight: 600, color: hasProblems ? '#f59e0b' : '#58a6ff' }}>
-          {issues.filter(i => i.type === 'error').length > 0
-            ? `${issues.filter(i => i.type === 'error').length} config error${issues.filter(i => i.type === 'error').length > 1 ? 's' : ''} detected`
-            : hasProblems
-              ? `${issues.filter(i => i.type === 'warning').length} config warning${issues.filter(i => i.type === 'warning').length > 1 ? 's' : ''}`
-              : `${issues.length} configuration note${issues.length > 1 ? 's' : ''}`}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Sliders size={14} style={{ color: '#58a6ff' }} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#e6edf3', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Quick Settings
+          </span>
+          {changedCount > 0 && (
+            <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 10, background: '#f59e0b18', color: '#f59e0b', fontWeight: 600 }}>
+              {changedCount} unsaved
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {changedCount > 0 && (
+            <button onClick={() => setDraft(initQuickDraft(settings))}
+              style={{ ...btnStyle('#21262d'), padding: '6px 12px', fontSize: 12 }}>
+              Reset
+            </button>
+          )}
+          <button onClick={handleApply} disabled={!changedCount || saving} style={{
+            ...btnStyle(changedCount ? '#1f6feb' : '#21262d'),
+            padding: '6px 14px', fontSize: 12, fontWeight: 600,
+            opacity: changedCount ? 1 : 0.5, cursor: changedCount ? 'pointer' : 'default',
+          }}>
+            {saving ? 'Saving…' : changedCount ? `Apply ${changedCount} change${changedCount !== 1 ? 's' : ''}` : 'No changes'}
+          </button>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '14px 20px' }}>
+        {field('Trading Mode', 'mode',
+          <SegmentedControl value={draft.mode}
+            options={[{ value: 'paper', label: '📝 Paper' }, { value: 'live', label: '⚡ Live' }]}
+            onChange={v => set('mode', String(v))} />
+        )}
+        {field('Cycle Interval', 'interval',
+          <SegmentedControl value={draft.interval}
+            options={[{ value: 60, label: '1m' }, { value: 120, label: '2m' }, { value: 300, label: '5m' }, { value: 600, label: '10m' }]}
+            onChange={v => set('interval', Number(v))} />
+        )}
+        {field(`Confidence: ${(draft.min_confidence * 100).toFixed(0)}%`, 'min_confidence',
+          <input type="range" min={0.3} max={0.95} step={0.05} value={draft.min_confidence}
+            onChange={e => set('min_confidence', parseFloat(e.target.value))}
+            style={{ width: '100%', accentColor: '#58a6ff', height: 4, cursor: 'pointer' }} />
+        )}
+        {field('Max Active Pairs', 'max_active_pairs',
+          <Stepper value={draft.max_active_pairs} onChange={v => set('max_active_pairs', v)} min={1} max={50} />
+        )}
+        {field('Stop Loss', 'stop_loss_pct',
+          <Stepper value={draft.stop_loss_pct} onChange={v => set('stop_loss_pct', v)}
+            min={0.005} max={0.5} step={0.005} format={v => `${(v * 100).toFixed(1)}%`} />
+        )}
+        {field('Take Profit', 'take_profit_pct',
+          <Stepper value={draft.take_profit_pct} onChange={v => set('take_profit_pct', v)}
+            min={0.005} max={1.0} step={0.005} format={v => `${(v * 100).toFixed(1)}%`} />
+        )}
+        {field('Max Single Trade', 'max_single_trade',
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#161b22', borderRadius: 6, padding: '4px 8px', border: '1px solid #21262d' }}>
+            <DollarSign size={11} style={{ color: '#8b949e' }} />
+            <input type="number" value={draft.max_single_trade}
+              onChange={e => set('max_single_trade', Number(e.target.value))}
+              style={{ ...inputBase, width: 70, padding: 0, border: 'none', fontSize: 13, fontWeight: 600 }} />
+          </div>
+        )}
+        {field('Max Daily Loss', 'max_daily_loss',
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#161b22', borderRadius: 6, padding: '4px 8px', border: '1px solid #21262d' }}>
+            <DollarSign size={11} style={{ color: '#8b949e' }} />
+            <input type="number" value={draft.max_daily_loss}
+              onChange={e => set('max_daily_loss', Number(e.target.value))}
+              style={{ ...inputBase, width: 70, padding: 0, border: 'none', fontSize: 13, fontWeight: 600 }} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ConfigHealthPanel({ settings }: { settings: Record<string, unknown> }) {
+  const t = (settings.trading ?? {}) as Record<string, unknown>
+  const r = (settings.risk ?? {}) as Record<string, unknown>
+  const a = (settings.absolute_rules ?? {}) as Record<string, unknown>
+  const sl = Number(r.stop_loss_pct ?? 0)
+  const tp = Number(r.take_profit_pct ?? 0)
+  const conf = Number(t.min_confidence ?? 0)
+  const drawdown = Number(r.max_drawdown_pct ?? 0)
+  const pairs = Number(t.max_active_pairs ?? 0)
+  const mode = String(t.mode ?? 'paper')
+  const dailyLoss = Number(a.max_daily_loss ?? 0)
+  const dailySpend = Number(a.max_daily_spend ?? 0)
+
+  type Severity = 'error' | 'warning' | 'info'
+  const issues: Array<{ severity: Severity; message: string }> = []
+  if (sl > 0 && tp > 0 && sl >= tp)
+    issues.push({ severity: 'error', message: 'Stop Loss ≥ Take Profit — inverted risk/reward ratio' })
+  if (conf > 0 && conf < 0.45)
+    issues.push({ severity: 'warning', message: 'Very low confidence threshold — expect many low-quality signals' })
+  if (conf > 0.85)
+    issues.push({ severity: 'info', message: 'Very high confidence threshold — bot may trade infrequently' })
+  if (drawdown > 0.25)
+    issues.push({ severity: 'warning', message: `Max drawdown tolerance is very high (${(drawdown * 100).toFixed(0)}%)` })
+  if (mode === 'live' && pairs > 15)
+    issues.push({ severity: 'warning', message: `${pairs} active pairs in live mode — consider reducing for tighter risk control` })
+  if (dailySpend > 0 && dailyLoss > dailySpend * 0.9)
+    issues.push({ severity: 'info', message: 'Daily loss limit is nearly equal to daily spend cap' })
+
+  const colors: Record<Severity, string> = { error: '#ef4444', warning: '#f59e0b', info: '#58a6ff' }
+  const icons: Record<Severity, React.ReactNode> = {
+    error: <AlertTriangle size={13} />,
+    warning: <Zap size={13} />,
+    info: <Info size={13} />,
+  }
+  const hasWarnings = issues.some(i => i.severity === 'error' || i.severity === 'warning')
+
+  if (!issues.length) return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
+      background: '#22c55e08', border: '1px solid #22c55e22', borderRadius: 10, marginBottom: 16,
+      fontSize: 12, color: '#22c55e',
+    }}>
+      <ShieldCheck size={14} />
+      Configuration looks healthy
+    </div>
+  )
+
+  return (
+    <div style={{
+      background: '#0d1117', border: `1px solid ${hasWarnings ? '#f59e0b22' : '#21262d'}`,
+      borderRadius: 12, padding: '12px 16px', marginBottom: 16,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+        <Activity size={13} style={{ color: hasWarnings ? '#f59e0b' : '#58a6ff' }} />
+        <span style={{ fontSize: 11, fontWeight: 700, color: hasWarnings ? '#f59e0b' : '#58a6ff', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Config Health
         </span>
       </div>
-      <div style={{ padding: '6px 0' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {issues.map((issue, i) => (
           <div key={i} style={{
-            display: 'flex', gap: 10, padding: '8px 16px',
-            background: i % 2 === 0 ? 'transparent' : '#0d111720',
-            borderLeft: `3px solid ${typeColors[issue.type]}`,
-            marginLeft: 0,
+            display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+            color: colors[issue.severity], padding: '4px 0',
           }}>
-            <span style={{ fontSize: 13, flexShrink: 0, marginTop: 1 }}>{issue.icon}</span>
-            <div>
-              <div style={{
-                fontSize: 12, color: '#c9d1d9', fontWeight: 500,
-                background: typeBgs[issue.type], display: 'inline',
-                padding: '1px 0',
-              }}>
-                {issue.message}
-              </div>
-              {issue.detail && (
-                <div style={{ fontSize: 11, color: '#8b949e', marginTop: 3, lineHeight: 1.4 }}>
-                  {issue.detail}
-                </div>
-              )}
-            </div>
+            {icons[issue.severity]}
+            {issue.message}
           </div>
         ))}
       </div>

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.utils.logger import get_logger
+from src.utils.qc_filter import qc_where
 
 logger = get_logger("stats")
 
@@ -52,7 +53,7 @@ class PortfolioMixin:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_portfolio_range(self, hours: int = 24, quote_currency: str | None = None) -> dict:
+    def get_portfolio_range(self, hours: int = 24, quote_currency: str | list[str] | None = None) -> dict:
         """Get min/max/avg portfolio value over a period.
 
         Uses the same anomaly-filtering logic as get_portfolio_history to exclude
@@ -110,25 +111,21 @@ class PortfolioMixin:
         ).fetchone()
         return dict(row) if row else None
 
-    def get_daily_summaries(self, days: int = 7, quote_currency: str | None = None) -> list[dict]:
-        """Get daily summaries.  When *quote_currency* is provided and the
-        table has an ``exchange`` column, filter by exchange.  Falls back
-        gracefully when the column doesn't exist (legacy DBs)."""
+    def get_daily_summaries(self, days: int = 7, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> list[dict]:
+        """Get daily summaries.  When *exchange* is provided and the table has
+        an ``exchange`` column, filter by exchange.  Falls back gracefully when
+        the column doesn't exist (legacy DBs)."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-        if quote_currency:
-            _qc_exchange_map = {"EUR": "coinbase", "USD": "ibkr"}
-            exchange = _qc_exchange_map.get(quote_currency.upper())
-            if exchange:
-                # Try filtering by exchange; fall back if column doesn't exist
-                try:
-                    rows = conn.execute(
-                        "SELECT * FROM daily_summaries WHERE date >= ? AND exchange = ? ORDER BY date DESC",
-                        (cutoff, exchange),
-                    ).fetchall()
-                    return [dict(r) for r in rows]
-                except Exception:
-                    pass  # exchange column doesn't exist in this DB
+        if exchange:
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM daily_summaries WHERE date >= ? AND exchange = ? ORDER BY date DESC",
+                    (cutoff, exchange),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except Exception:
+                pass  # exchange column doesn't exist in this DB
         rows = conn.execute(
             "SELECT * FROM daily_summaries WHERE date >= ? ORDER BY date DESC",
             (cutoff,),
@@ -137,7 +134,7 @@ class PortfolioMixin:
 
     # ─── Analytics Queries ─────────────────────────────────────────────────
 
-    def get_performance_summary(self, hours: int = 24, quote_currency: str | None = None) -> dict:
+    def get_performance_summary(self, hours: int = 24, quote_currency: str | list[str] | None = None) -> dict:
         """Get a comprehensive performance summary for the LLM."""
         return {
             "trade_stats": self.get_trade_stats(hours, quote_currency=quote_currency),
@@ -146,7 +143,7 @@ class PortfolioMixin:
             "recent_trades": self.get_trades(hours, limit=10, quote_currency=quote_currency),
         }
 
-    def get_portfolio_history(self, hours: int = 24, quote_currency: str | None = None) -> list[dict]:
+    def get_portfolio_history(self, hours: int = 24, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> list[dict]:
         """Get portfolio value over time (for trend analysis).
 
         Filters out anomalous snapshots from first-boot:
@@ -154,22 +151,17 @@ class PortfolioMixin:
         - portfolio_value wildly different from the stable median
           (paper-mode initial_balance bleed-through, e.g. ~914 vs real ~6)
 
-        When *quote_currency* is given, only snapshots whose exchange matches
-        the currency's canonical exchange are returned (via the ``exchange``
-        column added in the multi-exchange migration).
+        When *exchange* is given, only snapshots whose exchange column matches
+        are returned (e.g. ``exchange='coinbase'``).
         """
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         base_sql = """SELECT ts, portfolio_value, return_pct, total_pnl
                FROM portfolio_snapshots WHERE ts >= ? AND portfolio_value > 0"""
         params: list = [cutoff]
-        if quote_currency:
-            # Map quote currency → exchange name stored in the exchange column
-            _qc_exchange_map = {"EUR": "coinbase", "USD": "ibkr"}
-            exchange = _qc_exchange_map.get(quote_currency.upper())
-            if exchange:
-                base_sql += " AND exchange = ?"
-                params.append(exchange)
+        if exchange:
+            base_sql += " AND exchange = ?"
+            params.append(exchange)
         rows = conn.execute(base_sql + " ORDER BY ts", params).fetchall()
         if not rows:
             return []
@@ -187,21 +179,16 @@ class PortfolioMixin:
 
         return [dict(r) for r in rows]
 
-    def get_best_worst_trades(self, hours: int = 168, quote_currency: str | None = None) -> dict:
+    def get_best_worst_trades(self, hours: int = 168, quote_currency: str | list[str] | None = None) -> dict:
         """Get best and worst trades in a period."""
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         base_best = """SELECT pair, action, pnl, price, quote_amount, ts
                FROM trades WHERE ts >= ? AND pnl IS NOT NULL"""
         base_worst = base_best  # same WHERE clause
-        if quote_currency:
-            currency_filter = " AND UPPER(pair) LIKE ?"
-            suffix = f"%-{quote_currency.upper()}"
-            best = conn.execute(base_best + currency_filter + " ORDER BY pnl DESC LIMIT 3", (cutoff, suffix)).fetchall()
-            worst = conn.execute(base_worst + currency_filter + " ORDER BY pnl ASC LIMIT 3", (cutoff, suffix)).fetchall()
-        else:
-            best = conn.execute(base_best + " ORDER BY pnl DESC LIMIT 3", (cutoff,)).fetchall()
-            worst = conn.execute(base_worst + " ORDER BY pnl ASC LIMIT 3", (cutoff,)).fetchall()
+        qc_frag, qc_params = qc_where(quote_currency)
+        best = conn.execute(base_best + qc_frag + " ORDER BY pnl DESC LIMIT 3", (cutoff, *qc_params)).fetchall()
+        worst = conn.execute(base_worst + qc_frag + " ORDER BY pnl ASC LIMIT 3", (cutoff, *qc_params)).fetchall()
         return {
             "best": [dict(r) for r in best],
             "worst": [dict(r) for r in worst],

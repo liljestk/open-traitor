@@ -137,8 +137,10 @@ async def redis_subscriber():
                 for ws, ws_qc in list(deps.ws_connections):
                     # Filter: if this WS connection has a quote currency filter,
                     # only send events that match (or have no pair info)
-                    if ws_qc and event_pair and not event_pair.endswith(f"-{ws_qc.upper()}"):
-                        continue
+                    if ws_qc and event_pair:
+                        suffixes = [f"-{c.upper()}" for c in (ws_qc if isinstance(ws_qc, list) else [ws_qc])]
+                        if not any(event_pair.endswith(s) for s in suffixes):
+                            continue
                     try:
                         await ws.send_json(payload)
                     except Exception:

@@ -148,24 +148,19 @@ class TradesMixin:
         )
         conn.commit()
 
-    def get_events(self, hours: int = 24, event_type: Optional[str] = None, limit: int = 50, quote_currency: str | None = None) -> list[dict]:
+    def get_events(self, hours: int = 24, event_type: Optional[str] = None, limit: int = 50, quote_currency: str | list[str] | None = None) -> list[dict]:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        # Build optional quote-currency filter on the pair column
-        qc_clause = ""
-        params_extra: list = []
-        if quote_currency:
-            qc_clause = " AND UPPER(pair) LIKE ?"
-            params_extra = [f"%-{quote_currency.upper()}"]
+        qc_frag, qc_params = qc_where(quote_currency)
         if event_type:
             rows = conn.execute(
-                "SELECT * FROM events WHERE ts >= ? AND event_type = ?" + qc_clause + " ORDER BY ts DESC LIMIT ?",
-                (cutoff, event_type, *params_extra, limit),
+                "SELECT * FROM events WHERE ts >= ? AND event_type = ?" + qc_frag + " ORDER BY ts DESC LIMIT ?",
+                (cutoff, event_type, *qc_params, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM events WHERE ts >= ?" + qc_clause + " ORDER BY ts DESC LIMIT ?",
-                (cutoff, *params_extra, limit),
+                "SELECT * FROM events WHERE ts >= ?" + qc_frag + " ORDER BY ts DESC LIMIT ?",
+                (cutoff, *qc_params, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

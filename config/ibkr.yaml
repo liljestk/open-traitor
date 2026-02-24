@@ -193,6 +193,7 @@ trading:
   paper_slippage_pct: 0.0003
   quote_currencies:
   - EUR
+  - USD
   quote_currency: EUR
   reconcile_every_cycles: 10
   scan_movement_threshold_pct: 0.5

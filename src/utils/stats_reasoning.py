@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from src.utils.qc_filter import qc_where
+
 
 class ReasoningMixin:
     """Mixin supplying agent-reasoning and strategic-context persistence."""
@@ -105,7 +107,7 @@ class ReasoningMixin:
         pair: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
-        quote_currency: str | None = None,
+        quote_currency: str | list[str] | None = None,
     ) -> list[dict]:
         """
         Return a paginated list of trading cycles with outcome summary.
@@ -113,9 +115,7 @@ class ReasoningMixin:
         Used by the dashboard Cycle Explorer page.
         """
         conn = self._get_conn()
-        if pair:
-            rows = conn.execute(
-                """SELECT
+        _select = """SELECT
                     ar.cycle_id,
                     ar.pair,
                     MIN(ar.ts) as started_at,
@@ -134,7 +134,10 @@ class ReasoningMixin:
                     SUM(ar.completion_tokens) as total_completion_tokens,
                     SUM(ar.latency_ms) as total_latency_ms
                    FROM agent_reasoning ar
-                   LEFT JOIN trades t ON t.id = ar.trade_id
+                   LEFT JOIN trades t ON t.id = ar.trade_id"""
+        if pair:
+            rows = conn.execute(
+                _select + """
                    WHERE ar.pair = ?
                    GROUP BY ar.cycle_id
                    ORDER BY started_at DESC
@@ -142,56 +145,18 @@ class ReasoningMixin:
                 (pair, limit, offset),
             ).fetchall()
         elif quote_currency:
-            suffix = f"%-{quote_currency.upper()}"
+            qc_frag, qc_params = qc_where(quote_currency, col="ar.pair")
             rows = conn.execute(
-                """SELECT
-                    ar.cycle_id,
-                    ar.pair,
-                    MIN(ar.ts) as started_at,
-                    MAX(ar.ts) as finished_at,
-                    COUNT(DISTINCT ar.agent_name) as agent_count,
-                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.signal_type END) as signal_type,
-                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.confidence END) as confidence,
-                    MAX(CASE WHEN ar.agent_name='strategist' THEN
-                        json_extract(ar.reasoning_json, '$.action') END) as action,
-                    t.id as trade_id,
-                    t.pnl,
-                    t.quote_amount,
-                    t.price,
-                    ar.langfuse_trace_id,
-                    SUM(ar.prompt_tokens) as total_prompt_tokens,
-                    SUM(ar.completion_tokens) as total_completion_tokens,
-                    SUM(ar.latency_ms) as total_latency_ms
-                   FROM agent_reasoning ar
-                   LEFT JOIN trades t ON t.id = ar.trade_id
-                   WHERE UPPER(ar.pair) LIKE ?
+                _select + """
+                   WHERE 1=1""" + qc_frag + """
                    GROUP BY ar.cycle_id
                    ORDER BY started_at DESC
                    LIMIT ? OFFSET ?""",
-                (suffix, limit, offset),
+                (*qc_params, limit, offset),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT
-                    ar.cycle_id,
-                    ar.pair,
-                    MIN(ar.ts) as started_at,
-                    MAX(ar.ts) as finished_at,
-                    COUNT(DISTINCT ar.agent_name) as agent_count,
-                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.signal_type END) as signal_type,
-                    MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.confidence END) as confidence,
-                    MAX(CASE WHEN ar.agent_name='strategist' THEN
-                        json_extract(ar.reasoning_json, '$.action') END) as action,
-                    t.id as trade_id,
-                    t.pnl,
-                    t.quote_amount,
-                    t.price,
-                    ar.langfuse_trace_id,
-                    SUM(ar.prompt_tokens) as total_prompt_tokens,
-                    SUM(ar.completion_tokens) as total_completion_tokens,
-                    SUM(ar.latency_ms) as total_latency_ms
-                   FROM agent_reasoning ar
-                   LEFT JOIN trades t ON t.id = ar.trade_id
+                _select + """
                    GROUP BY ar.cycle_id
                    ORDER BY started_at DESC
                    LIMIT ? OFFSET ?""",

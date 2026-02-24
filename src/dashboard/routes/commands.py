@@ -112,9 +112,10 @@ def get_trailing_stops(profile: str = Query("")):
         # Filter by profile quote currency
         qc = deps.quote_currency_for(profile)
         if qc and isinstance(stops, dict):
+            suffixes = [f"-{c.upper()}" for c in (qc if isinstance(qc, list) else [qc])]
             stops = {
                 pair: data for pair, data in stops.items()
-                if pair.upper().endswith(f"-{qc.upper()}")
+                if any(pair.upper().endswith(s) for s in suffixes)
             }
         return deps.sanitize_floats({"stops": stops, "source": "redis"})
     except Exception as exc:

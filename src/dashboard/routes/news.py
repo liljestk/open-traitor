@@ -80,6 +80,14 @@ def get_news(
             crypto_profiles = {"coinbase", "crypto"}
             has_coingecko = resolved in crypto_profiles
 
+            # IBKR profile: also match articles from IBKR news sources
+            is_ibkr = resolved == "ibkr"
+            ibkr_tickers: set[str] = set()
+            if is_ibkr:
+                for pair in cfg.get("trading", {}).get("pairs", []):
+                    base = pair.split("-")[0].upper() if "-" in pair else pair.upper()
+                    ibkr_tickers.add(base.lower())
+
             def _matches_profile(article: dict) -> bool:
                 tags = {t.lower() for t in article.get("tags", [])}
                 source = (article.get("source") or "").lower()
@@ -92,6 +100,12 @@ def get_news(
                     return True
                 # Match coingecko for crypto profiles
                 if has_coingecko and "coingecko" in tags:
+                    return True
+                # Match IBKR-sourced articles
+                if is_ibkr and ("ibkr" in source or "benzinga" in source or "ib-" in source):
+                    return True
+                # Match by IBKR ticker tags
+                if ibkr_tickers and tags & ibkr_tickers:
                     return True
                 # Match by source field containing expected identifiers
                 for sub in expected_subs:
@@ -107,7 +121,7 @@ def get_news(
                 return False
 
             # Only filter if we have source config or followed symbols; otherwise show all
-            if expected_subs or expected_rss or followed_symbols:
+            if expected_subs or expected_rss or followed_symbols or ibkr_tickers:
                 articles = [a for a in articles if _matches_profile(a)]
 
         articles = articles[:count]
