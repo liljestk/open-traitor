@@ -409,16 +409,18 @@ class NewsAggregator:
                     if not title:
                         continue
                         
-                    # Parse time if possible
+                    # Parse time if possible — MUST be timezone-aware (UTC)
                     pub_time = datetime.now(timezone.utc)
                     if "time" in n:
                         try:
-                            # Tries to parse ISO format string or use as is if already datetime
                             time_val = n["time"]
                             if isinstance(time_val, str):
                                 pub_time = datetime.fromisoformat(time_val.replace('Z', '+00:00'))
                             elif hasattr(time_val, "isoformat"):
                                 pub_time = time_val
+                            # Ensure timezone-aware (naive → UTC)
+                            if pub_time.tzinfo is None:
+                                pub_time = pub_time.replace(tzinfo=timezone.utc)
                         except Exception:
                             pass
 

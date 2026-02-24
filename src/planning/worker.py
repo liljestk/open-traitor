@@ -49,8 +49,9 @@ from src.planning.workflows import (
     WeeklyReviewWorkflow,
     MonthlyReviewWorkflow,
 )
-from src.utils.logger import get_logger
+from src.utils.logger import setup_logger, get_logger
 
+setup_logger(log_level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = get_logger("planning.worker")
 
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "localhost:7233")
