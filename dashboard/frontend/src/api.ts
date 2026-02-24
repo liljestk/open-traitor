@@ -340,6 +340,8 @@ export interface LLMProviderLiveStatus {
   cooldown_remaining_s?: number
   daily_tokens?: number
   daily_token_limit?: number
+  daily_requests?: number
+  daily_request_limit?: number
   rpm_limit?: number
   rpm_current?: number
   /** OpenRouter-specific: remaining credit balance */
@@ -359,6 +361,7 @@ export interface LLMProviderConfig {
   timeout?: number
   rpm_limit?: number
   daily_token_limit?: number
+  daily_request_limit?: number
   cooldown_seconds?: number
   is_local?: boolean
   tier?: string

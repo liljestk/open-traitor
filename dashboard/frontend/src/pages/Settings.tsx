@@ -357,6 +357,21 @@ function LLMProvidersSection() {
                       )}
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
+                      <span style={{ color: '#8b949e' }}>Daily Requests</span>
+                      {editing ? (
+                        <input type="number" value={p.daily_request_limit ?? 0} min={0} step={100}
+                          onChange={e => updateField(idx, 'daily_request_limit', parseInt(e.target.value, 10))}
+                          style={{ ...inputBase, width: 90, textAlign: 'right', padding: '2px 6px', fontSize: 12 }}
+                        />
+                      ) : (
+                        <span style={{ color: '#e6edf3' }}>
+                          {p.live_status?.daily_requests !== undefined
+                            ? <>{p.live_status.daily_requests}<span style={{ color: '#484f58' }}> / {p.daily_request_limit ? p.daily_request_limit : '∞'}</span></>
+                            : p.daily_request_limit ? p.daily_request_limit : '∞'}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #21262d' }}>
                       <span style={{ color: '#8b949e' }}>Cooldown</span>
                       {editing ? (
                         <input type="number" value={p.cooldown_seconds ?? 60} min={5}

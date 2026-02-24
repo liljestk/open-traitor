@@ -68,7 +68,7 @@ llm:
     timeout: 45
     rpm_limit: 20
     daily_token_limit: 0
-    daily_request_limit: 300
+    daily_request_limit: 1000
     cooldown_seconds: 60
     tier: free
     api_key_set: true
