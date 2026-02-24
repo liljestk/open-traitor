@@ -471,27 +471,24 @@ class NewsAggregator:
 
         # Store
         with self._lock:
-            self.articles = unique_articles[-self.max_articles:]
+            self.articles = unique_articles[:self.max_articles]
             self.total_fetched += len(unique_articles)
             self.last_fetch_time = datetime.now(timezone.utc)
 
         # Store in Redis if available; publish update signal for subscribers
         if self.redis:
             try:
-                payload = json.dumps([asdict(a) for a in self.articles[-20:]], default=str)
+                payload = json.dumps([asdict(a) for a in self.articles[-80:]], default=str)
                 # Always write to global key for backward compat / "All Systems" view
                 self.redis.set(
                     "news:latest",
                     payload,
                     ex=600,  # 10 min TTL
                 )
-                # Also write to profile-specific key when running under a profile
-                if self.profile:
-                    self.redis.set(
-                        f"news:{self.profile}:latest",
-                        payload,
-                        ex=600,
-                    )
+                # NOTE: profile-specific keys (news:{profile}:latest) are written
+                # by the news worker with proper routing logic — do NOT write them
+                # here to avoid race conditions and incorrect filtering.
+
                 # Notify any subscribers (e.g. orchestrator) that fresh news is available.
                 # Non-blocking: if the channel has no subscribers the message is silently dropped.
                 self.redis.publish(

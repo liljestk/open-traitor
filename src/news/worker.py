@@ -157,10 +157,10 @@ def main():
         **reddit_creds,
     )
 
-    fetch_interval = min(
-        merged_config.get("fetch_interval", 300),
-        *(pcfg.get("fetch_interval", 300) for pcfg in profile_configs.values()),
-    )
+    _intervals = [merged_config.get("fetch_interval", 300)] + [
+        pcfg.get("fetch_interval", 300) for pcfg in profile_configs.values()
+    ]
+    fetch_interval = min(_intervals)
 
     # Pre-compute per-profile matching sets for fast article routing
     profile_match: dict[str, dict] = {}
@@ -172,9 +172,21 @@ def main():
             m = _re.search(r'//(?:www\.)?([^/]+)', url)
             if m:
                 rss_ids.add(m.group(1).lower().replace(".", "_"))
-        profile_match[pname] = {"subs": subs, "rss": rss_ids}
+        # For IBKR profile, also build a set of tracked ticker symbols
+        ibkr_tickers: set[str] = set()
+        if pname == "ibkr":
+            try:
+                ibkr_cfg_path = Path(config_dir) / "ibkr.yaml"
+                with open(ibkr_cfg_path) as f:
+                    ibkr_cfg = yaml.safe_load(f) or {}
+                for pair in ibkr_cfg.get("trading", {}).get("pairs", []):
+                    base = pair.split("-")[0].upper() if "-" in pair else pair.upper()
+                    ibkr_tickers.add(base)
+            except Exception:
+                pass
+        profile_match[pname] = {"subs": subs, "rss": rss_ids, "ibkr_tickers": ibkr_tickers}
 
-    def _route_article(article: dict, subs: set[str], rss_ids: set[str]) -> bool:
+    def _route_article(article: dict, subs: set[str], rss_ids: set[str], ibkr_tickers: set[str] | None = None) -> bool:
         """Return True if the article belongs to a profile's sources."""
         tags = {t.lower() for t in article.get("tags", [])}
         source = (article.get("source") or "").lower()
@@ -187,6 +199,13 @@ def main():
                 return True
         for rid in rss_ids:
             if rid in source:
+                return True
+        # Match IBKR-sourced articles by source prefix or ticker tags
+        if ibkr_tickers:
+            if "ibkr" in source or "benzinga" in source or "ib-" in source:
+                return True
+            tags_upper = {t.upper() for t in article.get("tags", [])}
+            if tags_upper & ibkr_tickers:
                 return True
         return False
 
@@ -208,10 +227,10 @@ def main():
                 for pname, pm in profile_match.items():
                     matched = [
                         a for a in all_dicts
-                        if _route_article(a, pm["subs"], pm["rss"])
+                        if _route_article(a, pm["subs"], pm["rss"], pm.get("ibkr_tickers"))
                     ]
                     max_arts = profile_configs[pname].get("max_articles", 50)
-                    matched = matched[-max_arts:]
+                    matched = matched[:max_arts]
                     redis_client.set(
                         f"news:{pname}:latest",
                         json.dumps(matched, default=str),
