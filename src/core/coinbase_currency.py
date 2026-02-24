@@ -126,6 +126,13 @@ class CoinbaseCurrencyMixin:
                 logger.debug(f"Using live fiat rate for {currency}: {fiat_rate:.4f} USD")
                 return amount * fiat_rate
 
+        # Stablecoin bridge: try {currency}-USDT or {currency}-USDC
+        for stable in ("USDT", "USDC"):
+            pair_stable = f"{currency}-{stable}"
+            price_stable = self.get_current_price(pair_stable)
+            if price_stable > 0:
+                return amount * price_stable  # stablecoins ≈ 1 USD
+
         logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
         return 0.0
 
@@ -171,6 +178,20 @@ class CoinbaseCurrencyMixin:
             if rate_nat > 0:
                 return amount * price_usd / rate_nat
 
+        # Stablecoin bridge: try {currency}-USDT or {currency}-USDC
+        # Many altcoins only have stablecoin pairs on Coinbase.
+        for stable in ("USDT", "USDC"):
+            pair_stable = f"{currency}-{stable}"
+            price_stable = self.get_current_price(pair_stable)
+            if price_stable > 0:
+                # stablecoins ≈ 1 USD → convert USD→native
+                rate_nat = _get_fiat_rate_usd(native) if native in _KNOWN_FIAT else 0.0
+                if rate_nat > 0:
+                    return amount * price_stable / rate_nat
+                # If native IS USD, stablecoin price ≈ USD price
+                if native == "USD":
+                    return amount * price_stable
+
         logger.warning(f"⚠️ No {native} price for {currency} — excluding {amount:.6f}")
         return 0.0
 
@@ -187,9 +208,18 @@ class CoinbaseCurrencyMixin:
         total = 0.0
         for account in accounts:
             balance = account.get("available_balance", {})
-            value = float(balance.get("value", 0))
-            currency = balance.get("currency", "")
-            if not currency or value == 0:
+            hold = account.get("hold", {})
+            currency = balance.get("currency", account.get("currency", ""))
+            try:
+                avail = float(balance.get("value", 0))
+            except (ValueError, TypeError):
+                avail = 0.0
+            try:
+                held = float(hold.get("value", 0))
+            except (ValueError, TypeError):
+                held = 0.0
+            amount = avail + held
+            if not currency or amount <= 0:
                 continue
-            total += self._currency_to_usd(currency, value)
+            total += self._currency_to_usd(currency, amount)
         return total

@@ -95,12 +95,19 @@ class HoldingsManager:
 
             for acct in account_list:
                 bal = acct.get("available_balance", {})
+                hold = acct.get("hold", {})
                 currency = bal.get("currency", acct.get("currency", ""))
-                val_str = bal.get("value", "0")
                 try:
-                    amount = float(val_str)
+                    avail = float(bal.get("value", "0"))
                 except (ValueError, TypeError):
-                    amount = 0.0
+                    avail = 0.0
+                try:
+                    held = float(hold.get("value", "0"))
+                except (ValueError, TypeError):
+                    held = 0.0
+
+                # Total = available + on-hold (pending orders)
+                amount = avail + held
 
                 if amount <= 0 or not currency:
                     continue

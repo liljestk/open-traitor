@@ -326,26 +326,62 @@ class CoinbaseClient(
     # Account & Portfolio
     # =========================================================================
 
+    _ACCOUNTS_PAGE_SIZE: int = 250  # API max per page
+
     def get_accounts(self) -> list[dict]:
-        """Get all accounts."""
+        """Get **all** accounts, paginating automatically.
+
+        The Coinbase Advanced Trade API defaults to 49 accounts per page.
+        We request 250 (the API maximum) and follow the cursor until no
+        more pages remain — otherwise accounts beyond page-1 are invisible.
+        """
         if self.paper_mode:
             return self._get_paper_accounts()
 
         if self._rest_client:
             try:
-                accounts = self._throttled_request("get_accounts")
-                result = (
-                    accounts.to_dict()
-                    if hasattr(accounts, "to_dict")
-                    else dict(accounts)
-                )
-                account_list = result.get("accounts", [])
-                if not account_list:
+                all_accounts: list[dict] = []
+                cursor: str | None = None
+                page = 0
+
+                while True:
+                    page += 1
+                    kwargs: dict[str, Any] = {"limit": self._ACCOUNTS_PAGE_SIZE}
+                    if cursor:
+                        kwargs["cursor"] = cursor
+
+                    accounts = self._throttled_request("get_accounts", **kwargs)
+                    result = (
+                        accounts.to_dict()
+                        if hasattr(accounts, "to_dict")
+                        else dict(accounts)
+                    )
+                    batch = result.get("accounts", [])
+                    all_accounts.extend(batch)
+
+                    # Follow pagination cursor
+                    cursor = result.get("cursor") or None
+                    has_next = result.get("has_next", False)
+                    if not cursor or not has_next or not batch:
+                        break
+                    if page >= 20:  # safety valve
+                        logger.warning(
+                            "⚠️ get_accounts: hit 20-page safety limit "
+                            f"({len(all_accounts)} accounts so far)"
+                        )
+                        break
+
+                if not all_accounts:
                     logger.warning(
                         "⚠️ get_accounts: Coinbase returned empty account list "
                         "(check API key permissions)"
                     )
-                return account_list
+                if page > 1:
+                    logger.info(
+                        f"📋 get_accounts: fetched {len(all_accounts)} accounts "
+                        f"across {page} pages"
+                    )
+                return all_accounts
             except Exception as e:
                 logger.error(f"Error fetching accounts: {e}")
                 raise
@@ -635,17 +671,30 @@ class CoinbaseClient(
 
     @property
     def balance(self) -> dict[str, float]:
-        """Get current balance (paper or real)."""
+        """Get current balance (paper or real).
+
+        Returns available + held amounts so the balance reflects the
+        full account value, not just what's immediately tradable.
+        """
         if self.paper_mode:
             return self._paper_balance.copy()
         accounts = self.get_accounts()
-        balances = {}
+        balances: dict[str, float] = {}
         for account in accounts:
-            bal = account.get("available_balance", {})
-            currency = bal.get("currency", "")
-            value = float(bal.get("value", 0))
-            if value > 0:
-                balances[currency] = value
+            currency = account.get("available_balance", {}).get(
+                "currency", account.get("currency", "")
+            )
+            try:
+                avail = float(account.get("available_balance", {}).get("value", 0))
+            except (ValueError, TypeError):
+                avail = 0.0
+            try:
+                held = float(account.get("hold", {}).get("value", 0))
+            except (ValueError, TypeError):
+                held = 0.0
+            total = avail + held
+            if total > 0 and currency:
+                balances[currency] = balances.get(currency, 0.0) + total
         return balances
 
     def reconcile_positions(self, expected: dict[str, float]) -> dict:

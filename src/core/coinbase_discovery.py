@@ -57,17 +57,24 @@ class CoinbaseDiscoveryMixin:
             }
 
         try:
-            accounts = self._throttled_request("get_accounts")
-            result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-            account_list = result.get("accounts", [])
+            account_list = self.get_accounts()  # paginated
             currencies = [
                 a.get("available_balance", {}).get("currency", a.get("currency", "?"))
                 for a in account_list
             ]
-            non_zero = [
-                a for a in account_list
-                if float(a.get("available_balance", {}).get("value", 0)) > 0
-            ]
+
+            def _has_balance(a: dict) -> bool:
+                try:
+                    avail = float(a.get("available_balance", {}).get("value", 0))
+                except (ValueError, TypeError):
+                    avail = 0.0
+                try:
+                    held = float(a.get("hold", {}).get("value", 0))
+                except (ValueError, TypeError):
+                    held = 0.0
+                return (avail + held) > 0
+
+            non_zero = [a for a in account_list if _has_balance(a)]
             return {
                 "ok": True,
                 "mode": "live" if not self.paper_mode else "paper",
@@ -101,17 +108,19 @@ class CoinbaseDiscoveryMixin:
             return "USD"
 
         try:
-            accounts = self._throttled_request("get_accounts")
-            result = accounts.to_dict() if hasattr(accounts, "to_dict") else dict(accounts)
-            account_list = result.get("accounts", [])
+            account_list = self.get_accounts()  # paginated
 
             best_currency = "USD"
             best_value_usd = -1.0  # -1 so even a zero EUR balance beats the USD default
 
             for account in account_list:
                 balance = account.get("available_balance", {})
+                hold = account.get("hold", {})
                 currency = balance.get("currency", "")
-                value = float(balance.get("value", 0))
+                try:
+                    value = float(balance.get("value", 0)) + float(hold.get("value", 0))
+                except (ValueError, TypeError):
+                    value = 0.0
 
                 if currency not in _KNOWN_FIAT or currency == "USD":
                     continue
