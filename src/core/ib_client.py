@@ -28,6 +28,7 @@ except ImportError:
 
 from src.core.exchange_client import ExchangeClient
 from src.core.paper_trading import PaperTradingMixin
+from src.core import equity_feed
 
 
 class IBClient(PaperTradingMixin, ExchangeClient):
@@ -57,7 +58,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         paper_slippage_pct: float = 0.0003,
         initial_balance: float = 100_000.0,
         ib_host: str = "127.0.0.1",
-        ib_port: int = 4002,        # 4001 = live TWS, 4002 = paper TWS / IB Gateway
+        ib_port: int = 4001,        # 4001 = live IB Gateway, 4002 = paper TWS
         ib_client_id: int = 1,
     ):
         self.paper_mode = paper_mode
@@ -98,6 +99,15 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "Live IB trading requires the 'ib_insync' package. "
                 "Install with: pip install ib_insync"
             )
+        # ib_insync requires an asyncio event loop in the current thread.
+        # When called from non-main threads (e.g. FastAPI/AnyIO workers),
+        # no event loop exists — create one so ib_insync can function.
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         self.ib = _IB()
         try:
             self.ib.connect(self._ib_host, self._ib_port, clientId=self._ib_client_id)
@@ -220,11 +230,18 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
     def get_current_price(self, pair: str) -> float:
         """
-        In paper mode, return last recorded price or 0.
+        In paper mode, fetch live price via Yahoo Finance (yfinance).
         In live mode, queries IB market data.
         """
         if self.paper_mode:
-            return self._last_prices.get(pair.upper(), 0.0)
+            # Try cached manual price first, then Yahoo Finance
+            cached = self._last_prices.get(pair.upper())
+            if cached and cached > 0:
+                return cached
+            price = equity_feed.get_current_price(pair)
+            if price > 0:
+                self._last_prices[pair.upper()] = price
+            return price
         
         try:
             contract = self._get_contract(pair)
@@ -250,11 +267,12 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         Live mode will query IB historical data.
         """
         if self.paper_mode:
-            logger.warning(
-                f"get_candles({product_id}) — paper mode returns no candle data; "
-                f"analysis pipeline will have no signals until a live data source is configured"
-            )
-            return []
+            candles = equity_feed.get_candles(product_id, granularity, limit)
+            if not candles:
+                logger.debug(
+                    f"get_candles({product_id}) — paper mode: yfinance returned no data"
+                )
+            return candles
         
         try:
             contract = self._get_contract(product_id)
@@ -642,11 +660,15 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         if only_trade:
             return list(only_trade)
         if self.paper_mode:
-            logger.warning(
-                "discover_all_pairs: paper mode without only_trade — "
-                "returning empty list. Configure trading.only_trade in ibkr.yaml."
+            pairs = equity_feed.discover_pairs(
+                exchange_id=self.exchange_id,
+                quote_currencies=quote_currencies,
+                never_trade=list(never_trade) if never_trade else None,
             )
-            return []
+            logger.info(
+                f"discover_all_pairs: paper mode discovered {len(pairs)} equity pairs via yfinance"
+            )
+            return pairs
             
         from ib_insync import ScannerSubscription
         try:
@@ -741,6 +763,27 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         except Exception as e:
             logger.error(f"Failed to fetch article body {article_id}: {e}")
             return ""
+
+    def discover_all_pairs_detailed(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: list[str] | None = None,
+        only_trade: list[str] | None = None,
+        include_crypto_quotes: bool = False,
+    ) -> list[dict]:
+        """Return detailed pair metadata for the universe scanner.
+
+        Paper mode uses Yahoo Finance; live mode will use IB Scanner.
+        """
+        if self.paper_mode:
+            return equity_feed.discover_pairs_detailed(
+                exchange_id=self.exchange_id,
+                quote_currencies=quote_currencies,
+                never_trade=list(never_trade) if never_trade else None,
+                only_trade=list(only_trade) if only_trade else None,
+            )
+        # Live mode: TODO use IB Scanner for detailed metadata
+        return []
 
     def adapt_pairs_to_account(
         self, pairs: list[str], native_currency: str

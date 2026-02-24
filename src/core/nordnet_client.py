@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover
 
 from src.core.exchange_client import ExchangeClient
 from src.core.paper_trading import PaperTradingMixin
+from src.core import equity_feed
 
 
 class NordnetClient(PaperTradingMixin, ExchangeClient):
@@ -125,11 +126,18 @@ class NordnetClient(PaperTradingMixin, ExchangeClient):
 
     def get_current_price(self, pair: str) -> float:
         """
-        In paper mode, return last recorded price or a synthetic one.
+        In paper mode, fetch live price via Yahoo Finance (yfinance).
         In live mode, this will call the Nordnet price endpoint.
         """
         if self.paper_mode:
-            return self._last_prices.get(pair.upper(), 0.0)
+            # Try cached manual price first, then Yahoo Finance
+            cached = self._last_prices.get(pair.upper())
+            if cached and cached > 0:
+                return cached
+            price = equity_feed.get_current_price(pair)
+            if price > 0:
+                self._last_prices[pair.upper()] = price
+            return price
         raise NotImplementedError
 
     def set_price(self, pair: str, price: float) -> None:
@@ -146,10 +154,12 @@ class NordnetClient(PaperTradingMixin, ExchangeClient):
         Live mode will query Nordnet historical data.
         """
         if self.paper_mode:
-            logger.debug(
-                f"get_candles({product_id}) — paper mode, returning empty list"
-            )
-            return []
+            candles = equity_feed.get_candles(product_id, granularity, limit)
+            if not candles:
+                logger.debug(
+                    f"get_candles({product_id}) — paper mode: yfinance returned no data"
+                )
+            return candles
         raise NotImplementedError
 
     def get_market_trades(self, product_id: str, limit: int = 50) -> list[dict]:
@@ -391,11 +401,35 @@ class NordnetClient(PaperTradingMixin, ExchangeClient):
         if only_trade:
             return list(only_trade)
         if self.paper_mode:
-            logger.warning(
-                "discover_all_pairs: paper mode without only_trade — "
-                "returning empty list. Configure trading.only_trade in nordnet.yaml."
+            pairs = equity_feed.discover_pairs(
+                exchange_id=self.exchange_id,
+                quote_currencies=quote_currencies,
+                never_trade=list(never_trade) if never_trade else None,
             )
-            return []
+            logger.info(
+                f"discover_all_pairs: paper mode discovered {len(pairs)} equity pairs via yfinance"
+            )
+            return pairs
+        raise NotImplementedError
+
+    def discover_all_pairs_detailed(
+        self,
+        quote_currencies: list[str] | None = None,
+        never_trade: list[str] | None = None,
+        only_trade: list[str] | None = None,
+        include_crypto_quotes: bool = False,
+    ) -> list[dict]:
+        """Return detailed pair metadata for the universe scanner.
+
+        Paper mode uses Yahoo Finance; live mode will use Nordnet API.
+        """
+        if self.paper_mode:
+            return equity_feed.discover_pairs_detailed(
+                exchange_id=self.exchange_id,
+                quote_currencies=quote_currencies,
+                never_trade=list(never_trade) if never_trade else None,
+                only_trade=list(only_trade) if only_trade else None,
+            )
         raise NotImplementedError
 
     def adapt_pairs_to_account(self, pairs: list[str], native_currency: str) -> list[str]:

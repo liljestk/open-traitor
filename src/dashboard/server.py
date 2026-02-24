@@ -91,7 +91,7 @@ def set_globals(
     # Also try to create an IBKR client for IBKR profile price lookups
     try:
         ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
-        ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+        ib_port = int(os.environ.get("IBKR_PORT", "4001"))
         ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
         from src.core.ib_client import IBClient
         deps.ibkr_exchange_client = IBClient(
@@ -223,6 +223,23 @@ async def lifespan(application: FastAPI):
             logger.info("✅ Dashboard exchange price client ready")
         except Exception as e:
             logger.warning(f"⚠️ Dashboard exchange client not available: {e}")
+
+    # Try to initialise IBKR client for equity price lookups (IB Gateway on host)
+    if deps.ibkr_exchange_client is None:
+        try:
+            ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+            ib_port = int(os.environ.get("IBKR_PORT", "4001"))
+            ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+            from src.core.ib_client import IBClient
+            deps.ibkr_exchange_client = IBClient(
+                paper_mode=False,
+                ib_host=ib_host,
+                ib_port=ib_port,
+                ib_client_id=ib_client_id + 10,
+            )
+            logger.info("✅ Dashboard IBKR price client ready")
+        except Exception as e:
+            logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
 
     yield
     if task:

@@ -325,7 +325,7 @@ def ensure_ibkr_client():
         return _self.ibkr_exchange_client
     try:
         ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
-        ib_port = int(os.environ.get("IBKR_PORT", "4002"))
+        ib_port = int(os.environ.get("IBKR_PORT", "4001"))
         ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
         from src.core.ib_client import IBClient
         client = IBClient(
