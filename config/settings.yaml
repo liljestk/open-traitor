@@ -64,13 +64,13 @@ llm:
     enabled: true
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
-    model: meta-llama/llama-3.3-70b-instruct
+    model: meta-llama/llama-3.3-70b-instruct:free
     timeout: 45
     rpm_limit: 20
     daily_token_limit: 0
     daily_request_limit: 1000
     cooldown_seconds: 60
-    tier: paid
+    tier: free
   - name: gemini
     enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
@@ -82,6 +82,17 @@ llm:
     cooldown_seconds: 120
     tier: free
     reserve_for_priority: high
+  - name: openrouter-paid
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: meta-llama/llama-3.3-70b-instruct
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 0
+    cooldown_seconds: 30
+    tier: paid
   - name: openai
     enabled: false
     base_url: https://api.openai.com/v1

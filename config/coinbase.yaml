@@ -80,10 +80,10 @@ llm:
     daily_token_limit: 0
     daily_request_limit: 1000
     enabled: true
-    model: meta-llama/llama-3.3-70b-instruct
+    model: meta-llama/llama-3.3-70b-instruct:free
     name: openrouter
     rpm_limit: 20
-    tier: paid
+    tier: free
     timeout: 45
   - api_key_env: GEMINI_API_KEY
     api_key_set: true
@@ -97,6 +97,18 @@ llm:
     rpm_limit: 10
     tier: free
     timeout: 30
+  - api_key_env: OPENROUTER_API_KEY
+    api_key_set: true
+    base_url: https://openrouter.ai/api/v1
+    cooldown_seconds: 30
+    daily_token_limit: 0
+    daily_request_limit: 0
+    enabled: true
+    model: meta-llama/llama-3.3-70b-instruct
+    name: openrouter-paid
+    rpm_limit: 20
+    tier: paid
+    timeout: 45
   - api_key_env: OPENAI_API_KEY
     api_key_set: false
     base_url: https://api.openai.com/v1

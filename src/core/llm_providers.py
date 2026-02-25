@@ -215,7 +215,7 @@ def build_providers(
                 timeout=timeout,
                 max_retries=fallback_max_retries,
             )
-        elif name == "openrouter":
+        elif name.startswith("openrouter"):
             # OpenRouter: add attribution headers for better rate limits
             client = AsyncOpenAI(
                 base_url=base_url,

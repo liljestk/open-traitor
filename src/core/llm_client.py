@@ -206,7 +206,7 @@ class LLMClient:
 
         # OpenRouter free-model rotation: if one free model is rate-limited,
         # try the next one before giving up entirely
-        if p.name == "openrouter" and p.tier == "free":
+        if p.name.startswith("openrouter") and p.tier == "free":
             self._rotate_openrouter_model(p, reason)
 
         logger.warning(
@@ -237,7 +237,7 @@ class LLMClient:
 
         Returns the credit info dict or None if not an OpenRouter provider.
         """
-        if p.name != "openrouter":
+        if not p.name.startswith("openrouter"):
             return None
 
         now = time.monotonic()
@@ -851,7 +851,7 @@ class LLMClient:
         with self._providers_lock:
             providers = list(self._providers)
         for p in providers:
-            if p.name == "openrouter" and not p.is_local:
+            if p.name.startswith("openrouter") and not p.is_local:
                 info = await self.check_openrouter_credits_cached(p)
                 if info and info.get("ok"):
                     remaining = info.get("credits_remaining")
@@ -923,7 +923,7 @@ class LLMClient:
                     ]),
                 })
                 # OpenRouter-specific: credit balance
-                if p.name == "openrouter":
+                if p.name.startswith("openrouter"):
                     with p._lock:
                         status["credits_remaining"] = p._credits_remaining
                         status["free_model_index"] = p._free_model_index
