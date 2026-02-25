@@ -257,33 +257,21 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
     def get_current_price(self, pair: str) -> float:
         """
-        In paper mode, fetch live price via Yahoo Finance (yfinance).
-        In live mode, queries IB market data.
+        Fetch live price via Yahoo Finance (yfinance).
+
+        Like get_candles(), we always use yfinance for price data because
+        ib_insync's synchronous API (qualifyContracts, reqTickers) deadlocks
+        when called from asyncio executor threads that share the event loop
+        with the orchestrator's run_until_complete().
         """
-        if self.paper_mode:
-            # Try cached manual price first, then Yahoo Finance
-            cached = self._last_prices.get(pair.upper())
-            if cached and cached > 0:
-                return cached
-            price = equity_feed.get_current_price(pair)
-            if price > 0:
-                self._last_prices[pair.upper()] = price
-            return price
-        
-        try:
-            import concurrent.futures as _cf
-            contract = self._get_contract(pair)
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                _fut = _pool.submit(self.ib.reqTickers, contract)
-                tickers = _fut.result(timeout=15)
-            if tickers:
-                t = tickers[0]
-                price = t.last if t.last == t.last and t.last > 0 else t.close
-                if price == price and price > 0:  # Check for NaN and > 0
-                    return float(price)
-        except Exception as e:
-            logger.warning(f"Failed to fetch live price for {pair}: {e}")
-        return 0.0
+        # Try cached manual price first, then Yahoo Finance
+        cached = self._last_prices.get(pair.upper())
+        if cached and cached > 0:
+            return cached
+        price = equity_feed.get_current_price(pair)
+        if price > 0:
+            self._last_prices[pair.upper()] = price
+        return price
 
     def set_price(self, pair: str, price: float) -> None:
         """Helper for tests / paper mode: set the current price for a pair."""
@@ -307,42 +295,20 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         self, product_id: str, granularity: str = "ONE_DAY", limit: int = 200
     ) -> list[dict]:
         """
-        Return OHLCV candles. In paper mode, returns an empty list.
-        Live mode will query IB historical data.
+        Return OHLCV candles via yfinance (equity_feed).
+
+        We always use yfinance for historical candles because ib_insync's
+        reqHistoricalData has event-loop conflicts when called concurrently
+        from worker threads (multi-TF analysis, universe scanner, etc.).
+        The IB Gateway connection is reserved for order execution, account
+        info, and live ticker data where real-time accuracy is critical.
         """
-        if self.paper_mode:
-            candles = equity_feed.get_candles(product_id, granularity, limit)
-            if not candles:
-                logger.debug(
-                    f"get_candles({product_id}) — paper mode: yfinance returned no data"
-                )
-            return candles
-        
-        try:
-            contract = self._get_contract(product_id)
-
-            barSize, duration = self._IB_GRANULARITY_MAP.get(
-                granularity, ("1 day", f"{min(limit, 365)} D")
+        candles = equity_feed.get_candles(product_id, granularity, limit)
+        if not candles:
+            logger.debug(
+                f"get_candles({product_id}) — yfinance returned no data"
             )
-
-            bars = self._ib_req_historical_with_timeout(
-                contract, duration, barSize,
-            )
-            
-            return [
-                {
-                    "time": bar.date.isoformat() if hasattr(bar.date, "isoformat") else str(bar.date),
-                    "open": float(bar.open),
-                    "high": float(bar.high),
-                    "low": float(bar.low),
-                    "close": float(bar.close),
-                    "volume": float(bar.volume),
-                }
-                for bar in bars
-            ]
-        except Exception as e:
-            logger.warning(f"Failed to fetch candles for {product_id}: {e}")
-            return []
+        return candles
 
     def _ib_req_historical_with_timeout(
         self, contract, duration: str, bar_size: str,
@@ -748,59 +714,35 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         only_trade: list[str] | None = None,
     ) -> list[str]:
         """
-        In live mode, use IB Scanner (Top % Gainers) to find active tickers.
-        Returns pairs with their actual trading currency (usually USD for US stocks).
+        Discover tradable equity pairs via Yahoo Finance.
+
+        Always uses yfinance for discovery because ib_insync's synchronous
+        methods (reqScannerData, reqTickers) deadlock or error when called
+        from threads that don't own the asyncio event loop.  IB Gateway is
+        reserved exclusively for order execution and account queries.
         """
         if only_trade:
             result = list(only_trade)
             self._known_pairs.update(p.upper() for p in result)
             return result
-        if self.paper_mode:
-            pairs = equity_feed.discover_pairs(
-                exchange_id=self.exchange_id,
-                quote_currencies=quote_currencies,
-                never_trade=list(never_trade) if never_trade else None,
-            )
-            logger.info(
-                f"discover_all_pairs: paper mode discovered {len(pairs)} equity pairs via yfinance"
-            )
-            return pairs
 
-        # ── Live mode: IB Scanner + known-pairs fallback ─────────────
+        # Use yfinance-powered discovery (works in both paper & live mode)
+        pairs = equity_feed.discover_pairs(
+            exchange_id=self.exchange_id,
+            quote_currencies=quote_currencies,
+            never_trade=list(never_trade) if never_trade else None,
+        )
+
+        # Merge with known pairs (seeded from YAML config)
         never_set = set(never_trade) if never_trade else set()
-        found: set[str] = set()
-
-        # 1) Always include previously-known pairs (seeded from YAML config)
+        merged = set(pairs)
         for p in self._known_pairs:
             if p not in never_set:
-                found.add(p)
+                merged.add(p)
 
-        # 2) Augment with IB Scanner results (top % gainers)
-        try:
-            import concurrent.futures as _cf
-            from ib_insync import ScannerSubscription
-            sub = ScannerSubscription(
-                instrument='STK',
-                locationCode='STK.US.MAJOR',
-                scanCode='TOP_PERC_GAIN',
-            )
-            # reqScannerData has no timeout — wrap with a deadline
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                _fut = _pool.submit(self.ib.reqScannerData, sub)
-                scan_data = _fut.result(timeout=30)
-            for item in scan_data:
-                contract = item.contractDetails.contract
-                sym = contract.symbol
-                cur = contract.currency or "USD"
-                pair = f"{sym}-{cur}"
-                if pair not in never_set:
-                    found.add(pair)
-            logger.info(f"IB Scanner found {len(scan_data)} tickers; merged total = {len(found)}")
-        except Exception as e:
-            logger.warning(f"IB Scanner discovery failed (using known pairs only): {e}")
-
-        result = sorted(found)
+        result = sorted(merged)
         self._known_pairs.update(result)
+        logger.info(f"discover_all_pairs: {len(result)} pairs (yfinance + known)")
         return result
 
     def get_news(self, pair: str, limit: int = 5) -> list[dict]:
@@ -876,111 +818,17 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     ) -> list[dict]:
         """Return detailed pair metadata for the universe scanner.
 
-        Paper mode uses Yahoo Finance; live mode will use IB Scanner.
+        Always uses Yahoo Finance for market-data enrichment. IB Gateway is
+        reserved exclusively for order execution because ib_insync synchronous
+        methods (qualifyContracts, reqTickers) deadlock when the asyncio event
+        loop is involved in the orchestrator's main thread.
         """
-        if self.paper_mode:
-            return equity_feed.discover_pairs_detailed(
-                exchange_id=self.exchange_id,
-                quote_currencies=quote_currencies,
-                never_trade=list(never_trade) if never_trade else None,
-                only_trade=list(only_trade) if only_trade else None,
-            )
-
-        # ── Live mode: enrich pairs with IB market-data snapshots ────
-        pairs = self.discover_all_pairs(
+        return equity_feed.discover_pairs_detailed(
+            exchange_id=self.exchange_id,
             quote_currencies=quote_currencies,
-            never_trade=never_trade,
-            only_trade=only_trade,
+            never_trade=list(never_trade) if never_trade else None,
+            only_trade=list(only_trade) if only_trade else None,
         )
-        if not pairs:
-            logger.warning("discover_all_pairs_detailed: no pairs to enrich")
-            return []
-
-        # Qualify contracts (skip any that fail)
-        contracts_map: dict[str, Any] = {}
-        for pair in pairs:
-            try:
-                contract = self._get_contract(pair)
-                if contract.conId:
-                    contracts_map[pair] = contract
-                else:
-                    logger.debug(f"Skipping {pair}: contract has no conId")
-            except Exception as e:
-                logger.debug(f"Skipping {pair}: contract qualification failed: {e}")
-
-        if not contracts_map:
-            logger.warning(
-                "discover_all_pairs_detailed: no contracts qualified — "
-                "returning pairs with zero metadata"
-            )
-            return [
-                self._empty_pair_meta(pair) for pair in pairs
-            ]
-
-        # Request market-data snapshots for all qualified contracts
-        ticker_by_conid: dict[int, Any] = {}
-        try:
-            self.ib.reqMarketDataType(3)  # 3 = delayed (free, 15-min lag)
-            import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                _fut = _pool.submit(self.ib.reqTickers, *contracts_map.values())
-                tickers = _fut.result(timeout=30)
-            ticker_by_conid = {
-                t.contract.conId: t for t in tickers if t.contract
-            }
-        except Exception as e:
-            logger.error(f"reqTickers batch failed: {e}")
-
-        results: list[dict] = []
-        for pair, contract in contracts_map.items():
-            t = ticker_by_conid.get(contract.conId)
-
-            last_price = 0.0
-            prev_close = 0.0
-            volume = 0.0
-
-            if t:
-                last_price = (
-                    _safe_float(t.last)
-                    or _safe_float(t.close)
-                    or _safe_float(t.prevClose)
-                )
-                prev_close = _safe_float(t.prevClose)
-                volume = _safe_float(t.volume)
-
-            pct_change = 0.0
-            if prev_close > 0 and last_price > 0:
-                pct_change = ((last_price - prev_close) / prev_close) * 100.0
-
-            notional_vol = (
-                volume * last_price if (last_price > 0 and volume > 0) else 0.0
-            )
-
-            parts = pair.upper().split("-")
-            base = parts[0]
-            quote = parts[1] if len(parts) > 1 else "USD"
-
-            results.append({
-                "product_id": pair,
-                "base_currency_id": base,
-                "quote_currency_id": quote,
-                "base_min_size": "1",
-                "quote_min_size": "1.00",
-                "volume_24h": str(round(notional_vol, 2)),
-                "price_percentage_change_24h": str(round(pct_change, 4)),
-            })
-
-        # Also include unqualified pairs so they appear in the universe
-        qualified_set = set(contracts_map.keys())
-        for pair in pairs:
-            if pair not in qualified_set:
-                results.append(self._empty_pair_meta(pair))
-
-        logger.info(
-            f"discover_all_pairs_detailed: enriched {len(results)} pairs "
-            f"with IB market data ({len(ticker_by_conid)} had snapshots)"
-        )
-        return results
 
     # ------------------------------------------------------------------
     # Helpers

@@ -265,7 +265,7 @@ def open_conn(db) -> sqlite3.Connection:
     """Open a fresh SQLite connection for the given StatsDB instance."""
     conn = sqlite3.connect(db.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=DELETE")
     return conn
 
 

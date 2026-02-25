@@ -27,6 +27,7 @@ from typing import Any
 from temporalio import activity
 
 from src.core.llm_client import LLMClient
+from src.core.llm_providers import build_providers
 from src.utils.logger import get_logger
 
 logger = get_logger("planning.activities")
@@ -45,17 +46,40 @@ _llm_client_lock = threading.Lock()
 
 
 def _get_llm_client() -> LLMClient:
-    """Thread-safe lazy-initialised LLMClient for use inside activities."""
+    """Thread-safe lazy-initialised LLMClient for use inside activities.
+
+    Uses the full provider chain from settings.yaml (OpenRouter → Gemini → Ollama)
+    so planning decisions benefit from cloud models instead of Ollama-only.
+    """
     global _llm_client
     if _llm_client is None:
         with _llm_client_lock:
             # Double-checked locking
             if _llm_client is None:
+                # Load provider config from settings.yaml
+                providers_config: list[dict] = []
+                try:
+                    settings_path = os.path.join("config", "settings.yaml")
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        cfg = yaml.safe_load(f) or {}
+                    providers_config = cfg.get("llm", {}).get("providers", [])
+                except Exception as e:
+                    logger.warning(f"Could not load settings.yaml for LLM providers: {e}")
+
+                providers = build_providers(
+                    providers_config,
+                    fallback_base_url=_OLLAMA_BASE,
+                    fallback_model=_PLANNING_MODEL,
+                    fallback_timeout=60,
+                    fallback_max_retries=1,
+                ) if providers_config else None
+
                 _llm_client = LLMClient(
                     base_url=_OLLAMA_BASE,
                     model=_PLANNING_MODEL,
                     temperature=0.3,
                     max_tokens=2000,
+                    providers=providers,
                 )
     return _llm_client
 
@@ -110,7 +134,7 @@ def _get_conn(profile: str = "") -> sqlite3.Connection:
         db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=5)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=DELETE")
     return conn
 
 

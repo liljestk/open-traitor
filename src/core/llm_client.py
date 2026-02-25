@@ -25,7 +25,7 @@ import time
 from datetime import date as dt_date
 from typing import Any, Optional, TYPE_CHECKING
 
-from openai import RateLimitError, APIStatusError
+from openai import AsyncOpenAI, RateLimitError, APIStatusError
 
 from src.utils.logger import get_logger
 

@@ -64,15 +64,15 @@ llm:
     enabled: true
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
-    model: meta-llama/llama-3.3-70b-instruct:free
+    model: meta-llama/llama-3.3-70b-instruct
     timeout: 45
     rpm_limit: 20
     daily_token_limit: 0
     daily_request_limit: 1000
     cooldown_seconds: 60
-    tier: free
+    tier: paid
   - name: gemini
-    enabled: false
+    enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     api_key_env: GEMINI_API_KEY
     model: gemini-2.0-flash

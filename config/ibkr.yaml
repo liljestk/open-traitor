@@ -83,10 +83,10 @@ llm:
     daily_request_limit: 1000
     daily_token_limit: 0
     enabled: true
-    model: meta-llama/llama-3.3-70b-instruct:free
+    model: meta-llama/llama-3.3-70b-instruct
     name: openrouter
     rpm_limit: 20
-    tier: free
+    tier: paid
     timeout: 45
   - api_key_env: GEMINI_API_KEY
     api_key_set: true

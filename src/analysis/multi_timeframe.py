@@ -134,22 +134,34 @@ class MultiTimeframeAnalyzer:
         # data sources (e.g. IB Gateway) stop responding.
         _FUTURE_TIMEOUT = 45  # seconds per timeframe fetch
 
-        with ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf") as pool:
+        # IMPORTANT: Do NOT use `with ThreadPoolExecutor(...)` here.
+        # If as_completed() raises TimeoutError, __exit__ calls shutdown(wait=True)
+        # which blocks forever if workers are stuck on blocking I/O (e.g. IB Gateway).
+        pool = ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf")
+        try:
             futures = {pool.submit(self._fetch_timeframe, pair, tf): tf for tf in TIMEFRAMES}
-            for future in as_completed(futures, timeout=_FUTURE_TIMEOUT * len(TIMEFRAMES)):
-                tf_def = futures[future]
-                try:
-                    name, result, score_contrib = future.result(timeout=_FUTURE_TIMEOUT)
-                    tf_results[name] = result
-                    weighted_score += score_contrib
-                except TimeoutError:
-                    name = tf_def["name"]
-                    logger.warning(f"Multi-TF {name} timed out after {_FUTURE_TIMEOUT}s")
-                    tf_results[name] = {"error": "timeout"}
-                except Exception as e:
-                    name = tf_def["name"]
-                    logger.warning(f"Multi-TF analysis failed for {name}: {e}")
-                    tf_results[name] = {"error": str(e)}
+            try:
+                for future in as_completed(futures, timeout=_FUTURE_TIMEOUT * len(TIMEFRAMES)):
+                    tf_def = futures[future]
+                    try:
+                        name, result, score_contrib = future.result(timeout=_FUTURE_TIMEOUT)
+                        tf_results[name] = result
+                        weighted_score += score_contrib
+                    except TimeoutError:
+                        name = tf_def["name"]
+                        logger.warning(f"Multi-TF {name} timed out after {_FUTURE_TIMEOUT}s")
+                        tf_results[name] = {"error": "timeout"}
+                    except Exception as e:
+                        name = tf_def["name"]
+                        logger.warning(f"Multi-TF analysis failed for {name}: {e}")
+                        tf_results[name] = {"error": str(e)}
+            except TimeoutError:
+                logger.warning(f"Multi-TF as_completed timed out for {pair} — skipping remaining timeframes")
+                for future, tf_def in futures.items():
+                    if tf_def["name"] not in tf_results:
+                        tf_results[tf_def["name"]] = {"error": "timeout"}
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         # Determine confluence
         valid_scores = [

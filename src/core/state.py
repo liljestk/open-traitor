@@ -173,13 +173,19 @@ class TradingState:
                 )
 
             # Additive merge: only add crypto holdings NOT already in positions
+            # Filter out dust holdings (below dust_threshold in native value)
             synced_count = 0
             for h in self.live_holdings:
                 if h.get("is_fiat"):
                     continue
                 pair = h.get("pair")
                 amount = h.get("amount", 0)
+                native_value = h.get("native_value", 0)
                 if not pair or amount <= 0:
+                    continue
+                # Skip dust holdings — they count against position limits
+                # but are too small to trade
+                if native_value < dust_threshold:
                     continue
                 # setdefault — does NOT overwrite existing bot-opened positions
                 if pair not in self.positions:

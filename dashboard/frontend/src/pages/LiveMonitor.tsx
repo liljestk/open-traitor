@@ -1,14 +1,15 @@
 /**
  * LiveMonitor — real-time WebSocket stream of LLM span events + HITL intervention panel.
  * Connects to /ws/live and renders events as they arrive.
+ * Profile-aware: shows context for the currently selected exchange (crypto or stocks).
  */
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { AlertTriangle, Crosshair, PauseCircle, ShieldAlert, ChevronDown, ChevronUp, History } from 'lucide-react'
+import { AlertTriangle, Crosshair, PauseCircle, ShieldAlert, ChevronDown, ChevronUp, History, Activity, BarChart3 } from 'lucide-react'
 import type { LiveEvent } from '../api'
-import { fetchPortfolioExposure, fetchTrailingStops, fetchCommandHistory, sendTradeCommand } from '../api'
+import { fetchPortfolioExposure, fetchTrailingStops, fetchCommandHistory, sendTradeCommand, fetchStatsSummary } from '../api'
 import { useLiveStore, useCurrencyFormatter } from '../store'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
@@ -298,8 +299,60 @@ function InterventionPanel() {
   )
 }
 
+/* ────── Agent Status Summary ────── */
+function AgentStatusPanel() {
+  const fmtCurrency = useCurrencyFormatter()
+  const profile = useLiveStore((s) => s.profile)
+
+  const { data: stats } = useQuery({
+    queryKey: ['stats-summary', profile],
+    queryFn: fetchStatsSummary,
+    refetchInterval: 15_000,
+  })
+
+  if (!stats) return null
+
+  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : profile === 'crypto' || !profile ? 'Coinbase (Crypto)' : profile
+  const portfolioVal = stats.portfolio?.portfolio_value
+
+  return (
+    <div className="bg-gray-900/60 border border-gray-800 rounded-xl mb-4 px-4 py-3">
+      <div className="flex items-center gap-2 mb-2">
+        <Activity size={14} className="text-brand-400" />
+        <span className="text-xs font-semibold text-gray-300">Agent Status — {profileLabel}</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div>
+          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Portfolio</span>
+          <p className="text-sm font-semibold text-gray-200">{portfolioVal != null ? fmtCurrency(portfolioVal) : '—'}</p>
+        </div>
+        <div>
+          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Cycles (24h)</span>
+          <p className="text-sm font-semibold text-gray-200">{stats.cycles_24h ?? 0}</p>
+        </div>
+        <div>
+          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Active Pairs</span>
+          <p className="text-sm font-semibold text-gray-200">{stats.active_pairs ?? 0}</p>
+        </div>
+        <div>
+          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Trades (24h)</span>
+          <p className="text-sm font-semibold text-gray-200">{stats.trades_24h ?? 0}</p>
+        </div>
+      </div>
+      {stats.total_trades > 0 && (
+        <div className="mt-2 flex items-center gap-3 text-[10px] text-gray-500">
+          <BarChart3 size={10} />
+          <span>Win rate: {stats.win_rate != null ? `${stats.win_rate.toFixed(0)}%` : '—'}</span>
+          <span>Total PnL: {stats.total_pnl != null ? fmtCurrency(stats.total_pnl) : '—'}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function LiveMonitor() {
   const { events, connected, clearEvents } = useLiveStore()
+  const profile = useLiveStore((s) => s.profile)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to latest
@@ -309,11 +362,16 @@ export default function LiveMonitor() {
 
   const spanEvents = events.filter((e) => e.type !== 'ping')
 
+  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : profile === 'crypto' || !profile ? 'Coinbase (Crypto)' : profile
+
   return (
     <PageTransition>
     <div className="p-6 flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold text-gray-100">Live Monitor</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-xl font-bold text-gray-100">Live Monitor</h2>
+          <span className="text-xs px-2 py-0.5 bg-gray-800 text-gray-400 rounded-lg">{profileLabel}</span>
+        </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-sm">
             <span
@@ -330,6 +388,9 @@ export default function LiveMonitor() {
         </div>
       </div>
 
+      {/* Agent status summary for current profile */}
+      <AgentStatusPanel />
+
       {/* HITL intervention panel */}
       <InterventionPanel />
 
@@ -338,7 +399,7 @@ export default function LiveMonitor() {
           <EmptyState
             icon="live"
             title="Waiting for LLM events"
-            description="Events will stream in real-time as the trading bot processes cycles."
+            description={`Events will stream in real-time as the ${profileLabel} agent processes trading cycles.`}
           />
         </div>
       )}

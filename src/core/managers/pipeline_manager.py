@@ -162,6 +162,7 @@ class PipelineManager:
             await orch.rate_limiter.async_wait("coinbase_rest")
             price = await asyncio.to_thread(orch.exchange.get_current_price, pair)
         _timings["data"] = time.monotonic() - _step_t
+        logger.info(f"📊 {pair}: candles={len(candles) if candles else 0}, price={price:.6g}")
 
         if price <= 0:
             logger.warning(
@@ -196,11 +197,18 @@ class PipelineManager:
         except Exception as e:
             logger.debug(f"Fear & Greed unavailable: {e}")
 
+        logger.info(f"📊 {pair}: Fear & Greed done, starting multi-TF...")
         mtf_prompt = ""
         try:
-            mtf_prompt = await asyncio.to_thread(orch.multi_tf.get_for_prompt, pair)
+            mtf_prompt = await asyncio.wait_for(
+                asyncio.to_thread(orch.multi_tf.get_for_prompt, pair),
+                timeout=120,  # 2-minute hard cap for multi-TF analysis
+            )
+            logger.info(f"📊 {pair}: multi-TF complete")
+        except asyncio.TimeoutError:
+            logger.warning(f"Multi-TF timed out after 120s for {pair}")
         except Exception as e:
-            logger.debug(f"Multi-TF unavailable: {e}")
+            logger.warning(f"Multi-TF unavailable for {pair}: {e}")
 
         # ─── Sentiment scoring (keyword-based) ───
         sentiment_prompt = ""

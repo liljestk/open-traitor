@@ -72,7 +72,7 @@ class StatsDB(
         if not hasattr(self._local, "conn") or self._local.conn is None:
             conn = sqlite3.connect(self._db_path)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA journal_mode=DELETE")
             conn.execute("PRAGMA synchronous=NORMAL")
             self._local.conn = conn
             with self._conn_lock:
@@ -94,6 +94,18 @@ class StatsDB(
     def _init_db(self) -> None:
         """Create tables if they don't exist."""
         conn = self._get_conn()
+        # Migrate existing WAL-mode DBs: checkpoint WAL data into main file,
+        # then switch to DELETE mode (WAL doesn't work on Docker bind-mounts
+        # from Windows due to missing mmap/shared-memory support).
+        try:
+            cur = conn.execute("PRAGMA journal_mode")
+            current_mode = cur.fetchone()[0].lower()
+            if current_mode == "wal":
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode=DELETE")
+                logger.info(f"📊 Migrated {self._db_path} from WAL → DELETE journal mode")
+        except Exception as exc:
+            logger.warning(f"📊 WAL migration check failed for {self._db_path}: {exc}")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

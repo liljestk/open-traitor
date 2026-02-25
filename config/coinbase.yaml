@@ -80,10 +80,10 @@ llm:
     daily_token_limit: 0
     daily_request_limit: 1000
     enabled: true
-    model: meta-llama/llama-3.3-70b-instruct:free
+    model: meta-llama/llama-3.3-70b-instruct
     name: openrouter
     rpm_limit: 20
-    tier: free
+    tier: paid
     timeout: 45
   - api_key_env: GEMINI_API_KEY
     api_key_set: true
@@ -182,7 +182,7 @@ telegram:
   status_update_interval: 3600
 trading:
   exchange: coinbase
-  holdings_dust_threshold: 0.01
+  holdings_dust_threshold: 1.0
   holdings_refresh_seconds: 60
   include_crypto_quotes: true
   interval: 120
