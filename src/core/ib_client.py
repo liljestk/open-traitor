@@ -271,8 +271,11 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             return price
         
         try:
+            import concurrent.futures as _cf
             contract = self._get_contract(pair)
-            tickers = self.ib.reqTickers(contract)
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(self.ib.reqTickers, contract)
+                tickers = _fut.result(timeout=15)
             if tickers:
                 t = tickers[0]
                 price = t.last if t.last == t.last and t.last > 0 else t.close
@@ -285,6 +288,20 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     def set_price(self, pair: str, price: float) -> None:
         """Helper for tests / paper mode: set the current price for a pair."""
         self._last_prices[pair.upper()] = price
+
+    # Granularity → (barSize, durationStr) mapping for IB historical data
+    _IB_GRANULARITY_MAP: dict[str, tuple[str, str]] = {
+        "ONE_MINUTE":      ("1 min",   "1 D"),
+        "FIVE_MINUTE":     ("5 mins",  "5 D"),
+        "FIFTEEN_MINUTE":  ("15 mins", "10 D"),
+        "ONE_HOUR":        ("1 hour",  "25 D"),
+        "TWO_HOUR":        ("2 hours", "50 D"),
+        "SIX_HOUR":        ("4 hours", "120 D"),   # IB has no 6h bar; use 4h
+        "ONE_DAY":         ("1 day",   "365 D"),
+    }
+
+    # Timeout (seconds) for a single reqHistoricalData call
+    _IB_HIST_TIMEOUT: float = 30.0
 
     def get_candles(
         self, product_id: str, granularity: str = "ONE_DAY", limit: int = 200
@@ -303,23 +320,13 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         
         try:
             contract = self._get_contract(product_id)
-            barSize = "1 day"
-            duration = f"{min(limit, 365)} D"
-            
-            if granularity == "ONE_HOUR":
-                barSize = "1 hour"
-                duration = f"{max(1, limit // 8)} D"
-            elif granularity == "ONE_MINUTE":
-                barSize = "1 min"
-                duration = f"{max(1, limit * 60)} S"
 
-            bars = self.ib.reqHistoricalData(
-                contract,
-                endDateTime='',
-                durationStr=duration,
-                barSizeSetting=barSize,
-                whatToShow='TRADES',
-                useRTH=True
+            barSize, duration = self._IB_GRANULARITY_MAP.get(
+                granularity, ("1 day", f"{min(limit, 365)} D")
+            )
+
+            bars = self._ib_req_historical_with_timeout(
+                contract, duration, barSize,
             )
             
             return [
@@ -335,6 +342,66 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             ]
         except Exception as e:
             logger.warning(f"Failed to fetch candles for {product_id}: {e}")
+            return []
+
+    def _ib_req_historical_with_timeout(
+        self, contract, duration: str, bar_size: str,
+    ) -> list:
+        """Call reqHistoricalData with a timeout to prevent indefinite hangs.
+
+        ib_insync's blocking methods have NO built-in timeout.  We wrap the
+        call with ``concurrent.futures`` so the caller can give up after
+        ``_IB_HIST_TIMEOUT`` seconds instead of blocking forever.
+        """
+        import concurrent.futures
+
+        def _req():
+            return self.ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow='TRADES',
+                useRTH=True,
+            )
+
+        # ib_insync is NOT thread-safe.  Run the request in the CURRENT
+        # thread but impose a wall-clock deadline via a watchdog thread.
+        # Approach: use ib_insync's async API + asyncio.wait_for.
+        try:
+            import asyncio
+
+            async def _async_req():
+                return await self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime='',
+                    durationStr=duration,
+                    barSizeSetting=bar_size,
+                    whatToShow='TRADES',
+                    useRTH=True,
+                )
+
+            loop = self.ib.client._loop if hasattr(self.ib, 'client') and hasattr(self.ib.client, '_loop') else None
+            if loop and loop.is_running():
+                # Schedule on the IB event loop and wait with timeout
+                future = asyncio.run_coroutine_threadsafe(
+                    asyncio.wait_for(_async_req(), timeout=self._IB_HIST_TIMEOUT),
+                    loop,
+                )
+                return future.result(timeout=self._IB_HIST_TIMEOUT + 5)
+            else:
+                # Fallback: synchronous call with thread-based timeout
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(_req)
+                    return fut.result(timeout=self._IB_HIST_TIMEOUT)
+        except (concurrent.futures.TimeoutError, asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                f"reqHistoricalData timed out after {self._IB_HIST_TIMEOUT}s "
+                f"(bar={bar_size}, duration={duration})"
+            )
+            return []
+        except Exception as e:
+            logger.warning(f"reqHistoricalData failed: {e}")
             return []
 
     def get_market_trades(self, product_id: str, limit: int = 50) -> list[dict]:
@@ -710,13 +777,17 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
         # 2) Augment with IB Scanner results (top % gainers)
         try:
+            import concurrent.futures as _cf
             from ib_insync import ScannerSubscription
             sub = ScannerSubscription(
                 instrument='STK',
                 locationCode='STK.US.MAJOR',
                 scanCode='TOP_PERC_GAIN',
             )
-            scan_data = self.ib.reqScannerData(sub)
+            # reqScannerData has no timeout — wrap with a deadline
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(self.ib.reqScannerData, sub)
+                scan_data = _fut.result(timeout=30)
             for item in scan_data:
                 contract = item.contractDetails.contract
                 sym = contract.symbol
@@ -850,7 +921,10 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         ticker_by_conid: dict[int, Any] = {}
         try:
             self.ib.reqMarketDataType(3)  # 3 = delayed (free, 15-min lag)
-            tickers = self.ib.reqTickers(*contracts_map.values())
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(self.ib.reqTickers, *contracts_map.values())
+                tickers = _fut.result(timeout=30)
             ticker_by_conid = {
                 t.contract.conId: t for t in tickers if t.contract
             }

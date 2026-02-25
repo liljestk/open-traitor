@@ -637,7 +637,20 @@ class Orchestrator:
 
                 try:
                     tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
-                    self._loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                    # Impose a hard timeout so no single cycle can hang forever.
+                    # Budget: ~60s per pair × max_pairs, capped at 10 min.
+                    _cycle_deadline = min(60.0 * len(sorted_pairs), 600.0)
+                    self._loop.run_until_complete(
+                        asyncio.wait_for(
+                            asyncio.gather(*tasks, return_exceptions=True),
+                            timeout=_cycle_deadline,
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"⚠️ Cycle #{cycle_count} pipelines timed out after "
+                        f"{_cycle_deadline:.0f}s — moving to next cycle"
+                    )
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
 

@@ -130,14 +130,22 @@ class MultiTimeframeAnalyzer:
         # Fetch and analyse all timeframes concurrently.
         # Each worker rate-limits itself so Coinbase quotas are respected,
         # but the *wait* times overlap instead of stacking sequentially.
+        # Timeout per-future: prevents indefinite hangs when upstream
+        # data sources (e.g. IB Gateway) stop responding.
+        _FUTURE_TIMEOUT = 45  # seconds per timeframe fetch
+
         with ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf") as pool:
             futures = {pool.submit(self._fetch_timeframe, pair, tf): tf for tf in TIMEFRAMES}
-            for future in as_completed(futures):
+            for future in as_completed(futures, timeout=_FUTURE_TIMEOUT * len(TIMEFRAMES)):
                 tf_def = futures[future]
                 try:
-                    name, result, score_contrib = future.result()
+                    name, result, score_contrib = future.result(timeout=_FUTURE_TIMEOUT)
                     tf_results[name] = result
                     weighted_score += score_contrib
+                except TimeoutError:
+                    name = tf_def["name"]
+                    logger.warning(f"Multi-TF {name} timed out after {_FUTURE_TIMEOUT}s")
+                    tf_results[name] = {"error": "timeout"}
                 except Exception as e:
                     name = tf_def["name"]
                     logger.warning(f"Multi-TF analysis failed for {name}: {e}")
