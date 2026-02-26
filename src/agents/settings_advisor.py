@@ -256,7 +256,6 @@ class SettingsAdvisorAgent(BaseAgent):
             f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n"
             f"- Universe Size: {context.get('universe_size', 'unknown')}\n"
             f"{self._compute_confidence_recommendation(stats_db)}\n\n"
-            f"LATEST SCAN RESULTS:\n{scan_summary}\n\n"
             f"Based on these conditions, should we adjust any trading parameters?\n"
             f"If everything is working well, return an empty changes array.\n"
             f"Respond with JSON only."

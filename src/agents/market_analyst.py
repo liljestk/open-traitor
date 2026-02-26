@@ -22,69 +22,50 @@ from src.utils.logger import get_logger
 logger = get_logger("agent.market_analyst")
 
 
-MARKET_ANALYSIS_SYSTEM_PROMPT_CRYPTO = """You are an expert cryptocurrency market analyst.
+MARKET_ANALYSIS_SYSTEM_PROMPT = """You are an expert market analyst.
 Your job is to analyze technical indicators and news sentiment to produce a clear market assessment.
 
-Given the technical indicators and recent crypto news, provide your analysis as JSON:
+Given the technical indicators and recent news, provide your analysis as JSON:
 
-{
+{{
     "signal_type": "strong_buy" | "buy" | "weak_buy" | "neutral" | "weak_sell" | "sell" | "strong_sell",
     "confidence": 0.0-1.0,
     "market_condition": "strongly_bullish" | "bullish" | "slightly_bullish" | "neutral" | "slightly_bearish" | "bearish" | "strongly_bearish" | "volatile",
     "sentiment_overall": "bullish" | "bearish" | "neutral",
     "sentiment_score": -1.0 to 1.0,
-    "key_factors": ["factor1", "factor2", ...],
-    "reasoning": "Detailed explanation of your analysis",
+    "key_factors": ["factor1", "factor2"],
+    "reasoning": "Brief explanation of your analysis",
     "suggested_entry": price or null,
     "suggested_stop_loss": price or null,
     "suggested_take_profit": price or null
-}
+}}
 
 Be objective. Follow the technical indicators closely.
-Don't artificially lower confidence if the indicators point clearly in one direction.
-Balance risk with opportunity. While capital preservation is important, your goal is to find actionable trades, including short-term entries in choppy markets.
-If a strategic context (daily/weekly/monthly plan) is provided, treat it as background regime information —
-use it to calibrate your confidence but do not override clear technical evidence.
+{asset_class_notes}
+If a strategic context is provided, use it as regime background but do not override clear technical evidence.
 
 ACCOUNT-SIZE AWARENESS:
-- When account context is provided, calibrate stop-loss and take-profit levels to be realistic for the account size.
-- For micro/small accounts, tighter stops (closer to entry) reduce the capital at risk per trade.
-- Suggest entry amounts that make sense relative to the portfolio (don't suggest €100 entries on a €7 account)."""
+- Calibrate stop-loss and take-profit to the account size.
+- For small accounts, tighter stops reduce capital at risk.
+- Suggest entry amounts realistic for the portfolio.
 
-MARKET_ANALYSIS_SYSTEM_PROMPT_EQUITY = """You are an expert equities market analyst specializing in US and European stocks.
-Your job is to analyze technical indicators, market data, and news to produce a clear assessment for individual stocks or ETFs.
+Respond ONLY with valid JSON."""
 
-Given the technical indicators and recent market news, provide your analysis as JSON:
-
-{
-    "signal_type": "strong_buy" | "buy" | "weak_buy" | "neutral" | "weak_sell" | "sell" | "strong_sell",
-    "confidence": 0.0-1.0,
-    "market_condition": "strongly_bullish" | "bullish" | "slightly_bullish" | "neutral" | "slightly_bearish" | "bearish" | "strongly_bearish" | "volatile",
-    "sentiment_overall": "bullish" | "bearish" | "neutral",
-    "sentiment_score": -1.0 to 1.0,
-    "key_factors": ["factor1", "factor2", ...],
-    "reasoning": "Detailed explanation of your analysis",
-    "suggested_entry": price or null,
-    "suggested_stop_loss": price or null,
-    "suggested_take_profit": price or null
-}
-
-Be objective. Follow the technical indicators closely.
-Consider earnings, macro conditions, sector rotation, and institutional flows.
-Balance risk with opportunity — equities are less volatile than crypto, so calibrate stop distances accordingly.
-If a strategic context is provided, use it as regime background but do not override technical evidence.
-
-ACCOUNT-SIZE AWARENESS:
-- Calibrate position sizes and stop distances to the account size.
-- For smaller accounts, consider fractional shares and minimum lot sizes.
-- Suggest realistic entry amounts relative to the portfolio."""
+_CRYPTO_NOTES = (
+    "Don't artificially lower confidence if indicators point clearly in one direction. "
+    "Balance risk with opportunity — find actionable trades even in choppy markets."
+)
+_EQUITY_NOTES = (
+    "Consider earnings, macro conditions, sector rotation, and institutional flows. "
+    "Equities are less volatile than crypto — calibrate stop distances accordingly. "
+    "For smaller accounts, consider fractional shares and minimum lot sizes."
+)
 
 
 def _get_system_prompt(exchange: str) -> str:
     """Return the appropriate system prompt based on exchange/asset class."""
-    if exchange == "ibkr":
-        return MARKET_ANALYSIS_SYSTEM_PROMPT_EQUITY
-    return MARKET_ANALYSIS_SYSTEM_PROMPT_CRYPTO
+    notes = _EQUITY_NOTES if exchange == "ibkr" else _CRYPTO_NOTES
+    return MARKET_ANALYSIS_SYSTEM_PROMPT.format(asset_class_notes=notes)
 
 
 class MarketAnalystAgent(BaseAgent):
@@ -164,6 +145,7 @@ class MarketAnalystAgent(BaseAgent):
         llm_response = await self.llm.chat_json(
             system_prompt=system_prompt,
             user_message=user_message,
+            max_tokens=800,
             span=span,
             agent_name=self.name,
         )

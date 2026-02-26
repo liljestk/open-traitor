@@ -277,17 +277,10 @@ Respond ONLY with JSON:
     "preferred_pairs": ["BTC-USD", ...],
     "avoid_pairs": [...],
     "risk_posture": "aggressive" | "normal" | "conservative",
-    "key_observations": ["obs1", "obs2", ...],
+    "key_observations": ["obs1", "obs2"],
     "today_focus": "One sentence on the main trading focus for today",
-    "pair_outlooks": {
-        "BTC-USD": {"direction": "bullish", "expected_move_pct": 2.5, "confidence": 0.70}
-    },
     "summary": "2-3 sentence plain-English summary of the daily plan"
-}
-
-For pair_outlooks: include up to 5 pairs from preferred_pairs and avoid_pairs where you have meaningful conviction.
-expected_move_pct is the expected % price move over the next 24 hours (e.g. 2.5 means +2.5%).
-direction is "bullish" or "bearish". Only include pairs with confidence >= 0.60.""",
+}""",
 
         "weekly": """You are the strategic planning module for an automated trading bot.
 Your job is to review the last month of trading performance and produce a weekly strategy.

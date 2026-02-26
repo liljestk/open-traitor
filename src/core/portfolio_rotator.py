@@ -452,7 +452,7 @@ class PortfolioRotator(RotationExecutorMixin):
             ranking_table = "Asset Rankings:\n"
             ranking_table += "Pair | Score | Confidence | Predicted Move\n"
             ranking_table += "-" * 55 + "\n"
-            for r in rankings[:20]:  # Top 20 for context
+            for r in rankings[:10]:  # Top 10 for context
                 ranking_table += (
                     f"{r.pair} | {r.score:+.2f} | {r.confidence:.2f} | "
                     f"{r.predicted_move_pct:+.2f}%\n"

@@ -14,7 +14,7 @@ from src.utils.logger import get_logger
 logger = get_logger("agent.strategist")
 
 
-STRATEGY_SYSTEM_PROMPT_CRYPTO = """You are a cryptocurrency trading strategist.
+STRATEGY_SYSTEM_PROMPT = """You are a trading strategist.
 Based on the market analysis signal and any active user tasks, decide what action to take.
 
 Consider:
@@ -23,74 +23,49 @@ Consider:
 3. Active tasks from the user (spending limits, specific instructions)
 4. Risk management parameters
 5. Recent trade history (avoid overtrading)
-6. Recent trade outcomes for this pair — adapt if similar setups have repeatedly lost
-7. Strategic context from longer-term planning (daily/weekly/monthly) — use as regime background, not hard override
-8. Actual exchange holdings — you may propose selling pre-existing holdings, not just bot-opened ones
-
-Respond with JSON:
-
-{
-    "action": "buy" | "sell" | "hold",
-    "pair": "BTC-EUR",
-    "confidence": 0.0-1.0,
-    "quote_amount": amount_in_quote_currency_or_null,
-    "quantity": crypto_quantity_or_null,
-    "stop_loss_price": price_or_null,
-    "take_profit_price": price_or_null,
-    "reasoning": "Why this action",
-    "task_alignment": "How this relates to user's active tasks (if any)"
-}
-
-Rules:
-- Be decisive. Look for actionable short-term trades and scaling opportunities even if signals are imperfect.
-- If confidence is above the threshold, you should lean towards action (buy or sell).
-- Never exceed spending limits specified in tasks
-- Always set stop-loss for buy orders
-- Consider the current portfolio before adding more of the same asset
-- Do not hold simply out of fear. Calculate risk-reward and take small entries on decent setups.
-- For sells of existing holdings, use the quantity shown in ACTUAL HOLDINGS"""
-
-STRATEGY_SYSTEM_PROMPT_EQUITY = """You are an equity trading strategist specializing in US and European stocks.
-Based on the market analysis signal and any active user tasks, decide what action to take.
-
-Consider:
-1. The signal confidence and type
-2. Current portfolio positions and sector allocation
-3. Active tasks from the user (spending limits, specific instructions)
-4. Risk management parameters
-5. Recent trade history (avoid overtrading)
-6. Recent trade outcomes for this ticker — adapt if similar setups have repeatedly lost
+6. Recent trade outcomes — adapt if similar setups have repeatedly lost
 7. Strategic context from longer-term planning — use as regime background
-8. Actual broker holdings — you may propose selling pre-existing positions
-9. Fractional shares are supported (IBKR) — propose precise quantities
+8. Actual exchange holdings — you may propose selling pre-existing positions
+{asset_class_notes}
 
 Respond with JSON:
 
-{
+{{
     "action": "buy" | "sell" | "hold",
-    "pair": "AAPL",
+    "pair": "PAIR",
     "confidence": 0.0-1.0,
     "quote_amount": amount_in_quote_currency_or_null,
-    "quantity": share_count_or_null,
+    "quantity": quantity_or_null,
     "stop_loss_price": price_or_null,
     "take_profit_price": price_or_null,
     "reasoning": "Why this action",
     "task_alignment": "How this relates to user's active tasks (if any)"
-}
+}}
 
 Rules:
-- Be decisive. Look for actionable entries based on technical and fundamental signals.
-- Consider earnings dates, ex-dividend dates, and macro events.
+- Be decisive. Look for actionable trades even if signals are imperfect.
+- If confidence is above the threshold, lean towards action.
+- Never exceed spending limits specified in tasks.
 - Always set stop-loss for buy orders.
-- Consider sector exposure — don't concentrate too heavily in one sector.
-- For sells of existing holdings, use the quantity shown in ACTUAL HOLDINGS."""
+- Consider the current portfolio before adding more of the same asset.
+- For sells of existing holdings, use the quantity shown in ACTUAL HOLDINGS.
+
+Respond ONLY with valid JSON."""
+
+_CRYPTO_STRATEGY_NOTES = (
+    "9. Do not hold simply out of fear — calculate risk-reward and take small entries on decent setups"
+)
+_EQUITY_STRATEGY_NOTES = (
+    "9. Fractional shares are supported (IBKR) — propose precise quantities\n"
+    "10. Consider earnings dates, ex-dividend dates, and macro events\n"
+    "11. Consider sector exposure — don't concentrate too heavily in one sector"
+)
 
 
 def _get_strategy_prompt(exchange: str) -> str:
     """Return the appropriate system prompt based on exchange/asset class."""
-    if exchange == "ibkr":
-        return STRATEGY_SYSTEM_PROMPT_EQUITY
-    return STRATEGY_SYSTEM_PROMPT_CRYPTO
+    notes = _EQUITY_STRATEGY_NOTES if exchange == "ibkr" else _CRYPTO_STRATEGY_NOTES
+    return STRATEGY_SYSTEM_PROMPT.format(asset_class_notes=notes)
 
 
 class StrategistAgent(BaseAgent):
@@ -188,6 +163,7 @@ class StrategistAgent(BaseAgent):
         llm_response = await self.llm.chat_json(
             system_prompt=system_prompt,
             user_message=user_message,
+            max_tokens=600,
             span=span,
             agent_name=self.name,
         )
@@ -301,7 +277,7 @@ class StrategistAgent(BaseAgent):
 - Confidence: {signal.get('confidence', 0):.0%}
 - Current Price: {sym}{price:,.2f}
 - Market Condition: {signal.get('market_condition', 'unknown')}
-- Reasoning: {signal.get('reasoning', 'N/A')}
+- Reasoning: {(signal.get('reasoning', 'N/A') or 'N/A')[:150]}
 - Suggested Entry: {signal.get('suggested_entry', 'N/A')}
 - Suggested Stop-Loss: {signal.get('suggested_stop_loss', 'N/A')}
 - Suggested Take-Profit: {signal.get('suggested_take_profit', 'N/A')}

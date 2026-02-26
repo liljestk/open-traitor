@@ -67,7 +67,7 @@ class LLMClient:
         "risk_manager":       "high",    # risk gating – correctness critical
         "portfolio_rotator":  "high",    # portfolio-level rebalancing
         "telegram_chat":      "high",    # user-facing interactive chat
-        "market_analyst":     "normal",  # runs per-pair each cycle, high volume
+        "market_analyst":     "high",    # latency-sensitive; needs fast cloud path
         "executor":           "normal",  # mostly deterministic, LLM rarely used
         "settings_advisor":   "low",     # periodic, non-urgent
     }
@@ -656,6 +656,7 @@ class LLMClient:
         system_prompt: str,
         user_message: str,
         temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         span: Optional["SpanContext"] = None,
         agent_name: Optional[str] = None,
         priority: Optional[str] = None,
@@ -664,15 +665,11 @@ class LLMClient:
         Send a chat request and parse the response as JSON.
         Instructs the model to respond in JSON and parses it.
         """
-        json_instruction = (
-            "\n\nIMPORTANT: Respond ONLY with valid JSON. "
-            "No markdown, no explanation, no code blocks. Just raw JSON."
-        )
-
         response = await self.chat(
-            system_prompt=system_prompt + json_instruction,
+            system_prompt=system_prompt,
             user_message=user_message,
             temperature=temperature,
+            max_tokens=max_tokens,
             span=span,
             agent_name=agent_name,
             priority=priority,
