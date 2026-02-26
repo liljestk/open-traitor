@@ -716,12 +716,27 @@ class PipelineManager:
                         fees=float(fee_amount),
                     )
                 elif risk_result.get('action') == 'sell' and float(filled_qty or 0) > 0:
-                    orch.fifo_tracker.record_sell(
+                    disposals = orch.fifo_tracker.record_sell(
                         asset=base_asset,
                         quantity=float(filled_qty),
                         sale_price_per_unit=float(fill_price),
                         fees=float(fee_amount),
                     )
+                    # Back-fill realized PNL into the StatsDB trade row so that
+                    # analytics queries (pnl IS NOT NULL) can include this trade.
+                    # Only update when we had real FIFO lots (cost_basis_per_unit > 0).
+                    # Skips pre-existing holdings where cost basis is unknown.
+                    if stats_trade_id and disposals:
+                        valid = [d for d in disposals if d.cost_basis_per_unit > 0]
+                        if valid:
+                            realized_pnl = sum(d.realized_pnl for d in valid)
+                            total_fees = sum(d.fees for d in valid)
+                            try:
+                                orch.stats_db.update_trade_pnl(
+                                    stats_trade_id, realized_pnl, fee_quote=total_fees
+                                )
+                            except Exception as _upd_err:
+                                logger.debug(f"PNL back-fill failed (non-fatal): {_upd_err}")
             except Exception as e:
                 logger.debug(f"FIFO tracking failed (non-fatal): {e}")
 

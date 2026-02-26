@@ -130,6 +130,22 @@ class TradesMixin:
             "sample_size": row["total"],
         }
 
+    def update_trade_pnl(self, trade_id: int, pnl: float, fee_quote: float | None = None) -> None:
+        """Back-fill PNL (and optionally fee) for a trade recorded without it.
+
+        Called after FIFO cost-basis calculation so that analytics queries
+        (which filter WHERE pnl IS NOT NULL) can include the trade.
+        """
+        conn = self._get_conn()
+        if fee_quote is not None:
+            conn.execute(
+                "UPDATE trades SET pnl = ?, fee_quote = ? WHERE id = ?",
+                (pnl, fee_quote, trade_id),
+            )
+        else:
+            conn.execute("UPDATE trades SET pnl = ? WHERE id = ?", (pnl, trade_id))
+        conn.commit()
+
     # ─── Events ────────────────────────────────────────────────────────────
 
     def record_event(

@@ -209,12 +209,27 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
   }
 
   // Build merged chart data: prices + prediction markers
-  const chartData = history.price_history.map((ph) => ({
+  type ChartPoint = {
+    ts: string
+    fullTs: string
+    price: number | undefined
+    forecastPrice: number | undefined
+    forecastHigh: number | undefined
+    forecastLow: number | undefined
+    buyMarker: number | undefined
+    sellMarker: number | undefined
+    isForecast?: boolean
+  }
+
+  const chartData: ChartPoint[] = history.price_history.map((ph) => ({
     ts: dayjs(ph.ts).format(overlayDays <= 1 ? 'HH:mm' : overlayDays <= 7 ? 'ddd HH:mm' : 'MMM DD'),
     fullTs: ph.ts,
     price: ph.price,
-    buyMarker: undefined as number | undefined,
-    sellMarker: undefined as number | undefined,
+    forecastPrice: undefined,
+    forecastHigh: undefined,
+    forecastLow: undefined,
+    buyMarker: undefined,
+    sellMarker: undefined,
   }))
 
   // Overlay prediction markers on closest price points
@@ -249,13 +264,70 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
     ? Math.round(correctPreds.length / evaluatedPreds.length * 1000) / 10
     : null
 
-  // Price range for Y axis domain
-  const prices = chartData.map(d => d.price).filter(Boolean)
-  const minPrice = Math.min(...prices) * 0.998
-  const maxPrice = Math.max(...prices) * 1.002
-
   // TP/SL reference lines from the latest prediction
   const latestPred = history.predictions[history.predictions.length - 1]
+
+  // ── Future Forecast Projection ─────────────────────────────────────────
+  // Extend the chart beyond the last known price toward the predicted target.
+  // Shows a dashed forecast line with a TP/SL confidence band.
+  const lastPrice = chartData.length > 0 ? chartData[chartData.length - 1].price : undefined
+  const lastTs = chartData.length > 0 ? chartData[chartData.length - 1].fullTs : undefined
+  const hasForecast = !!(latestPred && lastPrice && lastTs && (latestPred.suggested_tp || latestPred.suggested_sl))
+
+  if (hasForecast && lastPrice && lastTs) {
+    const tp = latestPred!.suggested_tp
+    const sl = latestPred!.suggested_sl
+    const isBullish = latestPred!.is_bullish
+    const confidence = latestPred!.confidence ?? 0.5
+
+    // Target price = TP if bullish, SL if bearish (direction of predicted move)
+    const targetPrice = isBullish
+      ? (tp ?? lastPrice * (1 + 0.02 * confidence))
+      : (sl ?? lastPrice * (1 - 0.02 * confidence))
+
+    // Number of forecast steps based on time range
+    const forecastSteps = overlayDays <= 1 ? 6 : overlayDays <= 7 ? 8 : 6
+    // Time step in hours
+    const hoursPerStep = overlayDays <= 1 ? 1 : overlayDays <= 7 ? 3 : 24
+
+    // Bridge point: last actual price also appears as first forecast point
+    const bridgeTs = dayjs(lastTs)
+    chartData[chartData.length - 1].forecastPrice = lastPrice
+
+    for (let i = 1; i <= forecastSteps; i++) {
+      const t = i / forecastSteps
+      const futureTs = bridgeTs.add(hoursPerStep * i, 'hour')
+      const forecastPrice = lastPrice + (targetPrice - lastPrice) * t
+
+      // Widen the band as we go further into the future
+      const bandSpread = Math.abs(
+        ((tp ?? lastPrice * 1.02) - (sl ?? lastPrice * 0.98))
+      ) * 0.5 * t + Math.abs(targetPrice - lastPrice) * 0.1 * t
+      const highBound = tp
+        ? Math.max(forecastPrice + bandSpread * 0.3, isBullish ? forecastPrice : forecastPrice + bandSpread)
+        : forecastPrice + bandSpread
+      const lowBound = sl
+        ? Math.min(forecastPrice - bandSpread * 0.3, isBullish ? forecastPrice - bandSpread : forecastPrice)
+        : forecastPrice - bandSpread
+
+      chartData.push({
+        ts: futureTs.format(overlayDays <= 1 ? 'HH:mm' : overlayDays <= 7 ? 'ddd HH:mm' : 'MMM DD'),
+        fullTs: futureTs.toISOString(),
+        price: undefined,
+        forecastPrice: Math.round(forecastPrice * 1e8) / 1e8,
+        forecastHigh: Math.round(highBound * 1e8) / 1e8,
+        forecastLow: Math.round(lowBound * 1e8) / 1e8,
+        buyMarker: undefined,
+        sellMarker: undefined,
+        isForecast: true,
+      })
+    }
+  }
+
+  // Price range for Y axis domain — include forecast band if present
+  const allValues = chartData.flatMap(d => [d.price, d.forecastPrice, d.forecastHigh, d.forecastLow].filter((v): v is number => v != null && v > 0))
+  const minPrice = Math.min(...allValues) * 0.997
+  const maxPrice = Math.max(...allValues) * 1.003
 
   return (
     <div>
@@ -287,6 +359,11 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-red-500" /> Sell ({bearish})
           </span>
+          {hasForecast && (
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-sm bg-amber-500/60" /> Forecast
+            </span>
+          )}
         </div>
       </div>
 
@@ -296,6 +373,11 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.2} />
               <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+            </linearGradient>
+            <linearGradient id="forecastBandGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.15} />
+              <stop offset="50%" stopColor="#f59e0b" stopOpacity={0.08} />
+              <stop offset="100%" stopColor="#f59e0b" stopOpacity={0.15} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
@@ -312,9 +394,13 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
           <Tooltip
             contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
             formatter={(value: any, name: string | undefined) => {
-              if (name === 'price') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Price']
-              if (name === 'buyMarker') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Buy Signal']
-              if (name === 'sellMarker') return [typeof value === 'number' ? (value < 1 ? value.toFixed(6) : value.toFixed(2)) : value, 'Sell Signal']
+              const fmt = (v: number) => v < 1 ? v.toFixed(6) : v.toFixed(2)
+              if (name === 'price') return [typeof value === 'number' ? fmt(value) : value, 'Price']
+              if (name === 'forecastPrice') return [typeof value === 'number' ? fmt(value) : value, 'Forecast']
+              if (name === 'forecastHigh') return [typeof value === 'number' ? fmt(value) : value, 'Forecast High']
+              if (name === 'forecastLow') return [typeof value === 'number' ? fmt(value) : value, 'Forecast Low']
+              if (name === 'buyMarker') return [typeof value === 'number' ? fmt(value) : value, 'Buy Signal']
+              if (name === 'sellMarker') return [typeof value === 'number' ? fmt(value) : value, 'Sell Signal']
               return [value, name]
             }}
           />
@@ -336,6 +422,7 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
               label={{ value: 'SL', fill: '#ef4444', fontSize: 9, position: 'right' }}
             />
           )}
+          {/* Actual price line */}
           <Area
             type="monotone"
             dataKey="price"
@@ -343,7 +430,44 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             strokeWidth={1.5}
             fill="url(#priceGrad)"
             dot={false}
+            connectNulls={false}
           />
+          {/* Forecast confidence band (TP/SL range) */}
+          {hasForecast && (
+            <Area
+              type="monotone"
+              dataKey="forecastHigh"
+              stroke="none"
+              fill="url(#forecastBandGrad)"
+              dot={false}
+              connectNulls={false}
+              activeDot={false}
+            />
+          )}
+          {hasForecast && (
+            <Area
+              type="monotone"
+              dataKey="forecastLow"
+              stroke="none"
+              fill="#161b22"
+              dot={false}
+              connectNulls={false}
+              activeDot={false}
+            />
+          )}
+          {/* Forecast price line (dashed) */}
+          {hasForecast && (
+            <Area
+              type="monotone"
+              dataKey="forecastPrice"
+              stroke="#f59e0b"
+              strokeWidth={2}
+              strokeDasharray="6 3"
+              fill="none"
+              dot={false}
+              connectNulls={false}
+            />
+          )}
           <Scatter
             dataKey="buyMarker"
             fill="#22c55e"
@@ -356,6 +480,24 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
           />
         </ComposedChart>
       </ResponsiveContainer>
+
+      {/* Forecast summary below chart */}
+      {hasForecast && latestPred && (
+        <div className="mt-2 flex items-center gap-4 text-[10px] text-gray-500 border-t border-gray-800/50 pt-2">
+          <span className="flex items-center gap-1">
+            <span className={`w-1.5 h-1.5 rounded-full ${latestPred.is_bullish ? 'bg-green-500' : 'bg-red-500'}`} />
+            Latest: <span className="text-gray-300 font-medium">{latestPred.is_bullish ? 'Bullish' : 'Bearish'}</span>
+            <span className="text-gray-600">({(latestPred.confidence * 100).toFixed(0)}% conf)</span>
+          </span>
+          {latestPred.suggested_tp && (
+            <span>Target: <span className="text-green-400 font-mono">{latestPred.suggested_tp < 1 ? latestPred.suggested_tp.toFixed(6) : latestPred.suggested_tp.toFixed(2)}</span></span>
+          )}
+          {latestPred.suggested_sl && (
+            <span>Stop: <span className="text-red-400 font-mono">{latestPred.suggested_sl < 1 ? latestPred.suggested_sl.toFixed(6) : latestPred.suggested_sl.toFixed(2)}</span></span>
+          )}
+          <span className="text-gray-600 italic ml-auto">Dashed line = AI forecast projection</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -754,7 +896,7 @@ export default function Predictions() {
               </button>
             </div>
             <p className="text-[10px] text-gray-600 mb-3">
-              Actual price with AI prediction signals overlaid. Triangles = buy signals, diamonds = sell signals.
+              Actual price with AI prediction signals overlaid. Triangles = buy signals, diamonds = sell signals. Dashed amber line = future forecast from latest prediction.
             </p>
             <PredictionOverlayChart pair={selectedPair} />
           </div>
