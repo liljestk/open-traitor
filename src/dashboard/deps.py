@@ -283,18 +283,23 @@ def langfuse_url(trace_id: str | None = None) -> str | None:
     """Build a Langfuse URL for a trace/span using the Langfuse SDK if available."""
     if not trace_id:
         return None
+    # External host for browser-accessible URLs (not internal Docker hostname)
+    external_host = get_config().get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
     try:
         from src.utils.tracer import get_llm_tracer
         tracer = get_llm_tracer()
         if tracer:
             url = tracer.get_trace_url(trace_id)
             if url:
+                # SDK returns internal Docker URL (e.g. http://langfuse-web:3000/...)
+                # Rewrite to external host for browser access
+                import re
+                url = re.sub(r'^https?://[^/]+', external_host.rstrip('/'), url)
                 return url
     except Exception:
         pass
-    # Fallback: best-effort URL (may not work if project ID is needed)
-    host = get_config().get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
-    return f"{host}/trace/{trace_id}"
+    # Fallback: best-effort URL
+    return f"{external_host}/trace/{trace_id}"
 
 
 def serialize_event_attrs(event) -> dict:

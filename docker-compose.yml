@@ -334,6 +334,23 @@ services:
       retries: 10
       start_period: 10s
 
+  # MinIO bucket init — creates 'langfuse' bucket on first start
+  minio-init:
+    image: minio/minio:latest
+    container_name: auto-traitor-minio-init
+    restart: "no"
+    entrypoint: /bin/sh
+    command: >
+      -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+          mc mb local/langfuse --ignore-existing &&
+          echo 'Bucket langfuse ready'"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_healthy
+
   # =========================================================================
   # Langfuse Web — self-hosted LLM observability UI (v3)
   # Dashboard: http://localhost:3000
@@ -349,6 +366,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     ports:
@@ -412,6 +431,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
