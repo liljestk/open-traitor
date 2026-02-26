@@ -8,7 +8,7 @@ the client automatically falls through to the next provider in the chain.
 Smart free-tier management:
   - Tracks per-provider RPM, daily token budgets, and cooldowns.
   - OpenRouter: periodically checks remaining free credits via /api/v1/auth/key.
-  - Gemini: respects 15 RPM / 1M token-per-day free limits.
+  - Gemini: respects 10 RPM / 200K token / 20 RPD free limits (gemini-2.5-flash-lite).
   - Automatic recovery polling re-enables providers after cooldown / day rollover.
 
 Provider config, LLMProvider dataclass, and build_providers() live in
@@ -166,9 +166,16 @@ class LLMClient:
                 p.rpm_timestamps = [t for t in p.rpm_timestamps if t > cutoff]
                 if len(p.rpm_timestamps) >= p.rpm_limit:
                     return False
-                # Per-second spacing: OpenRouter allows ~1 req/3s on free tier
-                if p.rpm_timestamps and (now_wall - p.rpm_timestamps[-1]) < 3.0:
-                    return False
+                # Per-second spacing to avoid bursts
+                # Gemini free tier: enforce 60/rpm_limit spacing (e.g. 8 RPM → 7.5s)
+                # OpenRouter: ~3s minimum spacing
+                if p.rpm_timestamps:
+                    if p.name == "gemini" and p.tier == "free":
+                        min_spacing = 60.0 / max(p.rpm_limit, 1) + 1.0  # e.g. 8.5s for 8 RPM
+                    else:
+                        min_spacing = 3.0
+                    if (now_wall - p.rpm_timestamps[-1]) < min_spacing:
+                        return False
 
         return True
 
@@ -186,20 +193,55 @@ class LLMClient:
             p.daily_tokens += total_tokens
             p.daily_requests += 1
 
+            # Reset consecutive 429 counter on success
+            if p._consecutive_429s > 0:
+                p._consecutive_429s = 0
+
+            # Warn when approaching daily limits (Gemini free tier)
+            if p.name == "gemini" and p.tier == "free":
+                if p.daily_request_limit > 0:
+                    remaining_reqs = p.daily_request_limit - p.daily_requests
+                    if remaining_reqs <= 5:
+                        logger.warning(
+                            f"⚠️ Gemini daily requests: {p.daily_requests}/{p.daily_request_limit} "
+                            f"({remaining_reqs} remaining)"
+                        )
+                if p.daily_token_limit > 0:
+                    token_pct = p.daily_tokens / p.daily_token_limit * 100
+                    if token_pct >= 80:
+                        logger.warning(
+                            f"⚠️ Gemini daily tokens: {p.daily_tokens:,}/{p.daily_token_limit:,} "
+                            f"({token_pct:.0f}%)"
+                        )
+
     def _activate_cooldown(self, p: LLMProvider, reason: str) -> None:
         """Put a provider on cooldown after a rate-limit or quota error.
 
         For OpenRouter on free tier: rotate to next free model before cooldown,
         so we can keep trying different free models.
 
-        For Gemini on free tier: use escalating cooldown (2x configured) since
-        the free tier is very restrictive and we don't want to keep hammering it.
+        For Gemini on free tier: use escalating cooldown based on consecutive
+        429 errors — each successive 429 doubles the cooldown (capped at 30 min).
+        This prevents hammering the API when daily limits are near exhaustion.
         """
         cooldown_secs = p.cooldown_seconds
 
-        # Gemini free tier: escalate cooldown on repeated 429s
+        # Gemini free tier: escalate cooldown on consecutive 429s
         if p.name == "gemini" and p.tier == "free":
-            cooldown_secs = min(cooldown_secs * 2, 600)  # cap at 10 minutes
+            with p._lock:
+                p._consecutive_429s += 1
+                # Exponential backoff: base * 2^(n-1), capped at 30 minutes
+                escalation = min(2 ** (p._consecutive_429s - 1), 10)
+                cooldown_secs = min(int(cooldown_secs * escalation), 1800)
+
+                # If we're near daily limits, go into long cooldown
+                if p.daily_request_limit > 0 and p.daily_requests >= p.daily_request_limit - 2:
+                    cooldown_secs = 3600  # 1 hour — effectively done for the day
+                    logger.warning(
+                        f"🛑 Gemini daily request limit nearly exhausted "
+                        f"({p.daily_requests}/{p.daily_request_limit}), "
+                        f"long cooldown {cooldown_secs}s"
+                    )
 
         with p._lock:
             p.cooldown_until = time.monotonic() + cooldown_secs

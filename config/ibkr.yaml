@@ -91,13 +91,14 @@ llm:
   - api_key_env: GEMINI_API_KEY
     api_key_set: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-    cooldown_seconds: 120
-    daily_token_limit: 500000
+    cooldown_seconds: 180
+    daily_token_limit: 200000
+    daily_request_limit: 18
     enabled: true
-    model: gemini-2.0-flash
+    model: gemini-2.5-flash-lite
     name: gemini
     reserve_for_priority: high
-    rpm_limit: 10
+    rpm_limit: 8
     tier: free
     timeout: 30
   - api_key_env: OPENROUTER_API_KEY

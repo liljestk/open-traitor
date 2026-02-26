@@ -156,6 +156,8 @@ class LLMProvider:
     _credits_remaining: Optional[float] = field(default=None, repr=False)
     _credits_checked_at: float = field(default=0.0, repr=False)
     _free_model_index: int = field(default=0, repr=False)  # current free model rotation
+    # Consecutive 429 counter for escalating cooldown (Gemini free tier)
+    _consecutive_429s: int = field(default=0, repr=False)
 
 
 def build_providers(

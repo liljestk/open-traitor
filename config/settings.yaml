@@ -75,11 +75,12 @@ llm:
     enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     api_key_env: GEMINI_API_KEY
-    model: gemini-2.0-flash
+    model: gemini-2.5-flash-lite
     timeout: 30
-    rpm_limit: 10
-    daily_token_limit: 500000
-    cooldown_seconds: 120
+    rpm_limit: 8
+    daily_token_limit: 200000
+    daily_request_limit: 18
+    cooldown_seconds: 180
     tier: free
     reserve_for_priority: high
   - name: openrouter-paid

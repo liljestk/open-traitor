@@ -23,8 +23,12 @@ logger = get_logger("core.context_manager")
 class ContextManager:
     """Manages strategic context loading, pair priorities, and performance summaries."""
 
+    _ACCURACY_CACHE_TTL: float = 6 * 3600  # re-fetch signal accuracy at most every 6 hours
+
     def __init__(self, orchestrator: "Orchestrator"):
         self.orchestrator = orchestrator
+        self._accuracy_cache: dict | None = None
+        self._accuracy_cache_ts: float = 0.0
 
     def get_strategic_context(self) -> str:
         """Return the latest strategic context string (cached 60s, reads from StatsDB)."""
@@ -125,6 +129,40 @@ class ContextManager:
                     except (TypeError, ValueError):
                         continue
 
+        # ── Step 1: Scale plan confidence by historical signal accuracy ──────
+        # Well-calibrated signals (>50% right) get a confidence boost so their
+        # TP overrides are more likely to trigger.  Unreliable signals (<50%)
+        # are penalised so their overrides are skipped or need stronger evidence.
+        # Requires at least 5 evaluated signals before trusting the accuracy figure.
+        _MIN_ACCURACY_SAMPLES = 5
+        accuracy_data = self._get_signal_accuracy()
+        overall_mult = (
+            self._accuracy_multiplier(accuracy_data["overall_pct"])
+            if accuracy_data["overall_samples"] >= _MIN_ACCURACY_SAMPLES
+            else 1.0
+        )
+        for pair, entry in expected_gains.items():
+            pair_info = accuracy_data["per_pair"].get(pair, {})
+            pair_acc = pair_info.get("accuracy_pct")
+            pair_samples = pair_info.get("samples", 0)
+            if pair_acc is not None and pair_samples >= _MIN_ACCURACY_SAMPLES:
+                mult = self._accuracy_multiplier(pair_acc)
+                source = f"per-pair {pair_acc:.1f}%"
+            elif overall_mult != 1.0:
+                mult = overall_mult
+                source = f"overall {accuracy_data['overall_pct']:.1f}%"
+            else:
+                continue  # not enough data — leave confidence unchanged
+
+            if mult == 1.0:
+                continue
+            original = entry["confidence"]
+            entry["confidence"] = round(min(1.0, original * mult), 3)
+            logger.info(
+                f"📊 {pair}: plan confidence {original:.0%} → {entry['confidence']:.0%} "
+                f"(signal accuracy {source}, factor {mult:.2f}x)"
+            )
+
         orch._pair_expected_gains = expected_gains
         if expected_gains:
             logger.info(
@@ -150,6 +188,63 @@ class ContextManager:
                 f"avoid={[p for p, v in priority_map.items() if v > 0]}"
             )
         return priority_map
+
+    # ── Accuracy-weighted confidence ──────────────────────────────────────
+
+    def _get_signal_accuracy(self) -> dict:
+        """Return cached 7-day signal accuracy data (refreshed every 6h).
+
+        Returns:
+            overall_pct     – overall 24h direction accuracy (0-100) or None
+            overall_samples – number of evaluated signals
+            per_pair        – {pair: {"accuracy_pct": float|None, "samples": int}}
+        """
+        now = time.time()
+        if self._accuracy_cache is not None and now - self._accuracy_cache_ts < self._ACCURACY_CACHE_TTL:
+            return self._accuracy_cache
+
+        result: dict = {"overall_pct": None, "overall_samples": 0, "per_pair": {}}
+        try:
+            raw = self.orchestrator.stats_db.get_prediction_accuracy(days=7)
+            overall = raw.get("overall", {})
+            result["overall_pct"] = overall.get("accuracy_24h_pct")
+            result["overall_samples"] = overall.get("evaluated_24h", 0)
+            result["per_pair"] = {
+                pair: {
+                    "accuracy_pct": data.get("accuracy_24h_pct"),
+                    "samples": data.get("evaluated_24h", 0),
+                }
+                for pair, data in raw.get("per_pair", {}).items()
+            }
+            logger.debug(
+                f"📊 Signal accuracy refreshed: overall={result['overall_pct']}% "
+                f"(n={result['overall_samples']}, {len(result['per_pair'])} pairs)"
+            )
+        except Exception as e:
+            logger.debug(f"Signal accuracy fetch failed (non-fatal): {e}")
+
+        self._accuracy_cache = result
+        self._accuracy_cache_ts = now
+        return result
+
+    @staticmethod
+    def _accuracy_multiplier(accuracy_pct: float | None) -> float:
+        """Convert a direction-accuracy % into a confidence multiplier.
+
+        Calibration (linear, normalised at 50% = coin-flip baseline):
+            90 % accuracy → 1.5 × (capped)
+            75 % accuracy → 1.5 ×
+            60 % accuracy → 1.2 ×
+            50 % accuracy → 1.0 × (neutral)
+            40 % accuracy → 0.8 ×
+            30 % accuracy → 0.6 ×
+            10 % accuracy → 0.4 × (floored)
+
+        Formula: clamp(accuracy_pct / 50, 0.4, 1.5)
+        """
+        if accuracy_pct is None:
+            return 1.0
+        return max(0.4, min(1.5, accuracy_pct / 50.0))
 
     def get_pair_confidence_adjustment(self, pair: str) -> float:
         """Return the confidence threshold adjustment for a pair (from planning context)."""

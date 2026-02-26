@@ -279,7 +279,9 @@ class Orchestrator:
         if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False) and _is_coinbase:
             try:
                 snapshot = self.holdings_manager.live_coinbase_snapshot()
-                self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)
+                new_externals = self.state.sync_live_holdings(snapshot, dust_threshold=self._holdings_dust_threshold)
+                if new_externals:
+                    self.holdings_manager._register_external_holdings(new_externals)
                 logger.info("📡 Initial live holdings sync complete")
 
                 # One-time strategic context invalidation.

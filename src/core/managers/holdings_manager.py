@@ -227,11 +227,62 @@ class HoldingsManager:
             return  # still fresh
         try:
             snapshot = self.live_coinbase_snapshot()
-            orch.state.sync_live_holdings(
+            new_externals = orch.state.sync_live_holdings(
                 snapshot, dust_threshold=orch._holdings_dust_threshold
             )
+            if new_externals:
+                self._register_external_holdings(new_externals)
         except Exception as e:
             logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
+
+    def _register_external_holdings(self, new_externals: dict[str, float]) -> None:
+        """Register newly discovered external holdings in FIFO tracker and trailing stops.
+
+        For assets the bot didn't buy (pre-existing on the exchange), we create
+        a synthetic cost-basis lot at the discovery price.  This means:
+          - PNL is tracked from the moment the bot first sees the holding
+          - Trailing stops have a reference price to work from
+          - The actual purchase price (before the bot was running) remains unknown
+
+        Args:
+            new_externals: {pair: discovery_price} returned by sync_live_holdings.
+        """
+        orch = self.orchestrator
+        for pair, discovery_price in new_externals.items():
+            qty = orch.state.positions.get(pair, 0)
+            if qty <= 0 or discovery_price <= 0:
+                continue
+            base_asset = pair.split("-")[0] if "-" in pair else pair
+
+            # Synthetic FIFO lot at discovery price so realized PNL is meaningful
+            try:
+                orch.fifo_tracker.record_buy(
+                    asset=base_asset,
+                    quantity=qty,
+                    cost_per_unit=discovery_price,
+                    fees=0.0,
+                )
+                logger.info(
+                    f"📎 External holding {pair}: synthetic cost basis registered "
+                    f"at discovery price {discovery_price:.6f} (qty={qty:.6f})"
+                )
+            except Exception as e:
+                logger.debug(f"FIFO registration for external {pair} failed: {e}")
+
+            # Trailing stop at discovery price — protects against further downside
+            try:
+                orch.trailing_stops.add_stop(
+                    pair=pair,
+                    entry_price=discovery_price,
+                    initial_stop=None,
+                    total_quantity=float(qty),
+                )
+                logger.info(
+                    f"📎 External holding {pair}: trailing stop added "
+                    f"at discovery price {discovery_price:.6f}"
+                )
+            except Exception as e:
+                logger.debug(f"Trailing stop for external {pair} failed: {e}")
 
     # =========================================================================
     # Position Reconciliation

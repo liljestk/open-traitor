@@ -127,7 +127,7 @@ class TradingState:
     # Live Holdings Sync (from Coinbase API)
     # =========================================================================
 
-    def sync_live_holdings(self, snapshot: dict, dust_threshold: float = 0.01) -> None:
+    def sync_live_holdings(self, snapshot: dict, dust_threshold: float = 0.01) -> dict[str, float]:
         """Merge live Coinbase snapshot into shared state.
 
         Uses additive-only merge for positions: only adds holdings that are NOT
@@ -136,6 +136,12 @@ class TradingState:
         Args:
             snapshot: Dict from Orchestrator._live_coinbase_snapshot().
             dust_threshold: Minimum native-currency value to include.
+
+        Returns:
+            Dict of {pair: discovery_price} for positions newly added in this
+            sync (external holdings not previously tracked by the bot).
+            Callers should use this to register synthetic FIFO lots and
+            trailing stops so the bot has a cost-basis reference point.
         """
         with self._lock:
             self.live_holdings = snapshot.get("holdings", [])
@@ -175,6 +181,7 @@ class TradingState:
             # Additive merge: only add crypto holdings NOT already in positions
             # Filter out dust holdings (below dust_threshold in native value)
             synced_count = 0
+            new_externals: dict[str, float] = {}  # {pair: discovery_price}
             for h in self.live_holdings:
                 if h.get("is_fiat"):
                     continue
@@ -191,10 +198,14 @@ class TradingState:
                 if pair not in self.positions:
                     self.positions[pair] = amount
                     ts_now = datetime.now(timezone.utc).isoformat()
+                    price = h.get("price", 0)
                     self.positions_meta[pair] = {
                         "origin": "external",
                         "synced_at": ts_now,
+                        "discovery_price": price,
                     }
+                    if price > 0:
+                        new_externals[pair] = price
                     synced_count += 1
                 # Always refresh price from Coinbase — not just on first sync
                 price = h.get("price", 0)
@@ -207,6 +218,7 @@ class TradingState:
                 f"total={self.currency_symbol}{self.live_portfolio_value:,.2f}"
                 + (f" ({synced_count} new positions added)" if synced_count else "")
             )
+            return new_externals
 
     @property
     def holdings_summary(self) -> str:
