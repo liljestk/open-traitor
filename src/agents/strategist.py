@@ -32,7 +32,7 @@ Respond with JSON:
 
 {{
     "action": "buy" | "sell" | "hold",
-    "pair": "PAIR",
+    "pair": "<the pair from the MARKET SIGNAL above — you MUST use that exact pair>",
     "confidence": 0.0-1.0,
     "quote_amount": amount_in_quote_currency_or_null,
     "quantity": quantity_or_null,
@@ -192,6 +192,16 @@ class StrategistAgent(BaseAgent):
                 )
             except Exception as e:
                 self.logger.debug(f"Failed to save reasoning trace: {e}")
+
+        # Guard: force pair to match the pipeline's analyzed pair.
+        # The LLM sometimes hallucinate a different pair from the portfolio.
+        proposed_pair = llm_response.get("pair", "")
+        if proposed_pair and proposed_pair != pair:
+            self.logger.warning(
+                f"⚠️ Strategist proposed {proposed_pair} but pipeline is analyzing {pair} — "
+                f"overriding to {pair}"
+            )
+            llm_response["pair"] = pair
 
         action = llm_response.get("action", "hold")
         self.logger.info(

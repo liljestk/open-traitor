@@ -100,6 +100,7 @@ export interface TradeFull extends Trade {
   reasoning: string | null
   is_rotation: number
   approved_by: string
+  cycle_id?: string | null
 }
 
 export interface EventLog {

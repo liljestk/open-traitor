@@ -475,6 +475,16 @@ class PipelineManager:
             return
 
         strategy_result["current_price"] = price
+
+        # Guard: ensure the strategist didn't propose a trade on a different pair
+        proposed_pair = strategy_result.get("pair", pair)
+        if proposed_pair != pair:
+            logger.warning(
+                f"⚠️ Strategist proposed trade on {proposed_pair} but pipeline is for {pair} — "
+                f"correcting to {pair}"
+            )
+            strategy_result["pair"] = pair
+
         _timings["strategist"] = time.monotonic() - _step_t
 
         # Step 4: Risk Validation
@@ -624,24 +634,41 @@ class PipelineManager:
 
         if exec_result.get("executed"):
             # Persist trade to StatsDB
+            # Use the ACTUAL filled price/quantity from the executor (exchange-
+            # reported) so the stats DB reflects what really happened, not the
+            # pre-trade estimate from the risk manager.
             stats_trade_id = None
+            _exec_trade = exec_result.get('trade', {})
+            _filled_price = (
+                _exec_trade.get('filled_price')
+                or risk_result.get('price', price)
+            )
+            _filled_qty = (
+                _exec_trade.get('filled_quantity')
+                or _exec_trade.get('quantity')
+                or 0
+            )
+            _fee = _exec_trade.get('fees', 0) or 0
+            # For quote_amount: use actual fill values when available
+            _quote_amount = risk_result.get('quote_amount', risk_result.get('usd_amount', 0))
+            if _filled_price and _filled_qty and risk_result.get('action') == 'sell':
+                # For sells the quote_amount is the actual proceeds
+                _quote_amount = float(_filled_price) * float(_filled_qty)
             try:
                 stats_trade_id = await asyncio.to_thread(
                     orch.stats_db.record_trade,
                     pair=risk_result.get('pair', pair),
                     action=risk_result.get('action', 'unknown'),
-                    price=risk_result.get('price', price),
-                    quantity=(
-                        exec_result.get('trade', {}).get('filled_quantity')
-                        or exec_result.get('trade', {}).get('quantity')
-                        or 0
-                    ),
-                    quote_amount=risk_result.get('quote_amount', risk_result.get('usd_amount', 0)),
+                    price=float(_filled_price),
+                    quantity=float(_filled_qty),
+                    quote_amount=float(_quote_amount),
                     confidence=risk_result.get('confidence', 0),
                     signal_type=signal.get('signal_type', ''),
                     stop_loss=risk_result.get('stop_loss', 0),
                     take_profit=risk_result.get('take_profit', 0),
                     reasoning=risk_result.get('reasoning', ''),
+                    fee_quote=float(_fee),
+                    exchange=exchange_name,
                 )
             except Exception as e:
                 logger.debug(f"Failed to record trade in StatsDB: {e}")
@@ -660,13 +687,9 @@ class PipelineManager:
             orch.journal.log_trade(
                 pair=risk_result.get('pair', pair),
                 action=risk_result.get('action', 'unknown'),
-                quantity=(
-                    exec_result.get('trade', {}).get('filled_quantity')
-                    or exec_result.get('trade', {}).get('quantity')
-                    or 0
-                ),
-                price=risk_result.get('price', price),
-                quote_amount=risk_result.get('quote_amount', risk_result.get('usd_amount', 0)),
+                quantity=float(_filled_qty),
+                price=float(_filled_price),
+                quote_amount=float(_quote_amount),
                 confidence=risk_result.get('confidence', 0),
                 signal_type=signal.get('signal_type', ''),
                 stop_loss=risk_result.get('stop_loss', 0),
@@ -679,48 +702,36 @@ class PipelineManager:
             orch.audit.log_trade(
                 pair=risk_result.get('pair', pair),
                 action=risk_result.get('action', 'unknown'),
-                amount=risk_result.get('quote_amount', risk_result.get('usd_amount', 0)),
-                price=risk_result.get('price', price),
+                amount=float(_quote_amount),
+                price=float(_filled_price),
             )
 
             if risk_result.get('action') == 'buy':
-                filled_qty = (
-                    exec_result.get('trade', {}).get('filled_quantity')
-                    or exec_result.get('trade', {}).get('quantity')
-                    or risk_result.get('quantity', 0)
-                )
                 orch.trailing_stops.add_stop(
                     pair=risk_result.get('pair', pair),
-                    entry_price=risk_result.get('price', price),
+                    entry_price=float(_filled_price),
                     initial_stop=risk_result.get('stop_loss'),
-                    total_quantity=float(filled_qty) if filled_qty else 0.0,
+                    total_quantity=float(_filled_qty) if _filled_qty else 0.0,
                 )
 
             # ─── FIFO tax tracking ───
             try:
-                filled_qty = (
-                    exec_result.get('trade', {}).get('filled_quantity')
-                    or exec_result.get('trade', {}).get('quantity')
-                    or risk_result.get('quantity', 0)
-                )
-                fill_price = risk_result.get('price', price)
                 trade_pair = risk_result.get('pair', pair)
                 base_asset = trade_pair.split("-")[0] if "-" in trade_pair else trade_pair
-                fee_amount = exec_result.get('trade', {}).get('fee', 0) or 0
 
-                if risk_result.get('action') == 'buy' and float(filled_qty or 0) > 0:
+                if risk_result.get('action') == 'buy' and float(_filled_qty or 0) > 0:
                     orch.fifo_tracker.record_buy(
                         asset=base_asset,
-                        quantity=float(filled_qty),
-                        cost_per_unit=float(fill_price),
-                        fees=float(fee_amount),
+                        quantity=float(_filled_qty),
+                        cost_per_unit=float(_filled_price),
+                        fees=float(_fee),
                     )
-                elif risk_result.get('action') == 'sell' and float(filled_qty or 0) > 0:
+                elif risk_result.get('action') == 'sell' and float(_filled_qty or 0) > 0:
                     disposals = orch.fifo_tracker.record_sell(
                         asset=base_asset,
-                        quantity=float(filled_qty),
-                        sale_price_per_unit=float(fill_price),
-                        fees=float(fee_amount),
+                        quantity=float(_filled_qty),
+                        price_per_unit=float(_filled_price),
+                        fees=float(_fee),
                     )
                     # Back-fill realized PNL into the StatsDB trade row so that
                     # analytics queries (pnl IS NOT NULL) can include this trade.

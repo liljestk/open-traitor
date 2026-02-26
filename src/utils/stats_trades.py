@@ -49,15 +49,20 @@ class TradesMixin:
     def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50, quote_currency: str | list[str] | None = None) -> list[dict]:
         conn = self._get_conn()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        # LEFT JOIN agent_reasoning to fetch the cycle_id that produced each trade
+        _select = """SELECT t.*,
+                            (SELECT ar.cycle_id FROM agent_reasoning ar
+                             WHERE ar.trade_id = t.id LIMIT 1) AS cycle_id
+                     FROM trades t"""
         if pair:
             rows = conn.execute(
-                "SELECT * FROM trades WHERE ts >= ? AND pair = ? ORDER BY ts DESC LIMIT ?",
+                _select + " WHERE t.ts >= ? AND t.pair = ? ORDER BY t.ts DESC LIMIT ?",
                 (cutoff, pair, limit),
             ).fetchall()
         else:
-            qc_frag, qc_params = qc_where(quote_currency)
+            qc_frag, qc_params = qc_where(quote_currency, col="t.pair")
             rows = conn.execute(
-                "SELECT * FROM trades WHERE ts >= ?" + qc_frag + " ORDER BY ts DESC LIMIT ?",
+                _select + " WHERE t.ts >= ?" + qc_frag + " ORDER BY t.ts DESC LIMIT ?",
                 (cutoff, *qc_params, limit),
             ).fetchall()
         return [dict(r) for r in rows]
