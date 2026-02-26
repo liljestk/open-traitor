@@ -201,7 +201,7 @@ class TraceContext:
                 logger.debug(f"Langfuse generation start failed: {e}")
 
         span = SpanContext(
-            trace_id=self._cycle_id,
+            trace_id=self.trace_id,
             agent_name=agent_name,
             model=model,
             input_data=input_data,

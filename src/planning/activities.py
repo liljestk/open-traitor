@@ -457,8 +457,8 @@ Generate the {horizon} plan as JSON."""
             f"Planning LLM response for {horizon}: "
             f"regime={result.get('regime', result.get('market_regime', result.get('macro_regime', '?')))}"
         )
-        # Attach the Langfuse trace ID so write_strategic_context can persist it
-        result["_langfuse_trace_id"] = trace_id
+        # Attach the real Langfuse trace ID so write_strategic_context can persist it
+        result["_langfuse_trace_id"] = trace_ctx.trace_id if trace_ctx else trace_id
         if trace_ctx:
             trace_ctx.finish(metadata={"horizon": horizon, "regime": result.get("regime")})
         return result
@@ -470,7 +470,7 @@ Generate the {horizon} plan as JSON."""
             "error": str(e),
             "summary": f"Planning LLM unavailable -- defaulting to neutral {horizon} posture.",
             "regime": "neutral",
-            "_langfuse_trace_id": trace_id,
+            "_langfuse_trace_id": trace_ctx.trace_id if trace_ctx else trace_id,
         }
 
 
