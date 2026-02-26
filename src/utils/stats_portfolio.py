@@ -167,17 +167,21 @@ class PortfolioMixin:
             return []
 
         # Detect and remove anomalous portfolio values.
-        # Strategy: find the *median* of the last 20% of values (most recent = most trustworthy),
-        # then discard anything more than 3x above that median.
-        # This catches both paper-mode bleed-through AND stale-fallback inflation
-        # (e.g. positions-based estimate of €114 vs real €32).
-        values = [r["portfolio_value"] for r in rows]
-        tail = sorted(values[max(0, len(values) - len(values) // 5):])
-        if tail:
-            median_val = tail[len(tail) // 2]
-            if median_val > 0:
-                threshold = median_val * 3
-                rows = [r for r in rows if r["portfolio_value"] <= threshold]
+        # Strategy: use IQR-based outlier detection on all values.
+        # Values beyond Q3 + 3*IQR are discarded as stale-fallback inflation
+        # or paper-mode bleed-through (e.g. €114 vs real €32).
+        # This is robust even when outliers dominate the dataset.
+        values = sorted(r["portfolio_value"] for r in rows)
+        n = len(values)
+        if n >= 10:
+            q1 = values[n // 4]
+            q3 = values[(3 * n) // 4]
+            iqr = q3 - q1
+            # For very stable portfolios (IQR ≈ 0), use 50% of median as min range
+            min_range = values[n // 2] * 0.5 if values[n // 2] > 0 else 1.0
+            effective_iqr = max(iqr, min_range)
+            upper_fence = q3 + 3 * effective_iqr
+            rows = [r for r in rows if r["portfolio_value"] <= upper_fence]
 
         return [dict(r) for r in rows]
 
@@ -217,11 +221,16 @@ class PortfolioMixin:
             return 0
 
         values = sorted(r["portfolio_value"] for r in recent)
-        median_val = values[len(values) // 2]
-        if median_val <= 0:
+        n = len(values)
+        if n < 10:
             return 0
-
-        threshold = max(median_val * 10, 100)
+        q1 = values[n // 4]
+        q3 = values[(3 * n) // 4]
+        iqr = q3 - q1
+        median_val = values[n // 2]
+        min_range = median_val * 0.5 if median_val > 0 else 1.0
+        effective_iqr = max(iqr, min_range)
+        threshold = q3 + 3 * effective_iqr
 
         # Delete zero-value and anomalously high snapshots
         cursor = conn.execute(
