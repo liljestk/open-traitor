@@ -447,7 +447,7 @@ Generate the {horizon} plan as JSON."""
 
     llm = _get_llm_client()
     try:
-        result = llm.chat_json(
+        result = await llm.chat_json(
             system_prompt=system_prompt,
             user_message=user_message,
             span=span,
