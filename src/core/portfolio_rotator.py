@@ -227,6 +227,7 @@ class PortfolioRotator(RotationExecutorMixin):
         portfolio_value: float,
         scan_results: dict[str, dict] | None = None,
         open_positions: dict[str, float] | None = None,
+        max_open_positions: int = 999,
     ) -> list[SwapProposal]:
         """
         Evaluate whether any portfolio rotations are beneficial.
@@ -238,6 +239,7 @@ class PortfolioRotator(RotationExecutorMixin):
             portfolio_value: Total portfolio value in USD
             scan_results: Optional universe scan data (pair → score dict) for ranking boost
             open_positions: Pair → held quantity (from TradingState.open_positions)
+            max_open_positions: Tier-scaled position limit (from portfolio_scaler)
 
         Returns:
             List of SwapProposals (ranked by expected net gain)
@@ -245,6 +247,16 @@ class PortfolioRotator(RotationExecutorMixin):
         if open_positions is None:
             open_positions = {}
         if not self.enabled:
+            return []
+
+        # Block rotation when at or above position limit.
+        # Every rotation proposal introduces a NEW pair (the candidate loop skips
+        # pairs already held), so any swap when at limit would increase position count.
+        if len(held_pairs) >= max_open_positions:
+            logger.info(
+                f"🔄 Rotation skipped: at position limit "
+                f"({len(held_pairs)}/{max_open_positions} open positions)"
+            )
             return []
 
         logger.info(f"🔄 Evaluating rotation: holding {held_pairs}, tracking {all_pairs}")

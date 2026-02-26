@@ -340,6 +340,7 @@ class Orchestrator:
         self._strategic_context_ts: float = 0.0
         self._STRATEGIC_CONTEXT_TTL: float = 60.0
         self._pair_priority_map: dict[str, float] = {}  # pair → confidence adjustment
+        self._pair_expected_gains: dict[str, dict] = {}  # pair → {gain_pct, direction, horizon_days, confidence}
 
         # ─── Universe Tracking (funnel system) ────────────────────────────
         self._pair_universe: list[dict] = []           # full product metadata
@@ -774,6 +775,10 @@ class Orchestrator:
                             f"{emoji} {event_msg}"
                         )
 
+                # Refresh live holdings before snapshot to prevent stale-data
+                # fallback that inflates values from drifted positions.
+                self.holdings_manager.maybe_refresh_holdings()
+
                 # Take portfolio snapshot
                 self.state.take_portfolio_snapshot()
 
@@ -1052,6 +1057,7 @@ class Orchestrator:
                 portfolio_value=self.state.portfolio_value,
                 scan_results=self._scan_results,
                 open_positions=self.state.open_positions,
+                max_open_positions=self.portfolio_scaler.tier.max_open_positions,
             ))
 
             if not proposals:

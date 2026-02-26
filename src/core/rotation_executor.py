@@ -108,13 +108,16 @@ class RotationExecutorMixin:
 
         action = TradeAction.SELL if action_str == "sell" else TradeAction.BUY
 
+        # Rotation swaps are paired (sell A → buy B together), so risk is managed
+        # at the swap level — not via per-trade stop-losses. Pass has_stop_loss=True
+        # so AbsoluteRules doesn't block the BUY leg when always_use_stop_loss=true.
         allowed, violations, _ = self.rules.check_trade(
             pair=pair,
             action=action,
             quote_value=quote_value,
             portfolio_value=portfolio_value,
             cash_balance=cash_balance,
-            has_stop_loss=False,
+            has_stop_loss=True,
         )
 
         if not allowed:

@@ -166,15 +166,17 @@ class PortfolioMixin:
         if not rows:
             return []
 
-        # Detect and remove paper-mode bleed-through values.
+        # Detect and remove anomalous portfolio values.
         # Strategy: find the *median* of the last 20% of values (most recent = most trustworthy),
-        # then discard anything more than 10x above that median.
+        # then discard anything more than 3x above that median.
+        # This catches both paper-mode bleed-through AND stale-fallback inflation
+        # (e.g. positions-based estimate of €114 vs real €32).
         values = [r["portfolio_value"] for r in rows]
         tail = sorted(values[max(0, len(values) - len(values) // 5):])
         if tail:
             median_val = tail[len(tail) // 2]
             if median_val > 0:
-                threshold = max(median_val * 10, 100)  # at least 100 to avoid filtering micro-portfolios
+                threshold = median_val * 3
                 rows = [r for r in rows if r["portfolio_value"] <= threshold]
 
         return [dict(r) for r in rows]

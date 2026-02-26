@@ -267,7 +267,7 @@ async def call_planning_llm(horizon: str, review_data: dict) -> dict:
     review_data: output from fetch_portfolio_history / fetch_trade_history
     """
     SYSTEM_PROMPTS = {
-        "daily": """You are the strategic planning module for an automated cryptocurrency trading bot.
+        "daily": """You are the strategic planning module for an automated trading bot.
 Your job is to review yesterday's and last week's trading performance and produce a clear daily plan.
 
 Respond ONLY with JSON:
@@ -279,10 +279,17 @@ Respond ONLY with JSON:
     "risk_posture": "aggressive" | "normal" | "conservative",
     "key_observations": ["obs1", "obs2", ...],
     "today_focus": "One sentence on the main trading focus for today",
+    "pair_outlooks": {
+        "BTC-USD": {"direction": "bullish", "expected_move_pct": 2.5, "confidence": 0.70}
+    },
     "summary": "2-3 sentence plain-English summary of the daily plan"
-}""",
+}
 
-        "weekly": """You are the strategic planning module for an automated cryptocurrency trading bot.
+For pair_outlooks: include up to 5 pairs from preferred_pairs and avoid_pairs where you have meaningful conviction.
+expected_move_pct is the expected % price move over the next 24 hours (e.g. 2.5 means +2.5%).
+direction is "bullish" or "bearish". Only include pairs with confidence >= 0.60.""",
+
+        "weekly": """You are the strategic planning module for an automated trading bot.
 Your job is to review the last month of trading performance and produce a weekly strategy.
 
 Respond ONLY with JSON:
@@ -296,8 +303,15 @@ Respond ONLY with JSON:
     "pattern_observations": ["pattern1", ...],
     "loss_analysis": "What drove the losses and what to change",
     "weekly_targets": {"win_rate_target": 0.0, "max_drawdown_tolerance": 0.0},
+    "pair_outlooks": {
+        "BTC-USD": {"direction": "bullish", "expected_move_pct": 8.0, "confidence": 0.70}
+    },
     "summary": "3-4 sentence weekly strategic plan"
-}""",
+}
+
+For pair_outlooks: include up to 5 pairs from pairs_to_focus and pairs_to_reduce where you have meaningful conviction.
+expected_move_pct is the expected % price move over the next 7 days (e.g. 8.0 means +8% this week).
+direction is "bullish" or "bearish". Only include pairs with confidence >= 0.60.""",
 
         "monthly": """You are the strategic planning module for an automated cryptocurrency trading bot.
 Your job is to review the last 90 days and year-to-date performance and produce a monthly portfolio strategy.

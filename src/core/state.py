@@ -444,19 +444,30 @@ class TradingState:
         """Return best-available portfolio value (caller must hold _lock).
 
         Prefers the authoritative Coinbase `live_portfolio_value` when it is
-        fresh (updated within `_LIVE_STALENESS_THRESHOLD` seconds).  Falls back
-        to the local computation (cash + positions * current_prices) for paper
-        mode or when live data is stale.
+        fresh (updated within `_LIVE_STALENESS_THRESHOLD` seconds).
+
+        When live data is stale, still prefers the last-known live value over
+        a local positions-based computation.  The local computation is unreliable
+        because ``positions`` uses additive-only merge and can drift from reality,
+        producing grossly inflated values.  A stale-but-accurate live value is
+        far better than a fresh-but-wrong local estimate.
+
+        The local computation is ONLY used in paper mode (where there is no
+        live Coinbase data at all).
         """
-        live_fresh = (
-            self.live_portfolio_value > 0
-            and self._live_snapshot_ts > 0
-            and (time.time() - self._live_snapshot_ts) < self._LIVE_STALENESS_THRESHOLD
-        )
-        if live_fresh:
+        # Always prefer live value when available (even if slightly stale)
+        if self.live_portfolio_value > 0 and self._live_snapshot_ts > 0:
+            stale_secs = time.time() - self._live_snapshot_ts
+            if stale_secs >= self._LIVE_STALENESS_THRESHOLD:
+                logger.warning(
+                    f"⚠️ Live portfolio data is {stale_secs:.0f}s stale "
+                    f"(threshold {self._LIVE_STALENESS_THRESHOLD:.0f}s) — "
+                    f"using last-known live value {self.currency_symbol}"
+                    f"{self.live_portfolio_value:,.2f} instead of local computation"
+                )
             return self.live_portfolio_value
 
-        # Fallback: local computation (paper mode or stale live data)
+        # Fallback: local computation (paper mode only — no live data ever received)
         total = self.cash_balance
         for pair, qty in self.positions.items():
             if qty > 0:

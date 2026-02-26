@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from src.analysis.technical import TechnicalAnalyzer
 from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy
 from src.utils.logger import get_logger
+from src.utils import settings_manager as sm
 
 if TYPE_CHECKING:
     from src.core.orchestrator import Orchestrator
@@ -355,6 +356,32 @@ class UniverseScanner:
                                     orch.ws_feed.update_subscriptions(valid)
                             except Exception as ws_err:
                                 logger.debug(f"WS subscription update failed: {ws_err}")
+
+                            # Persist selection to YAML so config file reflects what
+                            # the system is actually trading, and restarts use the
+                            # latest LLM-chosen pairs as the seed list.
+                            try:
+                                ok, err, _ = sm.update_section(
+                                    "trading", {"pairs": orch._screener_active_pairs}
+                                )
+                                if ok:
+                                    # Mirror into runtime config dict and orch.pairs
+                                    # so the rotation candidate pool is up-to-date.
+                                    with orch._pairs_lock:
+                                        orch.config.setdefault("trading", {})["pairs"] = list(orch._screener_active_pairs)
+                                        orch.pairs = list(orch._screener_active_pairs)
+                                        orch.all_tracked_pairs = list(
+                                            set(orch.pairs + orch.watchlist_pairs)
+                                        )
+                                    logger.info(
+                                        f"💾 LLM screener selection written to config: "
+                                        f"{orch._screener_active_pairs}"
+                                    )
+                                else:
+                                    logger.warning(f"⚠️ Could not persist screener pairs to YAML: {err}")
+                            except Exception as cfg_err:
+                                logger.warning(f"⚠️ Screener YAML persist failed (non-fatal): {cfg_err}")
+
                         return
 
             logger.warning(f"LLM screener returned unparseable response: {text[:200]}")

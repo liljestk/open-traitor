@@ -330,6 +330,16 @@ class HoldingsManager:
                     continue  # too small to track
 
                 with orch.state._lock:
+                    max_pos = (
+                        orch.portfolio_scaler.tier.max_open_positions
+                        if hasattr(orch, "portfolio_scaler") else 999
+                    )
+                    current_count = len(orch.state.positions)
+                    if current_count >= max_pos:
+                        logger.warning(
+                            f"⚠️ Position limit reached ({current_count}/{max_pos}) — "
+                            f"still tracking discovered {new_pair} for portfolio accounting"
+                        )
                     orch.state.positions[new_pair] = amount
 
                 msg = (

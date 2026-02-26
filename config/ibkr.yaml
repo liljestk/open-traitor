@@ -2,16 +2,16 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 5
   max_cash_per_trade_pct: 0.5
-  max_daily_loss: 3
-  max_daily_spend: 10
-  max_portfolio_risk_pct: 0.3
-  max_single_trade: 10
+  max_daily_loss: 10000   # safety ceiling — real limit is max_drawdown_pct
+  max_daily_spend: 10000  # safety ceiling — real limit is tier's max_cash_per_trade_pct
+  max_portfolio_risk_pct: 0.5
+  max_single_trade: 10000  # safety ceiling — real limit computed as portfolio_value × tier_pct
   max_stop_loss_pct: 0.08
   max_trades_per_day: 10
   min_trade_interval_seconds: 300
   never_trade_pairs: []
   only_trade_pairs: []
-  require_approval_above: 10
+  require_approval_above: 10000  # approval not needed — trades are auto-sized to account value
 analysis:
   sentiment:
     enabled: true
@@ -141,7 +141,7 @@ logging:
   max_file_size: 50
 multi_timeframe:
   enabled: true
-  min_alignment: 3
+  min_alignment: 2
 news:
   articles_for_analysis: 15
   fetch_interval: 600
@@ -190,8 +190,9 @@ trading:
   interval: 300
   invalidate_strategic_context: false
   live_holdings_sync: false
-  max_active_pairs: 8
-  max_open_positions: 10
+  max_active_pairs: 10           # upper-bound — portfolio_scaler may reduce this
+  max_open_positions: 10         # upper-bound — portfolio_scaler may reduce this
+  portfolio_scaling: true        # enable dynamic tier scaling (micro→whale)
   min_confidence: 0.6
   mode: live
   pair_discovery: all

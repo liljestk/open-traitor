@@ -548,6 +548,31 @@ class PipelineManager:
                 else:
                     expected_gain_pct = orch.config.get("risk", {}).get("take_profit_pct", 0.06)
 
+            # ─── Plan-based TP override ──────────────────────────────────
+            # When the planning system has a high-confidence multi-day prediction
+            # for this pair, use it to set a longer-horizon take-profit and
+            # expected gain. BOTH must change together: using plan gain for the
+            # fee check but keeping the original (small) TP would still lose
+            # money after fees once the trade exits at the technical target.
+            _plan_min_conf = orch.config.get("planning", {}).get(
+                "plan_tp_min_confidence", 0.65
+            )
+            _plan_outlook = orch.context_manager.get_pair_expected_gain(pair)
+            if _plan_outlook:
+                _plan_gain = _plan_outlook["gain_pct"]
+                _plan_conf = _plan_outlook["confidence"]
+                _plan_horizon = _plan_outlook["horizon_days"]
+                if _plan_gain > expected_gain_pct and _plan_conf >= _plan_min_conf:
+                    _plan_tp = trade_price * (1 + _plan_gain)
+                    logger.info(
+                        f"📋 {pair}: Plan-based TP override — "
+                        f"gain {_plan_gain:.1%} (conf={_plan_conf:.0%}, {_plan_horizon}d) "
+                        f"replaces TP-based {expected_gain_pct:.1%} | "
+                        f"new TP={_plan_tp:.4f}"
+                    )
+                    risk_result["take_profit"] = _plan_tp
+                    expected_gain_pct = _plan_gain
+
             worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
                 quote_amount=trade_amount,
                 expected_gain_pct=expected_gain_pct,

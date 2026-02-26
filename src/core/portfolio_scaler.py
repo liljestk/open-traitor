@@ -57,18 +57,18 @@ _TIERS: list[tuple[float, Tier]] = [
         max_position_pct=0.40,
         max_cash_per_trade_pct=0.50,
         max_portfolio_risk_pct=0.50,
-        max_active_pairs=2,
+        max_active_pairs=6,     # scan 6 candidates; risk_manager gates on max_open_positions
         max_open_positions=2,
         min_gain_after_fees_pct=0.015,
-        take_profit_pct=0.08,
-        stop_loss_pct=0.06,
+        take_profit_pct=0.05,   # 5% — more achievable on crypto; captures quick moves
+        stop_loss_pct=0.03,     # 3% — tighter SL gives better risk-reward (5:3 = 1.67:1)
     )),
     (500, Tier(
         name="SMALL",
         max_position_pct=0.25,
         max_cash_per_trade_pct=0.35,
         max_portfolio_risk_pct=0.35,
-        max_active_pairs=3,
+        max_active_pairs=8,     # scan 8 candidates; hold at most 3
         max_open_positions=3,
         min_gain_after_fees_pct=0.010,
         take_profit_pct=0.07,

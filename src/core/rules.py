@@ -74,11 +74,16 @@ class AbsoluteRules:
         """Attach a PortfolioScaler so tier-aware limits are used."""
         self._portfolio_scaler = scaler
 
-    def _get_effective_limits(self, portfolio_value: float) -> tuple[float, float, float]:
-        """Return (max_cash_per_trade_pct, max_portfolio_risk_pct, emergency_stop) scaled by tier.
+    def _get_effective_limits(self, portfolio_value: float) -> tuple[float, float, float, float]:
+        """Return (max_cash_per_trade_pct, max_portfolio_risk_pct, emergency_stop, max_single_trade).
 
         For micro/small accounts the config emergency_stop (€8000) would block ALL
         trading, so we disable it when the scaler says we're in a small tier.
+
+        max_single_trade is computed dynamically as portfolio_value × tier_cash_pct,
+        capped by the config value as a safety ceiling.  This makes the per-trade
+        dollar limit grow automatically with the account rather than needing manual
+        config edits.
         """
         if self._portfolio_scaler and portfolio_value > 0:
             self._portfolio_scaler.update(portfolio_value)
@@ -90,8 +95,15 @@ class AbsoluteRules:
                 eff_emerg = 0.0  # effectively disabled
             else:
                 eff_emerg = self.emergency_stop_portfolio
-            return eff_cash, eff_risk, eff_emerg
-        return self.max_cash_per_trade_pct, self.max_portfolio_risk_pct, self.emergency_stop_portfolio
+            # Dynamic single-trade cap: scales with account, never exceeds config ceiling
+            eff_max_trade = min(self.max_single_trade, portfolio_value * eff_cash)
+            return eff_cash, eff_risk, eff_emerg, eff_max_trade
+        return (
+            self.max_cash_per_trade_pct,
+            self.max_portfolio_risk_pct,
+            self.emergency_stop_portfolio,
+            self.max_single_trade,
+        )
 
     def seed_daily_counters(self, db_path: str = None) -> None:
         """Seed daily counters from persisted trades to survive restarts.
@@ -223,7 +235,7 @@ class AbsoluteRules:
         is_buy = action == TradeAction.BUY
 
         # Tier-scaled limits
-        eff_cash_pct, eff_risk_pct, eff_emerg = self._get_effective_limits(portfolio_value)
+        eff_cash_pct, eff_risk_pct, eff_emerg, eff_max_trade = self._get_effective_limits(portfolio_value)
 
         violations: list[RuleViolation] = []
         needs_approval = False
@@ -258,10 +270,11 @@ class AbsoluteRules:
             ))
 
         # --- Rule: Max single trade (BUY only) ---
-        if is_buy and quote_value > self.max_single_trade:
+        if is_buy and quote_value > eff_max_trade:
             violations.append(RuleViolation(
                 "max_single_trade",
-                f"Trade value {quote_value:,.2f} exceeds max {self.max_single_trade:,.0f}",
+                f"Trade value {quote_value:,.2f} exceeds max {eff_max_trade:,.2f} "
+                f"(portfolio-scaled; config ceiling={self.max_single_trade:,.0f})",
                 "Reduce position size",
             ))
 

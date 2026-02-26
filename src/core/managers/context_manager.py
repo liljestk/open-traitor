@@ -73,10 +73,18 @@ class ContextManager:
           * preferred pairs get -0.05 (slightly more lenient)
           * avoid pairs get +0.10 (need stronger signal to trade)
           * other pairs get 0.0 (no adjustment)
+
+        Also populates orch._pair_expected_gains from pair_outlooks in each plan.
+        Daily plans take precedence over weekly (more specific horizon).
         """
         orch = self.orchestrator
         preferred: set[str] = set()
         avoid: set[str] = set()
+
+        # Horizon priority: daily (1) > weekly (7). Lower = more specific.
+        _horizon_days = {"daily": 1, "weekly": 7}
+        # Accumulate per-pair expected gains; daily beats weekly when both present.
+        expected_gains: dict[str, dict] = {}
 
         for row in context_rows:
             try:
@@ -90,6 +98,42 @@ class ContextManager:
                     preferred.add(p)
                 for p in plan.get("avoid_pairs", plan.get("pairs_to_reduce", [])):
                     avoid.add(p)
+
+                # Parse pair_outlooks for fee-gate / TP override
+                horizon_days = _horizon_days.get(horizon, 7)
+                for pair, outlook in plan.get("pair_outlooks", {}).items():
+                    try:
+                        direction = outlook.get("direction", "neutral")
+                        move_pct = float(outlook.get("expected_move_pct", 0))
+                        confidence = float(outlook.get("confidence", 0))
+                        if direction == "neutral" or move_pct <= 0 or confidence < 0.60:
+                            continue
+                        if direction == "bearish":
+                            continue  # long-only: skip bearish predictions for now
+                        existing = expected_gains.get(pair)
+                        # Daily beats weekly; within same horizon keep higher confidence
+                        if existing is None or horizon_days < existing["horizon_days"] or (
+                            horizon_days == existing["horizon_days"]
+                            and confidence > existing["confidence"]
+                        ):
+                            expected_gains[pair] = {
+                                "gain_pct": move_pct / 100.0,
+                                "direction": direction,
+                                "horizon_days": horizon_days,
+                                "confidence": confidence,
+                            }
+                    except (TypeError, ValueError):
+                        continue
+
+        orch._pair_expected_gains = expected_gains
+        if expected_gains:
+            logger.info(
+                f"📋 Plan-based expected gains: "
+                + ", ".join(
+                    f"{p} +{v['gain_pct']*100:.1f}% ({v['horizon_days']}d, conf={v['confidence']:.0%})"
+                    for p, v in expected_gains.items()
+                )
+            )
 
         priority_map: dict[str, float] = {}
         for pair in orch.pairs:
@@ -110,6 +154,14 @@ class ContextManager:
     def get_pair_confidence_adjustment(self, pair: str) -> float:
         """Return the confidence threshold adjustment for a pair (from planning context)."""
         return getattr(self.orchestrator, "_pair_priority_map", {}).get(pair, 0.0)
+
+    def get_pair_expected_gain(self, pair: str) -> dict | None:
+        """Return plan-based expected gain for a pair, or None if not in any plan.
+
+        Returns dict with keys: gain_pct, direction, horizon_days, confidence.
+        Only bullish predictions with confidence >= 0.60 are included.
+        """
+        return getattr(self.orchestrator, "_pair_expected_gains", {}).get(pair)
 
     def get_performance_summary(self) -> str:
         """Build a short performance summary string for the settings advisor.

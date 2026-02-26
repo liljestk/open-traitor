@@ -98,15 +98,18 @@ export default function CandlestickChart({ candles, markers, height = 400, pair 
   useEffect(() => {
     if (!seriesRef.current || !candles.length) return
 
+    const parseTime = (t: string | number): number => {
+      if (typeof t === 'number') return t
+      const tNum = Number(t)
+      if (!isNaN(tNum)) return tNum
+      return Math.floor(new Date(t).getTime() / 1000)
+    }
+
     // Sort by time ascending
-    const sorted = [...candles].sort((a, b) => {
-      const ta = typeof a.time === 'string' ? new Date(a.time).getTime() / 1000 : a.time
-      const tb = typeof b.time === 'string' ? new Date(b.time).getTime() / 1000 : b.time
-      return ta - tb
-    })
+    const sorted = [...candles].sort((a, b) => parseTime(a.time) - parseTime(b.time))
 
     const data = sorted.map((c) => ({
-      time: (typeof c.time === 'string' ? Math.floor(new Date(c.time).getTime() / 1000) : c.time) as import('lightweight-charts').UTCTimestamp,
+      time: parseTime(c.time) as import('lightweight-charts').UTCTimestamp,
       open: c.open,
       high: c.high,
       low: c.low,
@@ -119,7 +122,7 @@ export default function CandlestickChart({ candles, markers, height = 400, pair 
       const sortedMarkers = [...markers]
         .map((m) => ({
           ...m,
-          time: (typeof m.time === 'string' ? Math.floor(new Date(m.time).getTime() / 1000) : m.time) as import('lightweight-charts').UTCTimestamp,
+          time: parseTime(m.time) as import('lightweight-charts').UTCTimestamp,
         }))
         .sort((a, b) => (a.time as number) - (b.time as number))
       markersRef.current.setMarkers(sortedMarkers)
