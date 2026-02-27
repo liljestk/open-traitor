@@ -1,51 +1,61 @@
 """Equity market trading-hours gating.
 
-Used by the orchestrator to skip analysis cycles when the exchange is closed,
-avoiding LLM token waste on stale prices.
+Uses the ``exchange_calendars`` library for accurate, holiday-aware market hours.
+Calendars are fetched once and cached at module level.
 
 Pairs must include the Yahoo exchange suffix in the ticker for non-US exchanges
 (e.g. ``NESTE.HE-EUR``, ``VOLV-B.ST-SEK``).  Plain tickers without a dot-suffix
-(e.g. ``GE-USD``, ``AAPL-USD``) default to US/NYSE hours.
+(e.g. ``GE-USD``, ``AAPL-USD``) default to NYSE hours.
 """
 from __future__ import annotations
 
-import datetime
-from dataclasses import dataclass
-from zoneinfo import ZoneInfo
+from typing import Any
+
+import pandas as pd
+
+try:
+    import exchange_calendars as xcals
+    _XCALS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _XCALS_AVAILABLE = False
 
 from src.utils.logger import get_logger
 
 logger = get_logger("market_hours")
 
-
-@dataclass(frozen=True)
-class _Schedule:
-    tz: str       # IANA timezone name
-    open_h: int   # local open hour
-    open_m: int   # local open minute
-    close_h: int  # local close hour
-    close_m: int  # local close minute
-
-
-# Yahoo Finance exchange suffix → trading schedule.
-# Key "" = US (no dot-suffix = NYSE / NASDAQ).
-_SCHEDULES: dict[str, _Schedule] = {
-    "":   _Schedule("America/New_York",   9, 30, 16,  0),  # NYSE / NASDAQ
-    "ST": _Schedule("Europe/Stockholm",   9,  0, 17, 30),  # OMX Stockholm
-    "HE": _Schedule("Europe/Helsinki",    9,  0, 17, 30),  # Helsinki (Nasdaq Nordic)
-    "CO": _Schedule("Europe/Copenhagen",  9,  0, 17,  0),  # Copenhagen (Nasdaq Nordic)
-    "OL": _Schedule("Europe/Oslo",        9,  0, 16, 30),  # Oslo Børs
-    "L":  _Schedule("Europe/London",      8,  0, 16, 30),  # London Stock Exchange
-    "DE": _Schedule("Europe/Berlin",      9,  0, 17, 30),  # XETRA / Frankfurt
-    "PA": _Schedule("Europe/Paris",       9,  0, 17, 30),  # Euronext Paris
-    "AS": _Schedule("Europe/Amsterdam",   9,  0, 17, 30),  # Euronext Amsterdam
-    "MI": _Schedule("Europe/Rome",        9,  0, 17, 30),  # Borsa Italiana
-    "SW": _Schedule("Europe/Zurich",      9,  0, 17, 30),  # SIX Swiss Exchange
-    "TO": _Schedule("America/Toronto",    9, 30, 16,  0),  # Toronto Stock Exchange
-    "AX": _Schedule("Australia/Sydney",  10,  0, 16,  0),  # ASX
-    "T":  _Schedule("Asia/Tokyo",         9,  0, 15, 30),  # TSE (lunch break ignored)
-    "HK": _Schedule("Asia/Hong_Kong",     9, 30, 16,  0),  # HKEX (lunch break ignored)
+# Yahoo Finance exchange suffix → ISO MIC code used by exchange_calendars.
+# Plain tickers with no dot-suffix (e.g. AAPL-USD, GE-USD) → "" → XNYS.
+_SUFFIX_TO_MIC: dict[str, str] = {
+    "":   "XNYS",  # NYSE / NASDAQ (US, no dot-suffix)
+    "ST": "XSTO",  # OMX Stockholm
+    "HE": "XHEL",  # Helsinki (Nasdaq Nordic)
+    "CO": "XCSE",  # Copenhagen (Nasdaq Nordic)
+    "OL": "XOSL",  # Oslo Børs
+    "L":  "XLON",  # London Stock Exchange
+    "DE": "XETR",  # XETRA / Frankfurt
+    "PA": "XPAR",  # Euronext Paris
+    "AS": "XAMS",  # Euronext Amsterdam
+    "MI": "XMIL",  # Borsa Italiana
+    "SW": "XSWX",  # SIX Swiss Exchange
+    "TO": "XTSE",  # Toronto Stock Exchange
+    "AX": "XASX",  # ASX
+    "T":  "XTKS",  # Tokyo Stock Exchange
+    "HK": "XHKG",  # Hong Kong Exchange
 }
+
+# Calendar objects are expensive to instantiate — cache them
+_calendar_cache: dict[str, Any] = {}
+
+
+def _get_calendar(mic: str) -> Any | None:
+    """Return a cached exchange_calendars Calendar for the given MIC code, or None."""
+    if mic not in _calendar_cache:
+        try:
+            _calendar_cache[mic] = xcals.get_calendar(mic)
+        except Exception as exc:
+            logger.warning(f"market_hours: calendar '{mic}' unavailable: {exc}")
+            _calendar_cache[mic] = None
+    return _calendar_cache[mic]
 
 
 def _exchange_suffix(pair: str) -> str | None:
@@ -54,7 +64,7 @@ def _exchange_suffix(pair: str) -> str | None:
     The exchange is determined by the ``.XX`` part of the ticker — NOT the
     quote currency — so EUR-quoted Nordic pairs are handled correctly:
 
-        "AAPL-USD"       → ""    (US, no dot-suffix → NYSE/NASDAQ)
+        "AAPL-USD"       → ""    (US, no dot-suffix → NYSE)
         "GE-USD"         → ""    (US)
         "VOLV-B.ST-SEK"  → "ST"  (OMX Stockholm)
         "NESTE.HE-EUR"   → "HE"  (Helsinki — EUR-quoted Nordic)
@@ -73,9 +83,9 @@ def _exchange_suffix(pair: str) -> str | None:
 
     if "." in ticker:
         suffix = ticker.rsplit(".", 1)[1]
-        return suffix if suffix in _SCHEDULES else None
+        return suffix if suffix in _SUFFIX_TO_MIC else None
 
-    # Plain ticker with no dot-suffix → treat as US market
+    # Plain ticker with no dot-suffix → US market
     return ""
 
 
@@ -83,10 +93,14 @@ def is_market_open(pair: str, asset_class: str = "crypto") -> bool:
     """Return True if the market for this pair is currently open.
 
     Crypto always returns True (24/7 trading).
-    For equity, checks the exchange's local trading hours Mon–Fri only.
-    Unknown pair formats or missing schedules are treated as open (fail-safe).
+    For equity, delegates to exchange_calendars for holiday-aware checking.
+    Unknown pairs or unavailable calendars are treated as open (fail-safe).
     """
     if asset_class != "equity":
+        return True
+
+    if not _XCALS_AVAILABLE:
+        logger.debug("exchange_calendars not installed — allowing all equity pairs")
         return True
 
     suffix = _exchange_suffix(pair)
@@ -94,20 +108,21 @@ def is_market_open(pair: str, asset_class: str = "crypto") -> bool:
         logger.debug(f"market_hours: unknown pair format '{pair}', allowing")
         return True
 
-    schedule = _SCHEDULES.get(suffix)
-    if schedule is None:
-        logger.debug(f"market_hours: no schedule for suffix '{suffix}', allowing")
+    mic = _SUFFIX_TO_MIC.get(suffix)
+    if mic is None:
+        logger.debug(f"market_hours: no MIC for suffix '{suffix}', allowing")
         return True
 
-    now = datetime.datetime.now(tz=ZoneInfo(schedule.tz))
+    cal = _get_calendar(mic)
+    if cal is None:
+        return True  # calendar unavailable — fail open
 
-    # Weekend check (0=Mon … 6=Sun)
-    if now.weekday() >= 5:
-        return False
-
-    open_t  = now.replace(hour=schedule.open_h,  minute=schedule.open_m,  second=0, microsecond=0)
-    close_t = now.replace(hour=schedule.close_h, minute=schedule.close_m, second=0, microsecond=0)
-    return open_t <= now < close_t
+    try:
+        now = pd.Timestamp.now(tz="UTC")
+        return bool(cal.is_open_on_minute(now))
+    except Exception as exc:
+        logger.debug(f"market_hours: calendar check failed for '{mic}': {exc}")
+        return True
 
 
 def market_status_label(pair: str, asset_class: str = "crypto") -> str:
@@ -115,11 +130,8 @@ def market_status_label(pair: str, asset_class: str = "crypto") -> str:
     if asset_class != "equity":
         return "open (crypto)"
     suffix = _exchange_suffix(pair)
-    schedule = _SCHEDULES.get(suffix or "", None) if suffix is not None else None
-    if schedule is None:
+    mic = _SUFFIX_TO_MIC.get(suffix or "", "") if suffix is not None else ""
+    if not mic:
         return "open (unknown exchange)"
-    tz_label  = schedule.tz.split("/")[-1]
-    open_str  = f"{schedule.open_h:02d}:{schedule.open_m:02d}"
-    close_str = f"{schedule.close_h:02d}:{schedule.close_m:02d}"
     state = "OPEN" if is_market_open(pair, asset_class) else "CLOSED"
-    return f"{state} ({tz_label} {open_str}–{close_str})"
+    return f"{state} ({mic})"

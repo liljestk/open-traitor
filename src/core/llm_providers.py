@@ -8,13 +8,15 @@ Provides:
   - check_openrouter_credits          – OpenRouter free-tier credit check
   - LLMProvider                       – dataclass for a single provider
   - build_providers                   – config list → provider chain
-  - OPENROUTER_FREE_MODELS            – ordered list of free model slugs
+  - OPENROUTER_FREE_MODELS            – live list of free model slugs (auto-refreshed)
+  - refresh_free_models               – fetch + update the list from OpenRouter API
 """
 
 from __future__ import annotations
 
 import os
 import threading
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -86,16 +88,68 @@ _OPENROUTER_HEADERS = {
     "X-Title": "auto-traitor",
 }
 
-# Free-tier models on OpenRouter (suffix :free). Ordered by preference.
-# Last verified: 2026-02-22. Check https://openrouter.ai/models?q=:free
-OPENROUTER_FREE_MODELS: list[str] = [
+# Fallback list used when the OpenRouter API is unreachable.
+_FALLBACK_FREE_MODELS: list[str] = [
     "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1-0528:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "google/gemma-3-27b-it:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
     "qwen/qwen3-coder:free",
 ]
+
+# Live list — mutated in-place by refresh_free_models() so existing
+# references in llm_client.py always see the current state.
+OPENROUTER_FREE_MODELS: list[str] = list(_FALLBACK_FREE_MODELS)
+
+_free_models_refreshed_at: float = 0.0
+_FREE_MODELS_TTL: float = 6 * 3600  # at most once every 6 hours
+
+
+async def refresh_free_models() -> bool:
+    """Fetch the live set of free models from OpenRouter and update OPENROUTER_FREE_MODELS in-place.
+
+    Queries ``GET /api/v1/models`` (public — no auth required) and filters for
+    models whose id ends with ``:free`` and whose prompt price is ``"0"``.
+    Falls back to the existing list on any error.  TTL-cached so the API is
+    not called more than once every 6 hours.
+
+    Returns True if the list was updated.
+    """
+    global _free_models_refreshed_at
+
+    if _time.monotonic() - _free_models_refreshed_at < _FREE_MODELS_TTL:
+        return False  # Still fresh
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers=_OPENROUTER_HEADERS,
+            )
+        if resp.status_code != 200:
+            logger.warning(f"OpenRouter models API returned HTTP {resp.status_code} — keeping existing list")
+            return False
+
+        models = resp.json().get("data", [])
+        free = sorted(
+            m["id"] for m in models
+            if isinstance(m.get("id"), str)
+            and m["id"].endswith(":free")
+            and str(m.get("pricing", {}).get("prompt", "1")) == "0"
+        )
+        if not free:
+            logger.warning("OpenRouter models API returned no free models — keeping existing list")
+            return False
+
+        _free_models_refreshed_at = _time.monotonic()
+        OPENROUTER_FREE_MODELS.clear()
+        OPENROUTER_FREE_MODELS.extend(free)
+        logger.info(f"🔄 OpenRouter free models refreshed: {len(free)} available")
+        return True
+
+    except Exception as exc:
+        logger.warning(f"Could not refresh OpenRouter free models (non-fatal): {exc}")
+        return False
 
 
 async def check_openrouter_credits(api_key: str) -> dict[str, Any]:

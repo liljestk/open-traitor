@@ -25,7 +25,7 @@ import time
 from datetime import date as dt_date
 from typing import Any, Optional, TYPE_CHECKING
 
-from openai import AsyncOpenAI, RateLimitError, APIStatusError
+from openai import AsyncOpenAI, NotFoundError, RateLimitError, APIStatusError
 
 from src.utils.logger import get_logger
 
@@ -35,6 +35,7 @@ from src.core.llm_providers import (  # noqa: F401
     build_providers,
     check_openrouter_credits,
     OPENROUTER_FREE_MODELS,
+    refresh_free_models,
     _resolve_env,
 )
 
@@ -255,15 +256,29 @@ class LLMClient:
             f"⏸️ Provider '{p.name}' cooldown ({cooldown_secs}s): {reason}"
         )
 
-    def _rotate_openrouter_model(self, p: LLMProvider, reason: str) -> None:
+    def _rotate_openrouter_model(self, p: LLMProvider, reason: str, *, blacklist_current: bool = False) -> None:
         """Rotate an OpenRouter provider to the next free model.
 
         If all free models have been tried, stay on cooldown.
+        If blacklist_current is True (e.g. 404 "no endpoints"), remove the
+        current model from the rotation list so it's never tried again.
         """
         with p._lock:
             old_model = p.model
             if old_model.endswith(":free") or old_model in OPENROUTER_FREE_MODELS:
-                p._free_model_index = (p._free_model_index + 1) % len(OPENROUTER_FREE_MODELS)
+                # Blacklist models that are listed but have no endpoints (404)
+                if blacklist_current and old_model in OPENROUTER_FREE_MODELS:
+                    OPENROUTER_FREE_MODELS.remove(old_model)
+                    logger.warning(
+                        f"🚫 OpenRouter: blacklisted dead model {old_model} "
+                        f"({len(OPENROUTER_FREE_MODELS)} free models remaining)"
+                    )
+                    if not OPENROUTER_FREE_MODELS:
+                        logger.error("All OpenRouter free models exhausted!")
+                        return
+                    p._free_model_index = p._free_model_index % len(OPENROUTER_FREE_MODELS)
+                else:
+                    p._free_model_index = (p._free_model_index + 1) % len(OPENROUTER_FREE_MODELS)
                 new_model = OPENROUTER_FREE_MODELS[p._free_model_index]
                 if new_model != old_model:
                     p.model = new_model
@@ -508,6 +523,14 @@ class LLMClient:
                 if self._is_rate_or_quota_error(e):
                     self._activate_cooldown(provider, str(e))
                     continue
+                # 404 "No endpoints" from OpenRouter = dead model, rotate it out
+                if (
+                    isinstance(e, (NotFoundError, APIStatusError))
+                    and getattr(e, 'status_code', 0) == 404
+                    and provider.name.startswith("openrouter")
+                    and provider.tier == "free"
+                ):
+                    self._rotate_openrouter_model(provider, str(e), blacklist_current=True)
                 if not provider.is_local:
                     _agent_label = f" for {agent_name}" if agent_name else ""
                     logger.warning(
@@ -641,6 +664,14 @@ class LLMClient:
                 if self._is_rate_or_quota_error(e):
                     self._activate_cooldown(provider, str(e))
                     continue
+                # 404 "No endpoints" from OpenRouter = dead model, rotate it out
+                if (
+                    isinstance(e, (NotFoundError, APIStatusError))
+                    and getattr(e, 'status_code', 0) == 404
+                    and provider.name.startswith("openrouter")
+                    and provider.tier == "free"
+                ):
+                    self._rotate_openrouter_model(provider, str(e), blacklist_current=True)
                 if not provider.is_local:
                     logger.warning(
                         f"⚠️ Provider '{provider.name}' tool call failed: "
@@ -887,6 +918,7 @@ class LLMClient:
 
     async def _check_all_openrouter_credits(self) -> None:
         """Check OpenRouter credit balance for all OpenRouter providers in the chain."""
+        await refresh_free_models()  # no-op if TTL hasn't elapsed
         with self._providers_lock:
             providers = list(self._providers)
         for p in providers:
