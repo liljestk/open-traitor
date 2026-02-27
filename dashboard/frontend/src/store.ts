@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useState, useEffect } from 'react'
 import type { LiveEvent } from './api'
 
 const MAX_EVENTS = 200
@@ -90,4 +91,15 @@ export function useCurrencySymbol(): string {
   const currency = useLiveStore((s) => s.currency) || 'EUR'
   const parts = new Intl.NumberFormat('en-US', { style: 'currency', currency }).formatToParts(0)
   return parts.find((p) => p.type === 'currency')?.value ?? currency
+}
+
+/** Returns true when the viewport is narrower than `breakpoint` (default 768px). */
+export function useIsMobile(breakpoint = 768): boolean {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < breakpoint)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [breakpoint])
+  return isMobile
 }

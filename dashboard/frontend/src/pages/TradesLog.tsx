@@ -7,7 +7,7 @@ import { fetchTrades, exportTradesUrl } from '../api'
 import { SkeletonTable } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
-import { useCurrencyFormatter } from '../store'
+import { useCurrencyFormatter, useIsMobile } from '../store'
 
 const inputStyle: React.CSSProperties = {
     background: '#161b22',
@@ -39,6 +39,7 @@ export default function TradesLog() {
     const [hours, setHours] = useState(168)
     const [limit, setLimit] = useState(500)
     const fmtCurrency = useCurrencyFormatter()
+    const isMobile = useIsMobile()
 
     const { data, isLoading, isFetching, refetch } = useQuery({
         queryKey: ['trades', pairFilter, limit, hours],
@@ -103,7 +104,7 @@ export default function TradesLog() {
                 </div>
 
                 {/* Stats strip */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12 }}>
                     {[
                         { label: 'Total Trades', value: trades.length, icon: <Hash size={14} />, color: '#8b949e' },
                         { label: 'Win Rate', value: `${winRate}%`, icon: <TrendingUp size={14} />, color: '#22c55e' },
@@ -137,136 +138,226 @@ export default function TradesLog() {
                     ))}
                 </div>
 
-                {/* Table */}
+                {/* Table (desktop) / Card list (mobile) */}
                 <div style={{
                     flex: 1, background: '#0d1117', border: '1px solid #21262d',
                     borderRadius: 8, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0,
                 }}>
-                    <div style={{ overflowY: 'auto', flex: 1 }}>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                            <thead style={{ position: 'sticky', top: 0, background: '#161b22', zIndex: 1 }}>
-                                <tr>
-                                    {['Time', 'Pair', 'Action', 'Price', 'Amount', 'PnL', 'Fee', 'Signal', 'Conf.', ''].map(h => (
-                                        <th key={h} style={{
-                                            padding: '10px 14px', textAlign: 'left', fontWeight: 600,
-                                            fontSize: 11, color: '#6e7681', textTransform: 'uppercase',
-                                            letterSpacing: '0.05em', borderBottom: '1px solid #21262d', whiteSpace: 'nowrap',
-                                        }}>
-                                            {h}
-                                        </th>
+                    {isMobile ? (
+                        /* ── Mobile card list ── */
+                        <div style={{ overflowY: 'auto', flex: 1 }}>
+                            {isLoading && (
+                                <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                    {Array.from({ length: 8 }).map((_, i) => (
+                                        <div key={i} style={{ height: 72, background: '#161b22', borderRadius: 8, animation: 'pulse 2s infinite' }} />
                                     ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {isLoading && <SkeletonTable rows={10} cols={10} />}
-                                {!isLoading && trades.length === 0 && (
-                                    <tr><td colSpan={10}>
-                                        <EmptyState
-                                            icon="trades"
-                                            title="No trades yet"
-                                            description="Trades will appear here once the bot executes its first order."
-                                        />
-                                    </td></tr>
-                                )}
-                                <AnimatePresence>
-                                    {trades.map((trade, i) => {
-                                        const isWin = (trade.pnl ?? 0) >= 0
-                                        const isBuy = trade.action?.toLowerCase() === 'buy'
-                                        return (
-                                            <motion.tr
-                                                key={trade.id}
-                                                initial={{ opacity: 0 }}
-                                                animate={{ opacity: 1 }}
-                                                transition={{ delay: Math.min(i * 0.01, 0.3) }}
-                                                style={{
-                                                    borderBottom: '1px solid #161b22',
-                                                    cursor: 'default',
-                                                }}
-                                                onMouseEnter={e => (e.currentTarget.style.background = '#161b22')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                                            >
-                                                <td style={{ padding: '9px 14px', color: '#8b949e', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, whiteSpace: 'nowrap' }}>
-                                                    {fmtDate(trade.ts)}
-                                                </td>
-                                                <td style={{ padding: '9px 14px' }}>
-                                                    <span style={{
-                                                        background: '#21262d', border: '1px solid #30363d',
-                                                        borderRadius: 4, padding: '2px 7px', fontSize: 12,
-                                                        fontFamily: 'JetBrains Mono, monospace', fontWeight: 500,
-                                                        color: '#e6edf3',
-                                                    }}>{trade.pair}</span>
-                                                </td>
-                                                <td style={{ padding: '9px 14px' }}>
-                                                    <span style={{
-                                                        padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                                                        fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
-                                                        background: isBuy ? '#22c55e18' : '#f8514918',
-                                                        color: isBuy ? '#22c55e' : '#f85149',
-                                                        border: `1px solid ${isBuy ? '#22c55e30' : '#f8514930'}`,
-                                                    }}>
-                                                        {trade.action}
-                                                    </span>
-                                                </td>
-                                                <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#c9d1d9' }}>
-                                                    {fmtCurrency(trade.price)}
-                                                </td>
-                                                <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#c9d1d9' }}>
-                                                    {fmtCurrency(trade.quote_amount)}
-                                                </td>
-                                                <td style={{ padding: '9px 14px', textAlign: 'right' }}>
-                                                    {trade.pnl != null ? (
+                                </div>
+                            )}
+                            {!isLoading && trades.length === 0 && (
+                                <EmptyState
+                                    icon="trades"
+                                    title="No trades yet"
+                                    description="Trades will appear here once the bot executes its first order."
+                                />
+                            )}
+                            {trades.map((trade) => {
+                                const isWin = (trade.pnl ?? 0) >= 0
+                                const isBuy = trade.action?.toLowerCase() === 'buy'
+                                return (
+                                    <div
+                                        key={trade.id}
+                                        style={{ padding: '12px 16px', borderBottom: '1px solid #161b22' }}
+                                    >
+                                        {/* Row 1: pair + action badge */}
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                                            <span style={{
+                                                background: '#21262d', border: '1px solid #30363d',
+                                                borderRadius: 4, padding: '2px 7px', fontSize: 12,
+                                                fontFamily: 'JetBrains Mono, monospace', fontWeight: 500, color: '#e6edf3',
+                                            }}>{trade.pair}</span>
+                                            <span style={{
+                                                padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                                                fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+                                                background: isBuy ? '#22c55e18' : '#f8514918',
+                                                color: isBuy ? '#22c55e' : '#f85149',
+                                                border: `1px solid ${isBuy ? '#22c55e30' : '#f8514930'}`,
+                                            }}>{trade.action}</span>
+                                        </div>
+                                        {/* Row 2: PnL + timestamp */}
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                                            {trade.pnl != null ? (
+                                                <span style={{
+                                                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                                                    fontFamily: 'JetBrains Mono, monospace', fontSize: 13,
+                                                    fontWeight: 600, color: isWin ? '#22c55e' : '#f85149',
+                                                }}>
+                                                    {isWin ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                                    {isWin ? '+' : ''}{fmtCurrency(trade.pnl)}
+                                                </span>
+                                            ) : <span style={{ color: '#484f58', fontSize: 13 }}>No PnL</span>}
+                                            <span style={{ fontSize: 12, color: '#6e7681', fontFamily: 'JetBrains Mono, monospace' }}>
+                                                {fmtDate(trade.ts)}
+                                            </span>
+                                        </div>
+                                        {/* Row 3: price + confidence + cycle link */}
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                            <span style={{ fontSize: 12, color: '#8b949e', fontFamily: 'JetBrains Mono, monospace' }}>
+                                                {fmtCurrency(trade.price)}
+                                            </span>
+                                            {trade.confidence != null && (
+                                                <span style={{
+                                                    fontSize: 12,
+                                                    color: trade.confidence > 0.8 ? '#22c55e' : trade.confidence > 0.5 ? '#d29922' : '#8b949e',
+                                                }}>
+                                                    {(trade.confidence * 100).toFixed(0)}% conf
+                                                </span>
+                                            )}
+                                            <div style={{ flex: 1 }} />
+                                            {trade.cycle_id && (
+                                                <button
+                                                    title="View cycle playback"
+                                                    onClick={() => navigate(`/cycle/${encodeURIComponent(trade.cycle_id!)}`)}
+                                                    style={{
+                                                        background: 'none', border: 'none', cursor: 'pointer',
+                                                        color: '#58a6ff', padding: 2, lineHeight: 1,
+                                                    }}
+                                                >
+                                                    <ExternalLink size={13} />
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    ) : (
+                        /* ── Desktop table ── */
+                        <div style={{ overflowY: 'auto', flex: 1 }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                <thead style={{ position: 'sticky', top: 0, background: '#161b22', zIndex: 1 }}>
+                                    <tr>
+                                        {['Time', 'Pair', 'Action', 'Price', 'Amount', 'PnL', 'Fee', 'Signal', 'Conf.', ''].map(h => (
+                                            <th key={h} style={{
+                                                padding: '10px 14px', textAlign: 'left', fontWeight: 600,
+                                                fontSize: 11, color: '#6e7681', textTransform: 'uppercase',
+                                                letterSpacing: '0.05em', borderBottom: '1px solid #21262d', whiteSpace: 'nowrap',
+                                            }}>
+                                                {h}
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {isLoading && <SkeletonTable rows={10} cols={10} />}
+                                    {!isLoading && trades.length === 0 && (
+                                        <tr><td colSpan={10}>
+                                            <EmptyState
+                                                icon="trades"
+                                                title="No trades yet"
+                                                description="Trades will appear here once the bot executes its first order."
+                                            />
+                                        </td></tr>
+                                    )}
+                                    <AnimatePresence>
+                                        {trades.map((trade, i) => {
+                                            const isWin = (trade.pnl ?? 0) >= 0
+                                            const isBuy = trade.action?.toLowerCase() === 'buy'
+                                            return (
+                                                <motion.tr
+                                                    key={trade.id}
+                                                    initial={{ opacity: 0 }}
+                                                    animate={{ opacity: 1 }}
+                                                    transition={{ delay: Math.min(i * 0.01, 0.3) }}
+                                                    style={{
+                                                        borderBottom: '1px solid #161b22',
+                                                        cursor: 'default',
+                                                    }}
+                                                    onMouseEnter={e => (e.currentTarget.style.background = '#161b22')}
+                                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                                >
+                                                    <td style={{ padding: '9px 14px', color: '#8b949e', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, whiteSpace: 'nowrap' }}>
+                                                        {fmtDate(trade.ts)}
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px' }}>
                                                         <span style={{
-                                                            display: 'inline-flex', alignItems: 'center', gap: 4,
-                                                            fontFamily: 'JetBrains Mono, monospace', fontSize: 12,
-                                                            fontWeight: 600, color: isWin ? '#22c55e' : '#f85149',
-                                                        }}>
-                                                            {isWin ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                                                            {isWin ? '+' : ''}{fmtCurrency(trade.pnl)}
-                                                        </span>
-                                                    ) : <span style={{ color: '#484f58' }}>—</span>}
-                                                </td>
-                                                <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#8b949e' }}>
-                                                    {fmtCurrency(trade.fee_quote)}
-                                                </td>
-                                                <td style={{ padding: '9px 14px', color: '#8b949e', fontSize: 12, maxWidth: 130 }}>
-                                                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}
-                                                        title={trade.signal_type ?? ''}>
-                                                        {trade.signal_type ?? '—'}
-                                                    </span>
-                                                </td>
-                                                <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>
-                                                    {trade.confidence != null ? (
+                                                            background: '#21262d', border: '1px solid #30363d',
+                                                            borderRadius: 4, padding: '2px 7px', fontSize: 12,
+                                                            fontFamily: 'JetBrains Mono, monospace', fontWeight: 500,
+                                                            color: '#e6edf3',
+                                                        }}>{trade.pair}</span>
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px' }}>
                                                         <span style={{
-                                                            color: trade.confidence > 0.8 ? '#22c55e' : trade.confidence > 0.5 ? '#d29922' : '#8b949e'
+                                                            padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                                                            fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+                                                            background: isBuy ? '#22c55e18' : '#f8514918',
+                                                            color: isBuy ? '#22c55e' : '#f85149',
+                                                            border: `1px solid ${isBuy ? '#22c55e30' : '#f8514930'}`,
                                                         }}>
-                                                            {(trade.confidence * 100).toFixed(0)}%
+                                                            {trade.action}
                                                         </span>
-                                                    ) : <span style={{ color: '#484f58' }}>—</span>}
-                                                </td>
-                                                <td style={{ padding: '9px 6px', textAlign: 'center' }}>
-                                                    {trade.cycle_id ? (
-                                                        <button
-                                                            title="View cycle playback"
-                                                            onClick={() => navigate(`/cycle/${encodeURIComponent(trade.cycle_id!)}`)}
-                                                            style={{
-                                                                background: 'none', border: 'none', cursor: 'pointer',
-                                                                color: '#58a6ff', padding: 2, lineHeight: 1,
-                                                                opacity: 0.7, transition: 'opacity 0.15s',
-                                                            }}
-                                                            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-                                                            onMouseLeave={e => (e.currentTarget.style.opacity = '0.7')}
-                                                        >
-                                                            <ExternalLink size={13} />
-                                                        </button>
-                                                    ) : null}
-                                                </td>
-                                            </motion.tr>
-                                        )
-                                    })}
-                                </AnimatePresence>
-                            </tbody>
-                        </table>
-                    </div>
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#c9d1d9' }}>
+                                                        {fmtCurrency(trade.price)}
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#c9d1d9' }}>
+                                                        {fmtCurrency(trade.quote_amount)}
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', textAlign: 'right' }}>
+                                                        {trade.pnl != null ? (
+                                                            <span style={{
+                                                                display: 'inline-flex', alignItems: 'center', gap: 4,
+                                                                fontFamily: 'JetBrains Mono, monospace', fontSize: 12,
+                                                                fontWeight: 600, color: isWin ? '#22c55e' : '#f85149',
+                                                            }}>
+                                                                {isWin ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                                                {isWin ? '+' : ''}{fmtCurrency(trade.pnl)}
+                                                            </span>
+                                                        ) : <span style={{ color: '#484f58' }}>—</span>}
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#8b949e' }}>
+                                                        {fmtCurrency(trade.fee_quote)}
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', color: '#8b949e', fontSize: 12, maxWidth: 130 }}>
+                                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}
+                                                            title={trade.signal_type ?? ''}>
+                                                            {trade.signal_type ?? '—'}
+                                                        </span>
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>
+                                                        {trade.confidence != null ? (
+                                                            <span style={{
+                                                                color: trade.confidence > 0.8 ? '#22c55e' : trade.confidence > 0.5 ? '#d29922' : '#8b949e'
+                                                            }}>
+                                                                {(trade.confidence * 100).toFixed(0)}%
+                                                            </span>
+                                                        ) : <span style={{ color: '#484f58' }}>—</span>}
+                                                    </td>
+                                                    <td style={{ padding: '9px 6px', textAlign: 'center' }}>
+                                                        {trade.cycle_id ? (
+                                                            <button
+                                                                title="View cycle playback"
+                                                                onClick={() => navigate(`/cycle/${encodeURIComponent(trade.cycle_id!)}`)}
+                                                                style={{
+                                                                    background: 'none', border: 'none', cursor: 'pointer',
+                                                                    color: '#58a6ff', padding: 2, lineHeight: 1,
+                                                                    opacity: 0.7, transition: 'opacity 0.15s',
+                                                                }}
+                                                                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                                                                onMouseLeave={e => (e.currentTarget.style.opacity = '0.7')}
+                                                            >
+                                                                <ExternalLink size={13} />
+                                                            </button>
+                                                        ) : null}
+                                                    </td>
+                                                </motion.tr>
+                                            )
+                                        })}
+                                    </AnimatePresence>
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
 
                     {/* Footer */}
                     <div style={{

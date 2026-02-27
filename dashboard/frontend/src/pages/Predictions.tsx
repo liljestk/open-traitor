@@ -334,7 +334,7 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3">
         <div className="flex items-center gap-3">
           <div className="flex gap-1">
             {OVERLAY_TIME_RANGES.map((r) => (
@@ -354,7 +354,7 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             {history.total_predictions} predictions · {accuracy != null ? `${accuracy}% accurate` : 'pending eval'}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[10px]">
+        <div className="flex items-center gap-3 text-[10px] ml-auto">
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-green-500" /> Buy ({bullish})
           </span>
@@ -369,7 +369,7 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
         </div>
       </div>
 
-      <ResponsiveContainer width="100%" height={320}>
+      <ResponsiveContainer width="100%" height={260}>
         <ComposedChart data={chartData} margin={{ top: 10, right: 15, bottom: 0, left: 5 }}>
           <defs>
             <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
@@ -394,7 +394,8 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             tickFormatter={(v: number) => v < 1 ? v.toFixed(4) : v < 100 ? v.toFixed(2) : v.toFixed(0)}
           />
           <Tooltip
-            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
+            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
+            itemStyle={{ color: '#e5e7eb' }}
             formatter={(value: any, name: string | undefined) => {
               const fmt = (v: number) => v < 1 ? v.toFixed(6) : v.toFixed(2)
               if (name === 'price') return [typeof value === 'number' ? fmt(value) : value, 'Price']
@@ -563,7 +564,8 @@ function CalibrationChart({ data }: { data: PredictionAccuracyData['confidence_c
         <XAxis dataKey="range" tick={{ fontSize: 10, fill: '#6e7681' }} />
         <YAxis tick={{ fontSize: 10, fill: '#6e7681' }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
         <Tooltip
-          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
+          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
+          itemStyle={{ color: '#e5e7eb' }}
           formatter={(v: any) => [`${Number(v ?? 0).toFixed(1)}%`, 'Actual Accuracy']}
         />
         <Bar dataKey="accuracy" name="Actual Accuracy" radius={[3, 3, 0, 0]}>
@@ -602,7 +604,8 @@ function DailyAccuracyChart({ data }: { data: PredictionAccuracyData['daily_accu
         <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6e7681' }} />
         <YAxis tick={{ fontSize: 10, fill: '#6e7681' }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
         <Tooltip
-          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
+          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
+          itemStyle={{ color: '#e5e7eb' }}
           formatter={(v: any, name?: string) => {
             if (name === 'accuracy') return [`${Number(v ?? 0).toFixed(1)}%`, 'Accuracy']
             return [v, name ?? '']
@@ -634,7 +637,8 @@ function SignalTypeChart({ data }: { data: PredictionAccuracyData['by_signal_typ
         <XAxis type="number" tick={{ fontSize: 10, fill: '#6e7681' }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
         <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#d1d5db' }} width={65} />
         <Tooltip
-          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12 }}
+          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
+          itemStyle={{ color: '#e5e7eb' }}
           formatter={(v: any) => [`${Number(v ?? 0).toFixed(1)}%`, 'Accuracy']}
         />
         <Bar dataKey="accuracy" radius={[0, 3, 3, 0]}>
@@ -1128,10 +1132,10 @@ function PairTradeHistory({ pair }: { pair: string }) {
 // ── Recent Predictions Table ───────────────────────────────────────────────
 
 function RecentPredictions({ data, selectedPair }: { data: PredictionAccuracyData; selectedPair?: string | null }) {
-  const allPredictions = [...data.predictions].reverse().slice(0, 50)
-  const predictions = selectedPair
+  const allPredictions = [...data.predictions].reverse()
+  const predictions = (selectedPair
     ? allPredictions.filter(p => p.pair === selectedPair)
-    : allPredictions
+    : allPredictions).slice(0, 50)
 
   if (!predictions.length) return <EmptyState icon="chart" title={selectedPair ? `No predictions for ${selectedPair}` : 'No predictions yet'} description="AI signal predictions will appear as cycles run." />
 

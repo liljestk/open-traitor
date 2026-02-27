@@ -11,7 +11,7 @@ import StatCard from '../components/StatCard'
 import { SkeletonTable, SkeletonStatCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
-import { useCurrencyFormatter } from '../store'
+import { useCurrencyFormatter, useIsMobile } from '../store'
 
 const PAGE_SIZE = 50
 
@@ -25,6 +25,7 @@ export default function CycleExplorer() {
   const [offset, setOffset] = useState(0)
   const navigate = useNavigate()
   const fmtCurrency = useCurrencyFormatter()
+  const isMobile = useIsMobile()
 
   const fmtPnl = (pnl: number | null): string => {
     if (pnl == null) return '—'
@@ -88,65 +89,114 @@ export default function CycleExplorer() {
         )}
       </div>
 
-      {/* Table */}
+      {/* Table (desktop) / Card list (mobile) */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase">
-              {['Time', 'Pair', 'Signal', 'Action', 'Confidence', 'PnL', 'Tokens', 'LLM Time', 'Wall Clock', 'Trace'].map((h) => (
-                <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {cyclesLoading && <SkeletonTable rows={10} cols={10} />}
+        {isMobile ? (
+          /* ── Mobile card list ── */
+          <div>
+            {cyclesLoading && (
+              <div className="p-4 space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-20 bg-gray-800 rounded-xl animate-pulse" />
+                ))}
+              </div>
+            )}
             {!cyclesLoading && cycles.length === 0 && (
-              <tr><td colSpan={10}>
-                <EmptyState
-                  icon="chart"
-                  title="No cycles found"
-                  description="Cycles will appear here once the trading bot starts analyzing pairs."
-                />
-              </td></tr>
+              <EmptyState
+                icon="chart"
+                title="No cycles found"
+                description="Cycles will appear here once the trading bot starts analyzing pairs."
+              />
             )}
             {cycles.map((c: CycleSummary) => (
-              <tr
+              <button
                 key={c.cycle_id}
-                className="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors"
                 onClick={() => navigate(`/cycle/${encodeURIComponent(c.cycle_id)}`)}
+                className="w-full text-left border-b border-gray-800/50 px-4 py-3 active:bg-gray-800/60 transition-colors"
+                style={{ WebkitTapHighlightColor: 'transparent' }}
               >
-                <td className="px-4 py-2.5 text-gray-400 whitespace-nowrap">{dayjs(c.started_at).format('MM-DD HH:mm:ss')}</td>
-                <td className="px-4 py-2.5 font-mono text-brand-400">{c.pair}</td>
-                <td className="px-4 py-2.5 text-gray-300">{c.signal_type ?? '—'}</td>
-                <td className="px-4 py-2.5">
+                {/* Row 1: pair + action badge */}
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-brand-400 font-semibold text-sm">{c.pair}</span>
                   <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
                     c.action === 'BUY' ? 'bg-green-900/60 text-green-400' :
                     c.action === 'SELL' ? 'bg-red-900/60 text-red-400' :
                     'bg-gray-800 text-gray-400'
                   }`}>{c.action ?? 'HOLD'}</span>
-                </td>
-                <td className="px-4 py-2.5 text-gray-300">{c.confidence != null ? `${(c.confidence * 100).toFixed(0)}%` : '—'}</td>
-                <td className={`px-4 py-2.5 font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</td>
-                <td className="px-4 py-2.5 text-gray-400">{c.total_prompt_tokens != null ? (c.total_prompt_tokens + (c.total_completion_tokens ?? 0)) : '—'}</td>
-                <td className="px-4 py-2.5 text-gray-400">{c.total_latency_ms != null ? `${c.total_latency_ms.toFixed(0)} ms` : '—'}</td>
-                <td className={`px-4 py-2.5 ${c.cycle_duration_ms != null && c.cycle_duration_ms > 120000 ? 'text-yellow-400 font-medium' : 'text-gray-400'}`}>{c.cycle_duration_ms != null ? `${(c.cycle_duration_ms / 1000).toFixed(1)}s` : '—'}</td>
-                <td className="px-4 py-2.5">
-                  {c.langfuse_url ? (
-                    <a
-                      href={c.langfuse_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-brand-400 hover:underline text-xs"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      Open ↗
-                    </a>
-                  ) : '—'}
-                </td>
-              </tr>
+                </div>
+                {/* Row 2: signal + confidence */}
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-gray-400">{c.signal_type ?? '—'}</span>
+                  <span className="text-xs text-gray-400">{c.confidence != null ? `${(c.confidence * 100).toFixed(0)}% conf` : '—'}</span>
+                </div>
+                {/* Row 3: PnL + timestamp */}
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</span>
+                  <span className="text-xs text-gray-500">{dayjs(c.started_at).format('MM-DD HH:mm')}</span>
+                </div>
+              </button>
             ))}
-          </tbody>
-        </table>
+          </div>
+        ) : (
+          /* ── Desktop table ── */
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase">
+                {['Time', 'Pair', 'Signal', 'Action', 'Confidence', 'PnL', 'Tokens', 'LLM Time', 'Wall Clock', 'Trace'].map((h) => (
+                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cyclesLoading && <SkeletonTable rows={10} cols={10} />}
+              {!cyclesLoading && cycles.length === 0 && (
+                <tr><td colSpan={10}>
+                  <EmptyState
+                    icon="chart"
+                    title="No cycles found"
+                    description="Cycles will appear here once the trading bot starts analyzing pairs."
+                  />
+                </td></tr>
+              )}
+              {cycles.map((c: CycleSummary) => (
+                <tr
+                  key={c.cycle_id}
+                  className="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors"
+                  onClick={() => navigate(`/cycle/${encodeURIComponent(c.cycle_id)}`)}
+                >
+                  <td className="px-4 py-2.5 text-gray-400 whitespace-nowrap">{dayjs(c.started_at).format('MM-DD HH:mm:ss')}</td>
+                  <td className="px-4 py-2.5 font-mono text-brand-400">{c.pair}</td>
+                  <td className="px-4 py-2.5 text-gray-300">{c.signal_type ?? '—'}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                      c.action === 'BUY' ? 'bg-green-900/60 text-green-400' :
+                      c.action === 'SELL' ? 'bg-red-900/60 text-red-400' :
+                      'bg-gray-800 text-gray-400'
+                    }`}>{c.action ?? 'HOLD'}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-300">{c.confidence != null ? `${(c.confidence * 100).toFixed(0)}%` : '—'}</td>
+                  <td className={`px-4 py-2.5 font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</td>
+                  <td className="px-4 py-2.5 text-gray-400">{c.total_prompt_tokens != null ? (c.total_prompt_tokens + (c.total_completion_tokens ?? 0)) : '—'}</td>
+                  <td className="px-4 py-2.5 text-gray-400">{c.total_latency_ms != null ? `${c.total_latency_ms.toFixed(0)} ms` : '—'}</td>
+                  <td className={`px-4 py-2.5 ${c.cycle_duration_ms != null && c.cycle_duration_ms > 120000 ? 'text-yellow-400 font-medium' : 'text-gray-400'}`}>{c.cycle_duration_ms != null ? `${(c.cycle_duration_ms / 1000).toFixed(1)}s` : '—'}</td>
+                  <td className="px-4 py-2.5">
+                    {c.langfuse_url ? (
+                      <a
+                        href={c.langfuse_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-brand-400 hover:underline text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Open ↗
+                      </a>
+                    ) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
 
         {/* Pagination */}
         <div className="px-4 py-3 border-t border-gray-800 flex items-center gap-4 text-sm">
