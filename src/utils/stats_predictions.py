@@ -419,17 +419,17 @@ class PredictionsMixin:
         }
 
     def get_tracked_pairs(self, quote_currency: str | list[str] | None = None) -> dict:
-        """Return pairs the LLM system has analyzed, grouped by asset class.
+        """Return pairs tracked by AI and/or humans, grouped by asset class.
 
-        Looks at agent_reasoning entries to see what pairs were actually
-        predicted on, and classifies them as crypto or equity.
+        AI-tracked: pairs with agent_reasoning entries from the last 7 days.
+        Human-tracked: pairs in the pair_follows table with followed_by='human'.
 
         If *quote_currency* is given (e.g. "EUR" or ["EUR", "USD"]),
         only pairs ending in those currency suffixes are returned.
         """
         conn = self._get_conn()
 
-        # Get all pairs with prediction counts from last 7 days
+        # Get AI-tracked pairs with prediction counts from last 7 days
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         qc_frag, qc_params = qc_where(quote_currency)
         rows = conn.execute(
@@ -443,21 +443,51 @@ class PredictionsMixin:
             (cutoff, *qc_params),
         ).fetchall()
 
-        # Classify pairs
-        crypto_suffixes = {"-USD", "-EUR", "-BTC", "-ETH", "-USDT", "-USDC", "-GBP"}
-        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordic equities
-
-        crypto_pairs = []
-        equity_pairs = []
+        # Build a map of AI-tracked pairs
+        ai_pairs: dict[str, dict] = {}
         for r in rows:
             pair = r["pair"]
-            item = {
+            ai_pairs[pair.upper()] = {
                 "pair": pair,
                 "prediction_count": r["prediction_count"],
                 "last_predicted": r["last_predicted"],
                 "signal_types": (r["signal_types"] or "").split(","),
+                "source": "ai",
             }
-            # Classify by suffix
+
+        # Get human-followed pairs from pair_follows table
+        human_sql = "SELECT DISTINCT pair, ts FROM pair_follows WHERE followed_by = 'human'"
+        human_params: list = []
+        if qc_frag:
+            human_sql += qc_frag
+            human_params.extend(qc_params)
+        try:
+            human_rows = conn.execute(human_sql, human_params).fetchall()
+        except Exception:
+            human_rows = []  # table may not exist in very old DBs
+
+        # Merge: AI pairs take priority, human-only pairs get added with source="human"
+        for hr in human_rows:
+            pair_upper = hr["pair"].upper()
+            if pair_upper in ai_pairs:
+                # Pair is both AI and human tracked
+                ai_pairs[pair_upper]["source"] = "both"
+            else:
+                ai_pairs[pair_upper] = {
+                    "pair": hr["pair"],
+                    "prediction_count": 0,
+                    "last_predicted": hr["ts"] if hr["ts"] else None,
+                    "signal_types": [],
+                    "source": "human",
+                }
+
+        # Classify pairs into crypto/equity
+        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordic equities
+
+        crypto_pairs = []
+        equity_pairs = []
+        for item in sorted(ai_pairs.values(), key=lambda x: x["prediction_count"], reverse=True):
+            pair = item["pair"]
             is_equity = any(pair.upper().endswith(s) for s in equity_suffixes)
             if is_equity:
                 equity_pairs.append(item)
@@ -467,5 +497,5 @@ class PredictionsMixin:
         return {
             "crypto": crypto_pairs,
             "equity": equity_pairs,
-            "total_pairs": len(rows),
+            "total_pairs": len(ai_pairs),
         }

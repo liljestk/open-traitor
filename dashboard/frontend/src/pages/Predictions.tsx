@@ -16,6 +16,7 @@ import {
   Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2,
   Zap, Clock, Layers, Eye, Search, Newspaper, Shield, Brain,
   ArrowUpRight, ArrowDownRight, Minus, ExternalLink, DollarSign, X,
+  ChevronDown, ChevronRight, User, Bot,
 } from 'lucide-react'
 import {
   fetchPredictionAccuracy, fetchTrackedPairs, fetchPairPredictionHistory,
@@ -135,7 +136,13 @@ function filterByAsset(data: PredictionAccuracyData, tab: string): PredictionAcc
   }
 }
 
-// ── LLM-Tracked Pairs Section ──────────────────────────────────────────────
+// ── Tracked Pairs Section (AI + Human) ─────────────────────────────────────
+
+const SOURCE_BADGE: Record<string, { icon: typeof Bot; label: string; color: string }> = {
+  ai:    { icon: Bot,  label: 'AI',    color: 'text-violet-400' },
+  human: { icon: User, label: 'Manual', color: 'text-amber-400' },
+  both:  { icon: Bot,  label: 'AI+You', color: 'text-emerald-400' },
+}
 
 function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
   data: TrackedPairsData; assetTab: string; onSelectPair: (pair: string) => void; selectedPair: string | null
@@ -145,12 +152,16 @@ function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
       : [...data.crypto, ...data.equity]
 
   if (!pairs.length) {
+    const emptyTitle = assetTab === 'equity' ? 'No shares tracked yet'
+      : assetTab === 'crypto' ? 'No crypto pairs tracked yet'
+        : 'No pairs tracked yet'
+    const emptyDesc = assetTab === 'equity'
+      ? 'Follow shares from the Watchlist or let the AI discover them.'
+      : assetTab === 'crypto'
+        ? 'Follow crypto pairs from the Watchlist or let the AI discover them.'
+        : 'Follow pairs from the Watchlist or let the AI discover them.'
     return (
-      <EmptyState
-        icon="chart"
-        title={assetTab === 'equity' ? 'No equity pairs tracked' : 'No pairs tracked yet'}
-        description="The AI will start tracking pairs as it runs analysis cycles."
-      />
+      <EmptyState icon="chart" title={emptyTitle} description={emptyDesc} />
     )
   }
 
@@ -159,6 +170,9 @@ function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
       {pairs.sort((a, b) => b.prediction_count - a.prediction_count).map((p) => {
         const isEquity = classifyPair(p.pair) === 'equity'
         const isSelected = selectedPair === p.pair
+        const source = p.source ?? 'ai'
+        const badge = SOURCE_BADGE[source] ?? SOURCE_BADGE.ai
+        const BadgeIcon = badge.icon
         return (
           <button
             key={p.pair}
@@ -171,14 +185,19 @@ function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
             <div className="flex items-center gap-1.5 mb-1">
               <span className={`w-1.5 h-1.5 rounded-full ${isEquity ? 'bg-blue-400' : 'bg-green-400'}`} />
               <span className="text-xs font-medium text-gray-200 truncate">{p.pair}</span>
-              {isSelected && <Eye size={10} className="text-brand-400 ml-auto flex-shrink-0" />}
+              <span className={`ml-auto flex items-center gap-0.5 flex-shrink-0 ${badge.color}`} title={badge.label}>
+                <BadgeIcon size={10} />
+                {isSelected && <Eye size={10} className="text-brand-400" />}
+              </span>
             </div>
             <p className="text-[10px] text-gray-500">
-              {p.prediction_count} predictions
+              {p.prediction_count > 0 ? `${p.prediction_count} predictions` : 'No predictions yet'}
             </p>
-            <p className="text-[10px] text-gray-600">
-              Last: {dayjs(p.last_predicted).fromNow()}
-            </p>
+            {p.last_predicted && (
+              <p className="text-[10px] text-gray-600">
+                Last: {dayjs(p.last_predicted).fromNow()}
+              </p>
+            )}
           </button>
         )
       })}
@@ -1205,6 +1224,7 @@ export default function Predictions() {
   const [assetTab, setAssetTab] = useState('all')
   const [selectedPair, setSelectedPair] = useState<string | null>(null)
   const [pairSearch, setPairSearch] = useState('')
+  const [trackedCollapsed, setTrackedCollapsed] = useState(false)
 
   const { data: rawData, isLoading } = useQuery({
     queryKey: ['prediction-accuracy', days],
@@ -1376,28 +1396,45 @@ export default function Predictions() {
           )}
         </div>
 
-        {/* LLM-Tracked Pairs */}
+        {/* Tracked Pairs (AI + Human) */}
         <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
+          <button
+            onClick={() => setTrackedCollapsed(!trackedCollapsed)}
+            className="w-full flex items-center gap-2 text-left group"
+          >
+            {trackedCollapsed
+              ? <ChevronRight size={14} className="text-gray-500 group-hover:text-gray-300 transition-colors" />
+              : <ChevronDown size={14} className="text-gray-500 group-hover:text-gray-300 transition-colors" />}
             <Layers size={14} className="text-violet-400" />
-            AI-Tracked Pairs
+            <h3 className="text-sm font-semibold text-gray-300">
+              {assetTab === 'equity' ? 'Tracked Shares' : assetTab === 'crypto' ? 'Tracked Crypto' : 'Tracked Pairs'}
+            </h3>
             {trackedPairs && (
               <span className="text-[10px] font-normal text-gray-600">
-                {trackedPairs.crypto.length} crypto · {trackedPairs.equity.length} equity
+                {assetTab === 'equity'
+                  ? `${trackedPairs.equity.length} shares`
+                  : assetTab === 'crypto'
+                    ? `${trackedPairs.crypto.length} pairs`
+                    : `${trackedPairs.crypto.length} crypto · ${trackedPairs.equity.length} shares`}
               </span>
             )}
-          </h3>
-          <p className="text-[10px] text-gray-600 mb-3">
-            Pairs the LLM system has autonomously chosen to analyze and predict.
-            <span className="inline-flex items-center gap-1 ml-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Crypto
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block ml-1" /> Equity
+            <span className="ml-auto inline-flex items-center gap-2 text-[10px] text-gray-600">
+              <span className="inline-flex items-center gap-0.5"><Bot size={10} className="text-violet-400" /> AI</span>
+              <span className="inline-flex items-center gap-0.5"><User size={10} className="text-amber-400" /> Manual</span>
+              {assetTab === 'all' && <>
+                <span className="inline-flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Crypto</span>
+                <span className="inline-flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block" /> Shares</span>
+              </>}
             </span>
-          </p>
-          {trackedPairs ? (
-            <TrackedPairsSection data={trackedPairs} assetTab={assetTab} onSelectPair={setSelectedPair} selectedPair={selectedPair} />
-          ) : (
-            <SkeletonBlock className="h-[100px]" />
+          </button>
+          {!trackedCollapsed && (
+            <div className="mt-3">
+              {trackedPairs ? (
+                <TrackedPairsSection data={trackedPairs} assetTab={assetTab} onSelectPair={setSelectedPair} selectedPair={selectedPair} />
+              ) : (
+                <SkeletonBlock className="h-[100px]" />
+              )}
+            </div>
           )}
         </div>
 

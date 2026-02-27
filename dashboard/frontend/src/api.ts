@@ -557,6 +557,7 @@ export interface TrackedPair {
   prediction_count: number
   last_predicted: string
   signal_types: string[]
+  source: 'ai' | 'human' | 'both'
 }
 
 export interface TrackedPairsData {
