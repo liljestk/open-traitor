@@ -102,14 +102,22 @@ _GRANULARITY_MAP: dict[str, tuple[str, str]] = {
 
 # ── Default universe lists (well-known liquid tickers) ───────────────────
 
-# US Large-Cap (S&P 500 core)
-US_UNIVERSE = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
-    "JPM", "V", "JNJ", "UNH", "XOM", "PG", "MA", "HD", "CVX", "MRK",
-    "ABBV", "PEP", "KO", "COST", "AVGO", "LLY", "TMO", "MCD", "WMT",
-    "CSCO", "ACN", "ABT", "DHR", "NEE", "PM", "TXN", "UPS", "RTX",
-    "LOW", "MS", "BMY", "AMGN", "HON", "IBM", "INTC", "QCOM", "CAT",
-    "GE", "DE", "BA", "AMAT", "ADP",
+# EU Large-Cap (Euro Stoxx 50 & Major European Markets)
+EU_UNIVERSE = [
+    # Technology / Semiconductors
+    "ASML.AS", "SAP.DE", "IFX.DE", "ASM.AS", "CAP.PA",
+    # Consumer Discretionary & Luxury
+    "MC.PA", "RMS.PA", "CDI.PA", "KER.PA", "BMW.DE", "MBG.DE", "VOW3.DE", "RNO.PA", "STLA.MI",
+    # Financials
+    "BNP.PA", "SAN.MC", "INGA.AS", "ISP.MI", "ALV.DE", "MUV2.DE", "CS.PA", "UCG.MI", "BBVA.MC",
+    # Energy & Utilities
+    "TTE.PA", "ENI.MI", "IBE.MC", "ENEL.MI", "ENG.MC", "EOAN.DE",
+    # Industrials
+    "SIE.DE", "AIR.PA", "VCI.PA", "SGO.PA", "SU.PA", "DHL.DE", "SAF.PA", "DSY.PA",
+    # Consumer Staples & Healthcare
+    "OR.PA", "SAN.PA", "BN.PA", "ABI.BR", "AH.AS", "BAYN.DE", "FRE.DE",
+    # Telecom
+    "DTE.DE", "ORA.PA", "TEF.MC",
 ]
 
 
@@ -375,8 +383,8 @@ def discover_pairs(
 
     never = set(never_trade or [])
 
-    raw_tickers = list(US_UNIVERSE)
-    default_currency = "USD"
+    raw_tickers = list(EU_UNIVERSE)
+    default_currency = "EUR"
 
     # Convert to internal pair format
     pairs = [yahoo_to_pair(t, default_currency) for t in raw_tickers]

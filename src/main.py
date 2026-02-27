@@ -478,10 +478,12 @@ def main():
     # WebSocket Feed (real-time prices)
     ws_feed = None
     pairs = config.get("trading", {}).get("pairs", ["BTC-USD"])
+    watchlist_pairs = config.get("trading", {}).get("watchlist_pairs", [])
+    all_pairs_to_track = list(set(list(pairs) + list(watchlist_pairs)))
     if not paper_mode or os.environ.get("COINBASE_API_KEY"):
         try:
             ws_feed = CoinbaseWebSocketFeed(
-                product_ids=pairs,
+                product_ids=all_pairs_to_track,
                 api_key=os.environ.get("COINBASE_API_KEY"),
                 api_secret=os.environ.get("COINBASE_API_SECRET"),
             )

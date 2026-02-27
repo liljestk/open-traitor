@@ -371,6 +371,30 @@ class Orchestrator:
         except Exception as _restore_err:
             logger.warning(f"⚠️ Could not restore LLM-followed pairs: {_restore_err}")
 
+        # Seed human-followed pairs from DB so dashboard watchlist additions
+        # survive a restart (they are also kept in self.watchlist_pairs at runtime)
+        try:
+            human_followed = self.stats_db.get_followed_pairs_set(
+                followed_by="human",
+                quote_currency=trading_cfg.get("quote_currency"),
+            )
+            if human_followed:
+                new_wl = list(dict.fromkeys(
+                    self.watchlist_pairs + [p for p in sorted(human_followed) if p not in self.watchlist_pairs]
+                ))
+                self.watchlist_pairs = new_wl
+                self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
+                logger.info(
+                    f"♻️ Seeded {len(human_followed)} human-followed pairs from DB into pipeline: "
+                    f"{sorted(human_followed)}"
+                )
+                # Update WS subscriptions so seeded pairs get live prices
+                # (no-op if WS not yet connected — product_ids updated for first connect)
+                if self.ws_feed is not None:
+                    self.ws_feed.update_subscriptions(self.all_tracked_pairs)
+        except Exception as _seed_err:
+            logger.warning(f"⚠️ Could not seed human-followed pairs: {_seed_err}")
+
         self._SCREENER_INTERVAL: int = int(
             trading_cfg.get("screener_interval_cycles", 5)
         )
@@ -613,14 +637,19 @@ class Orchestrator:
                 except Exception as _uf_err:
                     logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
 
-                # Effective pairs: screener-selected (if any) or configured seed list
+                # Effective base pairs: screener-selected (if any) or configured seed list
                 # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
-                effective_pairs = self._screener_active_pairs or self.pairs[:effective_max_active]
-                effective_pairs = effective_pairs[:effective_max_active]  # enforce cap
+                base_pairs = self._screener_active_pairs or self.pairs[:effective_max_active]
+                base_pairs = base_pairs[:effective_max_active]  # enforce cap
+
+                # Watchlist pairs bypass the LLM screener cap since they are explicitly requested
+                # Combine base pairs and watchlist pairs, removing duplicates while preserving order
+                effective_pairs = list(dict.fromkeys(base_pairs + getattr(self, "watchlist_pairs", [])))
+
                 if not effective_pairs:
                     logger.warning(
                         "⚠️ No active pairs to trade this cycle "
-                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}). "
+                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}, watchlist={len(getattr(self, 'watchlist_pairs', []))}). "
                         "Waiting for LLM screener to pick pairs..."
                     )
 
@@ -1014,7 +1043,7 @@ class Orchestrator:
                 with self._ws_trigger_lock:
                     early_pairs = (
                         self._ws_trigger_pairs | self._news_trigger_pairs
-                    ).intersection(set(self.pairs))
+                    ).intersection(set(getattr(self, "all_tracked_pairs", self.pairs)))
                     self._ws_trigger_pairs.clear()
                     self._news_trigger_pairs.clear()
 

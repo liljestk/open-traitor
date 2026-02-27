@@ -84,6 +84,10 @@ class DashboardCommandManager:
                     self._handle_tighten_stop(pair)
                 elif action == "pause":
                     self._handle_pause_pair(pair)
+                elif action == "add_watchlist_pair":
+                    self._handle_add_watchlist_pair(pair)
+                elif action == "remove_watchlist_pair":
+                    self._handle_remove_watchlist_pair(pair)
                 else:
                     logger.warning(f"Unknown dashboard command: {action}")
         except Exception as e:
@@ -228,3 +232,34 @@ class DashboardCommandManager:
                 logger.info(f"{pair} already in never_trade list")
         except Exception as e:
             logger.error(f"Dashboard pause-pair failed for {pair}: {e}")
+
+    def _handle_add_watchlist_pair(self, pair: str) -> None:
+        """Add a human-followed pair to the live trading pipeline."""
+        orch = self.orch
+        try:
+            with orch._pairs_lock:
+                if pair not in orch.watchlist_pairs:
+                    orch.watchlist_pairs = orch.watchlist_pairs + [pair]
+                orch.all_tracked_pairs = list(set(orch.pairs + orch.watchlist_pairs))
+            # Subscribe to real-time prices for crypto profiles
+            if orch.ws_feed is not None:
+                orch.ws_feed.update_subscriptions(orch.all_tracked_pairs)
+            logger.info(f"👁️ Dashboard watchlist add: {pair} now tracked by pipeline")
+            if orch.telegram:
+                orch.telegram.send_alert(f"👁️ Now tracking {pair} (dashboard watchlist)")
+        except Exception as e:
+            logger.error(f"Dashboard add-watchlist-pair failed for {pair}: {e}")
+
+    def _handle_remove_watchlist_pair(self, pair: str) -> None:
+        """Remove a human-followed pair from the live trading pipeline."""
+        orch = self.orch
+        try:
+            with orch._pairs_lock:
+                orch.watchlist_pairs = [p for p in orch.watchlist_pairs if p != pair]
+                orch.all_tracked_pairs = list(set(orch.pairs + orch.watchlist_pairs))
+            # Update WebSocket subscriptions — but keep pair subscribed if it's still in base pairs
+            if orch.ws_feed is not None and pair not in orch.pairs:
+                orch.ws_feed.update_subscriptions(orch.all_tracked_pairs)
+            logger.info(f"👁️ Dashboard watchlist remove: {pair} removed from pipeline")
+        except Exception as e:
+            logger.error(f"Dashboard remove-watchlist-pair failed for {pair}: {e}")

@@ -141,7 +141,7 @@ class PipelineManager:
             if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
                 candles = list(cached[1])
             else:
-                await orch.rate_limiter.async_wait("coinbase_rest")
+                await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
                 try:
                     candles = await asyncio.to_thread(
                         orch.exchange.get_candles,
@@ -156,10 +156,10 @@ class PipelineManager:
         if orch.ws_feed:
             price = orch.ws_feed.get_price(pair)
             if price <= 0:
-                await orch.rate_limiter.async_wait("coinbase_rest")
+                await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
                 price = await asyncio.to_thread(orch.exchange.get_current_price, pair)
         else:
-            await orch.rate_limiter.async_wait("coinbase_rest")
+            await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
             price = await asyncio.to_thread(orch.exchange.get_current_price, pair)
         _timings["data"] = time.monotonic() - _step_t
         logger.info(f"📊 {pair}: candles={len(candles) if candles else 0}, price={price:.6g}")
@@ -281,7 +281,7 @@ class PipelineManager:
                         if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
                             return list(cached[1])
                     async with _sem:
-                        await orch.rate_limiter.async_wait("coinbase_rest")
+                        await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
                         res = await asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
                         async with self._candle_cache_lock:
                             self._candle_cache[p] = (time.monotonic(), list(res))
@@ -410,17 +410,6 @@ class PipelineManager:
             )
             if signal_obj:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
-
-        # Stop early if this is strictly a watchlist pair
-        is_watchlist_only = pair in getattr(orch, "watchlist_pairs", []) and pair not in orch.pairs
-        if is_watchlist_only:
-            _timings["analyst"] = time.monotonic() - _step_t
-            _total = time.monotonic() - _t0
-            _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
-            logger.info(f"👀 Pipeline {pair}: {_parts} total={_total:.1f}s [watchlist-only]")
-            if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "watchlist_only", "signal": signal.get("action")})
-            return
 
         # Step 3: Strategy Generation
         _step_t = time.monotonic()

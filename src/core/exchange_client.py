@@ -37,6 +37,15 @@ class ExchangeClient(abc.ABC):
         exchange-specific ``if`` checks.
         """
 
+    @property
+    def rate_limit_key(self) -> str:
+        """Rate-limiter bucket key for REST price/candle API calls.
+
+        Equity exchanges use Yahoo Finance; crypto exchanges use Coinbase REST.
+        Override in subclasses if the exchange has its own REST API.
+        """
+        return "yahoo_finance" if self.asset_class == "equity" else "coinbase_rest"
+
     # ── Connection & account methods ─────────────────────────────────────
 
     @abc.abstractmethod

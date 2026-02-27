@@ -254,10 +254,10 @@ class UniverseScanner:
             macd_h = d.get('macd_histogram')
             table_lines.append(
                 f"{pair} | {d.get('current_price', '?'):.6g} | "
-                f"{rsi:.1f if rsi is not None else '?'} | "
-                f"{adx:.1f if adx is not None else '?'} | "
+                f"{'?' if rsi is None else f'{rsi:.1f}'} | "
+                f"{'?' if adx is None else f'{adx:.1f}'} | "
                 f"{d.get('volume_24h', 0):.0f} | "
-                f"{macd_h:.4f if macd_h is not None else '?'} | "
+                f"{'?' if macd_h is None else f'{macd_h:.4f}'} | "
                 f"{d.get('ema_signal', '?')}({d.get('ema_confidence', 0):.2f}) | "
                 f"{d.get('bb_signal', '?')}({d.get('bb_confidence', 0):.2f}) | "
                 f"{d.get('composite_score', 0):.3f} | "
@@ -272,12 +272,26 @@ class UniverseScanner:
 
         # Use actual quote currency from config for accurate LLM examples
         qc = orch.config.get("trading", {}).get("quote_currency", "EUR")
-        # Build example pairs from actual scan results for the LLM
+        asset_class = getattr(orch.exchange, "asset_class", "crypto")
+        is_equity = asset_class == "equity"
+
+        # Build example pairs from actual scan results
         example_pairs = [p for p, _ in ranked[:3]]
         example_str = json.dumps(example_pairs) if example_pairs else f'["BTC-{qc}","ETH-{qc}","SOL-{qc}"]'
 
+        if is_equity:
+            screener_role = (
+                f"You are an EU equity screener selecting the best European stocks to trade. "
+                f"Focus on liquid, high-momentum EU-listed equities (e.g. ASML.AS-EUR, SAP.DE-EUR, MC.PA-EUR). "
+                f"All pairs are quoted in {qc}."
+            )
+            system_role = "You are a systematic EU equity screener. Output ONLY valid JSON."
+        else:
+            screener_role = f"You are a crypto pair screener."
+            system_role = "You are a systematic crypto screener. Output ONLY valid JSON."
+
         prompt = (
-            f"You are a crypto pair screener. Pick the best {orch._max_active_pairs} "
+            f"{screener_role} Pick the best {orch._max_active_pairs} "
             f"pairs to actively trade from the scan results below.\n\n"
             f"SCAN RESULTS (sorted by composite score):\n{table_str}\n\n"
             f"{held_note}\n\n"
@@ -296,7 +310,7 @@ class UniverseScanner:
             import asyncio as _asyncio
             future = _asyncio.run_coroutine_threadsafe(
                 orch.llm.chat(
-                    system_prompt="You are a systematic crypto screener. Output ONLY valid JSON.",
+                    system_prompt=system_role,
                     user_message=prompt,
                     temperature=0.2,
                     max_tokens=200,

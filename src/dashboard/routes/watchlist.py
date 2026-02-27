@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -14,6 +16,29 @@ from src.utils.rpm_budget import compute_rpm_entity_cap
 logger = get_logger("dashboard.watchlist")
 
 router = APIRouter(tags=["Watchlist"])
+
+
+def _notify_orchestrator(action: str, pair: str) -> None:
+    """Push a signed watchlist-update command to the orchestrator via Redis.
+
+    Silently no-ops if Redis or the signing key is not configured.
+    """
+    if not deps.redis_client or not deps.DASHBOARD_COMMAND_SIGNING_KEY:
+        return
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        nonce = uuid.uuid4().hex
+        cmd = {
+            "action": action,
+            "pair": pair,
+            "ts": ts,
+            "source": "dashboard",
+            "nonce": nonce,
+            "signature": deps.sign_dashboard_command(action, pair, ts, "dashboard", nonce),
+        }
+        deps.redis_client.rpush("dashboard:commands_queue", json.dumps(cmd))
+    except Exception as exc:
+        logger.debug(f"watchlist: Redis notify failed ({action} {pair}): {exc}")
 
 
 class _FollowPairBody(BaseModel):
@@ -156,9 +181,9 @@ def get_watchlist(
 def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps.get_profile_db)):
     """Add a pair to the human-curated watchlist.
 
-    This does NOT affect the autonomous LLM's trading decisions or pair
-    selection — it only controls what the dashboard shows in the watchlist
-    and news feed.
+    Watchlist pairs are displayed in the dashboard and are now fully integrated
+    into the autonomous trading pipeline. They receive full LLM analysis, trade proposals,
+    and risk validation just like system-configured pairs.
     """
     pair = body.pair.upper().strip()
     if not pair or "-" not in pair:
@@ -169,6 +194,7 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
     exchange = body.exchange or resolved or "coinbase"
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
+    _notify_orchestrator("add_watchlist_pair", pair)
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}
 
 
@@ -182,4 +208,5 @@ def unfollow_pair(pair: str, db=Depends(deps.get_profile_db)):
     deleted = db.unfollow_pair(pair=pair, followed_by="human")
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Not following {pair!r}")
+    _notify_orchestrator("remove_watchlist_pair", pair)
     return {"ok": True, "pair": pair, "unfollowed": True}

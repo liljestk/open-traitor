@@ -45,7 +45,7 @@ class MultiTimeframeAnalyzer:
 
     def __init__(self, config: dict, coinbase_client=None):
         self.config = config
-        self.coinbase = coinbase_client
+        self.exchange = coinbase_client  # may be CoinbaseClient or IBClient
         self.technical = TechnicalAnalyzer(config.get("analysis", {}).get("technical", {}))
         self.rate_limiter = get_rate_limiter()
         self._candle_cache: dict[str, tuple[float, list[dict]]] = {}  # key -> (timestamp, candles)
@@ -63,7 +63,8 @@ class MultiTimeframeAnalyzer:
         ``"aggregate": 2``), the raw candles are merged in groups of N to
         synthesise a higher timeframe (e.g. 2×TWO_HOUR → 4h candles).
         """
-        self.rate_limiter.wait("coinbase_rest")
+        _rl_key = self.exchange.rate_limit_key if self.exchange else "coinbase_rest"
+        self.rate_limiter.wait(_rl_key)
         cache_key = f"{pair}:{tf['granularity']}"
         ttl = self._CACHE_TTL.get(tf["granularity"], 300)
         now = time.time()
@@ -74,7 +75,7 @@ class MultiTimeframeAnalyzer:
         if cached and (now - cached[0]) < ttl:
             candles = cached[1]
         else:
-            candles = self.coinbase.get_candles(
+            candles = self.exchange.get_candles(
                 product_id=pair,
                 granularity=tf["granularity"],
                 limit=tf["candles"],
@@ -121,8 +122,8 @@ class MultiTimeframeAnalyzer:
                 "summary": str,
             }
         """
-        if not self.coinbase:
-            return {"error": "Coinbase client not available", "confluence_score": 0}
+        if not self.exchange:
+            return {"error": "Exchange client not available", "confluence_score": 0}
 
         tf_results = {}
         weighted_score = 0.0

@@ -37,6 +37,8 @@ _SUFFIX_TO_MIC: dict[str, str] = {
     "AS": "XAMS",  # Euronext Amsterdam
     "MI": "XMIL",  # Borsa Italiana
     "SW": "XSWX",  # SIX Swiss Exchange
+    "MC": "XMAD",  # Bolsa de Madrid (Spain)
+    "BR": "XBRU",  # Euronext Brussels
     "TO": "XTSE",  # Toronto Stock Exchange
     "AX": "XASX",  # ASX
     "T":  "XTKS",  # Tokyo Stock Exchange
