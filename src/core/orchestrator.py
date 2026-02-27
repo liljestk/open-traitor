@@ -28,6 +28,7 @@ from src.core.trailing_stop import TrailingStopManager
 from src.core.health import check_component_health, update_health, start_health_server
 from src.core.fee_manager import FeeManager
 from src.core.high_stakes import HighStakesManager
+from src.core.market_hours import is_market_open as _is_market_open
 from src.core.portfolio_rotator import PortfolioRotator
 from src.core.portfolio_scaler import PortfolioScaler
 from src.core.route_finder import RouteFinder
@@ -628,6 +629,19 @@ class Orchestrator:
                     key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
                 )
 
+                # ─── Market hours filter (equity only) ────────────────
+                _asset_class = getattr(self.exchange, "asset_class", "crypto")
+                if _asset_class == "equity":
+                    _open_pairs, _closed_pairs = [], []
+                    for _p in sorted_pairs:
+                        (_open_pairs if _is_market_open(_p, _asset_class) else _closed_pairs).append(_p)
+                    if _closed_pairs:
+                        logger.info(
+                            f"🕐 Market closed — skipping {_closed_pairs} "
+                            f"({len(_open_pairs)}/{len(sorted_pairs)} pairs open)"
+                        )
+                    sorted_pairs = _open_pairs
+
                 # ─── RPM utilisation log (every 10 cycles) ────────────
                 if cycle_count % 10 == 0:
                     _n_pairs = len(sorted_pairs)
@@ -1006,6 +1020,12 @@ class Orchestrator:
 
                 if not early_pairs:
                     continue
+
+                # Filter early triggers for closed equity markets
+                if getattr(self.exchange, "asset_class", "crypto") == "equity":
+                    early_pairs = {p for p in early_pairs if _is_market_open(p, "equity")}
+                    if not early_pairs:
+                        continue
 
                 logger.info(
                     f"⚡ Early-trigger pipeline for {sorted(early_pairs)} "

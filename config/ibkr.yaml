@@ -180,7 +180,7 @@ trading:
   holdings_dust_threshold: 0.01
   holdings_refresh_seconds: 120
   include_crypto_quotes: false
-  interval: 300
+  interval: 1800
   invalidate_strategic_context: false
   live_holdings_sync: false
   max_active_pairs: 10           # upper-bound — portfolio_scaler may reduce this
