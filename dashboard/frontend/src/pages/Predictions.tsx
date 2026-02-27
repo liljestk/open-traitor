@@ -2,7 +2,7 @@
  * Predictions vs Actuals — Signal accuracy analysis with charts.
  * Shows how well the AI market analyst predicts price movements.
  * Separated by asset class (Crypto / Equity).
- * Includes per-pair prediction overlay chart.
+ * Includes per-pair prediction overlay chart and full Trader's View.
  */
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -14,11 +14,15 @@ import {
 } from 'recharts'
 import {
   Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2,
-  Zap, Clock, Layers, Eye, Search,
+  Zap, Clock, Layers, Eye, Search, Newspaper, Shield, Brain,
+  ArrowUpRight, ArrowDownRight, Minus, ExternalLink, DollarSign, X,
 } from 'lucide-react'
 import {
   fetchPredictionAccuracy, fetchTrackedPairs, fetchPairPredictionHistory,
+  fetchCycles, fetchCycleFull, fetchTrades, fetchNews, fetchPortfolioExposure,
+  fetchMarketPrice,
   type PredictionAccuracyData, type TrackedPairsData,
+  type CycleFull, type NewsArticle,
 } from '../api'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
@@ -138,7 +142,7 @@ function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
 }) {
   const pairs = assetTab === 'equity' ? data.equity
     : assetTab === 'crypto' ? data.crypto
-    : [...data.crypto, ...data.equity]
+      : [...data.crypto, ...data.equity]
 
   if (!pairs.length) {
     return (
@@ -159,11 +163,10 @@ function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
           <button
             key={p.pair}
             onClick={() => onSelectPair(p.pair)}
-            className={`rounded-lg border p-2.5 transition-colors text-left ${
-              isSelected
-                ? 'border-brand-500 bg-brand-900/30 ring-1 ring-brand-500/50'
-                : 'border-gray-800 bg-gray-900/40 hover:border-gray-700'
-            }`}
+            className={`rounded-lg border p-2.5 transition-colors text-left ${isSelected
+              ? 'border-brand-500 bg-brand-900/30 ring-1 ring-brand-500/50'
+              : 'border-gray-800 bg-gray-900/40 hover:border-gray-700'
+              }`}
           >
             <div className="flex items-center gap-1.5 mb-1">
               <span className={`w-1.5 h-1.5 rounded-full ${isEquity ? 'bg-blue-400' : 'bg-green-400'}`} />
@@ -338,11 +341,10 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
               <button
                 key={r.days}
                 onClick={() => setOverlayDays(r.days)}
-                className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${
-                  overlayDays === r.days
-                    ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
-                    : 'bg-gray-800/50 text-gray-500 border border-gray-800 hover:border-gray-700'
-                }`}
+                className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${overlayDays === r.days
+                  ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
+                  : 'bg-gray-800/50 text-gray-500 border border-gray-800 hover:border-gray-700'
+                  }`}
               >
                 {r.label}
               </button>
@@ -520,12 +522,12 @@ function PairAccuracyGrid({ data }: { data: PredictionAccuracyData }) {
         const evaluated = stats.accuracy_24h_pct != null ? stats.evaluated_24h : stats.evaluated_1h
         const bgColor = acc == null ? 'bg-gray-800/50' :
           acc >= 65 ? 'bg-green-900/40 border-green-700/50' :
-          acc >= 50 ? 'bg-yellow-900/30 border-yellow-700/40' :
-          'bg-red-900/30 border-red-700/40'
+            acc >= 50 ? 'bg-yellow-900/30 border-yellow-700/40' :
+              'bg-red-900/30 border-red-700/40'
         const textColor = acc == null ? 'text-gray-500' :
           acc >= 65 ? 'text-green-400' :
-          acc >= 50 ? 'text-yellow-400' :
-          'text-red-400'
+            acc >= 50 ? 'text-yellow-400' :
+              'text-red-400'
 
         return (
           <div key={pair} className={`rounded-lg border border-gray-800 p-3 ${bgColor} transition-colors`}>
@@ -645,12 +647,493 @@ function SignalTypeChart({ data }: { data: PredictionAccuracyData['by_signal_typ
   )
 }
 
+// ── Trader's View Components ───────────────────────────────────────────────
+
+/** Extract base ticker from pair, e.g. "BTC" from "BTC-USD" */
+function pairBaseTicker(pair: string): string {
+  return pair.split('-')[0].toUpperCase()
+}
+
+/** Parse technical indicators from market_analyst raw_prompt text */
+function parseIndicatorsFromPrompt(rawPrompt: string | null): Record<string, string> | null {
+  if (!rawPrompt) return null
+  const indicators: Record<string, string> = {}
+  const patterns: [string, RegExp][] = [
+    ['rsi', /RSI:\s*([^\n]+)/i],
+    ['macd', /MACD:\s*([^\n]+)/i],
+    ['bb', /Bollinger Bands:\s*([^\n]+)/i],
+    ['ema_signal', /EMA Signal:\s*([^\n]+)/i],
+    ['ema_values', /EMA 9:\s*([^\n]+)/i],
+    ['volume', /Volume:\s*([^\n]+)/i],
+    ['support_resistance', /Support:\s*([^\n]+)/i],
+    ['atr', /ATR:\s*([^\n]+)/i],
+    ['price_1h', /1 hour:\s*([^\n]+)/i],
+    ['price_24h', /24 hours:\s*([^\n]+)/i],
+  ]
+  for (const [key, re] of patterns) {
+    const m = rawPrompt.match(re)
+    if (m) indicators[key] = m[1].trim()
+  }
+  return Object.keys(indicators).length > 0 ? indicators : null
+}
+
+/** Determine colour for an indicator signal string */
+function indicatorColor(text: string): string {
+  const t = text.toLowerCase()
+  if (t.includes('oversold') || t.includes('strongly_bullish') || t.includes('strong_buy')) return 'text-green-400'
+  if (t.includes('bullish') || t.includes('buy')) return 'text-green-400/80'
+  if (t.includes('overbought') || t.includes('strongly_bearish') || t.includes('strong_sell')) return 'text-red-400'
+  if (t.includes('bearish') || t.includes('sell')) return 'text-red-400/80'
+  return 'text-gray-400'
+}
+
+function indicatorBg(text: string): string {
+  const t = text.toLowerCase()
+  if (t.includes('oversold') || t.includes('strongly_bullish')) return 'bg-green-900/30 border-green-800/50'
+  if (t.includes('bullish') || t.includes('buy')) return 'bg-green-900/20 border-green-800/30'
+  if (t.includes('overbought') || t.includes('strongly_bearish')) return 'bg-red-900/30 border-red-800/50'
+  if (t.includes('bearish') || t.includes('sell')) return 'bg-red-900/20 border-red-800/30'
+  return 'bg-gray-800/30 border-gray-700/30'
+}
+
+// ── Trader View Header ─────────────────────────────────────────────────────
+
+function TraderViewHeader({ pair, onClose }: {
+  pair: string; onClose: () => void
+}) {
+  const { data: priceData } = useQuery({
+    queryKey: ['market-price', pair],
+    queryFn: () => fetchMarketPrice(pair),
+    enabled: !!pair,
+    refetchInterval: 30_000,
+  })
+
+  const { data: exposure } = useQuery({
+    queryKey: ['portfolio-exposure-trader'],
+    queryFn: fetchPortfolioExposure,
+    enabled: !!pair,
+    refetchInterval: 60_000,
+  })
+
+  const position = useMemo(() => {
+    if (!exposure?.exposure?.breakdown) return null
+    return exposure.exposure.breakdown.find(
+      (b) => b.pair.toUpperCase() === pair.toUpperCase()
+    )
+  }, [exposure, pair])
+
+  const fmtPrice = (v: number) => v < 1 ? v.toFixed(6) : v < 100 ? v.toFixed(2) : v.toLocaleString(undefined, { maximumFractionDigits: 2 })
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className={`w-2.5 h-2.5 rounded-full ${classifyPair(pair) === 'equity' ? 'bg-blue-400' : 'bg-green-400'}`} />
+            <h3 className="text-lg font-bold text-gray-100">{pair}</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 font-medium">
+              {classifyPair(pair) === 'equity' ? 'EQUITY' : 'CRYPTO'}
+            </span>
+          </div>
+          {priceData && (
+            <span className="text-xl font-bold text-gray-200 font-mono">
+              {fmtPrice(priceData.price)}
+            </span>
+          )}
+        </div>
+        <button
+          onClick={onClose}
+          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 px-3 py-1.5 rounded-lg border border-gray-800 hover:border-gray-700 transition-colors"
+        >
+          <X size={12} />
+          Close
+        </button>
+      </div>
+
+      {/* Position stats row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+          <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-0.5">Live Price</p>
+          <p className="text-lg font-bold text-gray-200 font-mono">
+            {priceData ? fmtPrice(priceData.price) : '—'}
+          </p>
+        </div>
+        {position ? (
+          <>
+            <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+              <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-0.5">Position</p>
+              <p className="text-lg font-bold text-gray-200 font-mono">{position.quantity.toFixed(position.quantity < 1 ? 6 : 2)}</p>
+              <p className="text-[10px] text-gray-500">Entry: {fmtPrice(position.entry_price)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+              <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-0.5">PnL</p>
+              <p className={`text-lg font-bold font-mono ${position.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {position.pnl_pct >= 0 ? '+' : ''}{position.pnl_pct.toFixed(2)}%
+              </p>
+              <p className="text-[10px] text-gray-500">Value: {position.value.toFixed(2)}</p>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+              <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-0.5">Allocation</p>
+              <p className="text-lg font-bold text-brand-400 font-mono">{position.pct_of_portfolio.toFixed(1)}%</p>
+              <p className="text-[10px] text-gray-500">of portfolio</p>
+            </div>
+          </>
+        ) : (
+          <div className="col-span-3 rounded-lg border border-gray-800 bg-gray-900/60 p-3 flex items-center">
+            <p className="text-xs text-gray-500">No open position for {pairBaseTicker(pair)}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Technical Indicators Panel ──────────────────────────────────────────────
+
+function TechnicalIndicatorsPanel({ indicators }: { indicators: Record<string, string> }) {
+  const items: { label: string; key: string; icon: React.ReactNode; hint: string }[] = [
+    { label: 'RSI', key: 'rsi', icon: <Activity size={12} />, hint: 'Relative Strength Index — below 30 = oversold (buy signal), above 70 = overbought (sell signal)' },
+    { label: 'MACD', key: 'macd', icon: <BarChart2 size={12} />, hint: 'Moving Average Convergence/Divergence — shows momentum direction and trend changes' },
+    { label: 'Bollinger', key: 'bb', icon: <Layers size={12} />, hint: 'Bollinger Bands — price near lower band suggests undervalued, near upper band suggests overvalued' },
+    { label: 'EMA Signal', key: 'ema_signal', icon: <TrendingUp size={12} />, hint: 'Exponential Moving Average alignment — shows short vs long-term trend direction' },
+    { label: 'Volume', key: 'volume', icon: <BarChart2 size={12} />, hint: 'Trading volume relative to average — high volume confirms trend, low volume suggests weak moves' },
+  ]
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+        <Activity size={14} className="text-cyan-400" />
+        Technical Indicators
+      </h4>
+      <div className="space-y-2">
+        {items.map(({ label, key, icon, hint }) => {
+          const value = indicators[key]
+          if (!value) return null
+          return (
+            <div key={key} className={`px-3 py-2 rounded-lg border ${indicatorBg(value)}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">{icon}</span>
+                  <span className="text-xs font-medium text-gray-400">{label}</span>
+                </div>
+                <span className={`text-xs font-semibold font-mono ${indicatorColor(value)}`}>
+                  {value}
+                </span>
+              </div>
+              <p className="text-[10px] text-gray-600 mt-0.5 pl-[20px]">{hint}</p>
+            </div>
+          )
+        })}
+        {/* EMA values row */}
+        {indicators.ema_values && (
+          <div className="px-3 py-2 rounded-lg border border-gray-800/30 bg-gray-800/20">
+            <span className="text-[10px] text-gray-500 font-mono">{indicators.ema_values}</span>
+            <p className="text-[10px] text-gray-600 mt-0.5">Short-term (9) crossing above long-term (50) = bullish, below = bearish</p>
+          </div>
+        )}
+        {/* Support / Resistance */}
+        {indicators.support_resistance && (
+          <div className="px-3 py-2 rounded-lg border border-gray-800/30 bg-gray-800/20">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">S/R:</span>
+              <span className="text-[10px] text-gray-400 font-mono">{indicators.support_resistance}</span>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-0.5">Support = price floor where buyers step in · Resistance = ceiling where sellers emerge</p>
+          </div>
+        )}
+        {/* Price changes */}
+        {(indicators.price_1h || indicators.price_24h) && (
+          <div className="flex gap-2 mt-1">
+            {indicators.price_1h && (
+              <div className={`flex-1 px-3 py-1.5 rounded-lg border text-center ${indicatorBg(indicators.price_1h)}`}>
+                <span className="text-[10px] text-gray-500">1h: </span>
+                <span className={`text-xs font-semibold font-mono ${indicatorColor(indicators.price_1h)}`}>{indicators.price_1h}</span>
+              </div>
+            )}
+            {indicators.price_24h && (
+              <div className={`flex-1 px-3 py-1.5 rounded-lg border text-center ${indicatorBg(indicators.price_24h)}`}>
+                <span className="text-[10px] text-gray-500">24h: </span>
+                <span className={`text-xs font-semibold font-mono ${indicatorColor(indicators.price_24h)}`}>{indicators.price_24h}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── AI Assessment Card ──────────────────────────────────────────────────────
+
+function AIAssessmentCard({ cycle }: { cycle: CycleFull }) {
+  // Find market_analyst and risk_manager spans
+  const analystSpan = cycle.spans.find(s => s.agent_name === 'market_analyst')
+  const riskSpan = cycle.spans.find(s => s.agent_name === 'risk_manager')
+  const strategistSpan = cycle.spans.find(s => s.agent_name === 'strategist')
+
+  const analystReasoning = analystSpan?.reasoning_json as Record<string, unknown> | undefined
+  const riskReasoning = riskSpan?.reasoning_json as Record<string, unknown> | undefined
+  const stratReasoning = strategistSpan?.reasoning_json as Record<string, unknown> | undefined
+
+  const signalType = (analystReasoning?.signal_type as string) ?? analystSpan?.signal_type ?? 'neutral'
+  const confidence = (analystReasoning?.confidence as number) ?? analystSpan?.confidence ?? 0
+  const reasoning = (analystReasoning?.reasoning as string) ?? ''
+  const keyFactors = (analystReasoning?.key_factors as string[]) ?? []
+  const marketCondition = (analystReasoning?.market_condition as string) ?? ''
+  const sentimentScore = (analystReasoning?.sentiment_score as number) ?? 0
+  const sentimentOverall = (analystReasoning?.sentiment_overall as string) ?? ''
+
+  const riskApproved = riskReasoning?.approved as boolean | undefined
+  const riskReason = (riskReasoning?.reason as string) ?? ''
+  const riskAction = (stratReasoning?.action as string) ?? (riskReasoning?.action as string) ?? ''
+
+  const signalColor = SIGNAL_COLORS[signalType] ?? '#6b7280'
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+        <Brain size={14} className="text-violet-400" />
+        AI Assessment
+        <span className="text-[10px] text-gray-600 font-normal ml-auto">
+          {dayjs(cycle.started_at).fromNow()}
+        </span>
+      </h4>
+
+      {/* Signal badge + confidence */}
+      <div className="flex items-center gap-3 mb-3">
+        <span
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold border"
+          style={{ color: signalColor, borderColor: `${signalColor}40`, background: `${signalColor}10` }}
+        >
+          {signalType.includes('buy') ? <ArrowUpRight size={14} /> : signalType.includes('sell') ? <ArrowDownRight size={14} /> : <Minus size={14} />}
+          {SIGNAL_LABELS[signalType] ?? signalType}
+        </span>
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-[10px] text-gray-500">Confidence</span>
+            <span className="text-xs font-bold" style={{ color: signalColor }}>
+              {(confidence * 100).toFixed(0)}%
+            </span>
+          </div>
+          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{ width: `${confidence * 100}%`, background: signalColor }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Market condition + sentiment */}
+      {(marketCondition || sentimentOverall) && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          {marketCondition && (
+            <span className={`text-[10px] px-2 py-0.5 rounded border ${indicatorBg(marketCondition)} ${indicatorColor(marketCondition)}`}>
+              Market: {marketCondition.replace(/_/g, ' ')}
+            </span>
+          )}
+          {sentimentOverall && (
+            <span className={`text-[10px] px-2 py-0.5 rounded border ${indicatorBg(sentimentOverall)} ${indicatorColor(sentimentOverall)}`}>
+              Sentiment: {sentimentOverall} ({sentimentScore > 0 ? '+' : ''}{sentimentScore.toFixed(2)})
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Key factors */}
+      {keyFactors.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-1">Key Factors</p>
+          <div className="flex flex-wrap gap-1.5">
+            {keyFactors.map((f, i) => (
+              <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800/60 border border-gray-700/40 text-gray-300">
+                {f}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* AI reasoning text */}
+      {reasoning && (
+        <div className="mb-3">
+          <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider mb-1">Reasoning</p>
+          <p className="text-xs text-gray-400 leading-relaxed bg-gray-800/30 rounded-lg p-3 border border-gray-800/50">
+            {reasoning}
+          </p>
+        </div>
+      )}
+
+      {/* Risk verdict */}
+      <div className="border-t border-gray-800/50 pt-3">
+        <div className="flex items-center gap-2">
+          <Shield size={12} className={riskApproved === false ? 'text-red-400' : riskApproved === true ? 'text-green-400' : 'text-gray-500'} />
+          <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Risk Verdict</span>
+          {riskAction && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 font-mono ml-auto">
+              {riskAction}
+            </span>
+          )}
+        </div>
+        {riskApproved === true && (
+          <p className="text-xs text-green-400/80 mt-1 flex items-center gap-1">✓ Approved{riskReason ? ` — ${riskReason}` : ''}</p>
+        )}
+        {riskApproved === false && (
+          <p className="text-xs text-red-400/80 mt-1 flex items-center gap-1">✗ Rejected — {riskReason}</p>
+        )}
+        {riskApproved == null && (
+          <p className="text-xs text-gray-500 mt-1">No risk assessment (hold signal)</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Pair News Feed ──────────────────────────────────────────────────────────
+
+function PairNewsFeed({ pair, articles }: { pair: string; articles: NewsArticle[] }) {
+  const ticker = pairBaseTicker(pair).toLowerCase()
+
+  /** Strip IBKR metadata prefix like {A:800015:L:en:K:n/a:C:0.90...} from titles */
+  const cleanTitle = (t: string) => t.replace(/^\{[^}]+\}\s*/g, '').trim()
+
+  const filtered = useMemo(() => {
+    return articles.filter(a => {
+      const tags = (a.tags ?? []).map(t => t.toLowerCase())
+      if (tags.includes(ticker)) return true
+      const title = cleanTitle(a.title).toLowerCase()
+      if (title.includes(ticker.toLowerCase())) return true
+      // Also match the full pair name
+      if (title.includes(pair.toLowerCase().replace('-', ' '))) return true
+      return false
+    }).slice(0, 15)
+  }, [articles, ticker, pair])
+
+  const sentimentIcon = (s: string) => {
+    if (s === 'bullish') return <TrendingUp size={10} className="text-green-400" />
+    if (s === 'bearish') return <TrendingDown size={10} className="text-red-400" />
+    return <Minus size={10} className="text-gray-400" />
+  }
+
+  const sentimentBg = (s: string) => {
+    if (s === 'bullish') return 'border-green-800/30'
+    if (s === 'bearish') return 'border-red-800/30'
+    return 'border-gray-800'
+  }
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+        <Newspaper size={14} className="text-amber-400" />
+        News — {pairBaseTicker(pair)}
+        <span className="text-[10px] text-gray-600 font-normal">{filtered.length} articles</span>
+      </h4>
+
+      {filtered.length === 0 ? (
+        <p className="text-xs text-gray-500 py-4 text-center">No recent news for {pairBaseTicker(pair)}</p>
+      ) : (
+        <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1 scrollbar-thin">
+          {filtered.map((a, i) => (
+            <div key={a.id || i} className={`px-3 py-2 rounded-lg border ${sentimentBg(a.sentiment)} hover:bg-gray-800/30 transition-colors group`}>
+              <div className="flex items-start gap-2">
+                <div className="mt-0.5 flex-shrink-0">{sentimentIcon(a.sentiment)}</div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-gray-200 leading-snug line-clamp-2">{cleanTitle(a.title)}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-[10px] text-gray-600 uppercase">{a.source}</span>
+                    <span className="text-[10px] text-gray-600">{dayjs(a.published).fromNow()}</span>
+                  </div>
+                </div>
+                {a.url && (
+                  <a href={a.url} target="_blank" rel="noreferrer"
+                    className="flex-shrink-0 opacity-0 group-hover:opacity-100 text-gray-600 hover:text-gray-400 transition-opacity">
+                    <ExternalLink size={10} />
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Pair Trade History ──────────────────────────────────────────────────────
+
+function PairTradeHistory({ pair }: { pair: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['pair-trades', pair],
+    queryFn: () => fetchTrades(pair, 20, 720),
+    enabled: !!pair,
+    refetchInterval: 60_000,
+  })
+
+  const trades = data?.trades ?? []
+
+  if (isLoading) return <SkeletonBlock className="h-[200px]" />
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+        <DollarSign size={14} className="text-green-400" />
+        Trade History — {pair}
+        <span className="text-[10px] text-gray-600 font-normal">{trades.length} trades (30d)</span>
+      </h4>
+
+      {trades.length === 0 ? (
+        <p className="text-xs text-gray-500 py-4 text-center">No trades for {pair} in the last 30 days</p>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-gray-800">
+          <table className="min-w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-800 bg-gray-900/50">
+                {['Time', 'Action', 'Price', 'Amount', 'PnL', 'Confidence', 'Reasoning'].map(h => (
+                  <th key={h} className="px-2.5 py-2 text-left font-medium text-gray-400">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.slice(0, 10).map((t) => (
+                <tr key={t.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                  <td className="px-2.5 py-2 text-gray-400">{dayjs(t.ts).format('MMM DD HH:mm')}</td>
+                  <td className="px-2.5 py-2">
+                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${t.action === 'buy' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                      }`}>
+                      {t.action === 'buy' ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
+                      {t.action.toUpperCase()}
+                    </span>
+                  </td>
+                  <td className="px-2.5 py-2 text-gray-300 font-mono">{t.price < 1 ? t.price.toFixed(6) : t.price.toFixed(2)}</td>
+                  <td className="px-2.5 py-2 text-gray-300 font-mono">{t.quote_amount.toFixed(2)}</td>
+                  <td className="px-2.5 py-2">
+                    {t.pnl != null ? (
+                      <span className={`font-mono ${t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
+                      </span>
+                    ) : <span className="text-gray-600">—</span>}
+                  </td>
+                  <td className="px-2.5 py-2 text-gray-300">{t.confidence ? `${(t.confidence * 100).toFixed(0)}%` : '—'}</td>
+                  <td className="px-2.5 py-2 text-gray-500 max-w-[200px] truncate">{t.reasoning ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Recent Predictions Table ───────────────────────────────────────────────
 
-function RecentPredictions({ data }: { data: PredictionAccuracyData }) {
-  const predictions = [...data.predictions].reverse().slice(0, 50)
+function RecentPredictions({ data, selectedPair }: { data: PredictionAccuracyData; selectedPair?: string | null }) {
+  const allPredictions = [...data.predictions].reverse().slice(0, 50)
+  const predictions = selectedPair
+    ? allPredictions.filter(p => p.pair === selectedPair)
+    : allPredictions
 
-  if (!predictions.length) return <EmptyState icon="chart" title="No predictions yet" description="AI signal predictions will appear as cycles run." />
+  if (!predictions.length) return <EmptyState icon="chart" title={selectedPair ? `No predictions for ${selectedPair}` : 'No predictions yet'} description="AI signal predictions will appear as cycles run." />
 
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-800">
@@ -731,6 +1214,37 @@ export default function Predictions() {
     refetchInterval: 300_000,
   })
 
+  // ── Trader's View data fetches (only when pair selected) ──
+  const { data: cyclesData } = useQuery({
+    queryKey: ['pair-cycles', selectedPair],
+    queryFn: () => fetchCycles(selectedPair!, 1),
+    enabled: !!selectedPair,
+    refetchInterval: 120_000,
+  })
+
+  const latestCycleId = cyclesData?.cycles?.[0]?.cycle_id ?? null
+
+  const { data: cycleFull } = useQuery({
+    queryKey: ['cycle-full', latestCycleId],
+    queryFn: () => fetchCycleFull(latestCycleId!),
+    enabled: !!latestCycleId,
+    refetchInterval: 120_000,
+  })
+
+  const { data: newsData } = useQuery({
+    queryKey: ['trader-news'],
+    queryFn: () => fetchNews(100),
+    enabled: !!selectedPair,
+    refetchInterval: 300_000,
+  })
+
+  // Parse technical indicators from the latest market_analyst raw_prompt
+  const techIndicators = useMemo(() => {
+    if (!cycleFull) return null
+    const analystSpan = cycleFull.spans.find(s => s.agent_name === 'market_analyst')
+    return parseIndicatorsFromPrompt(analystSpan?.raw_prompt ?? null)
+  }, [cycleFull])
+
   const data = rawData ? filterByAsset(rawData, assetTab) : undefined
   const overall = data?.overall
 
@@ -759,9 +1273,14 @@ export default function Predictions() {
         {/* Header + controls */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h2 className="text-xl font-bold text-gray-100">Predictions vs Actuals</h2>
+            <h2 className="text-xl font-bold text-gray-100">
+              {selectedPair ? `Trader View — ${selectedPair}` : 'Predictions vs Actuals'}
+            </h2>
             <p className="text-xs text-gray-500 mt-0.5">
-              Live AI signal accuracy — data from {rawData?.overall?.total ?? 0} real predictions
+              {selectedPair
+                ? 'Complete AI analysis, technical indicators, news, and trade history'
+                : `Live AI signal accuracy — data from ${rawData?.overall?.total ?? 0} real predictions`
+              }
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -771,11 +1290,10 @@ export default function Predictions() {
                 <button
                   key={t.id}
                   onClick={() => setAssetTab(t.id)}
-                  className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${
-                    assetTab === t.id
-                      ? 'bg-gray-700 text-gray-100'
-                      : 'text-gray-500 hover:text-gray-300'
-                  }`}
+                  className={`px-2.5 py-1 text-[11px] rounded-md font-medium transition-colors ${assetTab === t.id
+                    ? 'bg-gray-700 text-gray-100'
+                    : 'text-gray-500 hover:text-gray-300'
+                    }`}
                 >
                   {t.label}
                 </button>
@@ -787,11 +1305,10 @@ export default function Predictions() {
                 <button
                   key={r.days}
                   onClick={() => setDays(r.days)}
-                  className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${
-                    days === r.days
-                      ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
-                      : 'bg-gray-800/50 text-gray-400 border border-gray-800 hover:border-gray-700'
-                  }`}
+                  className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-colors ${days === r.days
+                    ? 'bg-brand-600/30 text-brand-400 border border-brand-600/50'
+                    : 'bg-gray-800/50 text-gray-400 border border-gray-800 hover:border-gray-700'
+                    }`}
                 >
                   {r.label}
                 </button>
@@ -880,25 +1397,48 @@ export default function Predictions() {
           )}
         </div>
 
-        {/* Prediction Overlay Chart — shown when a pair is selected */}
+        {/* ═══════════════════════════════════════════════════════════════════
+            TRADER'S VIEW — shown when a pair is selected
+            ═══════════════════════════════════════════════════════════════════ */}
         {selectedPair && (
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <div className="flex items-center justify-between mb-1">
-              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
-                <Eye size={14} className="text-brand-400" />
-                Prediction Overlay: {selectedPair}
-              </h3>
-              <button
-                onClick={() => setSelectedPair(null)}
-                className="text-[10px] text-gray-500 hover:text-gray-300 px-2 py-0.5 rounded border border-gray-800 hover:border-gray-700"
-              >
-                Close
-              </button>
+          <div className="space-y-4">
+            {/* Header: pair name + live price + position stats */}
+            <TraderViewHeader pair={selectedPair} onClose={() => setSelectedPair(null)} />
+
+            {/* Row 1: Technical Indicators + AI Assessment */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {techIndicators && (
+                <TechnicalIndicatorsPanel indicators={techIndicators} />
+              )}
+              {cycleFull && (
+                <AIAssessmentCard cycle={cycleFull} />
+              )}
+              {/* If only one panel, fill the gap */}
+              {!techIndicators && !cycleFull && (
+                <div className="col-span-2 bg-gray-900/50 border border-gray-800 rounded-xl p-5 text-center">
+                  <p className="text-xs text-gray-500 py-4">No AI analysis data yet for {selectedPair}. Waiting for the next analysis cycle.</p>
+                </div>
+              )}
             </div>
-            <p className="text-[10px] text-gray-600 mb-3">
-              Actual price with AI prediction signals overlaid. Triangles = buy signals, diamonds = sell signals. Dashed amber line = future forecast from latest prediction.
-            </p>
-            <PredictionOverlayChart pair={selectedPair} />
+
+            {/* Row 2: Prediction Overlay + News */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
+                  <Eye size={14} className="text-brand-400" />
+                  Prediction Overlay
+                </h3>
+                <p className="text-[10px] text-gray-600 mb-3">
+                  Price chart with AI signal markers. ▲ = buy · ◆ = sell · Dashed = forecast.
+                </p>
+                <PredictionOverlayChart pair={selectedPair} />
+              </div>
+
+              <PairNewsFeed pair={selectedPair} articles={newsData?.articles ?? []} />
+            </div>
+
+            {/* Row 3: Trade History */}
+            <PairTradeHistory pair={selectedPair} />
           </div>
         )}
 
@@ -939,86 +1479,94 @@ export default function Predictions() {
         )}
 
         {/* Charts row 1: Daily trend + Signal type breakdown */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
-              <Activity size={14} className="text-blue-400" />
-              Daily Accuracy Trend
-            </h3>
-            {isLoading ? (
-              <SkeletonBlock className="h-[220px]" />
-            ) : data?.daily_accuracy?.length ? (
-              <DailyAccuracyChart data={data.daily_accuracy} />
-            ) : (
-              <EmptyState icon="chart" title="No daily data" description="Accuracy data will appear after predictions are evaluated." />
-            )}
-          </div>
+        {!selectedPair && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+                <Activity size={14} className="text-blue-400" />
+                Daily Accuracy Trend
+              </h3>
+              {isLoading ? (
+                <SkeletonBlock className="h-[220px]" />
+              ) : data?.daily_accuracy?.length ? (
+                <DailyAccuracyChart data={data.daily_accuracy} />
+              ) : (
+                <EmptyState icon="chart" title="No daily data" description="Accuracy data will appear after predictions are evaluated." />
+              )}
+            </div>
 
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
-              <BarChart2 size={14} className="text-purple-400" />
-              Accuracy by Signal Type
-            </h3>
-            {isLoading ? (
-              <SkeletonBlock className="h-[220px]" />
-            ) : data?.by_signal_type && Object.keys(data.by_signal_type).length ? (
-              <SignalTypeChart data={data.by_signal_type} />
-            ) : (
-              <EmptyState icon="chart" title="No signal data" description="Signal type breakdown will appear as predictions accumulate." />
-            )}
+            <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+                <BarChart2 size={14} className="text-purple-400" />
+                Accuracy by Signal Type
+              </h3>
+              {isLoading ? (
+                <SkeletonBlock className="h-[220px]" />
+              ) : data?.by_signal_type && Object.keys(data.by_signal_type).length ? (
+                <SignalTypeChart data={data.by_signal_type} />
+              ) : (
+                <EmptyState icon="chart" title="No signal data" description="Signal type breakdown will appear as predictions accumulate." />
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Charts row 2: Confidence calibration + Per-pair heatmap */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
-              <Target size={14} className="text-amber-400" />
-              Confidence Calibration
-            </h3>
-            <p className="text-[10px] text-gray-600 mb-2">Bars = actual accuracy at each confidence level.</p>
-            {isLoading ? (
-              <SkeletonBlock className="h-[220px]" />
-            ) : data?.confidence_calibration?.length ? (
-              <CalibrationChart data={data.confidence_calibration} />
-            ) : (
-              <EmptyState icon="chart" title="No calibration data" description="Calibration data will appear as predictions are evaluated." />
-            )}
-          </div>
+        {!selectedPair && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+                <Target size={14} className="text-amber-400" />
+                Confidence Calibration
+              </h3>
+              <p className="text-[10px] text-gray-600 mb-2">Bars = actual accuracy at each confidence level.</p>
+              {isLoading ? (
+                <SkeletonBlock className="h-[220px]" />
+              ) : data?.confidence_calibration?.length ? (
+                <CalibrationChart data={data.confidence_calibration} />
+              ) : (
+                <EmptyState icon="chart" title="No calibration data" description="Calibration data will appear as predictions are evaluated." />
+              )}
+            </div>
 
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
-              <Crosshair size={14} className="text-teal-400" />
-              Per-Pair Accuracy
-            </h3>
-            <p className="text-[10px] text-gray-600 mb-2">
-              Green = ≥65% · Yellow = 50-65% · Red = &lt;50% · Best available horizon shown.
-            </p>
-            {isLoading ? (
-              <SkeletonBlock className="h-[220px]" />
-            ) : data ? (
-              <PairAccuracyGrid data={data} />
-            ) : null}
+            <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+                <Crosshair size={14} className="text-teal-400" />
+                Per-Pair Accuracy
+              </h3>
+              <p className="text-[10px] text-gray-600 mb-2">
+                Green = ≥65% · Yellow = 50-65% · Red = &lt;50% · Best available horizon shown.
+              </p>
+              {isLoading ? (
+                <SkeletonBlock className="h-[220px]" />
+              ) : data ? (
+                <PairAccuracyGrid data={data} />
+              ) : null}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Recent predictions table */}
         <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
           <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
             <Crosshair size={14} className="text-cyan-400" />
-            Recent Predictions
+            {selectedPair ? `Predictions — ${selectedPair}` : 'Recent Predictions'}
           </h3>
           <p className="text-[10px] text-gray-600 mb-3">
-            Live predictions from the AI market analyst. Outcomes update automatically as time passes.
+            {selectedPair
+              ? `Filtered predictions for ${selectedPair}. Outcomes update automatically.`
+              : 'Live predictions from the AI market analyst. Outcomes update automatically as time passes.'
+            }
             <Clock size={8} className="inline ml-1 opacity-50" /> = awaiting evaluation window.
           </p>
           {isLoading ? (
             <SkeletonBlock className="h-[300px]" />
           ) : data ? (
-            <RecentPredictions data={data} />
+            <RecentPredictions data={data} selectedPair={selectedPair} />
           ) : null}
         </div>
       </div>
     </PageTransition>
   )
 }
+

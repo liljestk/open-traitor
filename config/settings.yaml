@@ -8,6 +8,7 @@ trading:
   quote_currency: EUR
   interval: 120
   min_confidence: 0.55
+  min_signal_confidence: 0.65
   max_open_positions: 8
   reconcile_every_cycles: 10
   paper_slippage_pct: 0.0005
@@ -188,7 +189,7 @@ fees:
   trade_fee_pct: 0.006
   maker_fee_pct: 0.004
   safety_margin: 1.5
-  min_gain_after_fees_pct: 0.005
+  min_gain_after_fees_pct: 0.02
   min_trade_quote: 0.0
   swap_cooldown_seconds: 3600
 high_stakes:

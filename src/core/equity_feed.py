@@ -277,6 +277,88 @@ def get_candles(
     return candles
 
 
+# ── Search / autocomplete ────────────────────────────────────────────────
+
+_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+_search_cache = _Cache(default_ttl=60.0)   # search results: 60s TTL
+
+
+def search_tickers(query: str, limit: int = 25) -> list[dict]:
+    """Search for equity tickers via Yahoo Finance autocomplete.
+
+    Returns results in the same format as the dashboard product search:
+    ``[{id, base, quote, display_name, exchange, volume_24h, price_change_24h}, ...]``
+
+    Only returns EQUITY and ETF results (filters out indices, futures, etc).
+    """
+    q = query.strip()
+    if not q:
+        return []
+
+    cache_key = f"search:{q.upper()}"
+    cached = _search_cache.get(cache_key)
+    if cached is not None:
+        return cached[:limit]
+
+    try:
+        resp = _http.get(
+            _SEARCH_URL,
+            headers=_HEADERS,
+            params={
+                "q": q,
+                "quotesCount": 25,
+                "newsCount": 0,
+                "listsCount": 0,
+                "enableFuzzyQuery": True,
+            },
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            logger.debug(f"Yahoo search API returned {resp.status_code} for '{q}'")
+            return []
+
+        data = resp.json()
+        quotes = data.get("quotes", [])
+    except Exception as e:
+        logger.debug(f"Yahoo search request failed for '{q}': {e}")
+        return []
+
+    results: list[dict] = []
+    for q_item in quotes:
+        # Only include equities and ETFs
+        quote_type = (q_item.get("quoteType") or "").upper()
+        if quote_type not in ("EQUITY", "ETF"):
+            continue
+
+        symbol = q_item.get("symbol", "")
+        if not symbol:
+            continue
+
+        exchange_short = q_item.get("exchDisp") or q_item.get("exchange") or ""
+        long_name = q_item.get("longname") or q_item.get("shortname") or symbol
+
+        # Convert Yahoo symbol to internal pair format
+        pair_id = yahoo_to_pair(symbol)
+        parts = pair_id.rsplit("-", 1)
+        base = parts[0] if parts else symbol
+        quote_currency = parts[1] if len(parts) > 1 else "USD"
+
+        results.append({
+            "id": pair_id,
+            "base": base,
+            "quote": quote_currency,
+            "display_name": long_name,
+            "exchange": exchange_short,
+            "volume_24h": 0,
+            "price_change_24h": 0,
+        })
+
+    if results:
+        _search_cache.put(cache_key, results)
+
+    return results[:limit]
+
+
 def discover_pairs(
     exchange_id: str,
     quote_currencies: list[str] | None = None,

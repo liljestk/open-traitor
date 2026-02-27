@@ -91,13 +91,15 @@ function applyFilters(
   tickers: Set<string>,
   sort: SortKey,
 ): NewsArticle[] {
+  /** Strip IBKR metadata prefix like {A:800015:L:en:K:n/a:C:0.90...} from titles */
+  const cleanTitle = (t: string) => t.replace(/^\{[^}]+\}\s*/g, '').trim()
   let filtered = articles
 
   if (search.trim()) {
     const q = search.toLowerCase()
     filtered = filtered.filter(
       (a) =>
-        a.title.toLowerCase().includes(q) ||
+        cleanTitle(a.title).toLowerCase().includes(q) ||
         (a.summary ?? '').toLowerCase().includes(q) ||
         (a.source ?? '').toLowerCase().includes(q) ||
         (a.tags ?? []).some((t) => t.toLowerCase().includes(q)),
@@ -243,14 +245,13 @@ export default function NewsFeed() {
             <button
               key={s}
               onClick={() => setSentimentFilter(s)}
-              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                sentimentFilter === s
+              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${sentimentFilter === s
                   ? s === 'bullish' ? 'bg-green-900/40 border-green-700/60 text-green-400'
                     : s === 'bearish' ? 'bg-red-900/40 border-red-700/60 text-red-400'
-                    : s === 'neutral' ? 'bg-gray-700/60 border-gray-600 text-gray-300'
-                    : 'bg-brand-900/40 border-brand-700/60 text-brand-400'
+                      : s === 'neutral' ? 'bg-gray-700/60 border-gray-600 text-gray-300'
+                        : 'bg-brand-900/40 border-brand-700/60 text-brand-400'
                   : 'bg-gray-800/40 border-gray-800 text-gray-500 hover:text-gray-400 hover:border-gray-700'
-              }`}
+                }`}
             >
               {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
             </button>
@@ -275,11 +276,10 @@ export default function NewsFeed() {
               <button
                 key={t}
                 onClick={() => toggleTicker(t)}
-                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                  selectedTickers.has(t)
+                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${selectedTickers.has(t)
                     ? 'bg-brand-900/50 border-brand-600/50 text-brand-300'
                     : 'bg-gray-800/50 border-gray-700/50 text-gray-500 hover:text-gray-400 hover:border-gray-600'
-                }`}
+                  }`}
               >
                 {t}
               </button>
@@ -329,7 +329,7 @@ export default function NewsFeed() {
                       )}
                     </div>
                     <h3 className="text-sm font-medium text-gray-200 mb-1 leading-snug">
-                      {article.title}
+                      {article.title.replace(/^\{[^}]+\}\s*/g, '').trim()}
                     </h3>
                     {article.summary && (
                       <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
@@ -346,11 +346,10 @@ export default function NewsFeed() {
                               if (/^[A-Z]{1,6}$/.test(upper)) toggleTicker(upper)
                               else setSearch(tag)
                             }}
-                            className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                              selectedTickers.has(tag.toUpperCase())
+                            className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${selectedTickers.has(tag.toUpperCase())
                                 ? 'bg-brand-900/50 text-brand-300'
                                 : 'bg-gray-800 text-gray-500 hover:text-gray-400 hover:bg-gray-700'
-                            }`}
+                              }`}
                           >
                             {tag}
                           </button>

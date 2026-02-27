@@ -119,12 +119,14 @@ def search_products(
 
     if deps.is_equity_profile(profile):
         all_products = _get_products_for_profile(profile)
-        results = []
+        # 1) Local config / followed pairs matching the query
+        config_results = []
+        config_ids: set[str] = set()
         for p in all_products:
             pid = p["id"].upper()
             base = p["base"].upper()
             if query in pid or query in base:
-                results.append({
+                config_results.append({
                     "id": p["id"],
                     "base": p["base"],
                     "quote": p["quote"],
@@ -132,7 +134,25 @@ def search_products(
                     "volume_24h": 0,
                     "price_change_24h": 0,
                 })
-        return {"results": results[:25], "query": q}
+                config_ids.add(pid)
+
+        # 2) Live search via IBKR Gateway (or Yahoo Finance fallback)
+        live_results: list[dict] = []
+        try:
+            client = deps.client_for_profile(profile)
+            if client and hasattr(client, "search_symbols"):
+                live_results = client.search_symbols(query, limit=25)
+        except Exception as e:
+            logger.debug(f"Live equity search failed: {e}")
+
+        # 3) Merge, dedup by pair ID (config results first)
+        merged = list(config_results)
+        for lr in live_results:
+            if lr["id"].upper() not in config_ids:
+                merged.append(lr)
+                config_ids.add(lr["id"].upper())
+
+        return {"results": merged[:25], "query": q}
 
     # Coinbase search
     client = deps.exchange_client

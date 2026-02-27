@@ -427,6 +427,15 @@ class PipelineManager:
         # Apply per-pair confidence adjustment from planning context
         pair_confidence_adj = orch.context_manager.get_pair_confidence_adjustment(pair)
 
+        # Build fee context so the LLM knows about trading costs
+        _rt_fee = orch.fee_manager.trade_fee_pct * 2  # round-trip
+        _be_fee = _rt_fee * orch.fee_manager.fee_safety_margin
+        fee_context = {
+            "round_trip_fee_pct": _rt_fee,
+            "breakeven_pct": _be_fee,
+            "min_gain_pct": orch.fee_manager.min_gain_after_fees_pct + _rt_fee,
+        }
+
         strategy_result = await orch.strategist.execute({
             "signal": signal,
             "active_tasks": [t.to_dict() for t in orch.active_tasks if not t.completed],
@@ -443,6 +452,7 @@ class PipelineManager:
             "sentiment": sentiment_data,
             "strategy_signals": strategy_signals,
             "confidence_adjustment": pair_confidence_adj,
+            "fee_context": fee_context,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
@@ -540,71 +550,121 @@ class PipelineManager:
 
         # ─── Step 5a: Fee Viability Gate ─────────────────────────────
         # Ensure the trade is actually profitable after fees.
-        # This was previously only checked for portfolio rotation swaps.
-        if risk_result.get("approved") and risk_result.get("action") == "buy":
+        # Applies to BOTH buys and sells of bot-tracked positions.
+        _trade_action = risk_result.get("action")
+        if risk_result.get("approved") and _trade_action in ("buy", "sell"):
             trade_amount = float(risk_result.get("quote_amount", 0))
-            tp = risk_result.get("take_profit")
             trade_price = risk_result.get("price", 0)
-            # Estimate expected gain from the take-profit target
-            if tp and trade_price and trade_price > 0:
-                expected_gain_pct = (float(tp) - trade_price) / trade_price
-            else:
-                # Fallback: use tier's take_profit_pct as expected gain
-                expected_gain_pct = getattr(
-                    getattr(orch, "portfolio_scaler", None), "tier", None
-                )
-                if expected_gain_pct:
-                    expected_gain_pct = expected_gain_pct.take_profit_pct
+
+            if _trade_action == "buy":
+                tp = risk_result.get("take_profit")
+                # Estimate expected gain from the take-profit target
+                if tp and trade_price and trade_price > 0:
+                    expected_gain_pct = (float(tp) - trade_price) / trade_price
                 else:
-                    expected_gain_pct = orch.config.get("risk", {}).get("take_profit_pct", 0.06)
-
-            # ─── Plan-based TP override ──────────────────────────────────
-            # When the planning system has a high-confidence multi-day prediction
-            # for this pair, use it to set a longer-horizon take-profit and
-            # expected gain. BOTH must change together: using plan gain for the
-            # fee check but keeping the original (small) TP would still lose
-            # money after fees once the trade exits at the technical target.
-            _plan_min_conf = orch.config.get("planning", {}).get(
-                "plan_tp_min_confidence", 0.65
-            )
-            _plan_outlook = orch.context_manager.get_pair_expected_gain(pair)
-            if _plan_outlook:
-                _plan_gain = _plan_outlook["gain_pct"]
-                _plan_conf = _plan_outlook["confidence"]
-                _plan_horizon = _plan_outlook["horizon_days"]
-                if _plan_gain > expected_gain_pct and _plan_conf >= _plan_min_conf:
-                    _plan_tp = trade_price * (1 + _plan_gain)
-                    logger.info(
-                        f"📋 {pair}: Plan-based TP override — "
-                        f"gain {_plan_gain:.1%} (conf={_plan_conf:.0%}, {_plan_horizon}d) "
-                        f"replaces TP-based {expected_gain_pct:.1%} | "
-                        f"new TP={_plan_tp:.4f}"
+                    # Fallback: use tier's take_profit_pct as expected gain
+                    expected_gain_pct = getattr(
+                        getattr(orch, "portfolio_scaler", None), "tier", None
                     )
-                    risk_result["take_profit"] = _plan_tp
-                    expected_gain_pct = _plan_gain
+                    if expected_gain_pct:
+                        expected_gain_pct = expected_gain_pct.take_profit_pct
+                    else:
+                        expected_gain_pct = orch.config.get("risk", {}).get("take_profit_pct", 0.06)
 
-            worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
-                quote_amount=trade_amount,
-                expected_gain_pct=expected_gain_pct,
-                is_swap=False,
-                portfolio_value=_portfolio_value,
-            )
-            if not worthwhile:
-                logger.info(
-                    f"💸 {pair}: Trade NOT worthwhile after fees "
-                    f"(amount={trade_amount:.2f}, expected={expected_gain_pct*100:.1f}%, "
-                    f"breakeven={fee_est.breakeven_move_pct*100:.1f}%)"
+                # ─── Plan-based TP override ──────────────────────────────────
+                _plan_min_conf = orch.config.get("planning", {}).get(
+                    "plan_tp_min_confidence", 0.65
                 )
-                orch.journal.log_decision(
-                    "fee_gate_reject", pair, risk_result.get("action", "buy"),
-                    {"reason": "Fees would eat expected gains",
-                     "trade_amount": trade_amount,
-                     "breakeven_pct": fee_est.breakeven_move_pct,
-                     "expected_gain_pct": expected_gain_pct},
+                _plan_outlook = orch.context_manager.get_pair_expected_gain(pair)
+                if _plan_outlook:
+                    _plan_gain = _plan_outlook["gain_pct"]
+                    _plan_conf = _plan_outlook["confidence"]
+                    _plan_horizon = _plan_outlook["horizon_days"]
+                    if _plan_gain > expected_gain_pct and _plan_conf >= _plan_min_conf:
+                        _plan_tp = trade_price * (1 + _plan_gain)
+                        logger.info(
+                            f"📋 {pair}: Plan-based TP override — "
+                            f"gain {_plan_gain:.1%} (conf={_plan_conf:.0%}, {_plan_horizon}d) "
+                            f"replaces TP-based {expected_gain_pct:.1%} | "
+                            f"new TP={_plan_tp:.4f}"
+                        )
+                        risk_result["take_profit"] = _plan_tp
+                        expected_gain_pct = _plan_gain
+
+            elif _trade_action == "sell" and trade_price > 0:
+                # For sell orders: check if gain from entry covers fees.
+                # Only applies to bot-tracked positions (we know the entry price).
+                from src.models.trade import TradeAction
+                entry_trade = next(
+                    (t for t in reversed(orch.state.recent_trades)
+                     if t.pair == pair and t.action == TradeAction.BUY),
+                    None
                 )
-                if trace_ctx is not None:
-                    trace_ctx.finish(metadata={"action": "fee_gate_reject"})
-                return
+                if entry_trade and entry_trade.price and entry_trade.price > 0:
+                    expected_gain_pct = (trade_price - entry_trade.price) / entry_trade.price
+                else:
+                    # Pre-existing holding (not bot-bought) — skip fee gate
+                    # since we don't know the cost basis
+                    expected_gain_pct = None
+
+            if expected_gain_pct is not None:
+                worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
+                    quote_amount=trade_amount,
+                    expected_gain_pct=expected_gain_pct,
+                    is_swap=False,
+                    portfolio_value=_portfolio_value,
+                )
+                if not worthwhile:
+                    # ─── Auto-bump: try increasing amount to minimum viable ───
+                    bumped = False
+                    if _trade_action == "buy":
+                        min_viable = orch.fee_manager.get_dynamic_min_trade(_portfolio_value)
+                        bumped_amount = max(trade_amount, min_viable)
+
+                        # Cap at available cash and risk-manager position limits
+                        _rm_max_pct = orch.risk_manager.risk_config.get("max_position_pct", 0.05)
+                        if orch.risk_manager.scaler and _portfolio_value > 0:
+                            _rm_max_pct = max(_rm_max_pct, orch.risk_manager.scaler.tier.max_position_pct)
+                        _max_position = _portfolio_value * _rm_max_pct
+                        bumped_amount = min(bumped_amount, _cash_balance, _max_position)
+
+                        if bumped_amount > trade_amount:
+                            worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
+                                quote_amount=bumped_amount,
+                                expected_gain_pct=expected_gain_pct,
+                                is_swap=False,
+                                portfolio_value=_portfolio_value,
+                            )
+                            if worthwhile:
+                                logger.info(
+                                    f"📈 {pair}: Fee gate auto-bumped amount "
+                                    f"{trade_amount:.2f} → {bumped_amount:.2f} "
+                                    f"(min_viable={min_viable:.2f}, "
+                                    f"cash={_cash_balance:.2f}, "
+                                    f"max_pos={_max_position:.2f})"
+                                )
+                                risk_result["quote_amount"] = bumped_amount
+                                if trade_price > 0:
+                                    risk_result["quantity"] = bumped_amount / trade_price
+                                trade_amount = bumped_amount
+                                bumped = True
+
+                    if not bumped and not worthwhile:
+                        logger.info(
+                            f"💸 {pair}: {_trade_action.upper()} NOT worthwhile after fees "
+                            f"(amount={trade_amount:.2f}, expected={expected_gain_pct*100:.1f}%, "
+                            f"breakeven={fee_est.breakeven_move_pct*100:.1f}%)"
+                        )
+                        orch.journal.log_decision(
+                            "fee_gate_reject", pair, _trade_action,
+                            {"reason": "Fees would eat expected gains",
+                             "trade_amount": trade_amount,
+                             "breakeven_pct": fee_est.breakeven_move_pct,
+                             "expected_gain_pct": expected_gain_pct},
+                        )
+                        if trace_ctx is not None:
+                            trace_ctx.finish(metadata={"action": "fee_gate_reject"})
+                        return
 
         if risk_result.get("needs_approval"):
             trade_desc = (

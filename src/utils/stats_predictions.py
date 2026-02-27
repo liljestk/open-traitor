@@ -13,14 +13,36 @@ from src.utils.qc_filter import qc_where
 def _find_price(
     pair: str, target_ts: str, price_timeline: list[tuple[str, dict]]
 ) -> float | None:
-    """Find the closest price for a pair at or after *target_ts*."""
-    for ts, prices in price_timeline:
+    """Find the closest price for a pair at or after *target_ts*.
+
+    Returns *None* if the price appears stale (unchanged for 2+ consecutive
+    hourly snapshots), which indicates the market was closed.
+    """
+    _STALE_LOOKBACK = 2  # how many prior entries to check for staleness
+    for idx, (ts, prices) in enumerate(price_timeline):
         if ts >= target_ts:
             # Try exact pair, then common variants
             for key in [pair, pair.replace("-", "/"), pair.replace("/", "-")]:
                 if key in prices:
                     val = prices[key]
-                    return float(val) if val else None
+                    if not val:
+                        return None
+                    current_price = float(val)
+                    # Check if price is stale (same value in prior entries)
+                    stale_streak = 0
+                    for lookback in range(1, _STALE_LOOKBACK + 1):
+                        prev_idx = idx - lookback
+                        if prev_idx < 0:
+                            break
+                        prev_prices = price_timeline[prev_idx][1]
+                        prev_val = prev_prices.get(key)
+                        if prev_val and float(prev_val) == current_price:
+                            stale_streak += 1
+                        else:
+                            break
+                    if stale_streak >= _STALE_LOOKBACK:
+                        return None  # market closed — stale price
+                    return current_price
             return None
     return None
 
@@ -31,6 +53,8 @@ def _find_price_in_history(
     """Find the first price entry at or after *target_ts* in a price-history list."""
     for ph in price_history:
         if ph["ts"] >= target_ts:
+            if ph.get("stale"):
+                return None  # market was closed — don't use this price
             return ph["price"]
     return None
 
@@ -289,6 +313,9 @@ class PredictionsMixin:
         price_history: list[dict] = []
         pair_upper = pair.upper()
         seen_hours: set[str] = set()  # deduplicate to ~hourly
+        _prev_price: float | None = None
+        _stale_count = 0
+        _STALE_THRESHOLD = 2  # consecutive same-price entries to flag as stale
         for snap in snapshots:
             try:
                 prices = json.loads(snap["current_prices"] or "{}")
@@ -303,7 +330,19 @@ class PredictionsMixin:
                 hour_key = snap["ts"][:13]  # YYYY-MM-DDTHH
                 if hour_key not in seen_hours:
                     seen_hours.add(hour_key)
-                    price_history.append({"ts": snap["ts"], "price": round(price, 8)})
+                    # Detect stale prices (market closed / no fresh data)
+                    is_stale = False
+                    if _prev_price is not None and price == _prev_price:
+                        _stale_count += 1
+                        if _stale_count >= _STALE_THRESHOLD:
+                            is_stale = True
+                    else:
+                        _stale_count = 0
+                    _prev_price = price
+                    entry = {"ts": snap["ts"], "price": round(price, 8)}
+                    if is_stale:
+                        entry["stale"] = True
+                    price_history.append(entry)
 
         # 2. Prediction markers
         predictions_raw = conn.execute(

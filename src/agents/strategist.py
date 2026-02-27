@@ -49,6 +49,7 @@ Rules:
 - Always set stop-loss for buy orders.
 - Consider the current portfolio before adding more of the same asset.
 - For sells of existing holdings, use the quantity shown in ACTUAL HOLDINGS.
+- CRITICAL: Trading fees are significant. Only propose trades where the expected price move CLEARLY exceeds the fee cost. If the expected gain is marginal (< breakeven shown in FEE CONTEXT), hold instead.
 
 Respond ONLY with valid JSON."""
 
@@ -106,6 +107,7 @@ class StrategistAgent(BaseAgent):
         cash_balance = context.get("cash_balance", 0)
         sentiment_data = context.get("sentiment", {})
         strategy_signals = context.get("strategy_signals", {})
+        fee_context = context.get("fee_context", {})
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -148,6 +150,7 @@ class StrategistAgent(BaseAgent):
             cash_balance=cash_balance,
             sentiment_data=sentiment_data,
             strategy_signals=strategy_signals,
+            fee_context=fee_context,
         )
 
         # Create a tracing span for this LLM call
@@ -228,6 +231,7 @@ class StrategistAgent(BaseAgent):
         cash_balance: float = 0,
         sentiment_data: dict | None = None,
         strategy_signals: dict | None = None,
+        fee_context: dict | None = None,
     ) -> str:
         """Build the strategy generation prompt."""
         pair = signal.get("pair", "?")
@@ -305,8 +309,25 @@ ACTIVE USER TASKS:
 RECENT TRADES:
 {recent_text}
 {outcomes_section}{strategy_section}
+{self._format_fee_context(fee_context)}
 {self._format_sentiment_strategy(sentiment_data, strategy_signals)}
 What action should we take? Respond with JSON."""
+
+    @staticmethod
+    def _format_fee_context(fee_context: dict | None) -> str:
+        """Format fee context for the prompt."""
+        if not fee_context:
+            return ""
+        rt = fee_context.get("round_trip_fee_pct", 0)
+        be = fee_context.get("breakeven_pct", 0)
+        mg = fee_context.get("min_gain_pct", 0)
+        return (
+            f"FEE CONTEXT (IMPORTANT — trades that ignore fees LOSE money):\n"
+            f"- Round-trip fee (buy+sell): {rt*100:.2f}%\n"
+            f"- Breakeven price move needed: {be*100:.2f}%\n"
+            f"- Minimum expected gain to trade: {mg*100:.2f}%\n"
+            f"- Do NOT propose a trade unless you expect the price to move MORE than {be*100:.1f}%\n"
+        )
 
     @staticmethod
     def _format_sentiment_strategy(

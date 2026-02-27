@@ -809,6 +809,96 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             logger.error(f"Failed to fetch article body {article_id}: {e}")
             return ""
 
+    def search_symbols(self, query: str, limit: int = 25) -> list[dict]:
+        """Search for tradable symbols.
+
+        In **live mode** uses IBKR ``reqMatchingSymbols()`` which guarantees
+        every result is actually tradable on Interactive Brokers.
+        In **paper mode** falls back to Yahoo Finance search.
+
+        Returns a list of dicts with keys:
+        ``id, base, quote, display_name, exchange, volume_24h, price_change_24h``
+        """
+        query = query.strip()
+        if not query:
+            return []
+
+        # ── Try IBKR Gateway first (live mode only) ─────────────────────
+        if not self.paper_mode and getattr(self, "ib", None) and self.ib.isConnected():
+            try:
+                symbols = self.ib.reqMatchingSymbols(query)
+                results = []
+                for sym in (symbols or []):
+                    contract = sym.contract
+                    if not contract or not contract.symbol:
+                        continue
+                    # Only include stocks and ETFs
+                    sec_type = (contract.secType or "").upper()
+                    if sec_type not in ("STK", "ETF", ""):
+                        continue
+
+                    symbol = contract.symbol
+                    currency = contract.currency or self._native_currency
+                    exchange = contract.primaryExchange or contract.exchange or ""
+
+                    # Build pair ID in internal format (e.g. METSO-EUR)
+                    # For European stocks with exchange suffixes, try to map
+                    yahoo_suffix = self._exchange_to_yahoo_suffix(exchange)
+                    if yahoo_suffix:
+                        pair_id = f"{symbol}.{yahoo_suffix}-{currency}"
+                    else:
+                        pair_id = f"{symbol}-{currency}"
+
+                    # Derive display name from derivative sec types
+                    display_name = f"{symbol}"
+                    desc_parts = getattr(sym, "derivativeSecTypes", [])
+                    long_name = getattr(contract, "description", "") or ""
+                    if long_name:
+                        display_name = long_name
+
+                    results.append({
+                        "id": pair_id,
+                        "base": symbol,
+                        "quote": currency,
+                        "display_name": display_name,
+                        "exchange": exchange,
+                        "volume_24h": 0,
+                        "price_change_24h": 0,
+                    })
+                if results:
+                    logger.debug(f"IBKR search '{query}' returned {len(results)} results")
+                    return results[:limit]
+            except Exception as e:
+                logger.warning(f"IBKR reqMatchingSymbols failed for '{query}': {e}")
+                # Fall through to Yahoo Finance search
+
+        # ── Fallback: Yahoo Finance search ───────────────────────────────
+        return equity_feed.search_tickers(query, limit=limit)
+
+    @staticmethod
+    def _exchange_to_yahoo_suffix(exchange: str) -> str:
+        """Map an IBKR primary exchange name to a Yahoo Finance suffix."""
+        _EXCHANGE_MAP = {
+            "SFB": "ST",      # Stockholm (NASDAQ OMX Nordic)
+            "OMXHEX": "HE",   # Helsinki
+            "HEX": "HE",      # Helsinki (alt)
+            "CSE": "CO",       # Copenhagen
+            "OSE": "OL",       # Oslo
+            "LSE": "L",        # London
+            "IBIS": "DE",      # XETRA / Germany
+            "SWB": "DE",       # Stuttgart / Germany
+            "FWB": "DE",       # Frankfurt
+            "SBF": "PA",       # Paris (Euronext)
+            "AEB": "AS",       # Amsterdam (Euronext)
+            "BVME": "MI",      # Milan (Borsa Italiana)
+            "EBS": "SW",       # Swiss Exchange
+            "TSE": "TO",       # Toronto
+            "ASX": "AX",       # Australia
+            "TSEJ": "T",       # Tokyo
+            "SEHK": "HK",     # Hong Kong
+        }
+        return _EXCHANGE_MAP.get((exchange or "").upper(), "")
+
     def discover_all_pairs_detailed(
         self,
         quote_currencies: list[str] | None = None,

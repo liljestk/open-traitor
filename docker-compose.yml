@@ -207,7 +207,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     ports:
-      - "127.0.0.1:8090:8090" # Web Dashboard
+      - "8090:8090" # Web Dashboard (LAN accessible)
     # Security: read-only filesystem, drop capabilities
     read_only: true
     tmpfs:

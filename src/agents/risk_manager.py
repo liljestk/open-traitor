@@ -192,6 +192,26 @@ class RiskManagerAgent(BaseAgent):
         if action == "hold":
             return {"approved": True, "action": "hold", "reason": "No trade proposed"}
 
+        # ─── Minimum confidence gate ─────────────────────────────
+        # Reject low-confidence proposals (e.g. weak_buy at 62%)
+        # before spending resources on position sizing.
+        min_signal_confidence = self.trading_config.get("min_signal_confidence", 0.65)
+        proposal_confidence = float(proposal.get("confidence", 0))
+        if proposal_confidence < min_signal_confidence and action == "buy":
+            self.logger.info(
+                f"🚫 Trade rejected: confidence {proposal_confidence:.0%} "
+                f"below minimum {min_signal_confidence:.0%}"
+            )
+            return {
+                "approved": False,
+                "action": action,
+                "pair": proposal.get("pair", "?"),
+                "reason": (
+                    f"Signal confidence {proposal_confidence:.0%} below "
+                    f"minimum {min_signal_confidence:.0%} — not worth the fee risk"
+                ),
+            }
+
         # ─── Portfolio-tier scaling ───────────────────────────────
         # Override static config values with tier-appropriate ones.
         if self.scaler and portfolio_value > 0:
