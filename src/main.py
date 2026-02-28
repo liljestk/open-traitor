@@ -259,8 +259,11 @@ def main():
                 ib_port=int(os.environ.get("IBKR_PORT", "4002")),
                 ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
             )
-        except NotImplementedError as e:
-            logger.warning(f"⚠️ Live trading not supported for IBKR yet: {e}. Forcing paper mode.")
+        except ImportError:
+            logger.error("IBClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
+            exchange = CoinbaseClient(paper_mode=True)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialise IBKR client: {e}. Forcing paper mode.")
             paper_mode = True
             exchange = IBClient(
                 paper_mode=True,
@@ -269,9 +272,6 @@ def main():
                 ib_port=int(os.environ.get("IBKR_PORT", "4002")),
                 ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
             )
-        except ImportError:
-            logger.error("IBClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
-            exchange = CoinbaseClient(paper_mode=True)
     else:
         exchange: ExchangeClient = CoinbaseClient(
             api_key=os.environ.get("COINBASE_API_KEY"),

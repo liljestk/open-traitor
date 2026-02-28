@@ -304,15 +304,23 @@ class HoldingsManager:
         ).upper()
 
         try:
-            # Reconcile fiat-quoted pairs (USD, EUR, GBP, etc.).
+            # Build expected from BOT-OPENED trades only (not state.positions, which also
+            # includes external pre-existing holdings).  External holdings are discovered
+            # by the holdings-sync path below and should NOT fire drift warnings.
             base_to_pair: dict[str, str] = {}
             expected: dict[str, float] = {}
-            for pair, qty in orch.state.open_positions.items():
-                if qty <= 0 or "-" not in pair:
+            for trade in orch.state.get_open_trades():
+                if trade.action.value != "buy":
+                    continue
+                pair = trade.pair
+                if "-" not in pair:
                     continue
                 base, quote = pair.split("-", 1)
-                if quote in _KNOWN_QUOTES:
-                    expected[base] = qty
+                if quote not in _KNOWN_QUOTES:
+                    continue
+                qty = trade.filled_quantity or trade.quantity
+                if qty and qty > 0:
+                    expected[base] = expected.get(base, 0.0) + qty
                     base_to_pair[base] = pair
             result = orch.exchange.reconcile_positions(expected)
 
@@ -320,6 +328,11 @@ class HoldingsManager:
                 for d in result["discrepancies"]:
                     currency = d["currency"]
                     actual_qty = d["actual"]
+                    # Skip currencies the bot never opened a trade for — those are
+                    # pre-existing external holdings and are handled by the discovery
+                    # section below (not genuine drift).
+                    if d["expected"] == 0:
+                        continue
                     # Reconstruct the original pair using config quote currency
                     pair = base_to_pair.get(currency, f"{currency}-{default_quote}")
 
@@ -358,11 +371,20 @@ class HoldingsManager:
             fiat_skip = _KNOWN_FIAT | _ALL_STABLECOINS
             dust_threshold = orch._holdings_dust_threshold if hasattr(orch, "_holdings_dust_threshold") else 0.50
 
+            # Build a set of already-tracked base currencies (from state.positions)
+            # so we don't re-emit discovery logs for holdings synced by holdings-manager.
+            tracked_bases: set[str] = set()
+            for pair in orch.state.open_positions:
+                if "-" in pair:
+                    tracked_bases.add(pair.split("-", 1)[0])
+
             for currency, amount in actual_balances.items():
                 if currency in fiat_skip:
                     continue
                 if currency in base_to_pair:
-                    continue  # already tracked
+                    continue  # already tracked via open trade
+                if currency in tracked_bases:
+                    continue  # already in state.positions (synced externally)
                 if amount <= 1e-8:
                     continue
 

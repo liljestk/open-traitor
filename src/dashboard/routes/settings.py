@@ -313,6 +313,8 @@ def get_setup_config():
             "openrouterApiKey": env("OPENROUTER_API_KEY", ""),
             "openaiEnabled": env("OPENAI_API_KEY", "") != "",
             "openaiApiKey": env("OPENAI_API_KEY", ""),
+            "groqEnabled": env("GROQ_API_KEY", "") != "",
+            "groqApiKey": env("GROQ_API_KEY", ""),
             "ollamaModel": env("OLLAMA_MODEL", "qwen2.5:14b"),
             "telegramEnabled": telegram_enabled,
             "telegramUserId": primary_user,
@@ -469,7 +471,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
         _ALLOWED_ENV_KEYS = {
             "COINBASE_API_KEY", "COINBASE_API_SECRET", "COINBASE_KEY_FILE",
             "REDIS_URL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
-            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY",
             "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_AUTHORIZED_USERS",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
             "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",

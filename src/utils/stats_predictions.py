@@ -418,6 +418,128 @@ class PredictionsMixin:
             "total_predictions": len(predictions),
         }
 
+    def get_pair_accuracy_context(
+        self, pair: str, days: int = 30, min_samples: int = 5
+    ) -> dict | None:
+        """Return a concise accuracy summary for a single pair, for LLM prompt injection.
+
+        Evaluates 24h and 1h directional accuracy over the last *days* days, plus a
+        trend comparison (last 7 days vs. the prior period). Returns None if fewer
+        than *min_samples* evaluated predictions exist (not enough data to be useful).
+        """
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        week_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        pair_upper = pair.upper()
+
+        rows = conn.execute(
+            """SELECT ar.ts, ar.signal_type, ar.reasoning_json
+               FROM agent_reasoning ar
+               WHERE ar.agent_name = 'market_analyst'
+                 AND UPPER(ar.pair) = ?
+                 AND ar.ts >= ?
+               ORDER BY ar.ts ASC""",
+            (pair_upper, cutoff),
+        ).fetchall()
+
+        if not rows:
+            return None
+
+        # Build price timeline from portfolio snapshots (same approach as full accuracy calc)
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
+
+        price_timeline: list[tuple[str, dict]] = []
+        for snap in snapshots:
+            try:
+                prices = json.loads(snap["current_prices"] or "{}")
+                if prices:
+                    price_timeline.append((snap["ts"], prices))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        results = []
+        for pred in rows:
+            try:
+                reasoning = json.loads(pred["reasoning_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                reasoning = {}
+
+            signal = pred["signal_type"] or "neutral"
+            pred_ts = pred["ts"]
+            is_bullish = signal in ("strong_buy", "buy", "weak_buy")
+            is_bearish = signal in ("strong_sell", "sell", "weak_sell")
+            if not is_bullish and not is_bearish:
+                continue
+
+            price_at_signal = None
+            for key in ["suggested_entry", "current_price"]:
+                val = reasoning.get(key)
+                if val and float(val) > 0:
+                    price_at_signal = float(val)
+                    break
+            if not price_at_signal:
+                price_at_signal = _find_price(pair_upper, pred_ts, price_timeline)
+            if not price_at_signal:
+                continue
+
+            rec: dict = {"ts": pred_ts, "is_recent": pred_ts >= week_cutoff}
+            for label, hours in [("1h", 1), ("24h", 24)]:
+                future_ts = _ts_plus_hours(pred_ts, hours)
+                actual = _find_price(pair_upper, future_ts, price_timeline)
+                if actual and actual > 0:
+                    went_up = actual > price_at_signal
+                    correct = (is_bullish and went_up) or (is_bearish and not went_up)
+                    rec[f"correct_{label}"] = int(correct)
+                    rec[f"evaluated_{label}"] = 1
+                else:
+                    rec[f"correct_{label}"] = 0
+                    rec[f"evaluated_{label}"] = 0
+            results.append(rec)
+
+        total_eval_24h = sum(r["evaluated_24h"] for r in results)
+        if total_eval_24h < min_samples:
+            return None
+
+        total_correct_24h = sum(r["correct_24h"] for r in results)
+        total_eval_1h = sum(r["evaluated_1h"] for r in results)
+        total_correct_1h = sum(r["correct_1h"] for r in results)
+
+        accuracy_24h = round(total_correct_24h / total_eval_24h * 100, 1) if total_eval_24h else None
+        accuracy_1h = round(total_correct_1h / total_eval_1h * 100, 1) if total_eval_1h else None
+
+        # Trend: last 7 days vs prior period
+        recent = [r for r in results if r["is_recent"]]
+        older = [r for r in results if not r["is_recent"]]
+        recent_eval = sum(r["evaluated_24h"] for r in recent)
+        recent_correct = sum(r["correct_24h"] for r in recent)
+        older_eval = sum(r["evaluated_24h"] for r in older)
+        older_correct = sum(r["correct_24h"] for r in older)
+        recent_acc = round(recent_correct / recent_eval * 100, 1) if recent_eval >= 3 else None
+        older_acc = round(older_correct / older_eval * 100, 1) if older_eval >= 3 else None
+
+        if recent_acc is not None and older_acc is not None:
+            delta = recent_acc - older_acc
+            trend = "improving" if delta > 8 else ("degrading" if delta < -8 else "stable")
+        else:
+            trend = "insufficient_data"
+
+        return {
+            "pair": pair_upper,
+            "total": len(results),
+            "evaluated_24h": total_eval_24h,
+            "accuracy_24h_pct": accuracy_24h,
+            "accuracy_1h_pct": accuracy_1h,
+            "recent_accuracy_24h_pct": recent_acc,
+            "older_accuracy_24h_pct": older_acc,
+            "trend": trend,
+        }
+
     def get_tracked_pairs(self, quote_currency: str | list[str] | None = None) -> dict:
         """Return pairs tracked by AI and/or humans, grouped by asset class.
 
@@ -481,14 +603,19 @@ class PredictionsMixin:
                     "source": "human",
                 }
 
-        # Classify pairs into crypto/equity
-        equity_suffixes = {"-SEK", "-NOK", "-DKK"}  # Nordic equities
+        # Classify pairs into crypto/equity.
+        # IBKR equity pairs embed an exchange suffix in the base symbol using a
+        # dot (e.g. ASML.AS-EUR, FSECURE.HE-EUR).  Crypto pairs never contain a
+        # dot (BTC-EUR, ETH-USD).  Nordic equities traded with SEK/NOK/DKK also
+        # count as equity regardless of dot presence.
+        equity_suffixes = {"-SEK", "-NOK", "-DKK"}
 
         crypto_pairs = []
         equity_pairs = []
         for item in sorted(ai_pairs.values(), key=lambda x: x["prediction_count"], reverse=True):
             pair = item["pair"]
-            is_equity = any(pair.upper().endswith(s) for s in equity_suffixes)
+            base = pair.rsplit("-", 1)[0] if "-" in pair else pair
+            is_equity = "." in base or any(pair.upper().endswith(s) for s in equity_suffixes)
             if is_equity:
                 equity_pairs.append(item)
             else:

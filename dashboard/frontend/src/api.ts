@@ -629,6 +629,152 @@ export interface PortfolioExposure {
 export const fetchPortfolioExposure = () =>
   apiFetch<{ exposure: PortfolioExposure | null }>('/portfolio/exposure')
 
+// ─── LLM Analytics ─────────────────────────────────────────────────────────
+
+export interface LLMAnalyticsSummary {
+  total_calls: number
+  total_prompt_tokens: number
+  total_completion_tokens: number
+  total_tokens: number
+  avg_latency_ms: number | null
+  avg_prompt_tokens: number | null
+  avg_completion_tokens: number | null
+  avg_total_tokens: number | null
+  max_latency_ms: number | null
+  min_latency_ms: number | null
+  p50_latency_ms: number | null
+  p90_latency_ms: number | null
+  p99_latency_ms: number | null
+  unique_pairs: number
+  total_cycles: number
+  runtime_total_calls: number | null
+  runtime_total_tokens: number | null
+}
+
+export interface LLMTimeBucket {
+  bucket: string
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  avg_latency_ms: number | null
+}
+
+export interface LLMAgentStat {
+  agent_name: string
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  avg_latency_ms: number | null
+  avg_prompt_tokens: number | null
+  avg_completion_tokens: number | null
+}
+
+export interface LLMExchangeStat {
+  exchange: string
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+}
+
+export interface LLMPairStat {
+  pair: string
+  calls: number
+  total_tokens: number
+  avg_latency_ms: number | null
+}
+
+export interface LLMProviderRuntimeStat {
+  name: string
+  enabled: boolean
+  model: string | null
+  daily_tokens_used: number
+  daily_tokens_budget: number | null
+  daily_requests_used: number
+  daily_requests_budget: number | null
+  rpm_limit: number | null
+  in_cooldown: boolean
+  credits_remaining: number | null
+}
+
+export interface LLMAnalyticsData {
+  summary: LLMAnalyticsSummary
+  time_series: LLMTimeBucket[]
+  by_agent: LLMAgentStat[]
+  by_exchange: LLMExchangeStat[]
+  top_pairs: LLMPairStat[]
+  providers: LLMProviderRuntimeStat[]
+  hours: number
+  bucket: 'hourly' | 'daily' | 'weekly'
+}
+
+export const fetchLLMAnalytics = (hours = 168) =>
+  apiFetch<LLMAnalyticsData>(`/llm-analytics?hours=${hours}`)
+
+// ─── LLM Optimizer ─────────────────────────────────────────────────────────
+
+export interface OptimizerParamMeta {
+  label: string
+  description: string
+  type: 'int' | 'multiselect'
+  min?: number
+  max?: number
+  step?: number
+  options?: string[]
+  impact_category: string
+  token_weight?: number
+}
+
+export interface OptimizerAgentContext {
+  agent_name: string
+  calls: number
+  avg_prompt_tokens: number
+  avg_completion_tokens: number
+  total_prompt_tokens: number
+}
+
+export interface OptimizerSignalDist {
+  signal_type: string
+  count: number
+  avg_confidence: number
+}
+
+export interface OptimizerHistoryEntry {
+  ts: string
+  changed_by: string
+  changes: Record<string, { from: unknown; to: unknown }>
+  snapshot: Record<string, unknown>
+}
+
+export interface OptimizerData {
+  settings: Record<string, unknown>
+  defaults: Record<string, unknown>
+  param_meta: Record<string, OptimizerParamMeta>
+  history: OptimizerHistoryEntry[]
+  context: {
+    by_agent: OptimizerAgentContext[]
+    signal_distribution: OptimizerSignalDist[]
+    total_strategist_calls: number
+    totals: { total_prompt_tokens: number; total_completion_tokens: number; total_calls: number }
+  }
+  hours: number
+}
+
+export const fetchOptimizer = (hours = 168) =>
+  apiFetch<OptimizerData>(`/llm-analytics/optimizer?hours=${hours}`)
+
+export const applyOptimizer = (settings: Record<string, unknown>) =>
+  apiFetch<{ ok: boolean; applied: Record<string, unknown>; changes: Record<string, { from: unknown; to: unknown }> }>(
+    '/llm-analytics/optimizer/apply',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    }
+  )
+
 // ─── News ──────────────────────────────────────────────────────────────────
 
 export interface NewsArticle {

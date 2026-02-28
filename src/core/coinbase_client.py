@@ -32,6 +32,21 @@ from src.utils.logger import get_logger
 
 logger = get_logger("core.coinbase")
 
+
+def _extract_cb_error(result: dict) -> str:
+    """Extract a human-readable error from a Coinbase CreateOrderResponse dict."""
+    err_resp = result.get("error_response") or {}
+    return (
+        result.get("error")
+        or err_resp.get("message")
+        or err_resp.get("error")
+        or err_resp.get("preview_failure_reason")
+        or err_resp.get("new_order_failure_reason")
+        or result.get("failure_reason")
+        or "Unknown error"
+    )
+
+
 # Make re-exports visible to star-imports and static analysis
 __all__ = [
     "CoinbaseClient",
@@ -394,6 +409,32 @@ class CoinbaseClient(
     # ExchangeClient abstract implementations
     # =========================================================================
 
+    def _format_base_size(self, pair: str, amount: float) -> str:
+        """Round *amount* down to the product's base_increment precision.
+
+        Uses the already-cached product catalogue — no extra API call.
+        Falls back to 8 decimal places if the product or increment is unknown.
+        """
+        import math
+
+        increment_str = "0.00000001"  # safe default (8 dp)
+        for prod in self._product_cache:
+            if prod.get("product_id") == pair:
+                increment_str = prod.get("base_increment", increment_str)
+                break
+
+        try:
+            # Determine decimal places from the increment string (e.g. "0.001" → 3)
+            if "." in increment_str:
+                decimals = len(increment_str.rstrip("0").split(".")[1])
+            else:
+                decimals = 0
+            factor = 10 ** decimals
+            rounded = math.floor(amount * factor) / factor
+            return f"{rounded:.{decimals}f}"
+        except Exception:
+            return f"{amount:.8f}"
+
     def place_market_order(
         self,
         pair: str,
@@ -405,11 +446,11 @@ class CoinbaseClient(
         """Place a market order (ExchangeClient abstract method implementation)."""
         if side.upper() == "BUY":
             if amount_is_base:
-                return self.market_order_buy(pair, base_size=str(amount))
+                return self.market_order_buy(pair, base_size=self._format_base_size(pair, amount))
             else:
                 return self.market_order_buy(pair, quote_size=str(amount))
         elif side.upper() == "SELL":
-            return self.market_order_sell(pair, base_size=str(amount))
+            return self.market_order_sell(pair, base_size=self._format_base_size(pair, amount))
         return {"success": False, "error": f"Invalid side: {side}"}
 
     def place_limit_order(
@@ -423,11 +464,11 @@ class CoinbaseClient(
         """Place a limit order (ExchangeClient abstract method implementation)."""
         if side.upper() == "BUY":
             return self.limit_order_buy(
-                pair, base_size=str(size), limit_price=str(price)
+                pair, base_size=self._format_base_size(pair, size), limit_price=str(price)
             )
         elif side.upper() == "SELL":
             return self.limit_order_sell(
-                pair, base_size=str(size), limit_price=str(price)
+                pair, base_size=self._format_base_size(pair, size), limit_price=str(price)
             )
         return {"success": False, "error": f"Invalid side: {side}"}
 
@@ -459,10 +500,17 @@ class CoinbaseClient(
                     if hasattr(order, "to_dict")
                     else dict(order)
                 )
-                logger.info(
-                    f"✅ Market BUY order placed: {product_id} | "
-                    f"order_id={result.get('order_id', '?')}"
-                )
+                if result.get("success", True):
+                    logger.info(
+                        f"✅ Market BUY order placed: {product_id} | "
+                        f"order_id={result.get('order_id', '?')}"
+                    )
+                else:
+                    _err = _extract_cb_error(result)
+                    logger.error(
+                        f"❌ Market BUY rejected by Coinbase: {product_id} | {_err}"
+                    )
+                    result.setdefault("error", _err)
                 logger.debug(f"BUY order detail: {result}")
                 return result
             except Exception as e:
@@ -476,6 +524,9 @@ class CoinbaseClient(
 
     def market_order_sell(self, product_id: str, base_size: str) -> dict:
         """Place a market sell order."""
+        # Normalise precision to avoid "too many decimals" rejection from Coinbase
+        base_size = self._format_base_size(product_id, float(base_size))
+
         if self.paper_mode:
             return self._paper_market_sell(product_id, base_size)
 
@@ -492,10 +543,17 @@ class CoinbaseClient(
                     if hasattr(order, "to_dict")
                     else dict(order)
                 )
-                logger.info(
-                    f"✅ Market SELL order placed: {product_id} | "
-                    f"order_id={result.get('order_id', '?')}"
-                )
+                if result.get("success", True):
+                    logger.info(
+                        f"✅ Market SELL order placed: {product_id} | "
+                        f"order_id={result.get('order_id', '?')}"
+                    )
+                else:
+                    _err = _extract_cb_error(result)
+                    logger.error(
+                        f"❌ Market SELL rejected by Coinbase: {product_id} | {_err}"
+                    )
+                    result.setdefault("error", _err)
                 logger.debug(f"SELL order detail: {result}")
                 return result
             except Exception as e:

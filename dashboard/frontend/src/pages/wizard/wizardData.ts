@@ -30,6 +30,8 @@ export interface WizardState {
   openrouterApiKey: string
   openaiEnabled: boolean
   openaiApiKey: string
+  groqEnabled: boolean
+  groqApiKey: string
   ollamaModel: string
   telegramEnabled: boolean
   telegramUserId: string
@@ -66,6 +68,8 @@ export const INITIAL_STATE: WizardState = {
   openrouterApiKey: '',
   openaiEnabled: false,
   openaiApiKey: '',
+  groqEnabled: false,
+  groqApiKey: '',
   ollamaModel: 'qwen2.5:14b',
   telegramEnabled: true,
   telegramUserId: '',
@@ -187,6 +191,7 @@ export function validateStep(stepId: string, state: WizardState): StepValidation
       if (state.geminiEnabled && !state.geminiApiKey) issues.push('Gemini API key missing')
       if (state.openrouterEnabled && !state.openrouterApiKey) issues.push('OpenRouter API key missing')
       if (state.openaiEnabled && !state.openaiApiKey) issues.push('OpenAI API key missing')
+      if (state.groqEnabled && !state.groqApiKey) issues.push('Groq API key missing')
       break
     case 'telegram':
       if (state.telegramEnabled) {
@@ -240,6 +245,9 @@ export function generateEnvContent(state: WizardState): string {
   blank()
   if (state.openaiEnabled && state.openaiApiKey) add('OPENAI_API_KEY', state.openaiApiKey, 'OpenAI API (provider 3 — fallback)')
   else lines.push('# OPENAI_API_KEY= (not configured)')
+  blank()
+  if (state.groqEnabled && state.groqApiKey) add('GROQ_API_KEY', state.groqApiKey, 'Groq API (free tier — llama-3.3-70b + llama-4-maverick)')
+  else lines.push('# GROQ_API_KEY= (not configured)')
   blank()
   add('OLLAMA_MODEL', state.ollamaModel, 'Ollama LLM model')
   add('OLLAMA_BASE_URL', 'http://ollama:11434', 'Ollama URL (Docker internal)')

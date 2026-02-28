@@ -38,6 +38,39 @@ _FIAT_RATE_LOCK = threading.Lock()
 _FIAT_RATE_TTL = 6 * 3600  # 6 hours — fiat rates are stable intraday
 _FIAT_RATE_URL = "https://api.frankfurter.app/latest?from=USD"  # ECB rates, no API key
 
+# ── No-price warning suppression ─────────────────────────────────────────────
+# After _NO_PRICE_WARN_THRESHOLD consecutive failures for a currency, suppress
+# further warnings for _NO_PRICE_SUPPRESS_SECS (1 hour) to keep logs clean.
+# Tokens that are delisted / have no pair on Coinbase will trigger this.
+_NO_PRICE_WARN_COUNTS: dict[str, int] = {}        # consecutive failures so far
+_NO_PRICE_SUPPRESSED_UNTIL: dict[str, float] = {} # epoch when suppression expires
+_NO_PRICE_WARN_THRESHOLD = 3    # warn this many times, then suppress
+_NO_PRICE_SUPPRESS_SECS = 3600  # silence window: 1 hour
+
+
+def _should_warn_no_price(currency: str) -> bool:
+    """Return True if a 'no price' warning should be emitted for *currency*.
+
+    Counts consecutive failures per currency. After *_NO_PRICE_WARN_THRESHOLD*
+    failures, suppresses further warnings for *_NO_PRICE_SUPPRESS_SECS* and logs
+    a single informational notice. Automatically re-enables after the window so
+    tokens that later get listed will warn again.
+    """
+    now = time.time()
+    if now < _NO_PRICE_SUPPRESSED_UNTIL.get(currency, 0.0):
+        return False  # still in suppression window
+    count = _NO_PRICE_WARN_COUNTS.get(currency, 0) + 1
+    _NO_PRICE_WARN_COUNTS[currency] = count
+    if count >= _NO_PRICE_WARN_THRESHOLD:
+        _NO_PRICE_SUPPRESSED_UNTIL[currency] = now + _NO_PRICE_SUPPRESS_SECS
+        _NO_PRICE_WARN_COUNTS[currency] = 0
+        logger.info(
+            f"🔇 {currency} has no priceable pair on Coinbase — "
+            f"suppressing price warnings for {_NO_PRICE_SUPPRESS_SECS // 60}m"
+        )
+        return False
+    return True
+
 
 def _get_fiat_rate_usd(currency: str) -> float:
     """
@@ -133,7 +166,8 @@ class CoinbaseCurrencyMixin:
             if price_stable > 0:
                 return amount * price_stable  # stablecoins ≈ 1 USD
 
-        logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
+        if _should_warn_no_price(currency):
+            logger.warning(f"⚠️ No USD price available for {currency} — excluding {amount:.6f} from portfolio value")
         return 0.0
 
     def _currency_to_native(self, currency: str, amount: float, native: str) -> float:
@@ -192,7 +226,8 @@ class CoinbaseCurrencyMixin:
                 if native == "USD":
                     return amount * price_stable
 
-        logger.warning(f"⚠️ No {native} price for {currency} — excluding {amount:.6f}")
+        if _should_warn_no_price(currency):
+            logger.warning(f"⚠️ No {native} price for {currency} — excluding {amount:.6f}")
         return 0.0
 
     def get_portfolio_value(self) -> float:

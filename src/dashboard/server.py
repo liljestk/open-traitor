@@ -49,6 +49,7 @@ from src.dashboard.routes.settings import router as settings_router
 from src.dashboard.routes.news import router as news_router
 from src.dashboard.routes.watchlist import router as watchlist_router
 from src.dashboard.routes.commands import router as commands_router
+from src.dashboard.routes.llm_analytics import router as llm_analytics_router
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +316,7 @@ app.include_router(settings_router)
 app.include_router(news_router)
 app.include_router(watchlist_router)
 app.include_router(commands_router)
+app.include_router(llm_analytics_router)
 
 
 # ---------------------------------------------------------------------------

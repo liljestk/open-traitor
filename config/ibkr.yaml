@@ -2,16 +2,16 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 5
   max_cash_per_trade_pct: 0.5
-  max_daily_loss: 10000   # safety ceiling — real limit is max_drawdown_pct
-  max_daily_spend: 10000  # safety ceiling — real limit is tier's max_cash_per_trade_pct
+  max_daily_loss: 10000
+  max_daily_spend: 10000
   max_portfolio_risk_pct: 0.5
-  max_single_trade: 10000  # safety ceiling — real limit computed as portfolio_value × tier_pct
+  max_single_trade: 10000
   max_stop_loss_pct: 0.08
   max_trades_per_day: 10
   min_trade_interval_seconds: 300
   never_trade_pairs: []
   only_trade_pairs: []
-  require_approval_above: 10000  # approval not needed — trades are auto-sized to account value
+  require_approval_above: 10000
 analysis:
   sentiment:
     enabled: true
@@ -84,8 +84,8 @@ llm:
     api_key_set: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     cooldown_seconds: 180
-    daily_token_limit: 200000
     daily_request_limit: 18
+    daily_token_limit: 200000
     enabled: true
     model: gemini-2.5-flash-lite
     name: gemini
@@ -183,9 +183,8 @@ trading:
   interval: 1800
   invalidate_strategic_context: false
   live_holdings_sync: false
-  max_active_pairs: 10           # upper-bound — portfolio_scaler may reduce this
-  max_open_positions: 10         # upper-bound — portfolio_scaler may reduce this
-  portfolio_scaling: true        # enable dynamic tier scaling (micro→whale)
+  max_active_pairs: 10
+  max_open_positions: 10
   min_confidence: 0.6
   mode: live
   pair_discovery: all
@@ -197,6 +196,7 @@ trading:
   - SIE.DE-EUR
   - ALV.DE-EUR
   paper_slippage_pct: 0.0003
+  portfolio_scaling: true
   quote_currencies:
   - EUR
   quote_currency: EUR

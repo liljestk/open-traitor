@@ -80,7 +80,7 @@ export function StepWelcome({ onStart }: { onStart: () => void }) {
             ['Exchange connection', 'Coinbase crypto + IBKR equities'],
             ['Trading mode', 'Paper (simulated) or Live (real money)'],
             ['Asset universe', 'Which crypto & stocks the agent monitors'],
-            ['AI brain', 'Multi-provider LLM chain (Gemini / OpenRouter / Ollama)'],
+            ['AI brain', 'Multi-provider LLM chain (Groq / Gemini / OpenRouter / Ollama)'],
             ['Notifications', 'Telegram bot for alerts, approvals & commands'],
             ['News feeds', 'Reddit + RSS for market sentiment analysis'],
             ['Infrastructure', 'Redis, Langfuse, Temporal (auto-generated secrets)'],
@@ -377,7 +377,7 @@ export function StepAssets({ state, update, onSkip: _onSkip }: { state: WizardSt
         <Activity size={14} style={{ color: '#60a5fa', flexShrink: 0 }} />
         <span>
           The number of pairs you can actively track depends on your LLM provider's RPM limit.
-          Free-tier providers (Gemini 14 RPM) support ~5 pairs; paid providers support up to 30.
+          Free-tier providers (Groq 30 RPM, OpenRouter 20 RPM, Gemini 14 RPM) support 5–10 pairs; paid providers support up to 30.
           Don't worry — you can select more here, the system auto-adjusts at runtime.
         </span>
       </div>
@@ -511,15 +511,22 @@ export function StepIbkrConnection({ state, update }: { state: WizardState; upda
 export function StepLLM({ state, update }: { state: WizardState; update: (p: Partial<WizardState>) => void }) {
   return (
     <>
-      <SectionHeader icon={<Sparkles size={22} />} title="AI / LLM Configuration" subtitle="Configure the AI brain. Requests try providers in order: Gemini → OpenRouter → OpenAI → Ollama (local fallback)." />
+      <SectionHeader icon={<Sparkles size={22} />} title="AI / LLM Configuration" subtitle="Configure the AI brain. Requests try providers in order: Groq → OpenRouter → Gemini → OpenAI → Ollama (local fallback)." />
 
       <h3 style={{ margin: '0 0 12px 0', fontSize: 15, fontWeight: 700, color: '#e6edf3', display: 'flex', alignItems: 'center', gap: 8 }}>
         <Cloud size={16} color="#6e7681" /> Cloud Providers
         <span style={{ fontSize: 12, fontWeight: 400, color: '#484f58' }}>Optional &mdash; faster than local</span>
       </h3>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 28 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16, marginBottom: 28 }}>
         {([
+          {
+            key: 'groq' as const, enabled: state.groqEnabled, apiKey: state.groqApiKey,
+            enabledKey: 'groqEnabled', apiKeyKey: 'groqApiKey',
+            icon: Zap, color: '#f97316', title: 'Groq', model: 'llama-3.3-70b-versatile', rate: '30 RPM · 1K req/day free',
+            placeholder: 'gsk_...', steps: ['Go to console.groq.com/keys', 'Click "Create API Key"', 'Copy the key (starts with gsk_)'],
+            link: { url: 'https://console.groq.com/keys', label: 'Get key' },
+          },
           {
             key: 'gemini' as const, enabled: state.geminiEnabled, apiKey: state.geminiApiKey,
             enabledKey: 'geminiEnabled', apiKeyKey: 'geminiApiKey',
@@ -583,8 +590,9 @@ export function StepLLM({ state, update }: { state: WizardState; update: (p: Par
           Each trading cycle uses ~2 LLM calls per tracked asset. Your provider's <strong style={{ color: '#c9d1d9' }}>requests-per-minute (RPM)</strong> limit
           determines how many assets the agent can monitor simultaneously.
         </p>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 12 }}>
           {([
+            { label: 'Groq Free', rpm: 30, pairs: 10, color: '#f97316' },
             { label: 'Gemini Free', rpm: 14, pairs: 5, color: '#3b82f6' },
             { label: 'OpenRouter Free', rpm: 20, pairs: 8, color: '#f59e0b' },
             { label: 'OpenAI Paid', rpm: 450, pairs: 30, color: '#10b981' },

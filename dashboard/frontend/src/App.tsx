@@ -15,6 +15,7 @@ import Watchlist from './pages/Watchlist'
 import RiskExposure from './pages/RiskExposure'
 import Predictions from './pages/Predictions'
 import SetupWizard from './pages/SetupWizard'
+import LLMAnalytics from './pages/LLMAnalytics'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/news" element={<NewsFeed />} />
             <Route path="/planning" element={<PlanningAudit />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/llm-analytics" element={<LLMAnalytics />} />
           </Route>
         </Routes>
       </BrowserRouter>

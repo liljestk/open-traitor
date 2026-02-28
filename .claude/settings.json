@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile src/agents/market_analyst.py src/agents/strategist.py src/core/managers/pipeline_manager.py)",
+      "Bash(ls d:/Development/auto-traitor/src/agents/*.py)",
+      "Bash(python -m py_compile src/agents/market_analyst.py src/agents/strategist.py src/agents/settings_advisor.py)"
+    ]
+  }
+}

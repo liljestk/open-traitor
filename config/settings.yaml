@@ -64,6 +64,28 @@ llm:
     daily_request_limit: 1000
     cooldown_seconds: 60
     tier: free
+  - name: groq
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.3-70b-versatile
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 100000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: groq-fallback
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: meta-llama/llama-4-maverick-17b-128e-instruct
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 500000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
   - name: gemini
     enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/

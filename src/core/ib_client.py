@@ -126,22 +126,58 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "Live IB trading requires the 'ib_insync' package. "
                 "Install with: pip install ib_insync"
             )
-        # ib_insync requires an asyncio event loop in the current thread.
-        # When called from non-main threads (e.g. FastAPI/AnyIO workers),
-        # no event loop exists — create one so ib_insync can function.
         import asyncio
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
+        import threading
 
-        self.ib = _IB()
+        # ib_insync's IB() captures the current event loop on instantiation,
+        # and connect() calls loop.run_until_complete() internally.
+        # Both fail if a loop is already running (e.g. FastAPI/AnyIO lifespan).
+        # Fix: when inside a running loop, do everything in a dedicated thread
+        # that owns its own fresh event loop.
         try:
-            self.ib.connect(self._ib_host, self._ib_port, clientId=self._ib_client_id)
-            logger.info(f"✅ IBClient LIVE connected to {self._ib_host}:{self._ib_port} (Client ID: {self._ib_client_id})")
-        except Exception as e:
-            logger.error(f"❌ IBClient LIVE connection failed: {e}")
-            raise
+            asyncio.get_running_loop()
+            _in_async = True
+        except RuntimeError:
+            _in_async = False
+
+        if _in_async:
+            _exc: list = [None]
+            _done = threading.Event()
+
+            def _connect_thread() -> None:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    self.ib = _IB()
+                    self.ib.connect(
+                        self._ib_host, self._ib_port,
+                        clientId=self._ib_client_id,
+                    )
+                except Exception as e:
+                    _exc[0] = e
+                finally:
+                    _done.set()
+
+            t = threading.Thread(target=_connect_thread, daemon=True)
+            t.start()
+            if not _done.wait(timeout=30):
+                raise TimeoutError("IB Gateway connection timed out after 30 s")
+            if _exc[0]:
+                logger.error(f"❌ IBClient LIVE connection failed: {_exc[0]}")
+                raise _exc[0]
+        else:
+            try:
+                asyncio.get_event_loop()
+            except RuntimeError:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+            self.ib = _IB()
+            try:
+                self.ib.connect(self._ib_host, self._ib_port, clientId=self._ib_client_id)
+            except Exception as e:
+                logger.error(f"❌ IBClient LIVE connection failed: {e}")
+                raise
+
+        logger.info(f"✅ IBClient LIVE connected to {self._ib_host}:{self._ib_port} (Client ID: {self._ib_client_id})")
 
     # ── Connection / account methods ─────────────────────────────────────
 

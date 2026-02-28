@@ -457,7 +457,16 @@ class ExecutorAgent(BaseAgent):
                 f"Position closed ({reason}): {trade.to_summary()}"
             )
         else:
-            error = result.get("error", "Unknown error")
+            err_resp = result.get("error_response") or {}
+            error = (
+                result.get("error")
+                or err_resp.get("message")
+                or err_resp.get("error")
+                or err_resp.get("preview_failure_reason")
+                or err_resp.get("new_order_failure_reason")
+                or result.get("failure_reason")
+                or "Unknown error"
+            )
             self.logger.error(
                 f"❌ Failed to close position for {trade.pair} ({reason}): {error} — "
                 f"position state NOT updated; will retry on next cycle."

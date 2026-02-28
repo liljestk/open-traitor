@@ -18,48 +18,33 @@ from src.models.signal import (
     SentimentSignals,
 )
 from src.utils.logger import get_logger
+from src.utils import llm_optimizer
 
 logger = get_logger("agent.market_analyst")
 
 
-MARKET_ANALYSIS_SYSTEM_PROMPT = """You are an expert market analyst.
-Your job is to analyze technical indicators and news sentiment to produce a clear market assessment.
-
-Given the technical indicators and recent news, provide your analysis as JSON:
+MARKET_ANALYSIS_SYSTEM_PROMPT = """You are a market analyst. Analyze indicators and news, return JSON:
 
 {{
-    "signal_type": "strong_buy" | "buy" | "weak_buy" | "neutral" | "weak_sell" | "sell" | "strong_sell",
+    "signal_type": "strong_buy"|"buy"|"weak_buy"|"neutral"|"weak_sell"|"sell"|"strong_sell",
     "confidence": 0.0-1.0,
-    "market_condition": "strongly_bullish" | "bullish" | "slightly_bullish" | "neutral" | "slightly_bearish" | "bearish" | "strongly_bearish" | "volatile",
-    "sentiment_overall": "bullish" | "bearish" | "neutral",
-    "sentiment_score": -1.0 to 1.0,
-    "key_factors": ["factor1", "factor2"],
-    "reasoning": "Brief explanation of your analysis",
-    "suggested_entry": price or null,
-    "suggested_stop_loss": price or null,
-    "suggested_take_profit": price or null
+    "market_condition": "strongly_bullish"|"bullish"|"slightly_bullish"|"neutral"|"slightly_bearish"|"bearish"|"strongly_bearish"|"volatile",
+    "sentiment_overall": "bullish"|"bearish"|"neutral",
+    "sentiment_score": -1.0-1.0,
+    "key_factors": ["factor1","factor2"],
+    "reasoning": "concise explanation",
+    "suggested_entry": price_or_null,
+    "suggested_stop_loss": price_or_null,
+    "suggested_take_profit": price_or_null
 }}
 
-Be objective. Follow the technical indicators closely.
 {asset_class_notes}
-If a strategic context is provided, use it as regime background but do not override clear technical evidence.
-
-ACCOUNT-SIZE AWARENESS:
-- Calibrate stop-loss and take-profit to the account size.
-- For small accounts, tighter stops reduce capital at risk.
-- Suggest entry amounts realistic for the portfolio.
-
+Strategic context = regime background; don't override clear technical signals.
+Calibrate SL/TP to account size (tighter for small accounts).
 Respond ONLY with valid JSON."""
 
-_CRYPTO_NOTES = (
-    "Don't artificially lower confidence if indicators point clearly in one direction. "
-    "Balance risk with opportunity — find actionable trades even in choppy markets."
-)
-_EQUITY_NOTES = (
-    "Consider earnings, macro conditions, sector rotation, and institutional flows. "
-    "Equities are less volatile than crypto — calibrate stop distances accordingly. "
-    "For smaller accounts, consider fractional shares and minimum lot sizes."
-)
+_CRYPTO_NOTES = "Don't artificially lower confidence when indicators clearly align. Find actionable trades even in choppy markets."
+_EQUITY_NOTES = "Consider earnings, macro, sector rotation. Equities are less volatile — wider stop distances. Fractional shares ok for small accounts."
 
 
 def _get_system_prompt(exchange: str) -> str:
@@ -208,6 +193,15 @@ class MarketAnalystAgent(BaseAgent):
     ) -> str:
         """Build the analysis prompt for the LLM."""
         sym = currency_symbol
+        # Cap news — reads optimizer setting hot (30s cache)
+        news_max = llm_optimizer.get("news_max_chars", 1500)
+        if len(news) > news_max:
+            news = news[:news_max].rsplit("\n", 1)[0] + "\n[...truncated]"
+
+        # Cap strategic context
+        ctx_max = llm_optimizer.get("strategic_context_max_chars", 800)
+        if strategic_context and len(strategic_context) > ctx_max:
+            strategic_context = strategic_context[:ctx_max].rstrip() + " [...]"
         fg_section = f"\nFEAR & GREED INDEX:\n{fear_greed}\n" if fear_greed else ""
         mtf_section = f"\nMULTI-TIMEFRAME CONFLUENCE:\n{multi_timeframe}\n" if multi_timeframe else ""
         sentiment_section = f"\nSENTIMENT ANALYSIS:\n{sentiment}\n" if sentiment else ""

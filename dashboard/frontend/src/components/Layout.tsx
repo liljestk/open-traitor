@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
 
@@ -32,6 +32,7 @@ const NAV = [
     items: [
       { to: '/logs', icon: <Terminal size={16} />, label: 'System Logs' },
       { to: '/live', icon: <Activity size={16} />, label: 'Live Monitor' },
+      { to: '/llm-analytics', icon: <Cpu size={16} />, label: 'LLM Analytics' },
       { to: '/risk', icon: <Shield size={16} />, label: 'Risk & Exposure' },
       { to: '/news', icon: <Newspaper size={16} />, label: 'News Feed' },
       { to: '/planning', icon: <BookOpen size={16} />, label: 'Planning Audit' },
@@ -57,6 +58,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/simulations': 'Simulate Trade',
   '/logs': 'System Logs',
   '/live': 'Live Monitor',
+  '/llm-analytics': 'LLM Analytics',
   '/risk': 'Risk & Exposure',
   '/news': 'News Feed',
   '/planning': 'Planning Audit',

@@ -9,6 +9,7 @@ from typing import Any
 from src.utils.logger import get_logger
 from src.utils.helpers import format_currency, format_percentage
 from src.utils.tracer import get_llm_tracer
+from src.utils import llm_optimizer
 
 logger = get_logger("core.pipeline")
 
@@ -173,11 +174,15 @@ class PipelineManager:
 
         orch.state.update_price(pair, price)
 
+        # Articles count is tunable via the LLM optimizer (hot-reloaded, 30s cache)
+        _articles_n = llm_optimizer.get(
+            "articles_for_analysis",
+            orch.config.get("news", {}).get("articles_for_analysis", 15),
+        )
         news_headlines = "No news available."
         if orch.news:
             news_headlines = await asyncio.to_thread(
-                orch.news.get_headlines,
-                orch.config.get("news", {}).get("articles_for_analysis", 15)
+                orch.news.get_headlines, _articles_n
             )
         elif orch.redis:
             try:
@@ -186,7 +191,7 @@ class PipelineManager:
                     articles = json.loads(cached)
                     news_headlines = "\n".join(
                         f"- [{a.get('source', '?')}] {a.get('title', '')}"
-                        for a in articles[:15]
+                        for a in articles[:_articles_n]
                     )
             except Exception:
                 pass
@@ -309,12 +314,21 @@ class PipelineManager:
 
         recent_outcomes = ""
         try:
+            _outcomes_n = llm_optimizer.get("recent_outcomes_n", 10)
             recent_outcomes = await asyncio.to_thread(
                 orch.stats_db.get_recent_outcomes,
-                pair, n=10, currency_symbol=orch.state.currency_symbol
+                pair, n=_outcomes_n, currency_symbol=orch.state.currency_symbol
             )
         except Exception as e:
             logger.debug(f"Failed to load recent outcomes: {e}")
+
+        pair_accuracy = None
+        try:
+            pair_accuracy = await asyncio.to_thread(
+                orch.stats_db.get_pair_accuracy_context, pair
+            )
+        except Exception as e:
+            logger.debug(f"Prediction accuracy context unavailable for {pair}: {e}")
 
         # ─── Training Data: record market snapshot ───
         if tc and tc.enabled:
@@ -441,6 +455,7 @@ class PipelineManager:
             "sentiment": sentiment_data,
             "strategy_signals": strategy_signals,
             "confidence_adjustment": pair_confidence_adj,
+            "prediction_accuracy": pair_accuracy,
             "fee_context": fee_context,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
