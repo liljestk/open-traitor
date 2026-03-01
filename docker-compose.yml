@@ -69,6 +69,27 @@ services:
       retries: 5
 
   # =========================================================================
+  # Trading Stats DB — PostgreSQL backend for all trading data
+  # =========================================================================
+  traitor-db:
+    image: postgres:16-alpine
+    container_name: auto-traitor-traitor-db
+    restart: unless-stopped
+    env_file:
+      - config/.env
+    environment:
+      POSTGRES_USER: traitor
+      POSTGRES_PASSWORD: ${TRAITOR_DB_PASSWORD}
+      POSTGRES_DB: autotraitor
+    volumes:
+      - traitor_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U traitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
   # Trading Agent — Coinbase (Crypto)
   # =========================================================================
   agent-coinbase:
@@ -84,9 +105,12 @@ services:
         condition: service_healthy
       langfuse-web:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -134,9 +158,12 @@ services:
         condition: service_healthy
       langfuse-web:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -191,9 +218,12 @@ services:
         condition: service_healthy
       temporal:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
@@ -527,9 +557,12 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - OLLAMA_BASE_URL=http://ollama:11434
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
@@ -561,6 +594,7 @@ services:
 volumes:
   ollama_data:
   redis_data:
+  traitor_db_data:
   temporal_db_data:
   langfuse_db_data:
   clickhouse_data:

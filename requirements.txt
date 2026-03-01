@@ -46,6 +46,9 @@ schedule>=1.2.2
 # Temporal workflow engine (multi-horizon planning)
 temporalio>=1.23.0
 
+# PostgreSQL
+psycopg2-binary>=2.9.9
+
 # Data Models
 pydantic>=2.12.5
 

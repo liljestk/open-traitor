@@ -97,7 +97,7 @@ class ProactiveEngine:
         # INSTANT notifications based on severity
         event_lower = event.lower()
         if severity == "critical" or any(kw in event_lower for kw in [
-            "circuit breaker", "emergency", "stop"
+            "circuit breaker", "emergency stop", "emergency"
         ]):
             self._send(f"🚨 *ALERT*\n\n{event}")
 

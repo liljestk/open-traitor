@@ -20,7 +20,8 @@ def list_trades(
 ):
     """Returns a list of raw trades from the database, newest first."""
     qc = deps.quote_currency_for(profile)
-    trades = db.get_trades(hours=hours, pair=pair, limit=limit, quote_currency=qc)
+    exchange = deps.resolve_profile(profile) or None
+    trades = db.get_trades(hours=hours, pair=pair, limit=limit, quote_currency=qc, exchange=exchange)
     return {"trades": trades, "count": len(trades)}
 
 
@@ -28,7 +29,8 @@ def list_trades(
 def export_trades(hours: int = Query(24 * 30, ge=1), profile: str = Query(""), db=Depends(deps.get_profile_db)):
     """Exports raw trades to a downloadable CSV file."""
     qc = deps.quote_currency_for(profile)
-    trades = db.get_trades(hours=hours, limit=100000, quote_currency=qc)
+    exchange = deps.resolve_profile(profile) or None
+    trades = db.get_trades(hours=hours, limit=100000, quote_currency=qc, exchange=exchange)
 
     if not trades:
         return Response(

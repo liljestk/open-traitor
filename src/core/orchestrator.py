@@ -814,6 +814,14 @@ class Orchestrator:
                 # Check stop-losses on all positions
                 closed = self.executor.check_stop_losses()
                 for c in closed:
+                    if not c.get("success", True):
+                        # Close attempt failed — exchange rejected or state diverged.
+                        # Don't report as "Position closed"; executor will retry next cycle.
+                        logger.warning(
+                            f"⚠️ Stop-loss close FAILED for {c['pair']} ({c['reason']}) — "
+                            "will retry next cycle; no notification sent."
+                        )
+                        continue
                     pnl = c.get("pnl", 0)
                     emoji = "🎯" if pnl and pnl > 0 else "⚠️"
                     event_msg = (

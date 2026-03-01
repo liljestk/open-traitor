@@ -7,24 +7,7 @@ from datetime import datetime, timedelta, timezone
 from src.utils.qc_filter import qc_where
 
 
-# -- Module-level helpers (extracted from nested definitions) ----------------
-
-_CURRENCY_STRIP = str.maketrans("", "", "€$£¥₹₩₪₫₦₨ ")
-
-
-def _safe_float(val) -> float | None:
-    """Convert val to float, stripping leading currency symbols if needed."""
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        if isinstance(val, str):
-            try:
-                return float(val.strip().translate(_CURRENCY_STRIP))
-            except (ValueError, TypeError):
-                pass
-    return None
+# ── Module-level helpers (extracted from nested definitions) ───────────
 
 
 def _find_price(
@@ -44,9 +27,7 @@ def _find_price(
                     val = prices[key]
                     if not val:
                         return None
-                    current_price = _safe_float(val)
-                    if current_price is None:
-                        return None
+                    current_price = float(val)
                     # Check if price is stale (same value in prior entries)
                     stale_streak = 0
                     for lookback in range(1, _STALE_LOOKBACK + 1):
@@ -55,12 +36,12 @@ def _find_price(
                             break
                         prev_prices = price_timeline[prev_idx][1]
                         prev_val = prev_prices.get(key)
-                        if prev_val and _safe_float(prev_val) == current_price:
+                        if prev_val and float(prev_val) == current_price:
                             stale_streak += 1
                         else:
                             break
                     if stale_streak >= _STALE_LOOKBACK:
-                        return None  # market closed -- stale price
+                        return None  # market closed — stale price
                     return current_price
             return None
     return None
@@ -73,7 +54,7 @@ def _find_price_in_history(
     for ph in price_history:
         if ph["ts"] >= target_ts:
             if ph.get("stale"):
-                return None  # market was closed -- don't use this price
+                return None  # market was closed — don't use this price
             return ph["price"]
     return None
 
@@ -87,19 +68,18 @@ def _ts_plus_hours(ts_str: str, hours: int) -> str:
         return ts_str
 
 
-# -- Mixin -------------------------------------------------------------------
+# ── Mixin ──────────────────────────────────────────────────────────────
 
 
 class PredictionsMixin:
     """Mixin supplying prediction-accuracy and pair-tracking queries.
 
-    Expects the host class to provide ``_get_conn()`` as a context manager
-    yielding a connection proxy with ``.execute()`` / ``.commit()`` methods.
+    Expects the host class to provide ``_get_conn() -> sqlite3.Connection``.
     """
 
-    # --- Prediction Accuracy ------------------------------------------------
+    # ─── Prediction Accuracy ───────────────────────────────────────────────
 
-    def get_prediction_accuracy(self, days: int = 30, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> dict:
+    def get_prediction_accuracy(self, days: int = 30, quote_currency: str | list[str] | None = None) -> dict:
         """
         Compute signal prediction accuracy by comparing market_analyst signals
         with actual price movements over subsequent hours.
@@ -110,51 +90,46 @@ class PredictionsMixin:
         If *quote_currency* is given (e.g. "EUR" or ["EUR", "USD"]), only pairs
         ending in those currency suffixes are included.
         """
-        with self._get_conn() as conn:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-            # 1. Get all market_analyst predictions with signal details
-            qc_frag, qc_params = qc_where(quote_currency)
-            exch_frag = " AND ar.exchange = %s" if exchange else ""
-            exch_params = [exchange] if exchange else []
-            predictions = conn.execute(
-                """SELECT
-                    ar.ts, ar.pair, ar.signal_type, ar.confidence,
-                    ar.reasoning_json, ar.cycle_id
-                   FROM agent_reasoning ar
-                   WHERE ar.agent_name = 'market_analyst'
-                     AND ar.ts >= %s""" + qc_frag + exch_frag + """
-                   ORDER BY ar.ts ASC""",
-                (cutoff, *qc_params, *exch_params),
-            ).fetchall()
+        # 1. Get all market_analyst predictions with signal details
+        qc_frag, qc_params = qc_where(quote_currency)
+        predictions = conn.execute(
+            """SELECT
+                ar.ts, ar.pair, ar.signal_type, ar.confidence,
+                ar.reasoning_json, ar.cycle_id
+               FROM agent_reasoning ar
+               WHERE ar.agent_name = 'market_analyst'
+                 AND ar.ts >= ?""" + qc_frag + """
+               ORDER BY ar.ts ASC""",
+            (cutoff, *qc_params),
+        ).fetchall()
 
-            if not predictions:
-                return {
-                    "predictions": [],
-                    "per_pair": {},
-                    "overall": {
-                        "total": 0, "correct_24h": 0, "evaluated_24h": 0,
-                        "correct_1h": 0, "evaluated_1h": 0,
-                        "accuracy_24h_pct": None, "accuracy_1h_pct": None,
-                    },
-                    "by_signal_type": {},
-                    "confidence_calibration": [],
-                    "daily_accuracy": [],
-                }
+        if not predictions:
+            return {
+                "predictions": [],
+                "per_pair": {},
+                "overall": {
+                    "total": 0, "correct_24h": 0, "evaluated_24h": 0,
+                    "correct_1h": 0, "evaluated_1h": 0,
+                    "accuracy_24h_pct": None, "accuracy_1h_pct": None,
+                },
+                "by_signal_type": {},
+                "confidence_calibration": [],
+                "daily_accuracy": [],
+            }
 
-            # 2. Build a price lookup from portfolio snapshots (current_prices JSON)
-            snap_exch_frag = " AND exchange = %s" if exchange else ""
-            snap_exch_params = [exchange] if exchange else []
-            snapshots = conn.execute(
-                """SELECT ts, current_prices
-                   FROM portfolio_snapshots
-                   WHERE ts >= %s AND current_prices IS NOT NULL AND current_prices != '{}'"""
-                + snap_exch_frag + """
-                   ORDER BY ts ASC""",
-                (cutoff, *snap_exch_params),
-            ).fetchall()
+        # 2. Build a price lookup from portfolio snapshots (current_prices JSON)
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
 
-        # Parse into list of (ts, prices_dict) -- sample every ~5 min
+        # Parse into list of (ts, prices_dict) — sample every ~5 min
         price_timeline: list[tuple[str, dict]] = []
         for snap in snapshots:
             try:
@@ -181,9 +156,8 @@ class PredictionsMixin:
             price_at_signal = None
             for key in ["suggested_entry", "current_price"]:
                 val = reasoning.get(key)
-                parsed = _safe_float(val)
-                if parsed and parsed > 0:
-                    price_at_signal = parsed
+                if val and float(val) > 0:
+                    price_at_signal = float(val)
                     break
             if not price_at_signal:
                 price_at_signal = _find_price(pair, pred_ts, price_timeline)
@@ -275,7 +249,7 @@ class PredictionsMixin:
             s = by_signal[st]
             s["accuracy_pct"] = round(s["correct_24h"] / s["evaluated_24h"] * 100, 1) if s["evaluated_24h"] else None
 
-        # 7. Confidence calibration buckets (0-20%, 20-40%, ..., 80-100%)
+        # 7. Confidence calibration buckets (0-20%, 20-40%, …, 80-100%)
         buckets: dict[str, dict] = {}
         for r in results:
             bucket_idx = min(int(r['confidence'] * 100 // 20), 4)  # clamp to 0-4
@@ -316,7 +290,7 @@ class PredictionsMixin:
             "daily_accuracy": daily_list,
         }
 
-    def get_pair_prediction_history(self, pair: str, days: int = 30, exchange: str | None = None) -> dict:
+    def get_pair_prediction_history(self, pair: str, days: int = 30) -> dict:
         """Return price time-series with prediction markers for a single pair.
 
         Used by the Prediction Overlay chart. Returns:
@@ -324,36 +298,20 @@ class PredictionsMixin:
           - predictions: [{ts, signal_type, confidence, entry_price, suggested_tp,
                           suggested_sl, is_bullish, outcomes}]
         """
-        with self._get_conn() as conn:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-            # 1. Price history from portfolio snapshots
-            snap_exch_frag = " AND exchange = %s" if exchange else ""
-            snap_exch_params = [exchange] if exchange else []
-            snapshots = conn.execute(
-                """SELECT ts, current_prices
-                   FROM portfolio_snapshots
-                   WHERE ts >= %s AND current_prices IS NOT NULL AND current_prices != '{}'"""
-                + snap_exch_frag + """
-                   ORDER BY ts ASC""",
-                (cutoff, *snap_exch_params),
-            ).fetchall()
-
-            # 2. Prediction markers
-            pair_upper = pair.upper()
-            pred_exch_frag = " AND exchange = %s" if exchange else ""
-            pred_exch_params = [exchange] if exchange else []
-            predictions_raw = conn.execute(
-                """SELECT ts, signal_type, confidence, reasoning_json
-                   FROM agent_reasoning
-                   WHERE agent_name = 'market_analyst'
-                     AND UPPER(pair) = %s
-                     AND ts >= %s""" + pred_exch_frag + """
-                   ORDER BY ts ASC""",
-                (pair_upper, cutoff, *pred_exch_params),
-            ).fetchall()
+        # 1. Price history from portfolio snapshots
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
 
         price_history: list[dict] = []
+        pair_upper = pair.upper()
         seen_hours: set[str] = set()  # deduplicate to ~hourly
         _prev_price: float | None = None
         _stale_count = 0
@@ -386,6 +344,17 @@ class PredictionsMixin:
                         entry["stale"] = True
                     price_history.append(entry)
 
+        # 2. Prediction markers
+        predictions_raw = conn.execute(
+            """SELECT ts, signal_type, confidence, reasoning_json
+               FROM agent_reasoning
+               WHERE agent_name = 'market_analyst'
+                 AND UPPER(pair) = ?
+                 AND ts >= ?
+               ORDER BY ts ASC""",
+            (pair_upper, cutoff),
+        ).fetchall()
+
         predictions: list[dict] = []
         for pred in predictions_raw:
             try:
@@ -399,9 +368,8 @@ class PredictionsMixin:
             entry_price = None
             for key in ["suggested_entry", "current_price"]:
                 val = reasoning.get(key)
-                parsed = _safe_float(val)
-                if parsed and parsed > 0:
-                    entry_price = parsed
+                if val and float(val) > 0:
+                    entry_price = float(val)
                     break
 
             # Try to find price from snapshot if not in reasoning
@@ -459,32 +427,32 @@ class PredictionsMixin:
         trend comparison (last 7 days vs. the prior period). Returns None if fewer
         than *min_samples* evaluated predictions exist (not enough data to be useful).
         """
-        with self._get_conn() as conn:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-            week_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            pair_upper = pair.upper()
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        week_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        pair_upper = pair.upper()
 
-            rows = conn.execute(
-                """SELECT ar.ts, ar.signal_type, ar.reasoning_json
-                   FROM agent_reasoning ar
-                   WHERE ar.agent_name = 'market_analyst'
-                     AND UPPER(ar.pair) = %s
-                     AND ar.ts >= %s
-                   ORDER BY ar.ts ASC""",
-                (pair_upper, cutoff),
-            ).fetchall()
+        rows = conn.execute(
+            """SELECT ar.ts, ar.signal_type, ar.reasoning_json
+               FROM agent_reasoning ar
+               WHERE ar.agent_name = 'market_analyst'
+                 AND UPPER(ar.pair) = ?
+                 AND ar.ts >= ?
+               ORDER BY ar.ts ASC""",
+            (pair_upper, cutoff),
+        ).fetchall()
 
-            if not rows:
-                return None
+        if not rows:
+            return None
 
-            # Build price timeline from portfolio snapshots
-            snapshots = conn.execute(
-                """SELECT ts, current_prices
-                   FROM portfolio_snapshots
-                   WHERE ts >= %s AND current_prices IS NOT NULL AND current_prices != '{}'
-                   ORDER BY ts ASC""",
-                (cutoff,),
-            ).fetchall()
+        # Build price timeline from portfolio snapshots (same approach as full accuracy calc)
+        snapshots = conn.execute(
+            """SELECT ts, current_prices
+               FROM portfolio_snapshots
+               WHERE ts >= ? AND current_prices IS NOT NULL AND current_prices != '{}'
+               ORDER BY ts ASC""",
+            (cutoff,),
+        ).fetchall()
 
         price_timeline: list[tuple[str, dict]] = []
         for snap in snapshots:
@@ -512,9 +480,8 @@ class PredictionsMixin:
             price_at_signal = None
             for key in ["suggested_entry", "current_price"]:
                 val = reasoning.get(key)
-                parsed = _safe_float(val)
-                if parsed and parsed > 0:
-                    price_at_signal = parsed
+                if val and float(val) > 0:
+                    price_at_signal = float(val)
                     break
             if not price_at_signal:
                 price_at_signal = _find_price(pair_upper, pred_ts, price_timeline)
@@ -573,7 +540,7 @@ class PredictionsMixin:
             "trend": trend,
         }
 
-    def get_tracked_pairs(self, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> dict:
+    def get_tracked_pairs(self, quote_currency: str | list[str] | None = None) -> dict:
         """Return pairs tracked by AI and/or humans, grouped by asset class.
 
         AI-tracked: pairs with agent_reasoning entries from the last 7 days.
@@ -582,45 +549,44 @@ class PredictionsMixin:
         If *quote_currency* is given (e.g. "EUR" or ["EUR", "USD"]),
         only pairs ending in those currency suffixes are returned.
         """
-        with self._get_conn() as conn:
-            # Get AI-tracked pairs with prediction counts from last 7 days
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            qc_frag, qc_params = qc_where(quote_currency)
-            exch_frag = " AND exchange = %s" if exchange else ""
-            exch_params = [exchange] if exchange else []
-            rows = conn.execute(
-                """SELECT pair, COUNT(*) as prediction_count,
-                          MAX(ts) as last_predicted,
-                          STRING_AGG(DISTINCT signal_type, ',') as signal_types
-                   FROM agent_reasoning
-                   WHERE agent_name = 'market_analyst' AND ts >= %s""" + qc_frag + exch_frag + """
-                   GROUP BY pair
-                   ORDER BY prediction_count DESC""",
-                (cutoff, *qc_params, *exch_params),
-            ).fetchall()
+        conn = self._get_conn()
 
-            # Build a map of AI-tracked pairs
-            ai_pairs: dict[str, dict] = {}
-            for r in rows:
-                pair = r["pair"]
-                ai_pairs[pair.upper()] = {
-                    "pair": pair,
-                    "prediction_count": r["prediction_count"],
-                    "last_predicted": r["last_predicted"],
-                    "signal_types": (r["signal_types"] or "").split(","),
-                    "source": "ai",
-                }
+        # Get AI-tracked pairs with prediction counts from last 7 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        qc_frag, qc_params = qc_where(quote_currency)
+        rows = conn.execute(
+            """SELECT pair, COUNT(*) as prediction_count,
+                      MAX(ts) as last_predicted,
+                      GROUP_CONCAT(DISTINCT signal_type) as signal_types
+               FROM agent_reasoning
+               WHERE agent_name = 'market_analyst' AND ts >= ?""" + qc_frag + """
+               GROUP BY pair
+               ORDER BY prediction_count DESC""",
+            (cutoff, *qc_params),
+        ).fetchall()
 
-            # Get human-followed pairs from pair_follows table
-            human_sql = "SELECT DISTINCT pair, ts FROM pair_follows WHERE followed_by = 'human'"
-            human_params: list = []
-            if qc_frag:
-                human_sql += qc_frag
-                human_params.extend(qc_params)
-            try:
-                human_rows = conn.execute(human_sql, human_params).fetchall()
-            except Exception:
-                human_rows = []  # table may not exist in very old DBs
+        # Build a map of AI-tracked pairs
+        ai_pairs: dict[str, dict] = {}
+        for r in rows:
+            pair = r["pair"]
+            ai_pairs[pair.upper()] = {
+                "pair": pair,
+                "prediction_count": r["prediction_count"],
+                "last_predicted": r["last_predicted"],
+                "signal_types": (r["signal_types"] or "").split(","),
+                "source": "ai",
+            }
+
+        # Get human-followed pairs from pair_follows table
+        human_sql = "SELECT DISTINCT pair, ts FROM pair_follows WHERE followed_by = 'human'"
+        human_params: list = []
+        if qc_frag:
+            human_sql += qc_frag
+            human_params.extend(qc_params)
+        try:
+            human_rows = conn.execute(human_sql, human_params).fetchall()
+        except Exception:
+            human_rows = []  # table may not exist in very old DBs
 
         # Merge: AI pairs take priority, human-only pairs get added with source="human"
         for hr in human_rows:
@@ -638,6 +604,10 @@ class PredictionsMixin:
                 }
 
         # Classify pairs into crypto/equity.
+        # IBKR equity pairs embed an exchange suffix in the base symbol using a
+        # dot (e.g. ASML.AS-EUR, FSECURE.HE-EUR).  Crypto pairs never contain a
+        # dot (BTC-EUR, ETH-USD).  Nordic equities traded with SEK/NOK/DKK also
+        # count as equity regardless of dot presence.
         equity_suffixes = {"-SEK", "-NOK", "-DKK"}
 
         crypto_pairs = []

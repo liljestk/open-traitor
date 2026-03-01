@@ -148,35 +148,8 @@ async def lifespan(application: FastAPI):
     if deps.stats_db is None:
         try:
             from src.utils.stats import StatsDB
-            _candidates = [
-                ("data/stats_coinbase.db", "coinbase"),
-                ("data/stats_ibkr.db", "ibkr"),
-            ]
-            _best_path = None
-            _best_size = 0
-            for _cpath, _clabel in _candidates:
-                if os.path.exists(_cpath):
-                    _sz = os.path.getsize(_cpath)
-                    if _sz > _best_size:
-                        _best_size = _sz
-                        _best_path = _cpath
-            _opened = False
-            _tried = [_best_path] if _best_path else []
-            _tried += [
-                c for c, _ in _candidates
-                if c != _best_path and os.path.exists(c) and os.path.getsize(c) > 8192
-            ]
-            for _try_path in _tried:
-                try:
-                    deps.stats_db = StatsDB(db_path=_try_path)
-                    logger.info(f"📊 Dashboard self-initialised StatsDB from {_try_path}")
-                    _opened = True
-                    break
-                except Exception as _db_err:
-                    logger.warning(f"⚠️ Could not open {_try_path}: {_db_err}")
-            if not _opened:
-                deps.stats_db = StatsDB()
-                logger.info("📊 Dashboard self-initialised StatsDB (default)")
+            deps.stats_db = StatsDB()
+            logger.info("📊 Dashboard self-initialised StatsDB (PostgreSQL)")
         except Exception as e:
             logger.error(f"❌ Could not initialise StatsDB: {e}")
 
@@ -355,7 +328,7 @@ if __name__ == "__main__":
     else:
         config = {}
 
-    db = StatsDB(config.get("database", {}).get("stats_db", "data/stats.db"))
+    db = StatsDB()
 
     redis_url = os.environ.get("REDIS_URL")
     redis_client = None

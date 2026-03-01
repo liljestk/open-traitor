@@ -7,12 +7,10 @@ Redis, Temporal client, exchange clients, and utility helpers.
 
 from __future__ import annotations
 
-import collections
 import hashlib
 import hmac
 import math
 import os
-import sqlite3
 import threading
 import time
 from typing import Any, Optional
@@ -177,50 +175,15 @@ def check_confirmation_rate(client_ip: str, max_per_window: int = 5, window_seco
 # Database helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-_MAX_PROFILE_DBS = 16
-_profile_db_cache: collections.OrderedDict[str, Any] = collections.OrderedDict()
-_profile_db_lock = threading.Lock()
-
-
 def require_db(profile: str = ""):
-    """Return the StatsDB for *profile* (empty string → default / injected)."""
-    resolved = resolve_profile(profile)
+    """Return the shared StatsDB singleton.
 
-    if not resolved or resolved in PROFILE_USE_DEFAULT_DB:
-        if stats_db is None:
-            raise HTTPException(status_code=503, detail="Stats DB not initialised")
-        return stats_db
-
-    safe = "".join(c for c in resolved if c.isalnum() or c == "_")
-    if not safe:
-        raise HTTPException(status_code=400, detail=f"Invalid profile: {profile!r}")
-
-    with _profile_db_lock:
-        if safe in _profile_db_cache:
-            _profile_db_cache.move_to_end(safe)
-            return _profile_db_cache[safe]
-        try:
-            from src.utils.stats import StatsDB
-            db_path = os.path.join("data", f"stats_{safe}.db")
-            if not os.path.exists(db_path) or os.path.getsize(db_path) < 8192:
-                logger.info(f"📊 Profile DB missing or empty ({db_path}), creating empty StatsDB for '{safe}'")
-                db = StatsDB(db_path=db_path)
-                _profile_db_cache[safe] = db
-                return db
-            if len(_profile_db_cache) >= _MAX_PROFILE_DBS:
-                evicted_key, evicted_db = _profile_db_cache.popitem(last=False)
-                try:
-                    evicted_db.close()
-                except Exception:
-                    pass
-            db = StatsDB(db_path=db_path)
-            _profile_db_cache[safe] = db
-            logger.info(f"📊 Loaded StatsDB for profile '{safe}': {db_path}")
-            return db
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Cannot load StatsDB for profile '{safe}': {e}")
+    All profiles now share a single PostgreSQL database; exchange-level
+    filtering is done via the ``exchange`` column in each table.
+    """
+    if stats_db is None:
+        raise HTTPException(status_code=503, detail="Stats DB not initialised")
+    return stats_db
 
 
 def get_profile_db(
@@ -261,17 +224,7 @@ def sign_dashboard_command(action: str, pair: str, ts: str, source: str, nonce: 
     ).hexdigest()
 
 
-def open_conn(db) -> sqlite3.Connection:
-    """Open a fresh SQLite connection for the given StatsDB instance."""
-    conn = sqlite3.connect(db.db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=DELETE")
-    return conn
 
-
-def fresh_conn(profile: str = "") -> sqlite3.Connection:
-    """Open a fresh SQLite connection for the given profile."""
-    return open_conn(require_db(profile))
 
 
 def utcnow() -> str:

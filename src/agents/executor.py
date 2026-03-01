@@ -40,6 +40,9 @@ class ExecutorAgent(BaseAgent):
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
         self.urgency_threshold = exec_cfg.get("urgency_confidence_threshold", 0.8)
+        # Track consecutive close failures per trade_id to prevent infinite retry loops
+        self._close_failures: dict[str, int] = {}
+        self._close_failure_limit = 3
 
     def _should_use_limit(self, trade_info: dict) -> bool:
         """
@@ -384,11 +387,29 @@ class ExecutorAgent(BaseAgent):
 
             # Check stop-loss
             if trade.stop_loss and current_price <= trade.stop_loss:
+                failures = self._close_failures.get(trade.id, 0)
+                if failures >= self._close_failure_limit:
+                    self.logger.error(
+                        f"🛑 Giving up on stop-loss close for {trade.pair} after "
+                        f"{failures} failed attempts — manual intervention required."
+                    )
+                    if self._telegram:
+                        self._telegram.send_alert(
+                            f"🛑 *Stuck Position*\n\n"
+                            f"Stop-loss for `{trade.pair}` failed {failures}x and will no longer retry.\n"
+                            f"Trade ID: `{trade.id}`\n"
+                            f"Manual close required."
+                        )
+                    continue
                 self.logger.warning(
                     f"⚠️ STOP-LOSS triggered for {trade.pair} | "
                     f"Price: ${current_price:,.2f} <= SL: ${trade.stop_loss:,.2f}"
                 )
                 close_result = self._close_position(trade, current_price, "stop_loss")
+                if close_result.get("success"):
+                    self._close_failures.pop(trade.id, None)
+                else:
+                    self._close_failures[trade.id] = failures + 1
                 closed_trades.append(close_result)
 
             # Check take-profit

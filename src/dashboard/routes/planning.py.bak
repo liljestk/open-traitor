@@ -14,7 +14,7 @@ router = APIRouter(tags=["Planning"])
 
 
 # ---------------------------------------------------------------------------
-# REST - Strategic context (planning)
+# REST — Strategic context (planning)
 # ---------------------------------------------------------------------------
 
 @router.get("/api/strategic", summary="Recent strategic plans from Temporal workflows")
@@ -24,43 +24,45 @@ def get_strategic(
     db=Depends(deps.get_profile_db),
 ):
     """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    with db._get_conn() as conn:
-        try:
-            if horizon:
-                rows = conn.execute(
-                    """SELECT id, horizon, plan_json, summary_text, ts,
-                              langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                       FROM strategic_context
-                       WHERE horizon = %s
-                       ORDER BY ts DESC LIMIT %s""",
-                    (horizon, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT id, horizon, plan_json, summary_text, ts,
-                              langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                       FROM strategic_context
-                       ORDER BY ts DESC LIMIT %s""",
-                    (limit,),
-                ).fetchall()
+    conn = deps.open_conn(db)
+    try:
+        if horizon:
+            rows = conn.execute(
+                """SELECT id, horizon, plan_json, summary_text, ts,
+                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
+                   FROM strategic_context
+                   WHERE horizon = ?
+                   ORDER BY ts DESC LIMIT ?""",
+                (horizon, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, horizon, plan_json, summary_text, ts,
+                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
+                   FROM strategic_context
+                   ORDER BY ts DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
 
-            result = []
-            for r in rows:
-                row = dict(r)
-                try:
-                    row["plan_json"] = json.loads(row["plan_json"] or "{}")
-                except Exception:
-                    pass
-                row["langfuse_url"] = deps.langfuse_url(row.get("langfuse_trace_id"))
-                result.append(row)
-            return {"plans": result, "count": len(result)}
-        except Exception as exc:
-            logger.exception("strategic error")
-            raise HTTPException(status_code=500, detail="Internal server error")
+        result = []
+        for r in rows:
+            row = dict(r)
+            try:
+                row["plan_json"] = json.loads(row["plan_json"] or "{}")
+            except Exception:
+                pass
+            row["langfuse_url"] = deps.langfuse_url(row.get("langfuse_trace_id"))
+            result.append(row)
+        return {"plans": result, "count": len(result)}
+    except Exception as exc:
+        logger.exception("strategic error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
-# REST - Temporal workflow replay
+# REST — Temporal workflow replay
 # ---------------------------------------------------------------------------
 
 @router.get("/api/temporal/runs", summary="List recent Temporal planning workflow runs")
@@ -107,7 +109,7 @@ async def list_temporal_runs(
 async def get_temporal_replay(workflow_id: str, run_id: str):
     """
     Fetches the complete event history for a Temporal workflow run.
-    Each event records input, LLM call, output, timing - enabling full step-by-step replay.
+    Each event records input, LLM call, output, timing — enabling full step-by-step replay.
     """
     if deps.temporal_client is None:
         raise HTTPException(status_code=503, detail="Temporal client not available")
@@ -126,15 +128,18 @@ async def get_temporal_replay(workflow_id: str, run_id: str):
         # Cross-link with Langfuse trace ID from StatsDB
         langfuse_trace_id = None
         if deps.stats_db:
-            with deps.require_db()._get_conn() as conn:
+            conn = deps.fresh_conn()
+            try:
                 row = conn.execute(
                     """SELECT langfuse_trace_id FROM strategic_context
-                       WHERE temporal_workflow_id = %s AND temporal_run_id = %s
+                       WHERE temporal_workflow_id = ? AND temporal_run_id = ?
                        LIMIT 1""",
                     (workflow_id, run_id),
                 ).fetchone()
                 if row:
-                    langfuse_trace_id = row["langfuse_trace_id"]
+                    langfuse_trace_id = row[0]
+            finally:
+                conn.close()
 
         return {
             "workflow_id": workflow_id,

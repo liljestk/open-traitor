@@ -24,7 +24,8 @@ def list_cycles(
     Each item represents one unique `cycle_id` across all agent spans.
     """
     qc = deps.quote_currency_for(profile)
-    cycles = db.get_cycles(pair=pair, limit=limit, offset=offset, quote_currency=qc)
+    exchange = deps.resolve_profile(profile) or None
+    cycles = db.get_cycles(pair=pair, limit=limit, offset=offset, quote_currency=qc, exchange=exchange)
     for c in cycles:
         c["langfuse_url"] = deps.langfuse_url(c.get("langfuse_trace_id"))
         # Compute wall-clock duration from first→last agent span timestamps
@@ -64,7 +65,8 @@ def list_events(
 ):
     """Returns a list of system events/logs from the database."""
     qc = deps.quote_currency_for(profile)
-    events = db.get_events(hours=hours, event_type=event_type, limit=limit, quote_currency=qc)
+    exchange = deps.resolve_profile(profile) or None
+    events = db.get_events(hours=hours, event_type=event_type, limit=limit, quote_currency=qc, exchange=exchange)
     # Parse event data json if possible
     for e in events:
         if isinstance(e.get("data"), str):

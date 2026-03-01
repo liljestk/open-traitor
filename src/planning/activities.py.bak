@@ -1,4 +1,4 @@
-"""
+﻿"""
 Temporal Activities for planning workflows.
 
 Activities are the side-effectful units of work in Temporal -- they run
@@ -16,22 +16,19 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import yaml
 import uuid
-from contextlib import contextmanager
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from typing import Any
-
-import psycopg2
-import psycopg2.extras
 
 from temporalio import activity
 
 from src.core.llm_client import LLMClient
 from src.core.llm_providers import build_providers
 from src.utils.logger import get_logger
-from src.utils.stats import get_dsn
 
 logger = get_logger("planning.activities")
 
@@ -51,7 +48,7 @@ _llm_client_lock = threading.Lock()
 def _get_llm_client() -> LLMClient:
     """Thread-safe lazy-initialised LLMClient for use inside activities.
 
-    Uses the full provider chain from settings.yaml (OpenRouter -> Gemini -> Ollama)
+    Uses the full provider chain from settings.yaml (OpenRouter → Gemini → Ollama)
     so planning decisions benefit from cloud models instead of Ollama-only.
     """
     global _llm_client
@@ -123,34 +120,22 @@ def _get_planning_tracer():
 
 # --- Helpers ------------------------------------------------------------------
 
-@contextmanager
-def _get_conn():
-    """Yield a psycopg2 connection using the shared DATABASE_URL.
+def _get_conn(profile: str = "") -> sqlite3.Connection:
+    """Get a DB connection for the given profile.
 
-    All profiles now share a single PostgreSQL database; exchange-level
-    filtering is done via the ``exchange`` column in each table.
+    If *profile* is given (e.g. "coinbase", "ibkr"), uses
+    ``data/stats_{profile}.db``.  Otherwise falls back to the env-var
+    based ``get_db_path()`` for backward compatibility.
     """
-    conn = psycopg2.connect(get_dsn())
-    conn.autocommit = True
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-def _dict_row(cursor):
-    """Convert a psycopg2 cursor result to list of dicts using RealDictCursor."""
-    if cursor.description is None:
-        return []
-    columns = [col.name for col in cursor.description]
-    return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-
-def _execute(conn, sql, params=None):
-    """Execute SQL and return a helper object mimicking sqlite3 cursor interface."""
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(sql, params)
-    return cur
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+    else:
+        from src.utils.stats import get_db_path
+        db_path = get_db_path()
+    conn = sqlite3.connect(db_path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=DELETE")
+    return conn
 
 
 # --- Activities ---------------------------------------------------------------
@@ -159,24 +144,24 @@ def _execute(conn, sql, params=None):
 async def fetch_trade_history(days: int = 7, pair: str | None = None, profile: str = "") -> list[dict]:
     """Fetch closed trade history from StatsDB for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    with _get_conn() as conn:
+    with closing(_get_conn(profile)) as conn:
         if pair:
-            cur = _execute(conn,
+            rows = conn.execute(
                 """SELECT ts, pair, action, price, quote_amount, confidence,
                           signal_type, pnl, fee_quote, reasoning
-                   FROM trades WHERE ts >= %s AND pair = %s AND pnl IS NOT NULL
+                   FROM trades WHERE ts >= ? AND pair = ? AND pnl IS NOT NULL
                    ORDER BY ts DESC LIMIT 500""",
                 (cutoff, pair),
-            )
+            ).fetchall()
         else:
-            cur = _execute(conn,
+            rows = conn.execute(
                 """SELECT ts, pair, action, price, quote_amount, confidence,
                           signal_type, pnl, fee_quote, reasoning
-                   FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+                   FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                    ORDER BY ts DESC LIMIT 500""",
                 (cutoff,),
-            )
-        return [dict(r) for r in cur.fetchall()]
+            ).fetchall()
+    return [dict(r) for r in rows]
 
 
 @activity.defn
@@ -184,8 +169,8 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
     """Fetch portfolio performance summary for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    with _get_conn() as conn:
-        trade_stats = _execute(conn,
+    with closing(_get_conn(profile)) as conn:
+        trade_stats = conn.execute(
             """SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning,
@@ -197,35 +182,35 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
                 COALESCE(AVG(confidence), 0) as avg_confidence,
                 COALESCE(SUM(quote_amount), 0) as total_volume,
                 COALESCE(SUM(fee_quote), 0) as total_fees
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL""",
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL""",
             (cutoff,),
         ).fetchone()
 
-        pair_breakdown = _execute(conn,
+        pair_breakdown = conn.execute(
             """SELECT pair,
                 COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 COALESCE(SUM(pnl), 0) as pnl,
                 COALESCE(AVG(confidence), 0) as avg_confidence
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                GROUP BY pair ORDER BY pnl DESC""",
             (cutoff,),
         ).fetchall()
 
-        portfolio_range = _execute(conn,
+        portfolio_range = conn.execute(
             """SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
                       AVG(portfolio_value) as avg
-               FROM portfolio_snapshots WHERE ts >= %s""",
+               FROM portfolio_snapshots WHERE ts >= ?""",
             (cutoff,),
         ).fetchone()
 
         # Fetch reasoning traces to understand what drove losses
-        reasoning_sample = _execute(conn,
+        reasoning_sample = conn.execute(
             """SELECT ar.ts, ar.pair, ar.signal_type, ar.confidence,
                       ar.reasoning_json, t.action, t.pnl
                FROM agent_reasoning ar
                LEFT JOIN trades t ON t.id = ar.trade_id
-               WHERE ar.ts >= %s AND ar.agent_name = 'market_analyst'
+               WHERE ar.ts >= ? AND ar.agent_name = 'market_analyst'
                  AND t.pnl IS NOT NULL
                ORDER BY t.pnl ASC LIMIT 20""",
             (cutoff,),
@@ -248,7 +233,7 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
                     _cfg = yaml.safe_load(f) or {}
                 pairs = _cfg.get("trading", {}).get("pairs", [])
                 _known_fiat = {"USD", "EUR", "GBP", "CAD", "AUD", "CHF", "JPY"}
-                _currency_symbols = {"EUR": "\u20ac", "GBP": "\u00a3", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "\u00a5"}
+                _currency_symbols = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
                 for pair in pairs:
                     if "-" in pair:
                         _, quote = pair.rsplit("-", 1)
@@ -349,7 +334,7 @@ Respond ONLY with JSON:
     wins = stats.get("winning") or 0
     win_rate = (wins / total * 100) if total > 0 else 0
 
-    # Dynamic currency symbol -- passed through review_data or defaults to '$'
+    # Dynamic currency symbol — passed through review_data or defaults to '$'
     sym = review_data.get("currency_symbol") or "$"
     native = review_data.get("native_currency") or "USD"
 
@@ -384,7 +369,7 @@ IMPORTANT: The bot's portfolio tracking was recently corrected to reflect
 actual live Coinbase holdings. Earlier data may reflect stale or incorrect
 portfolio assumptions. Weight recent data and current holdings more heavily.\n"""
 
-    # -- Previous plan evaluation feedback --
+    # ── Previous plan evaluation feedback ──────────────────────────────
     eval_data = review_data.get("previous_plan_evaluation", {})
     if eval_data.get("has_previous_plan") and eval_data.get("accuracy_score") is not None:
         eval_block = f"""
@@ -399,7 +384,7 @@ adjust your approach. If certain pair predictions were wrong, reconsider."""
     elif eval_data.get("has_previous_plan"):
         eval_block = f"""
 PREVIOUS PLAN EVALUATION:
-  {eval_data.get('summary', 'No trades since last plan -- no accuracy data.')}"""
+  {eval_data.get('summary', 'No trades since last plan — no accuracy data.')}"""
     else:
         eval_block = ""
 
@@ -492,9 +477,9 @@ async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
     since that plan was written, and returns an accuracy breakdown that
     the next planning LLM call can learn from.
     """
-    with _get_conn() as conn:
-        row = _execute(conn,
-            """SELECT * FROM strategic_context WHERE horizon = %s
+    with closing(_get_conn(profile)) as conn:
+        row = conn.execute(
+            """SELECT * FROM strategic_context WHERE horizon = ?
                ORDER BY ts DESC LIMIT 1""",
             (horizon,),
         ).fetchone()
@@ -506,9 +491,9 @@ async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
         plan_ts: str = row["ts"]
 
         # Actual trade outcomes since (and including) the plan timestamp
-        trades = _execute(conn,
+        trades = conn.execute(
             """SELECT pair, action, pnl, confidence, signal_type
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+               FROM trades WHERE ts >= ? AND pnl IS NOT NULL
                ORDER BY ts DESC LIMIT 500""",
             (plan_ts,),
         ).fetchall()
@@ -522,10 +507,10 @@ async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
             "previous_plan_summary": prev_plan.get("summary", ""),
             "trades_since": 0,
             "accuracy_score": None,
-            "summary": f"No trades executed since last {horizon} plan -- cannot evaluate.",
+            "summary": f"No trades executed since last {horizon} plan — cannot evaluate.",
         }
 
-    # -- aggregate actuals --
+    # ── aggregate actuals ──────────────────────────────────────────────
     total_trades = len(trades)
     winning = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
     total_pnl = sum(t.get("pnl") or 0 for t in trades)
@@ -624,8 +609,12 @@ async def write_strategic_context(
     profile: str = "",
 ) -> int:
     """Persist a planning workflow result to StatsDB."""
-    from src.utils.stats import StatsDB
-    db = StatsDB()
+    from src.utils.stats import StatsDB  # import here to use existing singleton logic
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+        db = StatsDB(db_path=db_path)
+    else:
+        db = StatsDB()
     langfuse_trace_id = plan_json.pop("_langfuse_trace_id", None)
     row_id = db.save_strategic_context(
         horizon=horizon,
@@ -643,7 +632,11 @@ async def write_strategic_context(
 async def write_daily_plan(date: str, plan_text: str, profile: str = "") -> None:
     """Write the daily plan text into daily_summaries."""
     from src.utils.stats import StatsDB
-    db = StatsDB()
+    if profile:
+        db_path = os.path.join("data", f"stats_{profile}.db")
+        db = StatsDB(db_path=db_path)
+    else:
+        db = StatsDB()
     db.write_daily_plan(date=date, plan_text=plan_text)
     logger.info(f"Wrote daily plan for {date}: {plan_text[:80]}")
 
@@ -661,7 +654,7 @@ async def fetch_pair_universe() -> dict:
         products = coinbase.discover_all_pairs_detailed(
             include_crypto_quotes=True,
         )
-        # Summarise -- don't send full list to LLM
+        # Summarise — don't send full list to LLM
         by_quote: dict[str, int] = {}
         for p in products:
             q = p.get("quote_currency", "?")
@@ -691,7 +684,11 @@ async def fetch_universe_scan_summary(profile: str = "") -> dict:
     """Fetch the latest universe scan results from StatsDB."""
     try:
         from src.utils.stats import StatsDB
-        db = StatsDB()
+        if profile:
+            db_path = os.path.join("data", f"stats_{profile}.db")
+            db = StatsDB(db_path=db_path)
+        else:
+            db = StatsDB()
         scan = db.get_latest_scan_results()
         if scan:
             return {

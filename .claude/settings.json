@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python -m py_compile src/agents/market_analyst.py src/agents/strategist.py src/core/managers/pipeline_manager.py)",
       "Bash(ls d:/Development/auto-traitor/src/agents/*.py)",
-      "Bash(python -m py_compile src/agents/market_analyst.py src/agents/strategist.py src/agents/settings_advisor.py)"
+      "Bash(python -m py_compile src/agents/market_analyst.py src/agents/strategist.py src/agents/settings_advisor.py)",
+      "Bash(docker exec auto-traitor-traitor-db psql -U traitor -d autotraitor -c \"SELECT exchange, COUNT\\(*\\), MIN\\(portfolio_value\\), MAX\\(portfolio_value\\), AVG\\(portfolio_value\\) FROM portfolio_snapshots GROUP BY exchange ORDER BY exchange;\")",
+      "Bash(docker exec auto-traitor-traitor-db psql -U traitor -d autotraitor -c \"DELETE FROM portfolio_snapshots WHERE exchange = ''ibkr''; SELECT ''deleted ibkr snapshots'';\")",
+      "Bash(docker exec auto-traitor-traitor-db psql -U traitor -d autotraitor -c \"SELECT exchange, COUNT\\(*\\), ROUND\\(MIN\\(portfolio_value\\)::numeric,2\\) as min, ROUND\\(MAX\\(portfolio_value\\)::numeric,2\\) as max FROM portfolio_snapshots GROUP BY exchange;\")",
+      "Bash(docker exec auto-traitor-traitor-db psql -U traitor -d autotraitor -c \"SELECT COUNT\\(*\\), MIN\\(ts\\), MAX\\(ts\\) FROM portfolio_snapshots WHERE exchange = ''coinbase'' AND portfolio_value <= 10.5;\")",
+      "Bash(docker exec auto-traitor-traitor-db psql -U traitor -d autotraitor -c \"DELETE FROM portfolio_snapshots WHERE exchange = ''coinbase'' AND portfolio_value <= 10.5; SELECT COUNT\\(*\\), ROUND\\(MIN\\(portfolio_value\\)::numeric,2\\) as min, ROUND\\(MAX\\(portfolio_value\\)::numeric,2\\) as max FROM portfolio_snapshots WHERE exchange = ''coinbase'';\")"
     ]
   }
 }

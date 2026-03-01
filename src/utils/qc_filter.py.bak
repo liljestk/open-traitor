@@ -7,9 +7,9 @@ clauses that match pairs ending in one of several quote currencies
 
 The ``quote_currency`` parameter accepted everywhere is now
 ``str | list[str] | None``:
-  - None          -> no filtering
-  - "EUR"         -> single currency (backward compat)
-  - ["EUR","USD"] -> multi-currency OR clause
+  - None          → no filtering
+  - "EUR"         → single currency (backward compat)
+  - ["EUR","USD"] → multi-currency OR clause
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ def qc_where(
     """Build a SQL WHERE fragment and params for quote-currency filtering.
 
     Returns (sql_fragment, params) where *sql_fragment* is either:
-      - ``""``  (empty -- no filtering when *currencies* is None/empty)
-      - ``" AND (UPPER({col}) LIKE %s OR UPPER({col}) LIKE %s)"``  (one per currency)
+      - ``""``  (empty — no filtering when *currencies* is None/empty)
+      - ``" AND (UPPER({col}) LIKE ? OR UPPER({col}) LIKE ?)"``  (one per currency)
 
     Usage::
 
@@ -37,8 +37,8 @@ def qc_where(
         currencies = [currencies]
 
     if len(currencies) == 1:
-        return f" AND UPPER({col}) LIKE %s", [f"%-{currencies[0].upper()}"]
+        return f" AND UPPER({col}) LIKE ?", [f"%-{currencies[0].upper()}"]
 
-    clauses = [f"UPPER({col}) LIKE %s" for _ in currencies]
+    clauses = [f"UPPER({col}) LIKE ?" for _ in currencies]
     params = [f"%-{c.upper()}" for c in currencies]
     return f" AND ({' OR '.join(clauses)})", params
