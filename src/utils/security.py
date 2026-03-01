@@ -97,8 +97,26 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
 
 
 def validate_trading_pair(pair: str) -> bool:
-    """Validate a trading pair format (e.g., BTC-USD)."""
-    return bool(re.match(r'^[A-Z0-9]{2,10}-[A-Z]{3,4}$', pair.upper()))
+    """Validate a trading pair format.
+    
+    Accepts:
+      - Crypto pairs: BTC-USD, ETH-EUR, DOGE-USDT
+      - IBKR stock tickers: AAPL, SPY, MSFT
+      - IBKR with exchange: AAPL@SMART, SPY@ARCA
+      
+    M2 fix: Updated regex to accept IBKR ticker formats.
+    """
+    upper_pair = pair.upper()
+    # Crypto pair format: XXX-YYY
+    if re.match(r'^[A-Z0-9]{2,10}-[A-Z]{3,4}$', upper_pair):
+        return True
+    # IBKR simple ticker: AAPL, SPY (1-6 uppercase letters)
+    if re.match(r'^[A-Z]{1,6}$', upper_pair):
+        return True
+    # IBKR with exchange: AAPL@SMART, SPY@ARCA
+    if re.match(r'^[A-Z]{1,6}@[A-Z]{3,8}$', upper_pair):
+        return True
+    return False
 
 
 def validate_amount(amount: float, min_val: float = 0.01, max_val: float = 100000) -> bool:

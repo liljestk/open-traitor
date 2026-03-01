@@ -7,6 +7,7 @@ in its constructor (same pattern as PipelineManager / StateManager).
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,8 @@ class HoldingsManager:
 
     def __init__(self, orchestrator: "Orchestrator"):
         self.orchestrator = orchestrator
+        # H6 fix: Prevent concurrent maybe_refresh_holdings calls
+        self._refresh_lock = threading.Lock()
 
     # =========================================================================
     # Live Coinbase Snapshot
@@ -217,23 +220,32 @@ class HoldingsManager:
         last successful sync.  Graceful degradation: on failure, keeps the
         previous snapshot and does NOT update the timestamp, so the next
         cycle retries immediately.
+        
+        H6 fix: Uses a lock to prevent concurrent API calls from multiple paths.
         """
         import time
-        orch = self.orchestrator
-        if not orch._holdings_sync_enabled or getattr(orch.exchange, 'paper_mode', False):
+        
+        # H6 fix: Use non-blocking acquire to skip if another refresh is in progress
+        if not self._refresh_lock.acquire(blocking=False):
             return
-        now = time.time()
-        if now - orch.state._live_snapshot_ts < orch._holdings_refresh_seconds:
-            return  # still fresh
         try:
-            snapshot = self.live_coinbase_snapshot()
-            new_externals = orch.state.sync_live_holdings(
-                snapshot, dust_threshold=orch._holdings_dust_threshold
-            )
-            if new_externals:
-                self._register_external_holdings(new_externals)
-        except Exception as e:
-            logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
+            orch = self.orchestrator
+            if not orch._holdings_sync_enabled or getattr(orch.exchange, 'paper_mode', False):
+                return
+            now = time.time()
+            if now - orch.state._live_snapshot_ts < orch._holdings_refresh_seconds:
+                return  # still fresh
+            try:
+                snapshot = self.live_coinbase_snapshot()
+                new_externals = orch.state.sync_live_holdings(
+                    snapshot, dust_threshold=orch._holdings_dust_threshold
+                )
+                if new_externals:
+                    self._register_external_holdings(new_externals)
+            except Exception as e:
+                logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
+        finally:
+            self._refresh_lock.release()
 
     def _register_external_holdings(self, new_externals: dict[str, float]) -> None:
         """Register newly discovered external holdings in FIFO tracker and trailing stops.
@@ -336,18 +348,26 @@ class HoldingsManager:
                     # Reconstruct the original pair using config quote currency
                     pair = base_to_pair.get(currency, f"{currency}-{default_quote}")
 
-                    # Correct state to match actual Coinbase balance
-                    with orch.state._lock:
-                        if actual_qty > 1e-8:
-                            orch.state.positions[pair] = actual_qty
-                        else:
-                            orch.state.positions.pop(pair, None)
+                    # C2 fix: Use state.reconcile_position() instead of direct _lock access
+                    # to maintain atomic cash/position accounting
+                    try:
+                        current_price = orch.exchange.get_current_price(pair)
+                    except Exception:
+                        current_price = 0.0
+                    recon_result = orch.state.reconcile_position(
+                        pair=pair,
+                        actual_qty=actual_qty,
+                        current_price=current_price,
+                        reason="position_drift",
+                    )
 
                     msg = (
                         f"⚠️ Position drift corrected: {currency} "
                         f"expected={d['expected']:.6f} actual={actual_qty:.6f} "
                         f"diff={d['diff']:+.6f}"
                     )
+                    if recon_result.get("cash_adj", 0) != 0:
+                        msg += f" (cash adj: {recon_result['cash_adj']:+.2f})"
                     logger.warning(msg)
                     orch.audit.log_rule_check(
                         "position_reconciliation",

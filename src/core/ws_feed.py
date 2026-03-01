@@ -69,12 +69,15 @@ class CoinbaseWebSocketFeed:
 
         logger.info(f"📡 WebSocket feed initialized | Products: {product_ids}")
 
-    def _generate_signature(self, timestamp: str, channel: str) -> Optional[str]:
-        """Generate HMAC signature for authenticated channels."""
+    def _generate_signature(self, timestamp: str, channel: str, product_ids: list[str]) -> Optional[str]:
+        """Generate HMAC signature for authenticated channels.
+        
+        H8 fix: product_ids passed as parameter to avoid race with update_subscriptions.
+        """
         if not self.api_key or not self.api_secret:
             return None
 
-        products_str = ",".join(self.product_ids)
+        products_str = ",".join(product_ids)
         message = f"{timestamp}{channel}{products_str}"
 
         try:
@@ -88,19 +91,22 @@ class CoinbaseWebSocketFeed:
             logger.error(f"Signature generation failed: {e}")
             return None
 
-    def _build_subscribe_message(self, channel: str) -> dict:
-        """Build a subscription message."""
+    def _build_subscribe_message(self, channel: str, product_ids: list[str]) -> dict:
+        """Build a subscription message.
+        
+        H8 fix: product_ids passed as parameter to avoid race with update_subscriptions.
+        """
         timestamp = str(int(time.time()))
 
         msg = {
             "type": "subscribe",
-            "product_ids": self.product_ids,
+            "product_ids": product_ids,
             "channel": channel,
         }
 
         # Add auth if available
         if self.api_key:
-            signature = self._generate_signature(timestamp, channel)
+            signature = self._generate_signature(timestamp, channel, product_ids)
             if signature:
                 msg["api_key"] = self.api_key
                 msg["timestamp"] = timestamp
@@ -209,13 +215,17 @@ class CoinbaseWebSocketFeed:
         logger.info("📡 WebSocket connected!")
         self._reconnect_delay = 1.0  # Reset backoff
 
+        # H8 fix: Capture product_ids under lock to avoid race with update_subscriptions
+        with self._lock:
+            current_products = list(self.product_ids)
+
         # Subscribe to ticker (real-time prices)
-        ws.send(json.dumps(self._build_subscribe_message("ticker")))
+        ws.send(json.dumps(self._build_subscribe_message("ticker", current_products)))
 
         # Subscribe to market trades
-        ws.send(json.dumps(self._build_subscribe_message("market_trades")))
+        ws.send(json.dumps(self._build_subscribe_message("market_trades", current_products)))
 
-        logger.info(f"📡 Subscribed to ticker + market_trades for {self.product_ids}")
+        logger.info(f"📡 Subscribed to ticker + market_trades for {current_products}")
 
     def _run_loop(self) -> None:
         """Connection loop with automatic reconnection and backoff."""
@@ -284,11 +294,14 @@ class CoinbaseWebSocketFeed:
 
     def get_stats(self) -> dict:
         """Get feed statistics."""
+        # H8 fix: Read product_ids under lock to avoid race with update_subscriptions
+        with self._lock:
+            products = list(self.product_ids)
         return {
             "connected": self._running and self._ws is not None,
             "messages_received": self.messages_received,
             "last_message": self.last_message_time.isoformat() if self.last_message_time else None,
-            "products": self.product_ids,
+            "products": products,
             "current_prices": self.get_all_prices(),
         }
 

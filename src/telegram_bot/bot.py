@@ -139,14 +139,18 @@ class TelegramBot:
     def start(self) -> None:
         """Start the bot in a background thread."""
         def _run():
+            # C1 fix: Use thread-local event loop without calling set_event_loop.
+            # This avoids conflicting with the orchestrator's main loop and
+            # Temporal emergency replans that spin up their own loops.
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(self._start_bot())
                 self._running_event.set()
                 loop.run_forever()
             except Exception as e:
                 logger.error(f"Telegram bot error: {e}")
+            finally:
+                loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()

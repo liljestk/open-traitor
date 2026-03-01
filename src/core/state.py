@@ -66,6 +66,7 @@ class TradingState:
         # History
         self.signals: deque = deque(maxlen=1000)
         self.trades: list[Trade] = []
+        self._max_trades_in_memory = 10000  # M5 fix: Bound trades list to prevent memory growth
         self.portfolio_history: list[PortfolioSnapshot] = []
 
         # Performance metrics
@@ -156,13 +157,22 @@ class TradingState:
                 if h.get("is_fiat"):
                     self.live_cash_balances[h["currency"]] = h.get("native_value", 0.0)
 
-            # Update cash_balance to reflect real fiat totals, but only if there
-            # are no open (in-flight) trades that may have already deducted cash
-            # from our internal balance — prevents races with the executor.
+            # Update cash_balance to reflect real fiat totals.
+            # M13 fix: Relaxed guard - update even with open trades if the live value
+            # is significantly different. The delta check prevents executor races on
+            # recent orders while still allowing drift correction.
             has_open_trades = any(t.is_open for t in self.trades)
             total_cash = sum(self.live_cash_balances.values())
-            if total_cash > 0 and not has_open_trades:  # M7 fix: only update when positive
-                self.cash_balance = total_cash
+            if total_cash > 0:
+                # Calculate maximum expected in-flight cash from open trades
+                in_flight_cash = sum(
+                    t.value for t in self.trades 
+                    if t.is_open and t.action.value == "buy"
+                )
+                # If delta exceeds in-flight buffer, update; otherwise skip to avoid race
+                delta = abs(total_cash - self.cash_balance)
+                if not has_open_trades or delta > in_flight_cash * 1.5:
+                    self.cash_balance = total_cash
 
             # Correct initial_balance on first successful sync
             if not self._initial_balance_synced and self.live_portfolio_value > 0:
@@ -295,24 +305,36 @@ class TradingState:
             self.signals.append(signal)
             self.last_analysis_time = signal.timestamp
 
-    def add_trade(self, trade: Trade) -> None:
-        """Record a new trade."""
+    def add_trade(self, trade: Trade, force: bool = False) -> None:
+        """Record a new trade.
+        
+        Args:
+            trade: The trade to record
+            force: M1 fix - If True, skip balance validation. Use when exchange
+                   has already filled the order and we must record it regardless
+                   of local state drift.
+        """
         with self._lock:
-            if trade.action.value == "buy":
-                if trade.value > self.cash_balance:
-                    raise ValueError(
-                        f"Insufficient cash for buy {trade.pair}: have={self.cash_balance:.2f}, need={trade.value:.2f}"
-                    )
-            elif trade.action.value == "sell":
-                position = self.positions.get(trade.pair, 0)
-                if trade.quantity > position:
-                    raise ValueError(
-                        f"Insufficient position for sell {trade.pair}: have={position:.8f}, need={trade.quantity:.8f}"
-                    )
+            if not force:
+                if trade.action.value == "buy":
+                    if trade.value > self.cash_balance:
+                        raise ValueError(
+                            f"Insufficient cash for buy {trade.pair}: have={self.cash_balance:.2f}, need={trade.value:.2f}"
+                        )
+                elif trade.action.value == "sell":
+                    position = self.positions.get(trade.pair, 0)
+                    if trade.quantity > position:
+                        raise ValueError(
+                            f"Insufficient position for sell {trade.pair}: have={position:.8f}, need={trade.quantity:.8f}"
+                        )
 
             self.trades.append(trade)
             self.total_trades += 1
             self.last_trade_time = trade.timestamp
+
+            # M5 fix: Trim old closed trades if list exceeds max length
+            if len(self.trades) > self._max_trades_in_memory:
+                self._trim_closed_trades()
 
             if trade.action.value == "buy":
                 self.positions[trade.pair] = (
@@ -326,6 +348,28 @@ class TradingState:
                 self.cash_balance += trade.value
 
             logger.info(f"Trade recorded: {trade.to_summary()}")
+
+    def _trim_closed_trades(self) -> None:
+        """M5 fix: Remove oldest closed trades to keep memory bounded.
+        
+        Keeps all open trades and the most recent closed trades.
+        Should only be called while holding _lock.
+        """
+        # Separate open and closed trades
+        open_trades = [t for t in self.trades if t.is_open]
+        closed_trades = [t for t in self.trades if not t.is_open]
+        
+        # Keep only the most recent closed trades
+        max_closed = self._max_trades_in_memory - len(open_trades) - 1000  # buffer for new trades
+        if len(closed_trades) > max_closed:
+            # Sort by timestamp and keep most recent
+            closed_trades.sort(key=lambda t: t.close_time or t.timestamp, reverse=True)
+            closed_trades = closed_trades[:max_closed]
+            trimmed_count = len(self.trades) - len(open_trades) - len(closed_trades)
+            logger.info(f"🗑️ Trimmed {trimmed_count} old closed trades from memory")
+        
+        # Rebuild trades list: closed (oldest first) + open
+        self.trades = sorted(closed_trades, key=lambda t: t.close_time or t.timestamp) + open_trades
 
     def close_trade(self, trade_id: str, close_price: float, fees: float = 0.0) -> Optional[Trade]:
         """Close an existing trade and update PnL, positions, and cash."""
@@ -426,6 +470,56 @@ class TradingState:
                     return True
             return False
 
+    def reconcile_position(
+        self,
+        pair: str,
+        actual_qty: float,
+        current_price: float = 0.0,
+        reason: str = "reconciliation",
+    ) -> dict:
+        """C2 fix: Atomically reconcile a position to match exchange reality.
+
+        Updates both position quantity AND cash_balance to maintain accounting
+        integrity. Returns delta info for audit logging.
+
+        Args:
+            pair: Trading pair (e.g. "BTC-USD")
+            actual_qty: The actual quantity on the exchange
+            current_price: Current market price (for cash adjustment estimation)
+            reason: Reason string for logging
+
+        Returns:
+            {"old_qty": float, "new_qty": float, "delta": float, "cash_adj": float}
+        """
+        with self._lock:
+            old_qty = self.positions.get(pair, 0.0)
+            delta = actual_qty - old_qty
+
+            if actual_qty > 1e-8:
+                self.positions[pair] = actual_qty
+            else:
+                self.positions.pop(pair, None)
+                actual_qty = 0.0
+
+            # Cash adjustment: if we have MORE than expected, we spent cash to get it
+            # (or it was deposited externally). If we have LESS, we sold it for cash.
+            # This is an approximation — we don't know the actual prices of external
+            # trades, but it keeps the accounting directionally correct.
+            cash_adj = 0.0
+            if abs(delta) > 1e-8 and current_price > 0:
+                # Positive delta = we have more asset = spent cash
+                # Negative delta = we have less asset = gained cash
+                cash_adj = -delta * current_price
+                self.cash_balance += cash_adj
+
+            return {
+                "old_qty": old_qty,
+                "new_qty": actual_qty,
+                "delta": delta,
+                "cash_adj": cash_adj,
+                "reason": reason,
+            }
+
     def reverse_trade_booking(self, trade) -> None:
         """Undo the position/cash changes from add_trade for a cancelled/failed order.
 
@@ -523,29 +617,41 @@ class TradingState:
         with self._lock:
             return self._get_portfolio_value_unlocked()
 
+    def _get_win_rate_unlocked(self) -> float:
+        """H2 fix: Get win rate without acquiring lock (caller must hold _lock)."""
+        completed = self.winning_trades + self.losing_trades
+        if completed == 0:
+            return 0.0
+        return self.winning_trades / completed
+
     @property
     def win_rate(self) -> float:
         """Get the win rate."""
         with self._lock:
-            completed = self.winning_trades + self.losing_trades
-            if completed == 0:
-                return 0.0
-            return self.winning_trades / completed
+            return self._get_win_rate_unlocked()
+
+    def _get_return_pct_unlocked(self) -> float:
+        """H2 fix: Get return percentage without acquiring lock (caller must hold _lock)."""
+        if self.initial_balance == 0:
+            return 0.0
+        pv = self._get_portfolio_value_unlocked()
+        return (pv - self.initial_balance) / self.initial_balance
 
     @property
     def return_pct(self) -> float:
         """Get the total return percentage."""
         with self._lock:
-            if self.initial_balance == 0:
-                return 0.0
-            pv = self._get_portfolio_value_unlocked()
-            return (pv - self.initial_balance) / self.initial_balance
+            return self._get_return_pct_unlocked()
+
+    def _get_open_positions_unlocked(self) -> dict[str, float]:
+        """H2 fix: Get open positions without acquiring lock (caller must hold _lock)."""
+        return {pair: qty for pair, qty in self.positions.items() if abs(qty) > 1e-8}
 
     @property
     def open_positions(self) -> dict[str, float]:
         """Get all open positions with non-zero quantities."""
         with self._lock:
-            return {pair: qty for pair, qty in self.positions.items() if abs(qty) > 1e-8}
+            return self._get_open_positions_unlocked()
 
     @property
     def recent_signals(self) -> list[Signal]:
@@ -580,15 +686,16 @@ class TradingState:
     def to_summary(self) -> dict:
         """Get an atomic snapshot of the current state."""
         with self._lock:
+            # H2 fix: Use unlocked versions to avoid RLock reentry (fragile pattern)
             return {
-                "portfolio_value": self.portfolio_value,
+                "portfolio_value": self._get_portfolio_value_unlocked(),
                 "cash_balance": self.cash_balance,
-                "return_pct": self.return_pct,
+                "return_pct": self._get_return_pct_unlocked(),
                 "total_pnl": self.total_pnl,
                 "total_trades": self.total_trades,
-                "win_rate": self.win_rate,
+                "win_rate": self._get_win_rate_unlocked(),
                 "max_drawdown": self.max_drawdown,
-                "open_positions": self.open_positions,
+                "open_positions": self._get_open_positions_unlocked(),
                 "current_prices": dict(self.current_prices),
                 "is_running": self.is_running,
                 "is_paused": self.is_paused,
@@ -602,24 +709,41 @@ class TradingState:
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        # H4 fix: Build state_data AND write to temp file both inside the lock
+        # to prevent stale snapshot on crash/restart
         with self._lock:
+            # H2 fix: Use unlocked versions directly instead of calling to_summary()
+            summary = {
+                "portfolio_value": self._get_portfolio_value_unlocked(),
+                "cash_balance": self.cash_balance,
+                "return_pct": self._get_return_pct_unlocked(),
+                "total_pnl": self.total_pnl,
+                "total_trades": self.total_trades,
+                "win_rate": self._get_win_rate_unlocked(),
+                "max_drawdown": self.max_drawdown,
+                "open_positions": self._get_open_positions_unlocked(),
+                "current_prices": dict(self.current_prices),
+                "is_running": self.is_running,
+                "is_paused": self.is_paused,
+                "circuit_breaker": self.circuit_breaker_triggered,
+            }
             state_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "summary": self.to_summary(),
+                "summary": summary,
                 "trades": [t.model_dump(mode="json") for t in self.trades[-100:]],
                 "signals": [s.model_dump(mode="json") for s in list(self.signals)[-50:]],
             }
-
-        # Write to temp file then rename for atomicity
-        tmp_path = path.with_suffix(".tmp")
-        try:
-            with open(tmp_path, "w") as f:
-                json.dump(state_data, f, indent=2, default=str)
-            tmp_path.replace(path)
-        except Exception as e:
-            logger.error(f"Failed to save state: {e}")
-            if tmp_path.exists():
-                tmp_path.unlink()
-            return
+            
+            # H4 fix: Write to temp file inside lock, then rename (atomic)
+            tmp_path = path.with_suffix(".tmp")
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump(state_data, f, indent=2, default=str)
+                tmp_path.replace(path)
+            except Exception as e:
+                logger.error(f"Failed to save state: {e}")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                return
 
         logger.debug(f"State saved to {filepath}")

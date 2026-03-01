@@ -105,3 +105,37 @@ def get_logger(name: str) -> logging.Logger:
     if full_name not in _loggers:
         _loggers[full_name] = logging.getLogger(full_name)
     return _loggers[full_name]
+
+
+# H10 fix: Sanitization patterns for sensitive data in logs
+_SENSITIVE_PATTERNS = [
+    # API keys and secrets (various formats)
+    (r'(?i)(api[_-]?key|api[_-]?secret|secret[_-]?key|access[_-]?token|bearer)["\']?\s*[:=]\s*["\']?([a-zA-Z0-9_\-]{8,})', r'\1=***REDACTED***'),
+    # Authorization headers
+    (r'(?i)(authorization|x-api-key)[:\s]+["\']?([^\s"\']+)', r'\1: ***REDACTED***'),
+    # Connection strings with passwords
+    (r'(?i)(postgres|mysql|redis|mongodb)://[^:]+:([^@]+)@', r'\1://***:***@'),
+    # Generic password patterns
+    (r'(?i)(password|passwd|pwd)["\']?\s*[:=]\s*["\']?([^\s"\']+)', r'\1=***REDACTED***'),
+]
+
+
+def sanitize_exception(exc: BaseException) -> str:
+    """Return a sanitized string representation of an exception.
+    
+    H10 fix: Redacts API keys, passwords, and connection strings from
+    exception messages to prevent accidental credential leakage in logs
+    or dashboard output.
+    """
+    import re
+    import traceback
+    
+    # Get the full traceback as string
+    tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    
+    # Apply sanitization patterns
+    sanitized = tb_str
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        sanitized = re.sub(pattern, replacement, sanitized)
+    
+    return sanitized

@@ -35,20 +35,21 @@ _lock = threading.RLock()
 # Validation schemas — per-section, per-field
 # ═══════════════════════════════════════════════════════════════════════════
 
+# H1 fix: Add minimum bounds to prevent LLM from lowering safety limits to near-zero
 _RULE_SCHEMA: dict[str, dict[str, Any]] = {
-    "max_single_trade":           {"type": float, "min": 0, "max": 1_000_000},
-    "max_daily_spend":            {"type": float, "min": 0, "max": 10_000_000},
-    "max_daily_loss":             {"type": float, "min": 0, "max": 1_000_000},
-    "max_portfolio_risk_pct":     {"type": float, "min": 0.0, "max": 1.0},
-    "require_approval_above":     {"type": float, "min": 0, "max": 1_000_000},
+    "max_single_trade":           {"type": float, "min": 1.0, "max": 1_000_000},      # H1: min $1 per trade
+    "max_daily_spend":            {"type": float, "min": 10.0, "max": 10_000_000},    # H1: min $10/day
+    "max_daily_loss":             {"type": float, "min": 10.0, "max": 1_000_000},     # H1: min $10 loss limit
+    "max_portfolio_risk_pct":     {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
+    "require_approval_above":     {"type": float, "min": 0, "max": 1_000_000},        # 0 is valid (approve all)
     "never_trade_pairs":          {"type": list},
     "only_trade_pairs":           {"type": list},
-    "min_trade_interval_seconds": {"type": int,   "min": 0, "max": 86_400},
-    "max_trades_per_day":         {"type": int,   "min": 0, "max": 10_000},
-    "max_cash_per_trade_pct":     {"type": float, "min": 0.0, "max": 1.0},
-    "emergency_stop_portfolio":   {"type": float, "min": 0, "max": 100_000_000},
+    "min_trade_interval_seconds": {"type": int,   "min": 0, "max": 86_400},           # 0 is valid
+    "max_trades_per_day":         {"type": int,   "min": 1, "max": 10_000},           # H1: at least 1 trade
+    "max_cash_per_trade_pct":     {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
+    "emergency_stop_portfolio":   {"type": float, "min": 0, "max": 100_000_000},      # 0 is valid (disabled)
     "always_use_stop_loss":       {"type": bool},
-    "max_stop_loss_pct":          {"type": float, "min": 0.0, "max": 1.0},
+    "max_stop_loss_pct":          {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
 }
 
 _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
@@ -77,14 +78,14 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
 }
 
 _RISK_SCHEMA: dict[str, dict[str, Any]] = {
-    "max_position_pct":        {"type": float, "min": 0.0, "max": 1.0},
-    "max_total_exposure_pct":  {"type": float, "min": 0.0, "max": 1.0},
-    "max_drawdown_pct":        {"type": float, "min": 0.0, "max": 1.0},
-    "stop_loss_pct":           {"type": float, "min": 0.0, "max": 1.0},
-    "take_profit_pct":         {"type": float, "min": 0.0, "max": 1.0},
-    "trailing_stop_pct":       {"type": float, "min": 0.0, "max": 1.0},
-    "max_trades_per_hour":     {"type": int,   "min": 0, "max": 1000},
-    "loss_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},
+    "max_position_pct":        {"type": float, "min": 0.01, "max": 1.0},   # H1: min 1%
+    "max_total_exposure_pct":  {"type": float, "min": 0.05, "max": 1.0},   # H1: min 5%
+    "max_drawdown_pct":        {"type": float, "min": 0.01, "max": 1.0},   # H1: min 1%
+    "stop_loss_pct":           {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "take_profit_pct":         {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "trailing_stop_pct":       {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "max_trades_per_hour":     {"type": int,   "min": 1, "max": 1000},     # H1: at least 1
+    "loss_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},   # 0 is valid (disabled)
 }
 
 _ROTATION_SCHEMA: dict[str, dict[str, Any]] = {

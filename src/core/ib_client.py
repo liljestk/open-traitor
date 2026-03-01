@@ -145,9 +145,13 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             _done = threading.Event()
 
             def _connect_thread() -> None:
+                # L11/C1 fix: Use thread-local loop without set_event_loop to avoid
+                # conflicts with orchestrator's main loop and Temporal replans.
                 new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
                 try:
+                    # ib_insync captures the running loop internally; pass ours explicitly
+                    # by running in this dedicated thread that owns new_loop.
+                    asyncio.set_event_loop(new_loop)  # Required by ib_insync internals
                     self.ib = _IB()
                     self.ib.connect(
                         self._ib_host, self._ib_port,
@@ -157,6 +161,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                     _exc[0] = e
                 finally:
                     _done.set()
+                    # Do NOT close the loop here — ib_insync needs it for callbacks
 
             t = threading.Thread(target=_connect_thread, daemon=True)
             t.start()

@@ -226,33 +226,26 @@ class ExecutorAgent(BaseAgent):
 
                 # Record in state and rules
                 # H27 fix: if add_trade raises ValueError (insufficient balance/position),
-                # the exchange order is already filled — attempt to cancel if resting,
-                # otherwise log the orphaned order for manual reconciliation.
+                # the exchange order is already filled — M1 fix: force-record it anyway
+                # since exchange state is the source of truth.
                 try:
                     self.state.add_trade(trade)
                 except ValueError as ve:
-                    self.logger.error(
-                        f"\u274c add_trade rejected filled order for {pair}: {ve} \u2014 "
-                        f"order_id={trade.coinbase_order_id} is orphaned on exchange. "
-                        "Manual reconciliation may be needed."
+                    self.logger.warning(
+                        f"⚠️ Balance validation failed for {pair}: {ve} \u2014 "
+                        f"force-recording anyway since exchange filled order_id={trade.coinbase_order_id}"
                     )
-                    trade.status = TradeStatus.FAILED
-                    # H1 fix: escalate orphaned orders to user via Telegram
+                    # M1 fix: Force-record the trade to keep state in sync with exchange
+                    self.state.add_trade(trade, force=True)
+                    # Alert user about the state drift
                     if self._telegram:
                         self._telegram.send_message(
-                            f"\U0001f6a8 *ORPHANED ORDER ALERT*\n\n"
-                            f"Exchange order filled but state rejected it:\n"
+                            f"⚠️ *State drift detected*\n\n"
+                            f"Exchange filled order but local balance check failed:\n"
                             f"Pair: `{pair}` | Action: `{action}`\n"
-                            f"Order ID: `{trade.coinbase_order_id}`\n"
-                            f"Error: {ve}\n\n"
-                            f"Manual reconciliation may be needed."
+                            f"Warning: {ve}\n\n"
+                            f"Trade recorded anyway. Holdings refresh recommended."
                         )
-                    return {
-                        "executed": False,
-                        "error": f"State rejected trade: {ve}",
-                        "trade_id": trade.id,
-                        "orphaned_order_id": trade.coinbase_order_id,
-                    }
                 self.rules.record_trade(quote_amount, action=action)
 
                 self.logger.info(f"✅ Trade executed: {trade.to_summary()}")
@@ -352,6 +345,9 @@ class ExecutorAgent(BaseAgent):
             if remaining <= 0:
                 self.state.close_trade(trade.id, close_price, fees)
 
+            # H3+M3 fix: Record partial sell for daily trade count tracking
+            self.rules.record_trade(close_price * quantity, action="sell")
+
             pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
             self.logger.info(
                 f"Partial sell ({reason}): {trade.pair} — "
@@ -448,8 +444,11 @@ class ExecutorAgent(BaseAgent):
                         f"Trade ID: `{trade.id}`\n"
                         f"Manual check required."
                     )
-            elif closed.pnl and closed.pnl < 0:
-                self.rules.record_loss(abs(closed.pnl))
+            else:
+                # H3+M3 fix: Record successful stop-loss/take-profit exit for daily trade count
+                self.rules.record_trade(qty * close_price, action="sell")
+                if closed.pnl and closed.pnl < 0:
+                    self.rules.record_loss(abs(closed.pnl))
 
             self._record_training_outcome(trade, close_price, reason)
 
@@ -591,20 +590,37 @@ class ExecutorAgent(BaseAgent):
                     })
 
                 elif status in ("CANCELLED", "FAILED", "EXPIRED"):
+                    # C4 fix: Update trade with exchange's latest fill before reversing.
+                    # A partial fill may have occurred between fetch and now.
+                    exchange_filled_qty = float(order.get("filled_size", 0) or 0)
+                    exchange_filled_price = float(order.get("average_filled_price", trade.price) or trade.price)
+                    
+                    # Update the trade object's filled_quantity to exchange reality
+                    # so reverse_trade_booking only reverses the UNFILLED portion.
+                    if exchange_filled_qty > 0 and exchange_filled_qty != trade.filled_quantity:
+                        self.logger.info(
+                            f"📋 Order {trade.coinbase_order_id} had partial fill: "
+                            f"local={trade.filled_quantity:.6f}, exchange={exchange_filled_qty:.6f}"
+                        )
+                        trade.filled_quantity = exchange_filled_qty
+                        trade.filled_price = exchange_filled_price
+                    
                     # H4 fix: set status under lock
                     new_status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
                     self.state.mark_trade_status(trade.id, new_status)
-                    # Reverse the position/cash booking from add_trade
+                    # Reverse the position/cash booking from add_trade (unfilled portion only)
                     self.state.reverse_trade_booking(trade)
                     self.logger.info(
                         f"📋 Pending order {status}: {trade.pair} — "
-                        "state booking reversed"
+                        f"state booking reversed (filled={exchange_filled_qty:.6f})"
                     )
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
                         "order_id": trade.coinbase_order_id,
                         "action": f"marked_{status.lower()}",
+                        "partial_fill": exchange_filled_qty > 0,
+                        "filled_quantity": exchange_filled_qty,
                     })
 
                 elif status == "OPEN":

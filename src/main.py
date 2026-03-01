@@ -250,28 +250,34 @@ def main():
     exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
     
     if exchange_type == "ibkr":
+        # C5 fix: Import IBClient BEFORE try block to ensure it's available in except handler
         try:
             from src.core.ib_client import IBClient
-            exchange: ExchangeClient = IBClient(
-                paper_mode=paper_mode,
-                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
-                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
-                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
-            )
+            _ibclient_available = True
         except ImportError:
+            _ibclient_available = False
             logger.error("IBClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
             exchange = CoinbaseClient(paper_mode=True)
-        except Exception as e:
-            logger.warning(f"⚠️ Could not initialise IBKR client: {e}. Forcing paper mode.")
-            paper_mode = True
-            exchange = IBClient(
-                paper_mode=True,
-                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
-                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
-                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
-            )
+        
+        if _ibclient_available:
+            try:
+                exchange: ExchangeClient = IBClient(
+                    paper_mode=paper_mode,
+                    paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                    ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                    ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                    ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Could not initialise IBKR client: {e}. Forcing paper mode.")
+                paper_mode = True
+                exchange = IBClient(
+                    paper_mode=True,
+                    paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                    ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                    ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                    ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+                )
     else:
         exchange: ExchangeClient = CoinbaseClient(
             api_key=os.environ.get("COINBASE_API_KEY"),

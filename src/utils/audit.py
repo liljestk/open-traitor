@@ -71,10 +71,24 @@ class AuditLog:
                 chunk = f.read().decode("utf-8", errors="replace")
                 lines = chunk.strip().split("\n")
                 if lines:
-                    entry = json.loads(lines[-1].strip())
-                    return entry.get("hash", "genesis")
-        except (json.JSONDecodeError, Exception):
-            pass
+                    # M8 fix: Try to parse last line, fall back to earlier lines if corrupted
+                    for i in range(len(lines) - 1, -1, -1):
+                        try:
+                            entry = json.loads(lines[i].strip())
+                            if i < len(lines) - 1:
+                                logger.warning(
+                                    f"⚠️ Audit log: last line corrupted, recovered hash from line -{len(lines) - 1 - i}"
+                                )
+                            return entry.get("hash", "genesis")
+                        except json.JSONDecodeError:
+                            continue
+                    # All lines in chunk corrupted - this is serious
+                    logger.error(
+                        "🚨 Audit log corruption detected: unable to recover hash chain. "
+                        "Tamper-evidence may be compromised. Starting new chain."
+                    )
+        except Exception as e:
+            logger.error(f"🚨 Audit log read error: {e}. Starting new chain.")
 
         return "genesis"
 
@@ -176,44 +190,54 @@ class AuditLog:
         """
         Verify the integrity of the entire audit chain.
         Returns verification result.
+        
+        H7 fix: File read is done outside the lock to avoid blocking trade logging.
+        The audit log is append-only so reading without lock is safe.
         """
         prev_hash = "genesis"
         count = 0
         broken_at = None
 
         try:
-            with self._lock:
-                if not os.path.exists(self._log_file):
-                    return {"valid": True, "entries": 0}
+            # H7 fix: Check existence and read file content outside the lock
+            if not os.path.exists(self._log_file):
+                return {"valid": True, "entries": 0}
+            
+            # Read file content without holding the lock (append-only file is safe to read)
+            with open(self._log_file, "r") as f:
+                lines = f.readlines()
+            
+            # Process verification without blocking writers
+            for line_num, line in enumerate(lines, 1):
+                try:
+                    entry = json.loads(line.strip())
+                    stored_prev = entry.get("prev_hash", "")
+                    stored_hash = entry.get("hash", "")
 
-                with open(self._log_file, "r") as f:
-                    for line_num, line in enumerate(f, 1):
-                        try:
-                            entry = json.loads(line.strip())
-                            stored_prev = entry.get("prev_hash", "")
-                            stored_hash = entry.get("hash", "")
+                    # Verify chain
+                    if stored_prev != prev_hash:
+                        broken_at = line_num
+                        break
 
-                            # Verify chain
-                            if stored_prev != prev_hash:
-                                broken_at = line_num
-                                break
+                    # Verify entry hash
+                    entry_copy = {k: v for k, v in entry.items()
+                                  if k not in ("prev_hash", "hash")}
+                    entry_data = json.dumps(entry_copy, default=str, separators=(",", ":"))
+                    expected_hash = self._compute_hash(entry_data, prev_hash)
 
-                            # Verify entry hash
-                            entry_copy = {k: v for k, v in entry.items()
-                                          if k not in ("prev_hash", "hash")}
-                            entry_data = json.dumps(entry_copy, default=str, separators=(",", ":"))
-                            expected_hash = self._compute_hash(entry_data, prev_hash)
+                    if expected_hash != stored_hash:
+                        broken_at = line_num
+                        break
 
-                            if expected_hash != stored_hash:
-                                broken_at = line_num
-                                break
+                    prev_hash = stored_hash
+                    count += 1
 
-                            prev_hash = stored_hash
-                            count += 1
-
-                        except json.JSONDecodeError:
-                            broken_at = line_num
-                            break
+                except json.JSONDecodeError:
+                    # H7: Partial line at end (concurrent write) is expected, not an error
+                    # Only treat as broken if it's not the last line
+                    if line_num < len(lines):
+                        broken_at = line_num
+                    break
 
         except Exception as e:
             return {"valid": False, "error": str(e)}

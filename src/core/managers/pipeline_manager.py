@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -25,7 +26,10 @@ class PipelineManager:
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
         self._candle_cache: dict[str, tuple[float, list]] = {}
-        self._candle_cache_lock = asyncio.Lock()
+        # C3 fix: Use threading.Lock instead of asyncio.Lock because this cache
+        # is accessed from both async code and from asyncio.to_thread() workers
+        # (threadpool). An asyncio.Lock cannot be acquired from a thread.
+        self._candle_cache_lock = threading.Lock()
 
     def _compute_ensemble(self, strategy_signals: dict) -> dict | None:
         """Compute a weighted ensemble from individual strategy signals.
@@ -137,22 +141,27 @@ class PipelineManager:
             "candle_granularity", "ONE_HOUR"
         )
         
-        async with self._candle_cache_lock:
+        # C3 fix: Use threading.Lock with regular `with` block
+        with self._candle_cache_lock:
             cached = self._candle_cache.get(pair)
             if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
                 candles = list(cached[1])
             else:
-                await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
-                try:
-                    candles = await asyncio.to_thread(
-                        orch.exchange.get_candles,
-                        pair,
-                        granularity=granularity,
-                    )
+                cached = None  # mark as needing fetch
+        
+        if cached is None:
+            await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
+            try:
+                candles = await asyncio.to_thread(
+                    orch.exchange.get_candles,
+                    pair,
+                    granularity=granularity,
+                )
+                with self._candle_cache_lock:
                     self._candle_cache[pair] = (time.monotonic(), list(candles))
-                except Exception as e:
-                    logger.warning(f"⚠️ Skipping pipeline for {pair}: get_candles failed: {e}")
-                    return
+            except Exception as e:
+                logger.warning(f"⚠️ Skipping pipeline for {pair}: get_candles failed: {e}")
+                return
 
         if orch.ws_feed:
             price = orch.ws_feed.get_price(pair)
@@ -281,14 +290,15 @@ class PipelineManager:
                 _sem = asyncio.Semaphore(3)  # max 3 concurrent API calls
 
                 async def _fetch_with_sem(p):
-                    async with self._candle_cache_lock:
+                    # C3 fix: Use threading.Lock with regular `with` block
+                    with self._candle_cache_lock:
                         cached = self._candle_cache.get(p)
                         if cached and (time.monotonic() - cached[0]) < min(60.0, orch.interval * 0.9):
                             return list(cached[1])
                     async with _sem:
                         await orch.rate_limiter.async_wait(orch.exchange.rate_limit_key)
                         res = await asyncio.to_thread(orch.exchange.get_candles, p, granularity=granularity)
-                        async with self._candle_cache_lock:
+                        with self._candle_cache_lock:
                             self._candle_cache[p] = (time.monotonic(), list(res))
                         return res
 

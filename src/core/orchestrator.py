@@ -39,7 +39,7 @@ from src.strategies import EMACrossoverStrategy, BollingerReversionStrategy, Pai
 from src.utils.tax import FIFOTracker
 from src.news.aggregator import NewsAggregator
 from src.telegram_bot.chat_handler import TelegramChatHandler
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, sanitize_exception
 from src.utils.helpers import format_currency, format_percentage
 from src.utils.rate_limiter import get_rate_limiter
 from src.utils.journal import TradeJournal
@@ -511,9 +511,9 @@ class Orchestrator:
         if self.state.max_drawdown >= max_dd_pct:
             reason, value = "max_drawdown", self.state.max_drawdown
             msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(value)} reached!"
-        # Daily loss check
-        elif self.rules._daily_loss >= self.rules.max_daily_loss:
-            reason, value = "daily_loss", self.rules._daily_loss
+        # Daily loss check (M4 fix: use thread-safe accessor)
+        elif self.rules.daily_loss >= self.rules.max_daily_loss:
+            reason, value = "daily_loss", self.rules.daily_loss
             msg = (
                 f"🛑 CIRCUIT BREAKER: Daily loss {format_currency(value)} "
                 f"reached limit {format_currency(self.rules.max_daily_loss)}!"
@@ -642,14 +642,18 @@ class Orchestrator:
                 base_pairs = self._screener_active_pairs or self.pairs[:effective_max_active]
                 base_pairs = base_pairs[:effective_max_active]  # enforce cap
 
+                # M6 fix: Read watchlist_pairs under lock to prevent race
+                with self._pairs_lock:
+                    current_watchlist = list(self.watchlist_pairs)
+                
                 # Watchlist pairs bypass the LLM screener cap since they are explicitly requested
                 # Combine base pairs and watchlist pairs, removing duplicates while preserving order
-                effective_pairs = list(dict.fromkeys(base_pairs + getattr(self, "watchlist_pairs", [])))
+                effective_pairs = list(dict.fromkeys(base_pairs + current_watchlist))
 
                 if not effective_pairs:
                     logger.warning(
                         "⚠️ No active pairs to trade this cycle "
-                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}, watchlist={len(getattr(self, 'watchlist_pairs', []))}). "
+                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}, watchlist={len(current_watchlist)}). "
                         "Waiting for LLM screener to pick pairs..."
                     )
 
@@ -733,6 +737,7 @@ class Orchestrator:
                                 amount=close_result.get("close_price", trigger_price) or 0,
                                 price=close_result.get("close_price", trigger_price) or 0,
                             )
+                            # H3 note: record_trade is handled in executor._close_position
                             if pnl is not None and pnl < 0:
                                 self.rules.record_loss(abs(pnl))
                             event_msg = (
@@ -783,6 +788,7 @@ class Orchestrator:
                                 amount=te_qty * te_price,
                                 price=te_price,
                             )
+                            # H3+M3 note: record_trade is handled in executor._partial_sell
                             # FIFO tracking for tier exit sell
                             try:
                                 base_asset = te_pair.split("-")[0] if "-" in te_pair else te_pair
@@ -998,10 +1004,10 @@ class Orchestrator:
 
             except Exception as e:
                 consecutive_errors += 1
-                # Full traceback in server logs; redact message before broadcasting
-                # to Telegram — exception text can contain connection strings, paths,
-                # or credential fragments.
-                logger.error(f"Pipeline error: {e}", exc_info=True)
+                # H10 fix: Use sanitized traceback to prevent credential leakage
+                # in logs that may be accessible via dashboard
+                sanitized_tb = sanitize_exception(e)
+                logger.error(f"Pipeline error: {type(e).__name__}\n{sanitized_tb}")
                 if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
                     alert_msg = (
                         f"🚨 *Auto-Traitor alert*: {consecutive_errors} consecutive pipeline "
@@ -1041,9 +1047,12 @@ class Orchestrator:
                 elapsed = time.monotonic() - _cycle_t0  # L16 fix: use wall clock
 
                 with self._ws_trigger_lock:
+                    # M6 fix: Read all_tracked_pairs under lock to prevent race
+                    with self._pairs_lock:
+                        tracked = set(self.all_tracked_pairs)
                     early_pairs = (
                         self._ws_trigger_pairs | self._news_trigger_pairs
-                    ).intersection(set(getattr(self, "all_tracked_pairs", self.pairs)))
+                    ).intersection(tracked)
                     self._ws_trigger_pairs.clear()
                     self._news_trigger_pairs.clear()
 
