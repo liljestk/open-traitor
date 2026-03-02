@@ -504,7 +504,10 @@ class PipelineManager:
             return
 
         confidence = signal.get("confidence", 0)
-        tg_cfg = orch.config.get("telegram", {})
+        # Read telegram config fresh from disk so dashboard saves take effect
+        # immediately without requiring a restart.
+        from src.utils.settings_manager import load_settings as _load_cfg
+        tg_cfg = _load_cfg().get("telegram", {})
         notify_threshold = tg_cfg.get("notify_on_signal_confidence", 0.65)
         if tg_cfg.get("notify_on_signal", True) and confidence >= notify_threshold and orch.telegram:
             # Cycle-3 fix: find the signal for THIS pair instead of signals[-1]
