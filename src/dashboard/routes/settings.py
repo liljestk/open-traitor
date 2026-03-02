@@ -612,7 +612,7 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
             ok, err, changes = _sm_apply_preset(body.preset)
             if not ok:
                 raise HTTPException(status_code=400, detail=err)
-            _sm_push_runtime(deps.rules_instance, deps.get_config(), changes)
+            _sm_push_runtime(deps.rules_instance, deps.config, changes)
             logger.warning(
                 f"⚙️ Settings preset applied: {body.preset} "
                 f"({len(changes)} changes, ip={source_ip})"
@@ -673,7 +673,9 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
         if not ok:
             raise HTTPException(status_code=400, detail=err)
 
-        _sm_push_section(body.section, changes, deps.rules_instance, deps.get_config())
+        # Use deps.config (== orch.config, the live dict) not deps.get_config()
+        # which returns a throwaway dict loaded from disk.
+        _sm_push_section(body.section, changes, deps.rules_instance, deps.config)
         logger.warning(
             f"⚙️ Settings updated: section={body.section}, "
             f"fields={sorted(changes.keys()) if isinstance(changes, dict) else changes} "
