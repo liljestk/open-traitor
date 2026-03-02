@@ -22,7 +22,7 @@ import {
 } from './settings/settingsData'
 import {
   Toast, SectionCard, RpmBudgetCard,
-  TelegramSetupGuide, DensityToggle,
+  TelegramSetupGuide, DensityToggle, TelegramNotificationsCard,
 } from './settings/SettingsComponents'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -704,6 +704,17 @@ export default function Settings() {
 
       {/* ─── Setting sections ─── */}
       {visibleSections.map(sectionName => {
+        // Telegram gets a dedicated grouped notifications card
+        if (sectionName === 'telegram') {
+          return (
+            <TelegramNotificationsCard
+              key="telegram"
+              values={(settings.telegram ?? {}) as Record<string, unknown>}
+              onSave={handleSaveSection}
+              searchQuery={searchQuery}
+            />
+          )
+        }
         const sectionSchema = schema?.[sectionName]
         const telegramTier = sectionSchema?.telegram_tier ?? 'blocked'
         return (

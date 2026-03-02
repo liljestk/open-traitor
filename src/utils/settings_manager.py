@@ -121,9 +121,24 @@ _TELEGRAM_SCHEMA: dict[str, dict[str, Any]] = {
     "bot_token":                   {"type": str},
     "chat_id":                     {"type": str},
     "authorized_users":            {"type": list},
-    "status_update_interval":      {"type": int,   "min": 0, "max": 86_400},
+    # Trade & Signal Alerts
     "notify_on_trade":             {"type": bool},
+    "notify_on_signal":            {"type": bool},
     "notify_on_signal_confidence": {"type": float, "min": 0.0, "max": 1.0},
+    # Win / Loss Highlights
+    "notify_on_big_win":           {"type": bool},
+    "big_win_threshold":           {"type": float, "min": 0, "max": 1_000_000},
+    "notify_on_big_loss":          {"type": bool},
+    "big_loss_threshold":          {"type": float, "min": 0, "max": 1_000_000},
+    # Price Movement Alerts
+    "notify_on_price_move":        {"type": bool},
+    "price_move_threshold_pct":    {"type": float, "min": 0.5, "max": 50.0},
+    "price_move_cooldown_minutes": {"type": int,   "min": 1, "max": 1440},
+    # Scheduled Messages
+    "notify_morning_plan":         {"type": bool},
+    "notify_evening_summary":      {"type": bool},
+    "notify_periodic_update":      {"type": bool},
+    "status_update_interval":      {"type": int,   "min": 0, "max": 86_400},
     "daily_summary":               {"type": bool},
     "daily_summary_hour":          {"type": int,   "min": 0, "max": 23},
 }

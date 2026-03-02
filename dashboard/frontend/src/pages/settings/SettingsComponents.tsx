@@ -3,7 +3,7 @@ import {
   ToggleLeft, ToggleRight, ChevronDown, Save, X,
   AlertTriangle, Check, Zap, Settings2,
   Gauge, Bot, ExternalLink, Lock,
-  Maximize2, Minimize2,
+  Maximize2, Minimize2, Bell, TrendingUp, DollarSign, Clock, Calendar,
 } from 'lucide-react'
 import type { SectionSchema, FieldSchema, RpmBudget } from '../../api'
 import { useLiveStore, type Density } from '../../store'
@@ -627,6 +627,560 @@ export function DensityToggle() {
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Telegram Notifications Card — grouped, intuitive notification config
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+type TgValues = Record<string, unknown>
+
+function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button onClick={() => onChange(!value)} style={{
+      background: value ? '#22c55e18' : '#6e768118',
+      border: `1px solid ${value ? '#22c55e44' : '#30363d'}`,
+      borderRadius: 20, cursor: 'pointer', padding: '3px 10px',
+      color: value ? '#22c55e' : '#6e7681',
+      display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 500,
+      transition: 'all 0.15s', flexShrink: 0,
+    }}>
+      {value ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+      {value ? 'On' : 'Off'}
+    </button>
+  )
+}
+
+function NumInput({ value, onChange, min, max, step = 1, suffix }: {
+  value: number; onChange: (v: number) => void
+  min?: number; max?: number; step?: number; suffix?: string
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <input type="number" value={value} min={min} max={max} step={step}
+        onChange={e => {
+          const v = parseFloat(e.target.value)
+          if (!isNaN(v)) onChange(v)
+        }}
+        style={{
+          ...inputBase, width: 72, textAlign: 'right', padding: '4px 8px', fontSize: 13,
+        }}
+      />
+      {suffix && <span style={{ fontSize: 11, color: '#6e7681', whiteSpace: 'nowrap' }}>{suffix}</span>}
+    </div>
+  )
+}
+
+interface NotifGroup {
+  icon: ReactNode
+  label: string
+  desc: string
+  rows: ReactNode[]
+}
+
+function NotifGroupCard({ icon, label, desc, rows }: NotifGroup) {
+  return (
+    <div style={{
+      background: '#161b22', border: '1px solid #21262d', borderRadius: 8, overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px',
+        borderBottom: '1px solid #21262d', background: '#0d111780',
+      }}>
+        <span style={{ color: '#58a6ff' }}>{icon}</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: '#e6edf3' }}>{label}</div>
+          {desc && <div style={{ fontSize: 11, color: '#6e7681', marginTop: 1 }}>{desc}</div>}
+        </div>
+      </div>
+      <div style={{ padding: '4px 0' }}>
+        {rows}
+      </div>
+    </div>
+  )
+}
+
+function NotifRow({ label, desc, right, changed }: {
+  label: string; desc?: string; right: ReactNode; changed?: boolean
+}) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+      padding: '8px 14px',
+      borderLeft: `3px solid ${changed ? '#f59e0b' : 'transparent'}`,
+      background: changed ? '#f59e0b06' : 'transparent',
+      transition: 'all 0.15s',
+    }}>
+      <div>
+        <div style={{ fontSize: 13, color: '#c9d1d9', fontWeight: 500 }}>{label}</div>
+        {desc && <div style={{ fontSize: 11, color: '#6e7681', marginTop: 2, lineHeight: 1.4 }}>{desc}</div>}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {right}
+      </div>
+    </div>
+  )
+}
+
+function AlwaysOnBadge({ label }: { label: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <span style={{
+        fontSize: 11, padding: '2px 8px', borderRadius: 10,
+        background: '#ef444415', color: '#f87171', fontWeight: 500, border: '1px solid #ef444430',
+      }}>Always On</span>
+      <span style={{ fontSize: 11, color: '#6e7681' }}>{label}</span>
+    </div>
+  )
+}
+
+export function TelegramNotificationsCard({ values, onSave, searchQuery }: {
+  values: TgValues
+  onSave: (section: string, updates: TgValues) => Promise<void>
+  searchQuery: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState<TgValues>({})
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const startEdit = () => { setDraft(JSON.parse(JSON.stringify(values))); setEditing(true); setMsg(null) }
+  const cancel = () => { setEditing(false); setMsg(null) }
+  const cur = editing ? draft : values
+
+  const get = <T,>(key: string, def: T): T => (cur[key] as T) ?? def
+  const set = (key: string, val: unknown) => setDraft(prev => ({ ...prev, [key]: val }))
+
+  const changedKeys = useMemo(() => {
+    if (!editing) return []
+    return Object.entries(draft).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(values[k])).map(([k]) => k)
+  }, [editing, draft, values])
+  const changedCount = changedKeys.length
+
+  const isChanged = (key: string) => editing && changedKeys.includes(key)
+
+  const handleSave = async () => {
+    const changes: TgValues = {}
+    for (const k of changedKeys) changes[k] = draft[k]
+    if (!Object.keys(changes).length) { setEditing(false); return }
+    setSaving(true)
+    try {
+      await onSave('telegram', changes)
+      setEditing(false)
+      setMsg({ ok: true, text: `${changedCount} setting${changedCount > 1 ? 's' : ''} saved & applied live` })
+      setTimeout(() => setMsg(null), 4000)
+    } catch (e: unknown) {
+      setMsg({ ok: false, text: (e instanceof Error ? e.message : String(e)) || 'Save failed' })
+    } finally { setSaving(false) }
+  }
+
+  // Auto-open when search matches any telegram field
+  const q = searchQuery.toLowerCase()
+  const hasSearchMatch = q && [
+    'notify_on_trade', 'notify_on_signal', 'notify_on_signal_confidence',
+    'notify_on_big_win', 'big_win_threshold', 'notify_on_big_loss', 'big_loss_threshold',
+    'notify_on_price_move', 'price_move_threshold_pct', 'price_move_cooldown_minutes',
+    'notify_morning_plan', 'notify_evening_summary', 'notify_periodic_update',
+    'status_update_interval', 'daily_summary', 'daily_summary_hour',
+    'telegram', 'trade', 'signal', 'price', 'win', 'loss', 'morning', 'evening', 'summary', 'notification',
+  ].some(k => k.includes(q))
+
+  useEffect(() => {
+    if (hasSearchMatch && !open) setOpen(true)
+  }, [searchQuery]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (searchQuery && !hasSearchMatch) return null
+
+  // Summary chips shown when collapsed
+  const summaryItems = [
+    { key: 'notify_on_trade',     label: 'Trades',      val: get<boolean>('notify_on_trade', true) },
+    { key: 'notify_on_signal',    label: 'Signals',     val: get<boolean>('notify_on_signal', true) },
+    { key: 'notify_on_price_move',label: 'Price Moves', val: get<boolean>('notify_on_price_move', true) },
+    { key: 'notify_morning_plan', label: 'Morning',     val: get<boolean>('notify_morning_plan', true) },
+  ]
+
+  return (
+    <div style={{
+      background: '#0d1117', border: '1px solid #21262d', borderRadius: 10,
+      marginBottom: 10, overflow: 'hidden',
+      ...(editing ? { borderColor: '#30363d' } : {}),
+    }}>
+      {/* Header */}
+      <button onClick={() => setOpen(!open)} style={{
+        width: '100%', background: open ? '#161b2240' : 'none', border: 'none', cursor: 'pointer',
+        display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px',
+        color: '#e6edf3', transition: 'background 0.15s',
+      }}>
+        <span style={{ color: '#8b949e', transition: 'transform 0.2s', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+          <ChevronDown size={14} />
+        </span>
+        <span style={{ color: '#22c55ecc' }}><Bell size={15} /></span>
+        <span style={{ fontWeight: 600, fontSize: 14, flexShrink: 0 }}>Telegram Notifications</span>
+
+        {/* Summary chips when collapsed */}
+        {!open && !editing && (
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', flex: 1, alignItems: 'center' }}>
+            {summaryItems.map(({ key, label, val }) => (
+              <span key={key} style={{
+                fontSize: 10, padding: '2px 7px', borderRadius: 8,
+                background: val ? '#22c55e12' : '#ef444412',
+                color: val ? '#4ade80' : '#f87171', border: `1px solid ${val ? '#22c55e22' : '#ef444422'}`,
+                display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap',
+              }}>
+                <span style={{ color: '#484f58' }}>{label}:</span>
+                <span style={{ fontWeight: 600 }}>{val ? 'On' : 'Off'}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {(open || editing) && <div style={{ flex: 1 }} />}
+
+        <span style={{
+          fontSize: 9, padding: '2px 7px', borderRadius: 10,
+          background: '#22c55e15', color: '#22c55e', fontWeight: 600,
+          display: 'flex', alignItems: 'center', gap: 3, border: '1px solid #22c55e22',
+        }}><Zap size={8} /> Live reload</span>
+
+        <span style={{
+          fontSize: 9, padding: '2px 7px', borderRadius: 10,
+          background: '#22c55e15', color: '#22c55e', fontWeight: 600, border: '1px solid #22c55e22',
+        }}>Telegram Safe</span>
+
+        {msg && (
+          <span style={{ fontSize: 11, color: msg.ok ? '#22c55e' : '#ef4444', display: 'flex', alignItems: 'center', gap: 3 }}>
+            {msg.ok ? <Check size={12} /> : <AlertTriangle size={12} />} {msg.text}
+          </span>
+        )}
+      </button>
+
+      {/* Body */}
+      {open && (
+        <div style={{ padding: '0 16px 16px', borderTop: '1px solid #21262d' }}>
+
+          {/* Action bar */}
+          <div style={{ display: 'flex', gap: 8, padding: '12px 0 12px', justifyContent: 'flex-end', alignItems: 'center' }}>
+            {editing && changedCount > 0 && (
+              <span style={{ fontSize: 11, color: '#f59e0b', marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <AlertTriangle size={11} /> {changedCount} unsaved change{changedCount > 1 ? 's' : ''}
+              </span>
+            )}
+            {!editing ? (
+              <button onClick={startEdit} style={{ ...btnStyle('#21262d'), borderColor: '#30363d' }}>
+                <Settings2 size={12} /> Edit notifications
+              </button>
+            ) : (
+              <>
+                <button onClick={cancel} style={btnStyle('#21262d')}><X size={12} /> Cancel</button>
+                <button onClick={handleSave} disabled={saving || changedCount === 0}
+                  style={{ ...btnStyle(changedCount > 0 ? '#238636' : '#21262d'), opacity: changedCount === 0 ? 0.5 : 1 }}>
+                  <Save size={12} /> {saving ? 'Saving…' : `Save & Apply${changedCount > 0 ? ` (${changedCount})` : ''}`}
+                </button>
+              </>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+            {/* ── Group 1: Trades & Signals ── */}
+            <NotifGroupCard
+              icon={<TrendingUp size={14} />}
+              label="Trades & Signals"
+              desc="Notifications fired immediately when the bot executes a trade or detects a signal"
+              rows={[
+                <NotifRow key="trade"
+                  label="Trade Executed"
+                  desc="Message sent whenever a buy or sell order is filled"
+                  changed={isChanged('notify_on_trade')}
+                  right={editing
+                    ? <Toggle value={get<boolean>('notify_on_trade', true)} onChange={v => set('notify_on_trade', v)} />
+                    : <span style={{ fontSize: 12, color: get<boolean>('notify_on_trade', true) ? '#22c55e' : '#6e7681' }}>
+                        {get<boolean>('notify_on_trade', true) ? '✓ On' : '✗ Off'}
+                      </span>
+                  }
+                />,
+                <NotifRow key="signal"
+                  label="Signal Detected"
+                  desc="Message sent when an AI signal reaches the minimum confidence threshold"
+                  changed={isChanged('notify_on_signal') || isChanged('notify_on_signal_confidence')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {editing && get<boolean>('notify_on_signal', true) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, color: '#6e7681', whiteSpace: 'nowrap' }}>min confidence</span>
+                          <NumInput
+                            value={Math.round(get<number>('notify_on_signal_confidence', 0.65) * 100)}
+                            onChange={v => set('notify_on_signal_confidence', v / 100)}
+                            min={0} max={100} step={5} suffix="%"
+                          />
+                        </div>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          ≥{Math.round(get<number>('notify_on_signal_confidence', 0.65) * 100)}%
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('notify_on_signal', true)} onChange={v => set('notify_on_signal', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('notify_on_signal', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('notify_on_signal', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+                <NotifRow key="approval"
+                  label="Approval Requests"
+                  desc="Inline keyboard sent when a trade requires manual approval"
+                  right={<AlwaysOnBadge label="cannot be disabled" />}
+                />,
+                <NotifRow key="circuit"
+                  label="Circuit Breaker / Emergency"
+                  desc="🚨 Alerts for circuit breaker trips and emergency stops"
+                  right={<AlwaysOnBadge label="safety-critical" />}
+                />,
+              ]}
+            />
+
+            {/* ── Group 2: Win / Loss Highlights ── */}
+            <NotifGroupCard
+              icon={<DollarSign size={14} />}
+              label="Win / Loss Highlights"
+              desc="Celebratory or analytical messages triggered by significant trade results"
+              rows={[
+                <NotifRow key="bigwin"
+                  label="Big Win Alert"
+                  desc="Sent when a single trade's profit exceeds the threshold"
+                  changed={isChanged('notify_on_big_win') || isChanged('big_win_threshold')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {editing && get<boolean>('notify_on_big_win', true) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, color: '#6e7681' }}>above</span>
+                          <NumInput
+                            value={get<number>('big_win_threshold', 50)}
+                            onChange={v => set('big_win_threshold', v)}
+                            min={1} max={100000} step={10} suffix="$"
+                          />
+                        </div>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          &gt;${get<number>('big_win_threshold', 50)}
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('notify_on_big_win', true)} onChange={v => set('notify_on_big_win', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('notify_on_big_win', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('notify_on_big_win', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+                <NotifRow key="bigloss"
+                  label="Big Loss Alert"
+                  desc="Sent when a single trade's loss exceeds the threshold"
+                  changed={isChanged('notify_on_big_loss') || isChanged('big_loss_threshold')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {editing && get<boolean>('notify_on_big_loss', true) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, color: '#6e7681' }}>above</span>
+                          <NumInput
+                            value={get<number>('big_loss_threshold', 50)}
+                            onChange={v => set('big_loss_threshold', v)}
+                            min={1} max={100000} step={10} suffix="$"
+                          />
+                        </div>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          &gt;${get<number>('big_loss_threshold', 50)}
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('notify_on_big_loss', true)} onChange={v => set('notify_on_big_loss', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('notify_on_big_loss', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('notify_on_big_loss', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+              ]}
+            />
+
+            {/* ── Group 3: Price Movement Alerts ── */}
+            <NotifGroupCard
+              icon={<Bell size={14} />}
+              label="Price Movement Alerts"
+              desc="Alerts when a held asset's price moves significantly (per-pair cooldown applied)"
+              rows={[
+                <NotifRow key="pricemove"
+                  label="Price Movements"
+                  desc="Alert when any open position moves by the configured % since last alert"
+                  changed={isChanged('notify_on_price_move') || isChanged('price_move_threshold_pct') || isChanged('price_move_cooldown_minutes')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {editing && get<boolean>('notify_on_price_move', true) && (
+                        <>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ fontSize: 11, color: '#6e7681' }}>threshold</span>
+                            <NumInput
+                              value={get<number>('price_move_threshold_pct', 5)}
+                              onChange={v => set('price_move_threshold_pct', v)}
+                              min={0.5} max={50} step={0.5} suffix="%"
+                            />
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ fontSize: 11, color: '#6e7681' }}>cooldown</span>
+                            <NumInput
+                              value={get<number>('price_move_cooldown_minutes', 20)}
+                              onChange={v => set('price_move_cooldown_minutes', Math.round(v))}
+                              min={1} max={1440} step={5} suffix="min"
+                            />
+                          </div>
+                        </>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          ≥{get<number>('price_move_threshold_pct', 5)}% · {get<number>('price_move_cooldown_minutes', 20)}min cooldown
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('notify_on_price_move', true)} onChange={v => set('notify_on_price_move', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('notify_on_price_move', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('notify_on_price_move', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+              ]}
+            />
+
+            {/* ── Group 4: Scheduled Messages ── */}
+            <NotifGroupCard
+              icon={<Calendar size={14} />}
+              label="Scheduled Messages"
+              desc="Time-based messages sent on a schedule — independent of trade activity"
+              rows={[
+                <NotifRow key="morning"
+                  label="Morning Briefing"
+                  desc="Overnight recap and day plan, sent once between 06:00–09:00 UTC"
+                  changed={isChanged('notify_morning_plan')}
+                  right={editing
+                    ? <Toggle value={get<boolean>('notify_morning_plan', true)} onChange={v => set('notify_morning_plan', v)} />
+                    : <span style={{ fontSize: 12, color: get<boolean>('notify_morning_plan', true) ? '#22c55e' : '#6e7681' }}>
+                        {get<boolean>('notify_morning_plan', true) ? '✓ On' : '✗ Off'}
+                      </span>
+                  }
+                />,
+                <NotifRow key="evening"
+                  label="Evening Summary"
+                  desc="Day wrap-up with P&L, sent once between 20:00–22:00 UTC"
+                  changed={isChanged('notify_evening_summary')}
+                  right={editing
+                    ? <Toggle value={get<boolean>('notify_evening_summary', true)} onChange={v => set('notify_evening_summary', v)} />
+                    : <span style={{ fontSize: 12, color: get<boolean>('notify_evening_summary', true) ? '#22c55e' : '#6e7681' }}>
+                        {get<boolean>('notify_evening_summary', true) ? '✓ On' : '✗ Off'}
+                      </span>
+                  }
+                />,
+                <NotifRow key="daily"
+                  label="Daily Summary"
+                  desc="Daily performance snapshot sent at a configured hour"
+                  changed={isChanged('daily_summary') || isChanged('daily_summary_hour')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {editing && get<boolean>('daily_summary', true) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, color: '#6e7681' }}>at hour</span>
+                          <NumInput
+                            value={get<number>('daily_summary_hour', 8)}
+                            onChange={v => set('daily_summary_hour', Math.round(v))}
+                            min={0} max={23} step={1} suffix="UTC"
+                          />
+                        </div>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          {String(get<number>('daily_summary_hour', 8)).padStart(2, '0')}:00 UTC
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('daily_summary', true)} onChange={v => set('daily_summary', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('daily_summary', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('daily_summary', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+              ]}
+            />
+
+            {/* ── Group 5: Periodic Check-ins ── */}
+            <NotifGroupCard
+              icon={<Clock size={14} />}
+              label="Periodic Check-ins"
+              desc="LLM-generated status updates sent at regular intervals (only when there's something worth saying)"
+              rows={[
+                <NotifRow key="periodic"
+                  label="Periodic Updates"
+                  desc="AI-written check-in messages based on recent events and market activity"
+                  changed={isChanged('notify_periodic_update') || isChanged('status_update_interval')}
+                  right={
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {editing && get<boolean>('notify_periodic_update', true) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, color: '#6e7681' }}>every</span>
+                          <NumInput
+                            value={Math.round(get<number>('status_update_interval', 3600) / 60)}
+                            onChange={v => set('status_update_interval', Math.round(v) * 60)}
+                            min={5} max={1440} step={15} suffix="min"
+                          />
+                        </div>
+                      )}
+                      {!editing && (
+                        <span style={{ fontSize: 11, color: '#6e7681' }}>
+                          every {Math.round(get<number>('status_update_interval', 3600) / 60)} min
+                        </span>
+                      )}
+                      {editing
+                        ? <Toggle value={get<boolean>('notify_periodic_update', true)} onChange={v => set('notify_periodic_update', v)} />
+                        : <span style={{ fontSize: 12, color: get<boolean>('notify_periodic_update', true) ? '#22c55e' : '#6e7681' }}>
+                            {get<boolean>('notify_periodic_update', true) ? '✓ On' : '✗ Off'}
+                          </span>
+                      }
+                    </div>
+                  }
+                />,
+              ]}
+            />
+
+          </div>
+
+          {/* Bottom action bar */}
+          {editing && (
+            <div style={{ display: 'flex', gap: 8, padding: '14px 0 0', justifyContent: 'flex-end', alignItems: 'center', borderTop: '1px solid #21262d', marginTop: 12 }}>
+              {changedCount > 0 && (
+                <span style={{ fontSize: 11, color: '#f59e0b', marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <AlertTriangle size={11} /> {changedCount} unsaved change{changedCount > 1 ? 's' : ''}
+                </span>
+              )}
+              <button onClick={cancel} style={btnStyle('#21262d')}><X size={12} /> Cancel</button>
+              <button onClick={handleSave} disabled={saving || changedCount === 0}
+                style={{ ...btnStyle(changedCount > 0 ? '#238636' : '#21262d'), opacity: changedCount === 0 ? 0.5 : 1 }}>
+                <Save size={12} /> {saving ? 'Saving…' : `Save & Apply${changedCount > 0 ? ` (${changedCount})` : ''}`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

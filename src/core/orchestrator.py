@@ -57,6 +57,7 @@ from src.core.managers.holdings_manager import HoldingsManager
 from src.core.managers.context_manager import ContextManager
 from src.core.managers.event_manager import EventManager
 from src.core.managers.dashboard_commands import DashboardCommandManager
+from src.core.managers.learning_manager import LearningManager
 import asyncio
 
 logger = get_logger("core.orchestrator")
@@ -260,6 +261,9 @@ class Orchestrator:
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
 
+        # ─── Adaptive Learning Engine ───
+        self.learning_manager = LearningManager(self)
+
         # ─── Training Data Collector (for future fine-tuning) ───
         self.training_collector = TrainingDataCollector(config)
         self.executor.training_collector = self.training_collector
@@ -451,6 +455,9 @@ class Orchestrator:
         self._ws_last_prices: dict[str, float] = {} # prices at last pipeline start
         self._ws_trigger_pct: float = config.get("trading", {}).get("ws_trigger_pct", 0.005)
         self._last_pipeline_ts: dict[str, float] = {}  # pair → epoch of last run
+        # Batch scanning: analyse at most N pairs per cycle, rotating by staleness.
+        # 0 = disabled (all pairs every cycle). Default: 5.
+        self.scan_batch_size: int = config.get("trading", {}).get("scan_batch_size", 5)
 
         # ─── LLM Chat Handler (conversational Telegram interface) ───
         self.chat_handler = TelegramChatHandler(
@@ -468,6 +475,8 @@ class Orchestrator:
             self.chat_handler.set_context_provider(self.telegram_manager.get_trading_context)
             if self.chat_handler._proactive:
                 self.chat_handler._proactive.set_stats_db(self.stats_db)
+                # Pass live config reference so notification settings take effect immediately
+                self.chat_handler._proactive.set_config(self.config)
 
         # Start health server
         start_health_server(port=config.get("health", {}).get("port", 8080))
@@ -524,9 +533,8 @@ class Orchestrator:
         self.state.circuit_breaker_triggered = True
         logger.warning(msg)
         self.audit.log_circuit_breaker(reason, value)
-        self.chat_handler.queue_event(f"CRITICAL: {msg}")
-        if self.telegram:
-            self.telegram.send_alert(msg)
+        # queue_event("CRITICAL: ...") already sends 🚨 ALERT immediately via ProactiveEngine
+        self.chat_handler.queue_event(f"CRITICAL: {msg}", severity="critical")
         self.event_manager.trigger_emergency_replan(f"Circuit breaker: {reason} {value}")
 
     def run_forever(self) -> None:
@@ -675,6 +683,34 @@ class Orchestrator:
                         )
                     sorted_pairs = _open_pairs
 
+                # ─── Batch scan: select the most-urgent/stale N pairs ─────────
+                _all_pairs_count = len(sorted_pairs)
+                if self.scan_batch_size and self.scan_batch_size < _all_pairs_count:
+                    _now_mono = time.monotonic()
+                    _open_pairs_set = {t.pair for t in self.state.trades if t.is_open}
+                    with self._pairs_lock:
+                        _watchlist_set = set(self.watchlist_pairs)
+
+                    def _batch_score(p: str) -> float:
+                        # Tier: open position (-2) → watchlist (-1) → normal (0)
+                        if p in _open_pairs_set:
+                            tier = -2.0
+                        elif p in _watchlist_set:
+                            tier = -1.0
+                        else:
+                            tier = 0.0
+                        # Staleness: 0 (just scanned) → -1.0 (≥3 cycles overdue)
+                        age = _now_mono - self._last_pipeline_ts.get(p, 0.0)
+                        staleness = min(age / (3 * self.interval), 1.0)
+                        return tier - staleness  # most-negative = scan first
+
+                    sorted_pairs = sorted(sorted_pairs, key=_batch_score)[:self.scan_batch_size]
+                    logger.info(
+                        f"🔄 Batch scan: {len(sorted_pairs)}/{_all_pairs_count} pairs "
+                        f"(batch_size={self.scan_batch_size}, "
+                        f"with_open={len(_open_pairs_set & set(sorted_pairs))})"
+                    )
+
                 # ─── RPM utilisation log (every 10 cycles) ────────────
                 if cycle_count % 10 == 0:
                     _n_pairs = len(sorted_pairs)
@@ -703,6 +739,12 @@ class Orchestrator:
                     )
                 except Exception as _pe:
                     logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
+
+                # Record scan timestamps so the next cycle's batch-scorer knows
+                # which pairs are freshest and can deprioritise them.
+                _ts_now = time.monotonic()
+                for _p in sorted_pairs:
+                    self._last_pipeline_ts[_p] = _ts_now
 
                 # ─── Check pending limit orders ───
                 try:
@@ -763,12 +805,7 @@ class Orchestrator:
                             f"at {format_currency(trigger_price)} (no open position found)"
                         )
 
-                    self.chat_handler.queue_event(event_msg)
-                    if self.telegram:
-                        self.telegram.send_trade_notification(
-                            f"🎯 {event_msg}\n"
-                            f"Entry: {format_currency(entry_price)}"
-                        )
+                    self.chat_handler.queue_event(event_msg, severity="trade", pair=pair)
 
                 # ─── Tiered partial exits (profit-locking) ───
                 tier_exits = self.trailing_stops.get_pending_tier_exits()
@@ -805,9 +842,7 @@ class Orchestrator:
                                 f"sold {te_qty:.6f} at {format_currency(te_price)} "
                                 f"(PnL: +{te.get('pnl_pct', 0):.1f}%)"
                             )
-                            self.chat_handler.queue_event(tier_msg)
-                            if self.telegram:
-                                self.telegram.send_trade_notification(f"📊 {tier_msg}")
+                            self.chat_handler.queue_event(tier_msg, severity="trade", pair=te_pair)
                     except Exception as e:
                         logger.warning(f"⚠️ Tier exit failed for {te_pair}: {e}")
 
@@ -828,11 +863,9 @@ class Orchestrator:
                         f"Position closed ({c['reason']}): {c['pair']} "
                         f"PnL: {format_currency(pnl or 0)}"
                     )
-                    self.chat_handler.queue_event(event_msg)
-                    if self.telegram:
-                        self.telegram.send_trade_notification(
-                            f"{emoji} {event_msg}"
-                        )
+                    self.chat_handler.queue_event(
+                        f"{emoji} {event_msg}", severity="trade", pair=c["pair"]
+                    )
 
                 # Refresh live holdings before snapshot to prevent stale-data
                 # fallback that inflates values from drifted positions.
@@ -959,12 +992,10 @@ class Orchestrator:
                                     f"🔄 Interval updated to {new_interval}s, "
                                     f"RPM entity cap recalculated: {rpm_max}"
                                 )
-                            # Notify via Telegram
+                            # Notify via Telegram (direct send — infrequent, system-level)
                             notif = format_advisor_notification(advisor_result)
-                            if notif:
-                                self.chat_handler.queue_event(notif)
-                                if self.telegram:
-                                    self.telegram.send_alert(notif)
+                            if notif and self.telegram:
+                                self.telegram.send_alert(notif)
                             self.audit.log_event(
                                 "settings_advisor",
                                 f"Applied {advisor_result['changes_applied']} autonomous setting change(s)",
@@ -972,6 +1003,16 @@ class Orchestrator:
                             )
                     except Exception as _sa_err:
                         logger.warning("Settings advisor error (non-fatal)", exc_info=True)
+
+                # ─── Adaptive Learning Engine tick ────────────────────
+                try:
+                    learning_result = self._loop.run_until_complete(
+                        self.learning_manager.tick(cycle_count)
+                    )
+                    if learning_result and not learning_result.get("skipped"):
+                        logger.debug(f"🧠 ALE tick: {list(learning_result.keys())}")
+                except Exception as _ale_err:
+                    logger.warning("ALE tick error (non-fatal)", exc_info=True)
 
                 # Sync state to Redis
                 self.state_manager.sync_to_redis()
@@ -1083,6 +1124,12 @@ class Orchestrator:
                 except Exception as _ep_err:
                     logger.error(f"Early-trigger pipeline error: {_ep_err}", exc_info=True)
                     
+                # Record timestamps for early-triggered pairs so the batch scorer
+                # treats them as freshly scanned on the next full cycle.
+                _et_now = time.monotonic()
+                for _ep in early_pairs:
+                    self._last_pipeline_ts[_ep] = _et_now
+
                 # Reset WS baselines so these pairs don’t immediately re-trigger
                 if self.ws_feed:
                     with self._ws_trigger_lock:

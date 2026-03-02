@@ -165,9 +165,20 @@ telegram:
   bot_token_env: TELEGRAM_BOT_TOKEN
   chat_id_env: TELEGRAM_CHAT_ID
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
-  status_update_interval: 3600
   notify_on_trade: true
-  notify_on_signal_confidence: 0.8
+  notify_on_signal: false
+  notify_on_signal_confidence: 0.9
+  notify_on_big_win: true
+  big_win_threshold: 50
+  notify_on_big_loss: true
+  big_loss_threshold: 50
+  notify_on_price_move: false
+  price_move_threshold_pct: 5
+  price_move_cooldown_minutes: 20
+  notify_morning_plan: true
+  notify_evening_summary: true
+  notify_periodic_update: true
+  status_update_interval: 3600
   daily_summary: true
   daily_summary_hour: 8
 logging:

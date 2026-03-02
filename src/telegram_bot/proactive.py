@@ -12,7 +12,7 @@ import time
 import threading
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional  # noqa: F401 (Any used in type hints)
 
 from src.telegram_bot.persona import PRO_TRADER_PERSONA
 from src.utils.logger import get_logger
@@ -60,11 +60,26 @@ class ProactiveEngine:
         self._stats_db = None  # StatsDB reference
         self._currency_symbol: str = "$"  # Updated from context on each tick
 
+        # Live config reference — updated via set_config() to support hot-reload
+        self._live_config: dict = {}
+
+        # Notification cooldowns (pair → last-sent epoch seconds)
+        self._price_alert_ts: dict[str, float] = {}   # 20-min per-pair cooldown
+        self._big_result_ts: dict[str, float] = {}    # 10-min per-pair cooldown
+
     def set_context_provider(self, provider: Callable) -> None:
         self._get_context = provider
 
     def set_stats_db(self, stats_db) -> None:
         self._stats_db = stats_db
+
+    def set_config(self, live_config: dict) -> None:
+        """Set reference to the live top-level config dict for hot-reloadable notification settings."""
+        self._live_config = live_config
+
+    def _tg(self, key: str, default: Any = None) -> Any:
+        """Read a telegram config value from the live config (hot-reloadable)."""
+        return self._live_config.get("telegram", {}).get(key, default)
 
     def queue_event(self, event: str, severity: str = "info", pair: Optional[str] = None) -> None:
         """
@@ -102,11 +117,11 @@ class ProactiveEngine:
             self._send(f"🚨 *ALERT*\n\n{event}")
 
         elif severity == "trade" or "trade executed" in event_lower:
-            if self._personality.detail_level >= 1:
+            if self._tg("notify_on_trade", True) and self._personality.detail_level >= 1:
                 self._send(f"📊 {event}")
 
-            # Check for big wins/losses
-            self._check_big_result(event)
+            # Check for big wins/losses (pass pair for debounce)
+            self._check_big_result(event, pair=pair)
 
         elif "approval" in event_lower or "pending" in event_lower:
             # Approval requests are always sent (at least in quiet mode)
@@ -116,29 +131,52 @@ class ProactiveEngine:
         elif severity == "signal" and self._personality.detail_level >= 3:
             self._send(f"📡 {event}")
 
-    def _check_big_result(self, event: str) -> None:
+    def _check_big_result(self, event: str, pair: Optional[str] = None) -> None:
         """Detect big wins or losses in trade events and react."""
-        pnl_match = re.search(r'PnL:\s*([+-]?)\s*[^\d]*([\d,]+\.?\d*)', event)
+        # 10-min per-pair debounce to prevent spam from rapid-fire trades
+        if pair:
+            now_ts = time.time()
+            if now_ts - self._big_result_ts.get(pair, 0) < 600:
+                return
+        # MED-6: handle all sign/currency-symbol orderings:
+        # "PnL: +$50.00", "PnL: -50.00", "PnL: $-50.00", "PnL: -€50", etc.
+        pnl_match = re.search(
+            r'PnL:\s*'
+            r'(?P<outer_sign>[+-]?)\s*'   # optional sign before currency symbol
+            r'[^\d+-]*'                    # optional currency symbol / spaces
+            r'(?P<inner_sign>[+-]?)\s*'   # optional sign after currency symbol
+            r'(?P<digits>[\d,]+\.?\d*)',
+            event,
+        )
         if not pnl_match:
             return
 
         try:
-            sign = pnl_match.group(1)
-            pnl = float(pnl_match.group(2).replace(",", ""))
+            outer = pnl_match.group("outer_sign")
+            inner = pnl_match.group("inner_sign")
+            sign = outer or inner  # prefer the outer sign if present
+            pnl = float(pnl_match.group("digits").replace(",", ""))
             if sign == "-":
                 pnl = -pnl
         except ValueError:
             return
 
-        if pnl > 50:
+        win_threshold = self._tg("big_win_threshold", 50)
+        loss_threshold = self._tg("big_loss_threshold", 50)
+
+        if pnl > win_threshold and self._tg("notify_on_big_win", True):
             sym = self._currency_symbol
             self._send(f"🔥 *Nice win!* +{sym}{pnl:,.2f}\n\nMomentum is on our side.")
-        elif pnl < -50:
+            if pair:
+                self._big_result_ts[pair] = time.time()
+        elif pnl < -loss_threshold and self._tg("notify_on_big_loss", True):
             sym = self._currency_symbol
             self._send(
                 f"📉 Took a hit: {sym}{pnl:,.2f}\n"
                 f"Part of the game. Risk management kept it contained."
             )
+            if pair:
+                self._big_result_ts[pair] = time.time()
 
     def start(self) -> None:
         if self._running:
@@ -183,13 +221,13 @@ class ProactiveEngine:
 
         # ─── 1. Morning Plan (06:00-09:00 UTC, once per day) ───
         if self._last_morning != today and 6 <= hour <= 9:
-            if self._personality.detail_level >= 2:
+            if self._tg("notify_morning_plan", True) and self._personality.detail_level >= 2:
                 await self._send_morning_plan(ctx)
             self._last_morning = today
 
         # ─── 2. Evening Summary (20:00-22:00 UTC, once per day) ───
         if self._last_evening != today and 20 <= hour <= 22:
-            if self._personality.detail_level >= 1:
+            if self._tg("notify_evening_summary", True) and self._personality.detail_level >= 1:
                 await self._send_evening_summary(ctx)
             self._last_evening = today
 
@@ -198,8 +236,12 @@ class ProactiveEngine:
 
         # ─── 4. Periodic proactive update ───
         now = time.time()
-        interval = self._personality.update_interval
-        if interval > 0 and (now - self._last_periodic) >= interval:
+        interval = self._tg("status_update_interval", self._personality.update_interval)
+        if (
+            self._tg("notify_periodic_update", True)
+            and interval > 0
+            and (now - self._last_periodic) >= interval
+        ):
             await self._send_periodic_update(ctx)
             self._last_periodic = now
 
@@ -220,8 +262,20 @@ class ProactiveEngine:
                 logger.debug(f"Snapshot record failed: {e}")
 
     def _check_price_movements(self, ctx: dict) -> None:
+        if not self._tg("notify_on_price_move", True):
+            return
+
         current_prices = ctx.get("raw_prices", {})
         positions = ctx.get("raw_positions", {})
+
+        # Threshold: use configured value, fall back to detail-level heuristic
+        configured_pct = self._tg("price_move_threshold_pct", None)
+        if configured_pct is not None:
+            threshold = float(configured_pct) / 100.0
+        else:
+            threshold = 0.03 if self._personality.detail_level >= 2 else 0.05
+
+        cooldown_secs = self._tg("price_move_cooldown_minutes", 20) * 60
 
         for pair in positions:
             price = current_prices.get(pair, 0)
@@ -229,9 +283,13 @@ class ProactiveEngine:
 
             if last > 0 and price > 0:
                 change = (price - last) / last
-                threshold = 0.03 if self._personality.detail_level >= 2 else 0.05
 
                 if abs(change) >= threshold:
+                    now_ts = time.time()
+                    if now_ts - self._price_alert_ts.get(pair, 0) < cooldown_secs:
+                        # Cooldown active — update baseline silently to avoid stale drift
+                        self._last_prices[pair] = price
+                        continue
                     d = "📈" if change > 0 else "📉"
                     sym = self._currency_symbol
                     self._send(
@@ -239,11 +297,15 @@ class ProactiveEngine:
                         f"{sym}{last:,.2f} → {sym}{price:,.2f}"
                     )
                     self._last_prices[pair] = price  # Reset after alert
+                    self._price_alert_ts[pair] = now_ts
             elif price > 0:
                 self._last_prices[pair] = price
 
     async def _send_periodic_update(self, ctx: dict) -> None:
-        events = self._drain_events()
+        # LOW-8: snapshot events first but only drain (remove from deque) after
+        # a successful LLM call so they are not lost on LLM failure.
+        with self._lock:
+            events = list(self._events)
 
         if not events and self._personality.detail_level < 3:
             return
@@ -265,6 +327,9 @@ class ProactiveEngine:
             except Exception:
                 pass
 
+        # HIGH-7: strip credential-like fields before sending to cloud LLM.
+        safe_ctx = self._sanitize_ctx_for_llm(ctx)
+
         prompt = f"""{PRO_TRADER_PERSONA}
 
 {self._personality.to_prompt_fragment()}
@@ -273,7 +338,7 @@ Quick check-in with your owner. Events since last update:
 {events_text}
 {stats_text}
 
-State: {json.dumps(ctx, indent=1, default=str)}
+State: {json.dumps(safe_ctx, indent=1, default=str)}
 Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}
 
 RULES:
@@ -288,6 +353,8 @@ RULES:
             )
             if r.strip().upper() != "SKIP":
                 self._send(r)
+            # LOW-8: only drain events after a successful LLM call.
+            self._drain_events()
         except Exception as e:
             logger.debug(f"Periodic update failed: {e}")
 
@@ -311,12 +378,15 @@ RULES:
             except Exception:
                 pass
 
+        # HIGH-7: strip credential-like fields before sending to cloud LLM.
+        safe_ctx = self._sanitize_ctx_for_llm(ctx)
+
         prompt = f"""{PRO_TRADER_PERSONA}
 
 It's morning. Give your owner a briefing.
 {overnight_text}
 
-Current state: {json.dumps(ctx, indent=1, default=str)}
+Current state: {json.dumps(safe_ctx, indent=1, default=str)}
 
 FORMAT:
 ☀️ *Morning Briefing — {datetime.now(timezone.utc).strftime('%b %d')}*
@@ -336,7 +406,8 @@ Keep it under 12 lines. Specific prices and levels."""
             )
             self._send(r)
         except Exception as e:
-            logger.debug(f"Morning plan failed: {e}")
+            # LOW-6: warn rather than silently debug-log; the user expects a morning briefing.
+            logger.warning(f"Morning plan failed: {e}")
 
     async def _send_evening_summary(self, ctx: dict) -> None:
         """Evening recap: how the day went, save to stats DB."""
@@ -347,15 +418,21 @@ Keep it under 12 lines. Specific prices and levels."""
                 bw = self._stats_db.get_best_worst_trades(hours=16)
                 port_range = self._stats_db.get_portfolio_range(hours=16)
                 sym = self._currency_symbol
+                # MED-11: only show portfolio range when we have actual samples.
+                port_range_text = ""
+                if port_range.get("samples", 0) > 0:
+                    port_range_text = (
+                        f"\n  Portfolio range: {sym}{port_range.get('low', 0):,.2f} - "
+                        f"{sym}{port_range.get('high', 0):,.2f}"
+                    )
                 day_text = (
                     f"\nToday's numbers:\n"
                     f"  Trades: {stats.get('total_trades', 0)} "
                     f"(W:{stats.get('winning', 0)} L:{stats.get('losing', 0)})\n"
                     f"  PnL: {sym}{stats.get('total_pnl', 0):+,.2f}\n"
                     f"  Volume: {sym}{stats.get('total_volume', 0):,.2f}\n"
-                    f"  Fees: {sym}{stats.get('total_fees', 0):,.2f}\n"
-                    f"  Portfolio range: {sym}{port_range.get('low', 0):,.2f} - "
-                    f"{sym}{port_range.get('high', 0):,.2f}"
+                    f"  Fees: {sym}{stats.get('total_fees', 0):,.2f}"
+                    f"{port_range_text}"
                 )
 
                 # Save daily summary
@@ -373,12 +450,15 @@ Keep it under 12 lines. Specific prices and levels."""
             except Exception as e:
                 logger.debug(f"Evening stats gathering failed: {e}")
 
+        # HIGH-7: strip credential-like fields before sending to cloud LLM.
+        safe_ctx = self._sanitize_ctx_for_llm(ctx)
+
         prompt = f"""{PRO_TRADER_PERSONA}
 
 End of day wrap-up for your owner.
 {day_text}
 
-Current state: {json.dumps(ctx, indent=1, default=str)}
+Current state: {json.dumps(safe_ctx, indent=1, default=str)}
 
 FORMAT:
 🌙 *Evening Wrap — {datetime.now(timezone.utc).strftime('%b %d')}*
@@ -397,7 +477,8 @@ Keep it under 10 lines. Be honest about losses."""
             )
             self._send(r)
         except Exception as e:
-            logger.debug(f"Evening summary failed: {e}")
+            # LOW-6: warn rather than silently debug-log.
+            logger.warning(f"Evening summary failed: {e}")
 
     def _run_scheduled_reports(self, ctx: dict) -> None:
         """Execute any due scheduled reports."""
@@ -444,9 +525,12 @@ Keep it under 10 lines. Be honest about losses."""
             elif cron.endswith("d"):
                 interval_hours = int(cron[:-1]) * 24
             else:
-                interval_hours = 1  # Default hourly
+                # MED-12: log unrecognised cron expressions so misconfigurations are visible.
+                logger.warning(f"Unrecognised cron expression {cron!r} for schedule {sched.get('name')!r} — defaulting to hourly")
+                interval_hours = 1
         except (ValueError, TypeError):
-            interval_hours = 1  # Fallback to hourly on malformed cron
+            logger.warning(f"Malformed cron expression {cron!r} for schedule {sched.get('name')!r} — defaulting to hourly")
+            interval_hours = 1
 
         return (now - last).total_seconds() >= interval_hours * 3600
 
@@ -478,3 +562,29 @@ Keep it under 10 lines. Be honest about losses."""
             while self._events:
                 events.append(self._events.popleft())
         return events
+
+    # HIGH-7: fields whose names suggest credentials/secrets that should never
+    # leave this process, even when ctx is sent to cloud LLM providers.
+    _SENSITIVE_KEY_FRAGMENTS: frozenset[str] = frozenset({
+        "key", "secret", "password", "token", "credential",
+        "auth", "apikey", "api_key", "api_secret", "private",
+    })
+
+    def _sanitize_ctx_for_llm(self, ctx: dict) -> dict:
+        """Return a copy of *ctx* safe to send to external LLM providers.
+
+        Keeps all financial and trading fields (portfolio values, positions,
+        prices, PnL, etc.) because that is exactly what the LLM needs to give
+        useful trading advice.  Only strips fields whose names suggest they
+        contain credentials or internal secrets.
+        """
+        sanitized = {}
+        for k, v in ctx.items():
+            k_lower = k.lower().replace("-", "_")
+            if any(frag in k_lower for frag in self._SENSITIVE_KEY_FRAGMENTS):
+                continue  # drop credential-like fields
+            if isinstance(v, dict):
+                sanitized[k] = self._sanitize_ctx_for_llm(v)
+            else:
+                sanitized[k] = v
+        return sanitized

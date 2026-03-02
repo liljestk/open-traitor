@@ -14,6 +14,19 @@ from src.utils import llm_optimizer
 
 logger = get_logger("core.pipeline")
 
+
+def _build_accuracy_ctx(
+    pair_accuracy: dict | None, weighted_acc: dict
+) -> dict | None:
+    """Merge raw pair accuracy with signal-strength-weighted accuracy for LLM context."""
+    base = dict(pair_accuracy) if pair_accuracy else {}
+    if weighted_acc:
+        base["weighted_accuracy_pct"] = weighted_acc.get("weighted_accuracy_pct")
+        base["weighted_sample_count"] = weighted_acc.get("weighted_total")
+        base["accuracy_by_signal_type"] = weighted_acc.get("by_type")
+    return base or None
+
+
 class PipelineManager:
     """Manages the execution of the main trading pipeline across all pairs."""
 
@@ -52,6 +65,9 @@ class PipelineManager:
         if not signals:
             return None
 
+        # ── Dynamic weights from ALE ensemble optimizer ───────────────
+        dynamic_weights = self._get_dynamic_weights()
+
         action_scores: dict[str, float] = {}  # action → total weighted confidence
         total_weight = 0.0
         breakdown: list[dict] = []
@@ -59,7 +75,7 @@ class PipelineManager:
         for name, sig in signals.items():
             action = sig.get("action", "hold")
             conf = sig.get("confidence", 0.0)
-            weight = self._STRATEGY_WEIGHTS.get(name, 0.3)
+            weight = dynamic_weights.get(name, self._STRATEGY_WEIGHTS.get(name, 0.3))
 
             weighted_conf = conf * weight
             action_scores[action] = action_scores.get(action, 0) + weighted_conf
@@ -99,6 +115,34 @@ class PipelineManager:
             "n_strategies": n_strategies,
             "breakdown": breakdown,
         }
+
+    def _get_dynamic_weights(self) -> dict[str, float]:
+        """Fetch learned strategy weights from ALE ensemble optimizer.
+
+        Falls back to static ``_STRATEGY_WEIGHTS`` on any error.
+        """
+        try:
+            lm = getattr(self.orchestrator, "learning_manager", None)
+            if lm and lm.ensemble:
+                # Detect current regime from latest state
+                regime = getattr(self.orchestrator.state, "market_regime", "unknown")
+                return lm.ensemble.get_weights(market_regime=regime)
+        except Exception:
+            pass
+        return dict(self._STRATEGY_WEIGHTS)
+
+    def _calibrate_confidence(self, raw_confidence: float, pair: str) -> float:
+        """Run raw LLM confidence through the ALE calibrator.
+
+        Returns calibrated value, or raw_confidence on any error.
+        """
+        try:
+            lm = getattr(self.orchestrator, "learning_manager", None)
+            if lm and lm.calibrator:
+                return lm.calibrator.calibrate(raw_confidence, pair)
+        except Exception:
+            pass
+        return raw_confidence
 
     async def run_pipeline(self, pair: str) -> None:
         """Run the full analysis → strategy → risk → execute pipeline for a pair asynchronously."""
@@ -381,6 +425,16 @@ class PipelineManager:
 
         # Step 2: Market Analysis
         _step_t = time.monotonic()
+
+        # ALE: Inject learned prompt supplements
+        _learned_context = ""
+        try:
+            lm = getattr(orch, "learning_manager", None)
+            if lm and lm.prompt_evolver:
+                _learned_context = lm.prompt_evolver.format_supplements("market_analyst")
+        except Exception:
+            pass
+
         analysis_result = await orch.market_analyst.execute({
             "pair": pair,
             "candles": candles,
@@ -398,10 +452,35 @@ class PipelineManager:
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
             "exchange": exchange_name,
+            "learned_context": _learned_context,
         })
 
         signal = analysis_result.get("signal", {})
         _timings["analyst"] = time.monotonic() - _step_t
+
+        # ─── ALE: Calibrate raw LLM confidence ───
+        raw_conf = signal.get("confidence", 0)
+        calibrated_conf = self._calibrate_confidence(raw_conf, pair)
+        if calibrated_conf != raw_conf:
+            signal["raw_confidence"] = raw_conf
+            signal["confidence"] = calibrated_conf
+            logger.debug(f"📐 {pair} confidence calibrated: {raw_conf:.3f} → {calibrated_conf:.3f}")
+
+        # ─── Signal-type context (for weighted accuracy + risk sizing) ───
+        signal_type = signal.get("signal_type", "neutral")
+        weighted_acc: dict = {}
+        signal_type_win_rate: float | None = None
+        try:
+            weighted_acc = await asyncio.to_thread(
+                orch.stats_db.get_weighted_pair_accuracy, pair
+            )
+            by_type = weighted_acc.get("by_type", {})
+            st_data = by_type.get(signal_type, {})
+            wt_pct = st_data.get("weighted_accuracy_pct")
+            if wt_pct is not None:
+                signal_type_win_rate = wt_pct / 100.0
+        except Exception as _e:
+            logger.debug(f"Weighted accuracy unavailable for {pair}: {_e}")
 
         # ─── Training Data: record analysis decision ───
         if tc and tc.enabled:
@@ -425,8 +504,9 @@ class PipelineManager:
             return
 
         confidence = signal.get("confidence", 0)
-        notify_threshold = orch.config.get("telegram", {}).get("notify_on_signal_confidence", 0.8)
-        if confidence >= notify_threshold and orch.telegram:
+        tg_cfg = orch.config.get("telegram", {})
+        notify_threshold = tg_cfg.get("notify_on_signal_confidence", 0.65)
+        if tg_cfg.get("notify_on_signal", True) and confidence >= notify_threshold and orch.telegram:
             # Cycle-3 fix: find the signal for THIS pair instead of signals[-1]
             # which races with concurrent pipelines via asyncio.gather.
             signal_obj = next(
@@ -465,7 +545,7 @@ class PipelineManager:
             "sentiment": sentiment_data,
             "strategy_signals": strategy_signals,
             "confidence_adjustment": pair_confidence_adj,
-            "prediction_accuracy": pair_accuracy,
+            "prediction_accuracy": _build_accuracy_ctx(pair_accuracy, weighted_acc),
             "fee_context": fee_context,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
@@ -526,6 +606,9 @@ class PipelineManager:
             "correlation_matrix": correlation_matrix,
             "atr": tech_analysis.get("atr") if tech_analysis else None,
             "exchange": exchange_name,
+            # Signal strength context for position sizing
+            "signal_type": signal_type,
+            "signal_type_win_rate": signal_type_win_rate,
         })
 
         if not risk_result.get("approved"):
@@ -832,10 +915,11 @@ class PipelineManager:
                 f"at {format_currency(risk_result['price'])} "
                 f"(confidence: {format_percentage(risk_result.get('confidence', 0))})"
             )
-            orch.chat_handler.queue_event(f"Trade executed: {trade_event}")
-
-            if orch.telegram and orch.config.get("telegram", {}).get("notify_on_trade", True):
-                orch.telegram.send_trade_notification(trade_event)
+            # severity="trade" triggers an instant Telegram message via ProactiveEngine
+            # (no second send_trade_notification needed — that was a duplicate).
+            orch.chat_handler.queue_event(
+                f"Trade executed: {trade_event}", severity="trade", pair=pair
+            )
 
             # ─── Training Data: record execution decision ───
             if tc and tc.enabled:

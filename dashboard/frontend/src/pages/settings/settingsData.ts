@@ -90,11 +90,26 @@ export const FIELD_DESCRIPTIONS: Record<string, Record<string, string>> = {
     auto_approve_up_to: 'Auto-approve high-stakes trades up to this amount.',
   },
   telegram: {
-    status_update_interval: 'Seconds between automatic status updates sent to Telegram.',
-    notify_on_trade: 'Send a Telegram notification whenever a trade is executed.',
-    notify_on_signal_confidence: 'Send notification when signal confidence exceeds this threshold.',
+    // Trade & Signal Alerts
+    notify_on_trade: 'Send a Telegram message whenever a trade is executed.',
+    notify_on_signal: 'Send a Telegram message when a trading signal is detected.',
+    notify_on_signal_confidence: 'Minimum AI confidence (0–1) a signal must reach before a notification is sent. 0.65 = 65%.',
+    // Win / Loss Highlights
+    notify_on_big_win: 'Celebrate trades with a profit above the win threshold.',
+    big_win_threshold: 'Profit in USD that qualifies a trade as a "big win" (sends a celebratory message).',
+    notify_on_big_loss: 'Alert when a trade loss exceeds the loss threshold.',
+    big_loss_threshold: 'Loss in USD (absolute value) that triggers a "big loss" alert.',
+    // Price Movement Alerts
+    notify_on_price_move: 'Alert when a held pair moves significantly in price.',
+    price_move_threshold_pct: 'Price change % required to send an alert (e.g. 5 = 5%). Applied to open positions only.',
+    price_move_cooldown_minutes: 'Minutes to wait before sending another price alert for the same pair.',
+    // Scheduled Messages
+    notify_morning_plan: 'Send a morning briefing with overnight recap and day plan (06:00–09:00 UTC).',
+    notify_evening_summary: 'Send an evening wrap-up with the day\'s performance (20:00–22:00 UTC).',
+    notify_periodic_update: 'Send periodic LLM-generated check-in messages.',
+    status_update_interval: 'Seconds between periodic check-in messages (0 = disabled).',
     daily_summary: 'Send a daily performance summary to Telegram.',
-    daily_summary_hour: 'Hour of day (0–23) to send the daily summary.',
+    daily_summary_hour: 'Hour of day (0–23 UTC) to send the daily summary.',
   },
   news: {
     fetch_interval: 'Seconds between news feed fetches.',
@@ -372,8 +387,10 @@ export const SECTION_SUMMARY: Record<string, Array<{ key: string; label: string 
     { key: 'trade_size_multiplier', label: 'Size ×' },
   ],
   telegram: [
-    { key: 'notify_on_trade', label: 'Trade Alerts' },
-    { key: 'daily_summary', label: 'Daily Summary' },
+    { key: 'notify_on_trade', label: 'Trades' },
+    { key: 'notify_on_signal', label: 'Signals' },
+    { key: 'notify_on_price_move', label: 'Price Moves' },
+    { key: 'notify_morning_plan', label: 'Morning' },
   ],
   llm: [
     { key: 'temperature', label: 'Temp' },
