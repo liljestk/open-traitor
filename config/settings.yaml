@@ -22,6 +22,7 @@ trading:
   scan_volume_threshold: 1000
   scan_movement_threshold_pct: 1.0
   screener_interval_cycles: 5
+  style_modifiers: []
 absolute_rules:
   max_single_trade: 500
   max_daily_spend: 2000

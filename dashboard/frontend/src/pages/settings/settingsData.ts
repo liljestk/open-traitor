@@ -246,6 +246,16 @@ export const PRESET_CONFIG: Record<string, { label: string; color: string; icon:
 export const TIER_COLORS: Record<string, string> = { safe: '#22c55e', semi_safe: '#f59e0b', blocked: '#ef4444' }
 export const TIER_LABELS: Record<string, string> = { safe: 'Telegram Safe', semi_safe: 'Semi-Safe', blocked: 'Dashboard Only' }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   Style Modifier config (visual only — metadata comes from API)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+export const MODIFIER_COLORS: Record<string, string> = {
+  prefer_maker:          '#a78bfa',  // purple
+  high_conviction_only:  '#f472b6',  // pink
+  wider_targets:         '#34d399',  // green
+}
+
 export const FIELD_LABELS: Record<string, string> = {
   max_single_trade: 'Max Single Trade',
   max_daily_spend: 'Max Daily Spend',

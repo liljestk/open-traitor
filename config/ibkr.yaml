@@ -149,13 +149,16 @@ news:
   - stockmarket
   - europeanstocks
   rss_feeds:
-  - https://feeds.finance.yahoo.com/rss/2.0/headline
+  - https://finance.yahoo.com/news/rssindex
   - https://www.cnbc.com/id/100003114/device/rss/rss.html
   - https://feeds.marketwatch.com/marketwatch/topstories
   - https://feeds.bloomberg.com/markets/news.rss
   - https://www.theguardian.com/business/rss
   - https://www.ecb.europa.eu/rss/press.html
   - https://rss.dw.com/rdf/rss-en-bus
+  - https://seekingalpha.com/market_currents.xml
+  - https://www.investing.com/rss/news.rss
+  - https://www.ft.com/?format=rss
 risk:
   loss_cooldown_seconds: 600
   max_drawdown_pct: 0.2

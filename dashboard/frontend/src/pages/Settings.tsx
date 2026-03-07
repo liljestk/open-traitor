@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
+  fetchStyleModifiers,
 } from '../api'
 import {
   X, AlertTriangle, Check,
@@ -9,13 +10,13 @@ import {
   DollarSign,
   RefreshCw, Search,
   Minus, Plus, Activity, ShieldCheck,
-  Sliders,
+  Sliders, Timer, Target, Expand,
 } from 'lucide-react'
 import { LLMProvidersSection } from './settings/LLMProviders'
 import PageTransition from '../components/PageTransition'
 import {
   SECTION_CATEGORIES, SECTION_ORDER, PRESET_CONFIG,
-  TIER_COLORS, TIER_LABELS,
+  TIER_COLORS, TIER_LABELS, MODIFIER_COLORS,
   type CategoryKey,
   detectActivePreset, buildPresetDiff, formatFieldValue,
   btnStyle, inputBase,
@@ -322,6 +323,7 @@ export default function Settings() {
   const queryClient = useQueryClient()
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
   const { data: presetsData } = useQuery({ queryKey: ['presets'], queryFn: fetchPresets })
+  const { data: modifiersData } = useQuery({ queryKey: ['style-modifiers'], queryFn: fetchStyleModifiers })
 
   const mutation = useMutation({
     mutationFn: updateSettings,
@@ -350,6 +352,20 @@ export default function Settings() {
   useEffect(() => {
     if (pendingPreset !== null) setPendingPreset(null)
   }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleToggleModifier = async (key: string) => {
+    const current: string[] = (data?.settings as any)?.trading?.style_modifiers ?? []
+    const next = current.includes(key) ? current.filter(m => m !== key) : [...current, key]
+    try {
+      await mutation.mutateAsync({ section: 'trading', updates: { style_modifiers: next } })
+      queryClient.invalidateQueries({ queryKey: ['style-modifiers'] })
+      const label = modifiersData?.modifiers?.[key]?.label ?? key
+      const action = next.includes(key) ? 'enabled' : 'disabled'
+      setToast({ message: `${label} ${action}`, type: 'success' })
+    } catch (e: unknown) {
+      setToast({ message: `Failed to toggle modifier: ${e instanceof Error ? e.message : String(e)}`, type: 'error' })
+    }
+  }
 
   const handleSaveSection = async (section: string, updates: Record<string, unknown>) => {
     const settings = data?.settings ?? {}
@@ -606,6 +622,70 @@ export default function Settings() {
           </div>
         )}
       </div>
+
+      {/* ─── Style Modifiers ─── */}
+      {modifiersData && !searchQuery && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Style Modifiers
+            </span>
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 10,
+              background: '#8b949e18', color: '#8b949e', fontWeight: 600, border: '1px solid #8b949e22',
+            }}>Stack with any preset</span>
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {Object.entries(modifiersData.modifiers).map(([key, meta]) => {
+              const isActive = modifiersData.active.includes(key)
+              const color = MODIFIER_COLORS[key] ?? '#8b949e'
+              const applicableHere = meta.exchanges.includes(modifiersData.asset_class)
+              const iconMap: Record<string, typeof Timer> = { timer: Timer, target: Target, expand: Expand }
+              const Icon = iconMap[meta.icon] ?? Sliders
+              return (
+                <button key={key}
+                  onClick={() => handleToggleModifier(key)}
+                  title={!applicableHere ? `No effect on ${modifiersData.asset_class} (${meta.exchanges.join('/')} only)` : meta.desc}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
+                    background: isActive
+                      ? `linear-gradient(135deg, ${color}12, ${color}20)`
+                      : '#0d1117',
+                    border: isActive ? `2px solid ${color}99` : `1px solid ${color}44`,
+                    borderRadius: 12,
+                    padding: isActive ? '10px 16px' : '11px 17px',
+                    cursor: 'pointer',
+                    color: '#e6edf3', minWidth: 150, transition: 'all 0.2s',
+                    opacity: applicableHere ? 1 : 0.5,
+                    boxShadow: isActive ? `0 0 20px ${color}20` : 'none',
+                  }}
+                >
+                  <Icon size={16} style={{ color }} />
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{meta.label}</div>
+                    <div style={{ fontSize: 10, color: isActive ? color + 'cc' : '#6e7681', marginTop: 1 }}>
+                      {meta.desc.length > 60 ? meta.desc.slice(0, 57) + '...' : meta.desc}
+                    </div>
+                    {!applicableHere && (
+                      <div style={{ fontSize: 9, color: '#f59e0b', marginTop: 2 }}>
+                        {meta.exchanges.join('/') } only
+                      </div>
+                    )}
+                  </div>
+                  {isActive && (
+                    <span style={{
+                      position: 'absolute', top: -6, right: -6,
+                      width: 18, height: 18, borderRadius: '50%',
+                      background: color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      boxShadow: `0 0 8px ${color}70`,
+                    }}><Check size={10} color="#fff" strokeWidth={3} /></span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ─── RPM Entity Budget (trading & intelligence tabs) ─── */}
       {data.rpm_budget && !searchQuery && (activeTab === 'trading' || activeTab === 'intelligence') && (

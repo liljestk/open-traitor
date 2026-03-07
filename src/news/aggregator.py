@@ -21,6 +21,7 @@ import feedparser
 import requests
 
 from src.utils.logger import get_logger
+from src.utils.security import sanitize_input
 
 logger = get_logger("news.aggregator")
 
@@ -319,8 +320,8 @@ class NewsAggregator:
                     subreddit = self._praw_reddit.subreddit(sub_name)
                     for post in subreddit.hot(limit=10):
                         article = NewsArticle(
-                            title=post.title,
-                            summary=post.selftext[:500] if post.selftext else "",
+                            title=sanitize_input(post.title, max_length=300),
+                            summary=sanitize_input(post.selftext[:500], max_length=500) if post.selftext else "",
                             source=f"reddit/r/{sub_name}",
                             url=f"https://reddit.com{post.permalink}",
                             published=datetime.fromtimestamp(post.created_utc, tz=timezone.utc),
@@ -351,8 +352,8 @@ class NewsAggregator:
                 for item in data.get("data", {}).get("children", []):
                     post = item.get("data", {})
                     article = NewsArticle(
-                        title=post.get("title", ""),
-                        summary=post.get("selftext", "")[:500],
+                        title=sanitize_input(post.get("title", ""), max_length=300),
+                        summary=sanitize_input(post.get("selftext", "")[:500], max_length=500),
                         source=f"reddit/r/{sub_name}",
                         url=f"https://reddit.com{post.get('permalink', '')}",
                         published=datetime.fromtimestamp(
@@ -367,16 +368,42 @@ class NewsAggregator:
         logger.info(f"📰 Fetched {len(articles)} Reddit posts (JSON fallback)")
         return articles
 
+    @staticmethod
+    def _domain_tag(url: str) -> str:
+        """Extract a domain-based tag from a URL for routing.
+
+        Example: 'https://feeds.bloomberg.com/markets/news.rss' → 'feeds_bloomberg_com'
+        """
+        m = re.search(r'//(?:www\.)?([^/]+)', url)
+        return m.group(1).lower().replace(".", "_") if m else ""
+
     def fetch_rss(self) -> list[NewsArticle]:
         """Fetch articles from RSS feeds."""
         articles = []
 
         for feed_url in self.rss_feeds:
             try:
-                feed = feedparser.parse(feed_url)
-                source_name = feed.feed.get("title", feed_url)
+                # SSRF protection: only allow http/https schemes
+                if not feed_url.lower().startswith(("https://", "http://")):
+                    logger.warning(f"RSS feed URL rejected (invalid scheme): {feed_url}")
+                    continue
 
-                for entry in feed.entries[:10]:
+                # Use requests with User-Agent to avoid being blocked,
+                # then parse the content with feedparser.
+                resp = requests.get(
+                    feed_url,
+                    timeout=15,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; auto-traitor-bot/0.1)"},
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"RSS HTTP {resp.status_code} for {feed_url}")
+                    continue
+
+                feed = feedparser.parse(resp.content)
+                source_name = feed.feed.get("title", feed_url)
+                domain_tag = self._domain_tag(feed_url)
+
+                for entry in feed.entries[:15]:
                     published = None
                     if hasattr(entry, "published_parsed") and entry.published_parsed:
                         published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
@@ -385,13 +412,22 @@ class NewsAggregator:
                     # Strip HTML tags from summary
                     summary = re.sub(r"<[^>]+>", "", summary)[:500]
 
+                    # Tags include: generic "rss" marker, the domain-based id
+                    # (used by profile routing), and the human-readable source name.
+                    tags = ["rss"]
+                    if domain_tag:
+                        tags.append(domain_tag)
+                    title_tag = source_name.lower().replace(" ", "_")
+                    if title_tag not in tags:
+                        tags.append(title_tag)
+
                     article = NewsArticle(
-                        title=entry.get("title", ""),
-                        summary=summary,
+                        title=sanitize_input(entry.get("title", ""), max_length=300),
+                        summary=sanitize_input(summary, max_length=500),
                         source=source_name,
                         url=entry.get("link", ""),
                         published=published,
-                        tags=["rss", source_name.lower().replace(" ", "_")],
+                        tags=tags,
                     )
                     articles.append(article)
             except Exception as e:
@@ -465,7 +501,7 @@ class NewsAggregator:
                             pass
 
                     articles.append(NewsArticle(
-                        title=title,
+                        title=sanitize_input(title, max_length=300),
                         summary=f"IBKR News for {pair}",
                         source=f"IBKR-{n.get('provider', 'News')}",
                         url=n.get("article_id", ""),

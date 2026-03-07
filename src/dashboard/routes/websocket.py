@@ -10,13 +10,12 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 import src.dashboard.deps as deps
+from src.dashboard import auth
 from src.utils.logger import get_logger
 
 logger = get_logger("dashboard.websocket")
 
 router = APIRouter(tags=["WebSocket"])
-
-_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -43,27 +42,34 @@ async def ws_live(websocket: WebSocket):
             "ts": "2025-01-01T00:00:00Z"
         }
     """
-    if _DASHBOARD_API_KEY:
-        # Try X-API-Key header first; fall back to Sec-WebSocket-Protocol
-        # (browsers can't set custom headers on WS, so the frontend encodes
-        # the key as a subprotocol: "apikey.<base64_key>")
-        api_key = websocket.headers.get("x-api-key", "")
-        if not api_key:
+    if auth.is_auth_configured():
+        # Check session cookie from query param or legacy API key via subprotocol
+        session_token = websocket.cookies.get("ot_session", "")
+        api_key = ""
+        _auth_subprotocol = None
+        if not session_token:
+            # Browsers can't set custom headers on WS, so the frontend encodes
+            # the key as a subprotocol: "apikey.<base64_key>"
             for proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
                 proto = proto.strip()
                 if proto.startswith("apikey."):
                     try:
                         api_key = base64.b64decode(proto[7:]).decode("utf-8")
+                        _auth_subprotocol = proto
                     except Exception:
                         pass
                     break
-        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-            await websocket.close(code=1008, reason="Invalid or missing API key")
+            api_key = api_key or websocket.headers.get("x-api-key", "")
+
+        authenticated = False
+        if session_token and auth.validate_session(session_token):
+            authenticated = True
+        elif api_key and auth._LEGACY_API_KEY and hmac.compare_digest(api_key, auth._LEGACY_API_KEY):
+            authenticated = True
+
+        if not authenticated:
+            await websocket.close(code=1008, reason="Authentication required")
             return
-    # When no API key is configured, network-level access control is handled
-    # by the Docker port binding (127.0.0.1:8090) — same as the HTTP
-    # middleware.  Checking websocket.client.host here would break Docker
-    # setups where the client appears as the bridge-network gateway IP.
 
     # L22 fix: echo the auth subprotocol so browsers don't reject per RFC 6455
     _accepted_subprotocol = None

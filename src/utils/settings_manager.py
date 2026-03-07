@@ -75,6 +75,7 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "scan_volume_threshold":         {"type": float, "min": 0, "max": 1_000_000_000},
     "scan_movement_threshold_pct":   {"type": float, "min": 0.0, "max": 100.0},
     "screener_interval_cycles":      {"type": int,   "min": 1, "max": 100},
+    "style_modifiers":               {"type": list},
 }
 
 _RISK_SCHEMA: dict[str, dict[str, Any]] = {
@@ -600,6 +601,35 @@ PRESETS = {
     "aggressive":   PRESET_AGGRESSIVE,
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Style Modifiers — orthogonal add-ons to presets
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Valid modifier keys (used for validation).
+VALID_STYLE_MODIFIERS = frozenset({"prefer_maker", "high_conviction_only", "wider_targets"})
+
+# Metadata for UI and help text.
+STYLE_MODIFIER_META: dict[str, dict[str, Any]] = {
+    "prefer_maker": {
+        "label": "Prefer Limit Orders",
+        "desc": "Force limit (maker) orders for all buys — lower fees on crypto exchanges.",
+        "exchanges": ["crypto"],  # No-op on equity (flat per-share fees)
+        "icon": "timer",
+    },
+    "high_conviction_only": {
+        "label": "High Conviction Only",
+        "desc": "Only trade strong_buy / strong_sell signals — skip weak and moderate signals.",
+        "exchanges": ["crypto", "equity"],
+        "icon": "target",
+    },
+    "wider_targets": {
+        "label": "Wider Targets",
+        "desc": "Take-profit ×2, stop-loss ×1.33 — let winners run on high-accuracy pairs.",
+        "exchanges": ["crypto", "equity"],
+        "icon": "expand",
+    },
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Core I/O
@@ -966,6 +996,22 @@ def get_preset_summary(preset_name: str) -> str:
     if "max_open_positions" in trading:
         lines.append(f"• Max open positions: {trading['max_open_positions']}")
 
+    return "\n".join(lines)
+
+
+def get_style_modifiers_summary(modifiers: list[str] | None = None, path: str | None = None) -> str:
+    """Return human-readable summary of active style modifiers."""
+    if modifiers is None:
+        cfg = load_settings(path)
+        modifiers = cfg.get("trading", {}).get("style_modifiers", [])
+    if not modifiers:
+        return ""
+    lines = ["\n🎛 *Active Style Modifiers:*"]
+    for mod in modifiers:
+        meta = STYLE_MODIFIER_META.get(mod)
+        if meta:
+            exchanges = ", ".join(meta["exchanges"])
+            lines.append(f"• {meta['label']} ({exchanges})")
     return "\n".join(lines)
 
 

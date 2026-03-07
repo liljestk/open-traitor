@@ -48,6 +48,9 @@ class ExecutorAgent(BaseAgent):
         # (e.g. stop-loss + trailing stop firing simultaneously).
         self._closing_trades: set[str] = set()
         self._closing_trades_lock = threading.Lock()
+        self._style_modifiers: set[str] = set(
+            config.get("trading", {}).get("style_modifiers", [])
+        )
 
     def _should_use_limit(self, trade_info: dict) -> bool:
         """
@@ -65,6 +68,19 @@ class ExecutorAgent(BaseAgent):
         """
         if not self.use_limit_orders:
             return False
+
+        # prefer_maker modifier: force limit orders for all buys on crypto.
+        # On equity, maker/taker fees are identical (flat per-share), so skip.
+        if "prefer_maker" in self._style_modifiers:
+            action = trade_info.get("action", "hold")
+            reason = trade_info.get("reasoning", "").lower()
+            is_urgent_exit = any(
+                kw in reason
+                for kw in ["stop_loss", "stop loss", "trailing stop", "take_profit", "take profit"]
+            )
+            is_crypto = getattr(self.exchange, "asset_class", "crypto") == "crypto"
+            if action == "buy" and is_crypto and not is_urgent_exit:
+                return True
 
         order_type = trade_info.get("order_type", "auto")
         if order_type == "market":

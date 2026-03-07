@@ -158,10 +158,6 @@ class AbsoluteRules:
                     (today_start,),
                 )
                 spend_row = cur.fetchone()
-                if row:
-                    self._daily_trade_count = int(row["cnt"])
-                if spend_row:
-                    self._daily_spend = float(spend_row["spend"])
 
                 cur.execute(
                     """SELECT COALESCE(SUM(ABS(pnl)), 0) as loss
@@ -169,10 +165,17 @@ class AbsoluteRules:
                     (today_start,),
                 )
                 loss_row = cur.fetchone()
-                if loss_row:
-                    self._daily_loss = float(loss_row["loss"])
 
-                self._last_reset_date = datetime.now(timezone.utc)
+                # Atomically update all counters under lock
+                with self._lock:
+                    if row:
+                        self._daily_trade_count = int(row["cnt"])
+                    if spend_row:
+                        self._daily_spend = float(spend_row["spend"])
+                    if loss_row:
+                        self._daily_loss = float(loss_row["loss"])
+                    self._last_reset_date = datetime.now(timezone.utc)
+
                 logger.info(
                     f"\U0001f4c5 Daily counters seeded from DB \u2014 "
                     f"spend={self._daily_spend:.2f}, loss={self._daily_loss:.2f}, "
