@@ -25,10 +25,25 @@ class RiskManagerAgent(BaseAgent):
 
     Position sizing hierarchy:
       1. Kelly Criterion (half-Kelly) based on historical win rate
+         — strong signals can override with their signal-type-specific win rate
       2. ATR volatility adjustment
       3. Correlation penalty for correlated positions
-      4. Cap by max_position_pct config
+      4. Signal-strength multiplier (strong_buy=1.0×, buy=0.8×, weak_buy=0.6×)
+      5. Strong-signal floor (prevents near-zero sizes for new/poor-history assets)
+      6. Cap by max_position_pct config
     """
+
+    # Position size multipliers by signal type.
+    # Strong signals get full allocation; weaker signals are sized proportionally smaller.
+    _SIGNAL_STRENGTH_MULT: dict[str, float] = {
+        "strong_buy":  1.00,
+        "buy":         0.80,
+        "weak_buy":    0.60,
+        "strong_sell": 1.00,
+        "sell":        0.80,
+        "weak_sell":   0.60,
+    }
+    _STRONG_SIGNAL_TYPES: frozenset[str] = frozenset({"strong_buy", "strong_sell"})
 
     def __init__(self, llm, state, config, rules: AbsoluteRules,
                  portfolio_scaler: PortfolioScaler | None = None):
@@ -185,6 +200,8 @@ class RiskManagerAgent(BaseAgent):
         avg_win = context.get("avg_win", 0)
         avg_loss = context.get("avg_loss", 0)
         correlation_matrix = context.get("correlation_matrix")
+        signal_type = context.get("signal_type", "neutral")
+        signal_type_win_rate = context.get("signal_type_win_rate")  # float | None
 
         action = proposal.get("action", "hold")
 
@@ -317,10 +334,24 @@ class RiskManagerAgent(BaseAgent):
             }
 
         # ===== POSITION SIZING (tier-scaled) =====
-        # Step 1: Start with Kelly Criterion or tier max
+        # Step 1: Kelly Criterion — use signal-type-specific win rate for strong signals
+        # when available (overrides global win rate, improving sizing for assets where
+        # strong signals historically outperform the overall track record).
+        effective_win_rate = win_rate
+        if (
+            signal_type in self._STRONG_SIGNAL_TYPES
+            and signal_type_win_rate is not None
+            and signal_type_win_rate > win_rate
+        ):
+            effective_win_rate = signal_type_win_rate
+            self.logger.info(
+                f"Strong signal override: using {signal_type} win_rate "
+                f"{signal_type_win_rate:.0%} (global {win_rate:.0%})"
+            )
+
         if self.use_kelly and action == "buy" and portfolio_value > 0:
             kelly_frac = self._compute_kelly_size(
-                portfolio_value, win_rate, avg_win, avg_loss
+                portfolio_value, effective_win_rate, avg_win, avg_loss
             )
             # Cap Kelly by the tier's max_position_pct, not just config
             kelly_frac = min(kelly_frac, effective_max_position_pct)
@@ -343,6 +374,35 @@ class RiskManagerAgent(BaseAgent):
             corr_mult = self._compute_correlation_penalty(pair, correlation_matrix)
             if corr_mult < 1.0:
                 max_position *= corr_mult
+
+        # Step 4: Signal-strength multiplier
+        # strong_buy=1.0×, buy=0.8×, weak_buy=0.6× (mirrors sell-side symmetrically)
+        if action == "buy":
+            strength_mult = self._SIGNAL_STRENGTH_MULT.get(signal_type, 0.80)
+            max_position *= strength_mult
+            if strength_mult != 1.0:
+                self.logger.info(
+                    f"Signal strength ({signal_type}): size × {strength_mult:.0%} → "
+                    f"max {max_position:,.2f}"
+                )
+
+        # Step 5: Strong-signal floor (override quality penalty for new/poor-history assets)
+        # A confident strong signal should not be near-zero-sized just because Kelly
+        # produced a tiny fraction from a thin/bad historical track record.
+        strong_signal_min_pct = self.risk_config.get("strong_signal_min_position_pct", 0.015)
+        if (
+            action == "buy"
+            and signal_type in self._STRONG_SIGNAL_TYPES
+            and proposal_confidence >= 0.80
+            and portfolio_value > 0
+        ):
+            floor = portfolio_value * strong_signal_min_pct
+            if max_position < floor:
+                max_position = floor
+                self.logger.info(
+                    f"Strong-signal floor applied: min {strong_signal_min_pct:.1%} "
+                    f"of portfolio ({floor:,.2f})"
+                )
 
         if quote_amount > max_position:
             original = quote_amount

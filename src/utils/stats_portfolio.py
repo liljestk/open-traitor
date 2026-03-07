@@ -140,7 +140,12 @@ class PortfolioMixin:
                     return [dict(r) for r in rows]
                 except Exception:
                     conn.rollback()  # Reset aborted transaction before next query
-                    pass  # exchange column doesn't exist in this DB
+                    # MED-3: log so misconfigured/legacy DBs are visible in logs.
+                    from src.utils.logger import get_logger as _get_logger
+                    _get_logger("stats.portfolio").warning(
+                        "get_daily_summaries: exchange filter failed (column may not exist) — "
+                        "returning unfiltered results"
+                    )
             rows = conn.execute(
                 "SELECT * FROM daily_summaries WHERE date >= %s ORDER BY date DESC",
                 (cutoff,),
@@ -161,37 +166,57 @@ class PortfolioMixin:
     def get_portfolio_history(self, hours: int = 24, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> list[dict]:
         """Get portfolio value over time (for trend analysis).
 
-        Filters out anomalous snapshots from first-boot:
-        - portfolio_value == 0  (before live sync)
-        - portfolio_value wildly different from the stable median
-          (paper-mode initial_balance bleed-through, e.g. ~914 vs real ~6)
+        Downsamples at the DB level based on the time range to keep response
+        sizes reasonable regardless of how many snapshots exist:
+          ≤24h  → 5-minute buckets  (~288 points max)
+          ≤168h → 1-hour buckets    (~168 points max)
+          ≤720h → 6-hour buckets    (~120 points max)
+          >720h → 24-hour buckets   (~365 points max)
 
-        When *exchange* is given, only snapshots whose exchange column matches
-        are returned (e.g. ``exchange='coinbase'``).
+        Filters out anomalous snapshots (portfolio_value == 0 or outliers).
+        When *exchange* is given, only snapshots for that exchange are returned.
         """
+        if hours <= 24:
+            bucket = '5 minutes'
+        elif hours <= 168:
+            bucket = '1 hour'
+        elif hours <= 720:
+            bucket = '6 hours'
+        else:
+            bucket = '1 day'
+
         with self._get_conn() as conn:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-            base_sql = """SELECT ts, portfolio_value, return_pct, total_pnl
-                   FROM portfolio_snapshots WHERE ts >= %s AND portfolio_value > 0"""
-            params: list = [cutoff]
-            if exchange:
-                base_sql += " AND exchange = %s"
-                params.append(exchange)
-            rows = conn.execute(base_sql + " ORDER BY ts", params).fetchall()
+            exch_frag = " AND exchange = %s" if exchange else ""
+            exch_params = [exchange] if exchange else []
+
+            rows = conn.execute(
+                f"""SELECT
+                        MIN(ts) AS ts,
+                        AVG(portfolio_value) AS portfolio_value,
+                        AVG(return_pct) AS return_pct,
+                        AVG(total_pnl) AS total_pnl
+                    FROM portfolio_snapshots
+                    WHERE ts >= %s AND portfolio_value > 0{exch_frag}
+                    GROUP BY date_bin(%s::interval, ts::timestamptz, TIMESTAMPTZ '2000-01-01')
+                    ORDER BY MIN(ts)""",
+                (cutoff, *exch_params, bucket),
+            ).fetchall()
+
             if not rows:
                 return []
 
-            # Detect and remove anomalous portfolio values.
+            # Remove anomalous portfolio values (first-boot / paper-mode bleed-through).
+            # Uses median ± 20× to handle bimodal distributions (e.g. paper 10 000 mixed
+            # with live 10) where the classic IQR fence would pass all outliers.
             values = sorted(r["portfolio_value"] for r in rows)
             n = len(values)
-            if n >= 10:
-                q1 = values[n // 4]
-                q3 = values[(3 * n) // 4]
-                iqr = q3 - q1
-                min_range = values[n // 2] * 0.5 if values[n // 2] > 0 else 1.0
-                effective_iqr = max(iqr, min_range)
-                upper_fence = q3 + 3 * effective_iqr
-                rows = [r for r in rows if r["portfolio_value"] <= upper_fence]
+            if n >= 4:
+                median = values[n // 2]
+                if median > 0:
+                    lower_fence = median / 20
+                    upper_fence = median * 20
+                    rows = [r for r in rows if lower_fence <= r["portfolio_value"] <= upper_fence]
 
             return [dict(r) for r in rows]
 

@@ -237,7 +237,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             return self.paper_get_all_balances()
         
         # Return portfolio positions and cash
-        balances = {"USD": 0.0, "EUR": 0.0}
+        balances: dict[str, float] = {}
         
         vals = self.ib.accountValues()
         for v in vals:

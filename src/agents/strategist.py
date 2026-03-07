@@ -194,6 +194,13 @@ class StrategistAgent(BaseAgent):
             )
             llm_response["pair"] = pair
 
+        # H5: Clamp confidence to [0.0, 1.0] to prevent LLM hallucinated values
+        raw_conf = llm_response.get("confidence", 0)
+        try:
+            llm_response["confidence"] = max(0.0, min(1.0, float(raw_conf)))
+        except (ValueError, TypeError):
+            llm_response["confidence"] = 0.0
+
         action = llm_response.get("action", "hold")
         self.logger.info(
             f"📋 Strategy: {action.upper()} {pair} | "

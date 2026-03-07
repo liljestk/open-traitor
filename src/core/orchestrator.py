@@ -152,10 +152,18 @@ class Orchestrator:
             try:
                 initial_balance = exchange.get_portfolio_value()
             except Exception as _e:
-                logger.warning(f"⚠️ Could not fetch live portfolio value on startup: {_e} — defaulting to $0")
+                logger.warning(f"⚠️ Could not fetch live portfolio value on startup: {_e} — defaulting to 0")
                 initial_balance = 0.0
         self.state = TradingState(initial_balance=initial_balance)
         self.state.is_running = True
+
+        # ─── Set native currency on TradingState from exchange / config ───
+        _CURRENCY_SYMBOLS = {"EUR": "€", "GBP": "£", "CHF": "CHF ", "USD": "$", "CAD": "C$", "AUD": "A$", "JPY": "¥"}
+        _native = config.get("trading", {}).get("quote_currency", "auto").upper()
+        if _native == "AUTO":
+            _native = getattr(exchange, "_native_currency", None) or "USD"
+        self.state.native_currency = _native
+        self.state.currency_symbol = _CURRENCY_SYMBOLS.get(_native, _native + " ")
 
         # Trading pairs (copy-on-write: always replace the list, never mutate in-place)
         self._pairs_lock = threading.Lock()
@@ -279,8 +287,28 @@ class Orchestrator:
         self._holdings_dust_threshold: float = float(trading_cfg.get("holdings_dust_threshold", 0.01))
 
         # Initial sync on startup (live mode only)
-        # Note: live_coinbase_snapshot() is Coinbase-specific; skip for other exchanges
         _is_coinbase = exchange.__class__.__name__ in ("CoinbaseClient", "CoinbasePaperClient")
+        _is_ibkr = exchange.__class__.__name__ == "IBClient"
+
+        # IBKR live: sync balance and portfolio value into TradingState
+        if not getattr(exchange, 'paper_mode', False) and _is_ibkr:
+            try:
+                pv = exchange.get_portfolio_value()
+                accs = exchange.get_accounts()
+                cash = 0.0
+                for acc in accs:
+                    cash += acc.get("available_cash", 0.0)
+                self.state.live_portfolio_value = pv
+                self.state.cash_balance = cash
+                self.state.live_cash_balances = {self.state.native_currency: cash}
+                self.state._live_snapshot_ts = time.time()
+                logger.info(
+                    f"📡 IBKR live sync: portfolio {self.state.currency_symbol}{pv:,.2f}, "
+                    f"cash {self.state.currency_symbol}{cash:,.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ IBKR initial portfolio sync failed: {e}")
+
         if self._holdings_sync_enabled and not getattr(exchange, 'paper_mode', False) and _is_coinbase:
             try:
                 snapshot = self.holdings_manager.live_coinbase_snapshot()
@@ -460,9 +488,11 @@ class Orchestrator:
         self.scan_batch_size: int = config.get("trading", {}).get("scan_batch_size", 5)
 
         # ─── LLM Chat Handler (conversational Telegram interface) ───
+        _exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
         self.chat_handler = TelegramChatHandler(
             llm_client=llm,
             rate_limiter=self.rate_limiter,
+            exchange_type=_exchange_type,
         )
         self.telegram_manager.register_chat_functions()
 
@@ -523,9 +553,10 @@ class Orchestrator:
         # Daily loss check (M4 fix: use thread-safe accessor)
         elif self.rules.daily_loss >= self.rules.max_daily_loss:
             reason, value = "daily_loss", self.rules.daily_loss
+            _sym = self.state.currency_symbol
             msg = (
-                f"🛑 CIRCUIT BREAKER: Daily loss {format_currency(value)} "
-                f"reached limit {format_currency(self.rules.max_daily_loss)}!"
+                f"🛑 CIRCUIT BREAKER: Daily loss {format_currency(value, _sym)} "
+                f"reached limit {format_currency(self.rules.max_daily_loss, _sym)}!"
             )
         else:
             return
@@ -542,9 +573,15 @@ class Orchestrator:
         logger.info("🚀 Starting main trading loop...")
 
         if self.telegram:
+            _configured_mode = self.config.get("trading", {}).get("mode", "paper")
+            _is_paper = getattr(self.exchange, "paper_mode", False)
+            if _is_paper:
+                _mode_line = "📝 Paper"
+            else:
+                _mode_line = "💰 Live"
             self.telegram.send_message(
                 "🤖 *Auto-Traitor Online*\n\n"
-                f"Mode: {'📝 Paper' if getattr(self.exchange, 'paper_mode', False) else '💰 Live'}\n"
+                f"Mode: {_mode_line}\n"
                 f"Pairs: {', '.join(self.pairs)}\n"
                 f"Cycle: every {self.interval}s\n\n"
                 "💬 I'm in conversational mode — just talk to me naturally!\n"
@@ -782,10 +819,11 @@ class Orchestrator:
                             # H3 note: record_trade is handled in executor._close_position
                             if pnl is not None and pnl < 0:
                                 self.rules.record_loss(abs(pnl))
+                            _sym = self.state.currency_symbol
                             event_msg = (
                                 f"Trailing stop executed on {pair} "
-                                f"at {format_currency(trigger_price)}"
-                                + (f" — PnL: {format_currency(pnl)}" if pnl is not None else "")
+                                f"at {format_currency(trigger_price, _sym)}"
+                                + (f" — PnL: {format_currency(pnl, _sym)}" if pnl is not None else "")
                             )
                         else:
                             # Sell failed — keep the stop so it retries next cycle
@@ -795,14 +833,14 @@ class Orchestrator:
                             )
                             event_msg = (
                                 f"⚠️ Trailing stop sell FAILED for {pair} "
-                                f"at {format_currency(trigger_price)} — will retry"
+                                f"at {format_currency(trigger_price, self.state.currency_symbol)} — will retry"
                             )
                     else:
                         # No open trade found — stop is stale; remove it
                         self.trailing_stops.remove_stop(pair)
                         event_msg = (
                             f"Trailing stop triggered on {pair} "
-                            f"at {format_currency(trigger_price)} (no open position found)"
+                            f"at {format_currency(trigger_price, self.state.currency_symbol)} (no open position found)"
                         )
 
                     self.chat_handler.queue_event(event_msg, severity="trade", pair=pair)
@@ -839,7 +877,7 @@ class Orchestrator:
 
                             tier_msg = (
                                 f"Tier exit +{te_pct:.0f}% on {te_pair}: "
-                                f"sold {te_qty:.6f} at {format_currency(te_price)} "
+                                f"sold {te_qty:.6f} at {format_currency(te_price, self.state.currency_symbol)} "
                                 f"(PnL: +{te.get('pnl_pct', 0):.1f}%)"
                             )
                             self.chat_handler.queue_event(tier_msg, severity="trade", pair=te_pair)
@@ -861,7 +899,7 @@ class Orchestrator:
                     emoji = "🎯" if pnl and pnl > 0 else "⚠️"
                     event_msg = (
                         f"Position closed ({c['reason']}): {c['pair']} "
-                        f"PnL: {format_currency(pnl or 0)}"
+                        f"PnL: {format_currency(pnl or 0, self.state.currency_symbol)}"
                     )
                     self.chat_handler.queue_event(
                         f"{emoji} {event_msg}", severity="trade", pair=c["pair"]
@@ -877,6 +915,8 @@ class Orchestrator:
                 # Persist snapshot to stats DB (drives the Analytics dashboard)
                 try:
                     exchange_name = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    if getattr(self.exchange, "paper_mode", False):
+                        exchange_name = f"{exchange_name}_paper"
                     _fg_value = getattr(self.fear_greed, "last_value", None)
                     self.stats_db.record_snapshot(
                         portfolio_value=self.state.portfolio_value,
@@ -1072,7 +1112,7 @@ class Orchestrator:
                 consecutive_errors = 0
 
             logger.info(
-                f"💼 Portfolio: {format_currency(self.state.portfolio_value)} | "
+                f"💼 Portfolio: {format_currency(self.state.portfolio_value, self.state.currency_symbol)} | "
                 f"Return: {format_percentage(self.state.return_pct)} | "
                 f"Drawdown: {format_percentage(self.state.max_drawdown)} | "
                 f"Trailing stops: {self.trailing_stops.get_active_count()}"
@@ -1183,7 +1223,7 @@ class Orchestrator:
                     # Execute autonomously (within allocation, fee-positive)
                     logger.info(
                         f"🔄 Auto-swap: {proposal.sell_pair} → {proposal.buy_pair} "
-                        f"({format_currency(proposal.quote_amount)}, net +{proposal.net_gain_pct*100:.2f}%)"
+                        f"({format_currency(proposal.quote_amount, self.state.currency_symbol)}, net +{proposal.net_gain_pct*100:.2f}%)"
                     )
                     result = self.rotator.execute_swap(
                         proposal,
@@ -1209,9 +1249,9 @@ class Orchestrator:
                             f"🔄 *Auto-Swap Executed*\n\n"
                             f"Sold: {proposal.sell_pair}\n"
                             f"Bought: {proposal.buy_pair}\n"
-                            f"Amount: {format_currency(proposal.quote_amount)}\n"
+                            f"Amount: {format_currency(proposal.quote_amount, self.state.currency_symbol)}\n"
                             f"Expected net gain: +{proposal.net_gain_pct*100:.2f}%\n"
-                            f"Fees: {format_currency(proposal.fee_estimate.total_fee_quote)}\n"
+                            f"Fees: {format_currency(proposal.fee_estimate.total_fee_quote, self.state.currency_symbol)}\n"
                             f"Confidence: {format_percentage(proposal.confidence)}"
                             f"{route_info}"
                         )

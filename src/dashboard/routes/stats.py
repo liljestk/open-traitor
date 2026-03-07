@@ -184,7 +184,7 @@ def get_portfolio_history(hours: int = Query(720, ge=1, le=8760), profile: str =
         return deps.sanitize_floats({"history": rows, "count": len(rows)})
     except Exception as exc:
         logger.exception("portfolio/history error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/analytics", summary="Comprehensive performance analytics")
@@ -209,7 +209,7 @@ def get_analytics(hours: int = Query(720, ge=1, le=8760), profile: str = Query("
         })
     except Exception as exc:
         logger.exception("analytics error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ---------------------------------------------------------------------------
@@ -256,10 +256,11 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
             prices = data.get("current_prices") or {}
             portfolio_val = data.get("portfolio_value") or 1
 
+            client = deps.client_for_profile(profile)
+
             # For equity profiles, override portfolio value with live data
             if deps.is_equity_profile(profile):
                 try:
-                    client = deps.client_for_profile(profile)
                     if client:
                         live_pv = client.get_portfolio_value()
                         if live_pv > 0:
@@ -267,6 +268,36 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
                             portfolio_val = live_pv
                 except Exception:
                     pass
+            else:
+                # For crypto profiles, override positions with live balances from
+                # the exchange so holdings outside the bot's tracking are visible.
+                try:
+                    if client:
+                        live_balances = client.balance  # {currency: total_qty}
+                        qc_list = qc if isinstance(qc, list) else ([qc] if qc else [])
+                        fiat = {"USD", "EUR", "GBP", "CHF", "SEK", "NOK", "DKK",
+                                "CAD", "AUD", "JPY", "USDC", "USDT"}
+                        live_positions: dict[str, float] = {}
+                        for currency, qty in live_balances.items():
+                            if currency.upper() in fiat or qty <= 0:
+                                continue
+                            # Match to a pair using the profile's quote currencies
+                            for q in qc_list:
+                                pair = f"{currency.upper()}-{q.upper()}"
+                                live_positions[pair] = qty
+                                break
+                            else:
+                                # No quote currency filter — keep as-is
+                                live_positions[currency] = qty
+                        if live_positions:
+                            positions = live_positions
+                            # Update cash balance from live EUR/fiat balance
+                            for q in qc_list:
+                                if q.upper() in live_balances:
+                                    data["cash_balance"] = live_balances[q.upper()]
+                                    break
+                except Exception:
+                    pass  # fall back to snapshot positions
 
             # Filter positions by quote currency when a profile is active
             if qc:
@@ -280,6 +311,28 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
                     if any(pair.upper().endswith(s) for s in suffixes)
                 }
 
+            # For legacy float positions, look up the weighted avg entry price
+            # from the last BUY trades per pair (single query, all pairs at once).
+            legacy_pairs = [p for p, v in positions.items() if not isinstance(v, dict)]
+            avg_entry_by_pair: dict[str, float] = {}
+            if legacy_pairs:
+                resolved_exch = deps.resolve_profile(profile) or None
+                exch_frag_ep = " AND exchange = %s" if resolved_exch else ""
+                exch_params_ep = [resolved_exch] if resolved_exch else []
+                placeholders = ",".join(["%s"] * len(legacy_pairs))
+                try:
+                    ep_rows = conn.execute(
+                        f"""SELECT pair,
+                                   SUM(price * quantity) / NULLIF(SUM(quantity), 0) AS avg_price
+                            FROM trades
+                            WHERE action = 'buy' AND pair IN ({placeholders}){exch_frag_ep}
+                            GROUP BY pair""",
+                        (*legacy_pairs, *exch_params_ep),
+                    ).fetchall()
+                    avg_entry_by_pair = {r["pair"]: float(r["avg_price"]) for r in ep_rows if r["avg_price"]}
+                except Exception:
+                    pass  # leave empty; fallback to current price below
+
             breakdown = []
             allocated = 0.0
             for pair, pos in positions.items():
@@ -292,8 +345,8 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
                     price = prices.get(pair, entry_price)
                 else:
                     qty = float(pos) if pos else 0
-                    entry_price = prices.get(pair, 0)  # no stored entry, use current
                     price = prices.get(pair, 0)
+                    entry_price = avg_entry_by_pair.get(pair, price)
                 value = qty * price
                 pct = (value / portfolio_val * 100) if portfolio_val else 0
                 allocated += value
@@ -316,12 +369,15 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
             return deps.sanitize_floats({"exposure": data})
         except Exception as exc:
             logger.exception("portfolio/exposure error")
-            raise HTTPException(status_code=500, detail=str(exc))
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ---------------------------------------------------------------------------
 # REST - Prediction Accuracy (Predictions vs Actuals)
 # ---------------------------------------------------------------------------
+
+_ACCURACY_CACHE_TTL = 300  # seconds
+
 
 @router.get("/api/predictions/accuracy", summary="Signal prediction accuracy vs actual price movements")
 def get_prediction_accuracy(
@@ -333,15 +389,30 @@ def get_prediction_accuracy(
 
     Automatically filters by the profile's quote currency so that, e.g.,
     the crypto/EUR profile only shows -EUR pairs.
+    Result is cached in Redis for 5 minutes to avoid expensive recomputation.
     """
     try:
         qc = deps.quote_currency_for(profile)
         resolved = deps.resolve_profile(profile) or None
+        cache_key = f"predictions:accuracy:{resolved or 'all'}:{days}"
+
+        if deps.redis_client:
+            cached = deps.redis_client.get(cache_key)
+            if cached:
+                import json as _json
+                return _json.loads(cached)
+
         result = db.get_prediction_accuracy(days=days, quote_currency=qc, exchange=resolved)
-        return deps.sanitize_floats(result)
+        result = deps.sanitize_floats(result)
+
+        if deps.redis_client:
+            import json as _json
+            deps.redis_client.setex(cache_key, _ACCURACY_CACHE_TTL, _json.dumps(result))
+
+        return result
     except Exception as exc:
         logger.exception("prediction accuracy error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/predictions/tracked-pairs", summary="Pairs the LLM system actively tracks")
@@ -356,7 +427,7 @@ def get_tracked_pairs(profile: str = Query(""), db=Depends(deps.get_profile_db))
         return db.get_tracked_pairs(quote_currency=qc, exchange=resolved)
     except Exception as exc:
         logger.exception("tracked pairs error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/predictions/pair-history", summary="Price history with prediction overlay for a single pair")
@@ -376,7 +447,7 @@ def get_pair_prediction_history(
         return deps.sanitize_floats(result)
     except Exception as exc:
         logger.exception("pair prediction history error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api/portfolio/cleanup", summary="One-time cleanup of bad portfolio snapshots")
@@ -387,4 +458,4 @@ def cleanup_portfolio(db=Depends(deps.get_profile_db)):
         return {"deleted": deleted, "status": "ok"}
     except Exception as exc:
         logger.exception("portfolio cleanup error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")

@@ -16,7 +16,7 @@ import {
 } from 'recharts'
 import { Shield, AlertTriangle, TrendingDown, Lock, Crosshair } from 'lucide-react'
 import { fetchPortfolioExposure, fetchTrailingStops, fetchAnalytics } from '../api'
-import { useCurrencyFormatter } from '../store'
+import { useCurrencyFormatter, useLiveStore } from '../store'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
@@ -167,6 +167,7 @@ function DrawdownBar({
 
 export default function RiskExposure() {
   const fmtCurrency = useCurrencyFormatter()
+  const profile = useLiveStore((s) => s.profile)
 
   const { data: exposure, isLoading: expLoading } = useQuery({
     queryKey: ['exposure'],
@@ -181,7 +182,7 @@ export default function RiskExposure() {
   })
 
   const { data: analytics, isLoading: analyticsLoading } = useQuery({
-    queryKey: ['analytics', 720],
+    queryKey: ['analytics', 720, profile],
     queryFn: () => fetchAnalytics(720),
     staleTime: 120_000,
   })

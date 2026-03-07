@@ -65,7 +65,11 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
     # between zero-width chars).
     text = unicodedata.normalize("NFKC", text)
 
-    # Remove potential prompt injection markers
+    # Remove potential prompt injection markers.
+    # NOTE: This is a blocklist approach which is inherently bypassable —
+    # creative rephrasing, typos, or novel attack vectors can evade it.
+    # Defence-in-depth (output validation, least-privilege LLM scoping,
+    # response-filtering) is required alongside this input sanitiser.
     injection_patterns = [
         r'(?i)ignore\s+(all\s+)?previous\s+instructions',
         r'(?i)forget\s+(all\s+)?previous',
@@ -86,6 +90,11 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
         r'(?i)jailbreak',
         r'(?i)do\s+anything\s+now',
         r'(?i)DAN\s+mode',
+        # M7: Additional common injection / role-hijacking patterns
+        r'(?i)\byou\s+are\s+now\b',
+        r'(?i)\bdisregard\b',
+        r'(?i)\bpretend\s+you\b',
+        r'(?i)\bact\s+as\b',
     ]
 
     for pattern in injection_patterns:
@@ -173,8 +182,16 @@ def validate_env_credentials() -> dict[str, bool]:
 
     status = {}
 
+    # L21: Expanded placeholder detection — catch common dummy values
+    _PLACEHOLDER_PATTERNS = (
+        "your-key-here", "your-api-key", "changeme", "todo", "fixme",
+        "xxxxxxxx", "00000000", "replace-me", "insert-key",
+    )
+
     for name, value in required.items():
-        is_set = bool(value) and value not in ("your-key-here", "")
+        is_set = bool(value) and value not in ("",) and not any(
+            p in value.lower() for p in _PLACEHOLDER_PATTERNS
+        )
         status[name] = is_set
         if is_set:
             logger.debug(f"  ✅ {name}: {mask_secret(value)}")
@@ -182,7 +199,9 @@ def validate_env_credentials() -> dict[str, bool]:
             logger.warning(f"  ❌ {name}: NOT SET (required)")
 
     for name, value in optional.items():
-        is_set = bool(value) and not value.startswith("your-")
+        is_set = bool(value) and not value.startswith("your-") and not any(
+            p in value.lower() for p in _PLACEHOLDER_PATTERNS
+        )
         status[name] = is_set
         if is_set:
             logger.debug(f"  ✅ {name}: {mask_secret(value)}")

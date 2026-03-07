@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import requests as _http
@@ -27,6 +28,7 @@ logger = get_logger("equity_feed")
 # ── Constants ────────────────────────────────────────────────────────────
 
 _BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+_SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -488,3 +490,265 @@ def discover_pairs_detailed(
         f"📊 Equity discovery ({exchange_id}): {len(results)} instruments with metadata"
     )
     return results
+
+
+# ── Corporate & Macro Calendar ────────────────────────────────────────────────
+
+_calendar_cache = _Cache(default_ttl=3600.0)  # 1h TTL — earnings dates don't shift hourly
+
+
+def _fetch_quote_summary(yahoo_ticker: str, modules: str) -> dict | None:
+    """Fetch Yahoo Finance quoteSummary for a ticker. Returns the first result or None."""
+    cache_key = f"qsummary:{yahoo_ticker}:{modules}"
+    cached = _calendar_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = _http.get(
+            f"{_SUMMARY_URL}/{yahoo_ticker}",
+            headers=_HEADERS,
+            params={"modules": modules},
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            logger.debug(f"Yahoo quoteSummary {resp.status_code} for {yahoo_ticker}")
+            return None
+        data = resp.json()
+        result = data.get("quoteSummary", {}).get("result")
+        if not result:
+            return None
+        parsed = result[0]
+        _calendar_cache.put(cache_key, parsed)
+        return parsed
+    except Exception as e:
+        logger.debug(f"Yahoo quoteSummary failed for {yahoo_ticker}: {e}")
+        return None
+
+
+def get_earnings_calendar(tickers: list[str], days_ahead: int = 60) -> dict[str, dict]:
+    """Fetch upcoming earnings dates for a list of Yahoo tickers.
+
+    Returns:
+        {ticker: {"earnings_date": "2026-04-16", "days_away": 40, "eps_estimate": 4.82}}
+    Only includes tickers with an earnings date within ``days_ahead`` days.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days_ahead)
+    results: dict[str, dict] = {}
+
+    for ticker in tickers:
+        try:
+            summary = _fetch_quote_summary(ticker, "calendarEvents")
+            if not summary:
+                continue
+
+            earnings_dates = (
+                summary.get("calendarEvents", {})
+                       .get("earnings", {})
+                       .get("earningsDate", [])
+            )
+            if not earnings_dates:
+                continue
+
+            # Take the earliest upcoming date
+            earliest: datetime | None = None
+            for ed in earnings_dates:
+                raw_ts = ed.get("raw")
+                if raw_ts:
+                    dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+                    if dt > now and (earliest is None or dt < earliest):
+                        earliest = dt
+
+            if earliest is None or earliest > cutoff:
+                continue
+
+            days_away = (earliest - now).days
+            entry: dict = {
+                "earnings_date": earliest.strftime("%Y-%m-%d"),
+                "days_away": days_away,
+            }
+
+            # EPS estimate (earningsAverage) if available
+            eps = (
+                summary.get("calendarEvents", {})
+                       .get("earnings", {})
+                       .get("earningsAverage", {})
+                       .get("raw")
+            )
+            if eps is not None:
+                entry["eps_estimate"] = eps
+
+            results[ticker] = entry
+
+        except Exception as e:
+            logger.debug(f"Earnings calendar failed for {ticker}: {e}")
+
+    logger.info(f"📅 Earnings calendar: {len(results)}/{len(tickers)} tickers have dates within {days_ahead}d")
+    return results
+
+
+def get_dividend_calendar(tickers: list[str], days_ahead: int = 60) -> dict[str, dict]:
+    """Fetch upcoming ex-dividend dates for a list of Yahoo tickers.
+
+    Returns:
+        {ticker: {"ex_div_date": "2026-03-15", "days_away": 8, "annual_dividend": 15.40, "yield_pct": 3.2}}
+    Only includes tickers with an ex-div date within ``days_ahead`` days.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days_ahead)
+    results: dict[str, dict] = {}
+
+    for ticker in tickers:
+        try:
+            summary = _fetch_quote_summary(ticker, "calendarEvents,summaryDetail")
+            if not summary:
+                continue
+
+            ex_div_raw = summary.get("calendarEvents", {}).get("exDividendDate", {})
+            raw_ts = ex_div_raw.get("raw") if isinstance(ex_div_raw, dict) else None
+            if not raw_ts:
+                continue
+
+            ex_div_dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+            if ex_div_dt <= now or ex_div_dt > cutoff:
+                continue
+
+            days_away = (ex_div_dt - now).days
+            entry: dict = {
+                "ex_div_date": ex_div_dt.strftime("%Y-%m-%d"),
+                "days_away": days_away,
+            }
+
+            detail = summary.get("summaryDetail", {})
+            div_rate = detail.get("dividendRate", {})
+            div_yield = detail.get("dividendYield", {})
+            if isinstance(div_rate, dict) and div_rate.get("raw") is not None:
+                entry["annual_dividend"] = div_rate["raw"]
+            if isinstance(div_yield, dict) and div_yield.get("raw") is not None:
+                entry["yield_pct"] = round(div_yield["raw"] * 100, 2)
+
+            results[ticker] = entry
+
+        except Exception as e:
+            logger.debug(f"Dividend calendar failed for {ticker}: {e}")
+
+    logger.info(f"💰 Dividend calendar: {len(results)}/{len(tickers)} tickers have ex-div within {days_ahead}d")
+    return results
+
+
+# ── Macro Event Calendar (semi-static, refresh annually) ─────────────────────
+# ECB Governing Council monetary policy meeting dates (rate decision days)
+# Source: ECB official press release schedule
+_ECB_MEETING_DATES = [
+    # 2025
+    "2025-01-30", "2025-03-06", "2025-04-17", "2025-06-05",
+    "2025-07-24", "2025-09-11", "2025-10-30", "2025-12-18",
+    # 2026
+    "2026-01-29", "2026-03-05", "2026-04-16", "2026-06-04",
+    "2026-07-23", "2026-09-10", "2026-10-29", "2026-12-17",
+]
+
+# US Federal Reserve FOMC meeting dates (global risk-appetite driver)
+_FOMC_MEETING_DATES = [
+    # 2025
+    "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18",
+    "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-17",
+    # 2026
+    "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-16",
+]
+
+# Quarterly EU earnings seasons (approximate peak weeks — when bulk of EU large-caps report)
+# Used to set seasonal regime context in monthly/weekly planning
+_EU_EARNINGS_SEASONS = [
+    # Q4 results season (January–February)
+    {"label": "Q4 Earnings Season", "start": "01-15", "end": "02-28", "notes": "Full-year results; guidance updates dominant"},
+    # Q1 results season (April–May)
+    {"label": "Q1 Earnings Season", "start": "04-10", "end": "05-20", "notes": "Revenue momentum check post-H2"},
+    # H1/Q2 results season (July–August)
+    {"label": "H1/Q2 Earnings Season", "start": "07-10", "end": "08-15", "notes": "Halftime results; summer liquidity thin"},
+    # Q3 results season (October–November)
+    {"label": "Q3 Earnings Season", "start": "10-10", "end": "11-20", "notes": "Guidance cuts/raises heading into year-end"},
+]
+
+
+def get_macro_calendar(days_ahead: int = 60) -> list[dict]:
+    """Return upcoming macro events relevant to European equity trading.
+
+    Covers ECB and FOMC decisions within the window.
+    Negative days_away = event occurred within the past 3 days (still market-moving context).
+
+    Returns list of dicts:
+        {"date": str, "days_away": int, "event": str, "importance": str, "relevance": str}
+    """
+    today = datetime.now(timezone.utc).date()
+    cutoff = today + timedelta(days=days_ahead)
+    lookback = today - timedelta(days=3)
+
+    events: list[dict] = []
+
+    for date_str in _ECB_MEETING_DATES:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if lookback <= d <= cutoff:
+                events.append({
+                    "date": date_str,
+                    "days_away": (d - today).days,
+                    "event": "ECB Rate Decision",
+                    "importance": "high",
+                    "relevance": "Direct driver of European equity valuations, EUR/USD, and bond yields",
+                })
+        except ValueError:
+            pass
+
+    for date_str in _FOMC_MEETING_DATES:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if lookback <= d <= cutoff:
+                events.append({
+                    "date": date_str,
+                    "days_away": (d - today).days,
+                    "event": "US Fed FOMC Decision",
+                    "importance": "high",
+                    "relevance": "Global risk appetite; USD strength affects EU exporter earnings (ASML, SAP, Airbus)",
+                })
+        except ValueError:
+            pass
+
+    events.sort(key=lambda x: x["days_away"])
+    return events
+
+
+def get_earnings_season_context() -> dict:
+    """Return the current/upcoming EU earnings season context for LLM injection.
+
+    Returns:
+        {"in_season": bool, "season_label": str, "notes": str, "days_to_peak": int | None}
+    """
+    today = datetime.now(timezone.utc).date()
+    year = today.year
+
+    for season in _EU_EARNINGS_SEASONS:
+        start = datetime.strptime(f"{year}-{season['start']}", "%Y-%m-%d").date()
+        end = datetime.strptime(f"{year}-{season['end']}", "%Y-%m-%d").date()
+        pre_window = start - timedelta(days=21)  # 3 weeks before = pre-season positioning
+
+        if start <= today <= end:
+            return {
+                "in_season": True,
+                "season_label": season["label"],
+                "notes": season["notes"],
+                "days_to_peak": None,
+                "phase": "active",
+            }
+        elif pre_window <= today < start:
+            return {
+                "in_season": False,
+                "season_label": season["label"],
+                "notes": season["notes"],
+                "days_to_peak": (start - today).days,
+                "phase": "pre_season",
+            }
+
+    return {"in_season": False, "season_label": None, "notes": None, "days_to_peak": None, "phase": "between_seasons"}

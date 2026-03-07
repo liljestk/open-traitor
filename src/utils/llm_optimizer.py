@@ -26,6 +26,13 @@ DEFAULTS: dict[str, Any] = {
     "recent_outcomes_n": 10,
     "strategist_skip_signals": ["neutral", "weak_buy", "weak_sell"],
     "articles_for_analysis": 8,
+    # ── Adaptive Learning Engine (ALE) ────────────────────────────────────
+    "learning_enabled": True,
+    "calibration_min_samples": 50,
+    "ensemble_max_shift": 0.05,
+    "prompt_supplement_max_tokens": 500,
+    "wfo_min_wfe": 0.5,
+    "finetune_min_examples": 50,
 }
 
 # ── Parameter metadata (for UI) ───────────────────────────────────────────────
@@ -76,6 +83,59 @@ PARAM_META: dict[str, dict] = {
         "type": "int",
         "impact_category": "news",
         "token_weight": 0.08,
+    },
+    # ── Adaptive Learning Engine (ALE) ────────────────────────────────────
+    "learning_enabled": {
+        "label": "Enable Adaptive Learning",
+        "description": "Master switch for the Adaptive Learning Engine. Disabling stops all learning subsystems.",
+        "type": "bool",
+        "impact_category": "learning",
+    },
+    "calibration_min_samples": {
+        "label": "Calibration min samples",
+        "description": "Minimum signal scores required before retraining the confidence calibrator.",
+        "min": 20,
+        "max": 500,
+        "step": 10,
+        "type": "int",
+        "impact_category": "learning",
+    },
+    "ensemble_max_shift": {
+        "label": "Ensemble max weight shift",
+        "description": "Maximum change in strategy weight per update cycle. Prevents sudden swings.",
+        "min": 0.01,
+        "max": 0.20,
+        "step": 0.01,
+        "type": "float",
+        "impact_category": "learning",
+    },
+    "prompt_supplement_max_tokens": {
+        "label": "Prompt supplement cap (tokens)",
+        "description": "Maximum tokens of learned lessons injected into agent prompts.",
+        "min": 0,
+        "max": 2000,
+        "step": 50,
+        "type": "int",
+        "impact_category": "learning",
+        "token_weight": 0.05,
+    },
+    "wfo_min_wfe": {
+        "label": "WFO minimum robustness",
+        "description": "Walk-Forward Efficiency threshold. Parameters below this are not promoted.",
+        "min": 0.3,
+        "max": 0.9,
+        "step": 0.05,
+        "type": "float",
+        "impact_category": "learning",
+    },
+    "finetune_min_examples": {
+        "label": "Fine-tune min examples",
+        "description": "Minimum curated examples required before exporting a fine-tuning dataset.",
+        "min": 10,
+        "max": 500,
+        "step": 10,
+        "type": "int",
+        "impact_category": "learning",
     },
 }
 

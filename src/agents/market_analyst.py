@@ -295,7 +295,9 @@ PRICE CHANGES:
 - 24 hours: {_24h_str}
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
 RECENT {"EQUITY" if exchange == "ibkr" else "CRYPTO"} NEWS:
+<external_data source="news_feed" type="untrusted">
 {news}
+</external_data>
 {strategy_section}{acct_section}
 Provide your analysis as JSON."""
 
@@ -321,7 +323,7 @@ Provide your analysis as JSON."""
             pair=pair,
             current_price=price,
             signal_type=signal_type,
-            confidence=float(llm_analysis.get("confidence", 0)),
+            confidence=max(0.0, min(1.0, float(llm_analysis.get("confidence", 0)))),  # H5: clamp to [0,1]
             market_condition=market_condition,
             technical=TechnicalSignals(
                 rsi=indicators.get("rsi"),

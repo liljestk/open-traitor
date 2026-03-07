@@ -49,21 +49,41 @@ _BEARISH_WORDS = frozenset([
     "negative", "weak", "weakness", "downgrade", "underperform",
 ])
 
-# Well-known crypto/stock symbol patterns (3-5 uppercase letters)
-_KNOWN_TICKERS = frozenset([
-    "BTC", "ETH", "SOL", "ADA", "XRP", "DOT", "AVAX", "MATIC", "LINK",
-    "ATOM", "UNI", "AAVE", "DOGE", "SHIB", "LTC", "BCH", "FIL", "APT",
-    "ARB", "OP", "SUI", "SEI", "TIA", "NEAR", "INJ", "FET", "RNDR",
-    "GRT", "CRV", "MKR", "SNX", "COMP", "LDO", "RPL", "PEPE", "WIF",
-    "BONK", "JUP", "PYTH", "W", "ENA", "STRK", "MANTA", "DYM", "TKX",
-    # Traditional stocks that might appear in investing subs
-    "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
-    "AMD", "INTC", "NFLX", "DIS", "BA", "GS", "JPM", "V", "MA",
-    "NOKIA", "NOK", "PLTR", "GME", "AMC", "RIVN", "LCID", "NIO",
-    "COIN", "MSTR", "SQ", "PYPL", "ABNB", "UBER", "SNAP", "PINS",
-    "ROKU", "ZM", "CRWD", "NET", "DDOG", "SNOW", "MDB", "U",
-    "SPY", "QQQ", "VOO", "VTI", "ARKK", "VGT", "SCHD",
+# Generic tickers — broadly relevant names for serendipitous discovery.
+# The bulk of ticker matching is built dynamically from the user's watchlist.
+_GENERIC_TICKERS = frozenset([
+    # Major indices/ETFs
+    "SPY", "QQQ", "VOO", "VTI", "ARKK",
+    # Macro-significant crypto (always worth catching)
+    "BTC", "ETH", "SOL", "XRP", "DOGE",
+    # Tech bellwethers (market-moving)
+    "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA",
 ])
+
+
+def _pair_to_tickers(pair: str) -> set[str]:
+    """Extract searchable ticker symbols from a trading pair string.
+
+    Examples:
+        "BTC-EUR"     → {"BTC"}
+        "ASML.AS-EUR" → {"ASML"}
+        "ETH-EURC"    → {"ETH"}
+    """
+    base = pair.split("-")[0] if "-" in pair else pair
+    base_short = base.split(".")[0]  # ASML.AS → ASML
+    tickers = set()
+    for t in (base.upper(), base_short.upper()):
+        if 2 <= len(t) <= 6 and t.isalpha():
+            tickers.add(t)
+    return tickers
+
+
+def build_ticker_set_from_config(config: dict) -> set[str]:
+    """Build a ticker set from config trading pairs."""
+    tickers: set[str] = set()
+    for pair in config.get("trading", {}).get("pairs", []):
+        tickers |= _pair_to_tickers(pair)
+    return tickers
 
 # Regex: $TICKER or standalone 2-5 uppercase letters bounded by word boundaries
 _TICKER_RE = re.compile(
@@ -101,24 +121,24 @@ def _classify_sentiment(text: str) -> str:
     return "neutral"
 
 
-def _extract_tickers(text: str) -> list[str]:
+def _extract_tickers(text: str, known_tickers: frozenset[str] | set[str] = _GENERIC_TICKERS) -> list[str]:
     """Extract likely stock/crypto ticker symbols from text."""
     found: list[str] = []
     for m in _TICKER_RE.finditer(text):
         ticker = m.group(1) or m.group(2)
-        if ticker and ticker in _KNOWN_TICKERS:
+        if ticker and ticker in known_tickers:
             found.append(ticker)
     return list(dict.fromkeys(found))  # dedup, preserve order
 
 
-def _relevance_score(article: "NewsArticle") -> float:
+def _relevance_score(article: "NewsArticle", known_tickers: frozenset[str] | set[str] = _GENERIC_TICKERS) -> float:
     """Score 0-1 based on specificity & actionability."""
     score = 0.3  # base score for any article
 
     text = f"{article.title} {article.summary}".lower()
 
     # Has specific tickers → more relevant
-    tickers = _extract_tickers(article.title + " " + article.summary)
+    tickers = _extract_tickers(article.title + " " + article.summary, known_tickers)
     if tickers:
         score += min(0.3, len(tickers) * 0.1)
 
@@ -157,7 +177,7 @@ def _is_noise(title: str) -> bool:
     return False
 
 
-def _enrich_article(article: "NewsArticle") -> "NewsArticle":
+def _enrich_article(article: "NewsArticle", known_tickers: frozenset[str] | set[str] = _GENERIC_TICKERS) -> "NewsArticle":
     """Add sentiment, tickers, relevance score to an article in-place."""
     text = f"{article.title} {article.summary}"
 
@@ -166,14 +186,14 @@ def _enrich_article(article: "NewsArticle") -> "NewsArticle":
         article.sentiment = _classify_sentiment(text)
 
     # Ticker extraction → add to tags
-    tickers = _extract_tickers(text)
+    tickers = _extract_tickers(text, known_tickers)
     existing_tags = set(t.lower() for t in article.tags)
     for ticker in tickers:
         if ticker.lower() not in existing_tags:
             article.tags.append(ticker)
 
     # Relevance score
-    article.relevance_score = _relevance_score(article)
+    article.relevance_score = _relevance_score(article, known_tickers)
 
     return article
 
@@ -237,14 +257,34 @@ class NewsAggregator:
         self._lock = threading.Lock()
         self._praw_reddit = None
 
+        # Dynamic ticker set: generic base + config pairs + Redis-published watchlist
+        self._known_tickers: set[str] = set(_GENERIC_TICKERS)
+        self._known_tickers |= build_ticker_set_from_config(config)
+        self._refresh_tickers_from_redis()
+
         # Stats
         self.last_fetch_time: Optional[datetime] = None
         self.total_fetched = 0
 
         logger.info(
             f"📰 News Aggregator initialized | "
-            f"Subreddits: {len(self.subreddits)} | RSS feeds: {len(self.rss_feeds)}"
+            f"Subreddits: {len(self.subreddits)} | RSS feeds: {len(self.rss_feeds)} | "
+            f"Tracked tickers: {len(self._known_tickers)}"
         )
+
+    def _refresh_tickers_from_redis(self) -> None:
+        """Read watched tickers published by orchestrator instances."""
+        if not self.redis:
+            return
+        try:
+            for key in self.redis.keys("*:news:watched_tickers") + [b"news:watched_tickers"]:
+                raw = self.redis.get(key)
+                if raw:
+                    tickers = json.loads(raw if isinstance(raw, str) else raw.decode())
+                    if isinstance(tickers, list):
+                        self._known_tickers.update(t for t in tickers if isinstance(t, str))
+        except Exception as e:
+            logger.debug(f"Could not read watched tickers from Redis: {e}")
 
     def _init_reddit(self) -> None:
         """Initialize the Reddit client (praw)."""
@@ -440,6 +480,9 @@ class NewsAggregator:
 
     def fetch_all(self) -> list[NewsArticle]:
         """Fetch news from all sources, enrich and filter."""
+        # Refresh dynamic tickers from Redis each cycle
+        self._refresh_tickers_from_redis()
+
         all_articles = []
 
         all_articles.extend(self.fetch_reddit())
@@ -453,9 +496,10 @@ class NewsAggregator:
         if before_filter != len(all_articles):
             logger.info(f"📰 Filtered {before_filter - len(all_articles)} noise posts")
 
-        # Enrich: sentiment, tickers, relevance
+        # Enrich: sentiment, tickers, relevance (using dynamic ticker set)
+        tickers = self._known_tickers
         for article in all_articles:
-            _enrich_article(article)
+            _enrich_article(article, tickers)
 
         # Deduplicate by ID
         seen = set()

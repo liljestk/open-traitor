@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -28,41 +29,51 @@ def _safe_float(val) -> float | None:
 
 
 def _find_price(
-    pair: str, target_ts: str, price_timeline: list[tuple[str, dict]]
+    pair: str, target_ts: str, price_timeline: list[tuple[str, dict]],
+    _ts_index: list[str] | None = None,
 ) -> float | None:
     """Find the closest price for a pair at or after *target_ts*.
+
+    Uses binary search on the pre-built *_ts_index* (list of timestamps) when
+    provided, falling back to linear scan otherwise.
 
     Returns *None* if the price appears stale (unchanged for 2+ consecutive
     hourly snapshots), which indicates the market was closed.
     """
-    _STALE_LOOKBACK = 2  # how many prior entries to check for staleness
-    for idx, (ts, prices) in enumerate(price_timeline):
-        if ts >= target_ts:
-            # Try exact pair, then common variants
-            for key in [pair, pair.replace("-", "/"), pair.replace("/", "-")]:
-                if key in prices:
-                    val = prices[key]
-                    if not val:
-                        return None
-                    current_price = _safe_float(val)
-                    if current_price is None:
-                        return None
-                    # Check if price is stale (same value in prior entries)
-                    stale_streak = 0
-                    for lookback in range(1, _STALE_LOOKBACK + 1):
-                        prev_idx = idx - lookback
-                        if prev_idx < 0:
-                            break
-                        prev_prices = price_timeline[prev_idx][1]
-                        prev_val = prev_prices.get(key)
-                        if prev_val and _safe_float(prev_val) == current_price:
-                            stale_streak += 1
-                        else:
-                            break
-                    if stale_streak >= _STALE_LOOKBACK:
-                        return None  # market closed -- stale price
-                    return current_price
+    _STALE_LOOKBACK = 2
+    if _ts_index is not None:
+        idx = bisect.bisect_left(_ts_index, target_ts)
+    else:
+        idx = next((i for i, (ts, _) in enumerate(price_timeline) if ts >= target_ts), None)
+        if idx is None:
             return None
+
+    if idx >= len(price_timeline):
+        return None
+
+    ts, prices = price_timeline[idx]
+    for key in [pair, pair.replace("-", "/"), pair.replace("/", "-")]:
+        if key in prices:
+            val = prices[key]
+            if not val:
+                return None
+            current_price = _safe_float(val)
+            if current_price is None:
+                return None
+            stale_streak = 0
+            for lookback in range(1, _STALE_LOOKBACK + 1):
+                prev_idx = idx - lookback
+                if prev_idx < 0:
+                    break
+                prev_prices = price_timeline[prev_idx][1]
+                prev_val = prev_prices.get(key)
+                if prev_val and _safe_float(prev_val) == current_price:
+                    stale_streak += 1
+                else:
+                    break
+            if stale_streak >= _STALE_LOOKBACK:
+                return None
+            return current_price
     return None
 
 
@@ -164,6 +175,9 @@ class PredictionsMixin:
             except (json.JSONDecodeError, TypeError):
                 continue
 
+        # Build sorted timestamp index for O(log n) binary search
+        ts_index: list[str] = [ts for ts, _ in price_timeline]
+
         # 3. Evaluate each prediction
         results: list[dict] = []
         for pred in predictions:
@@ -186,7 +200,7 @@ class PredictionsMixin:
                     price_at_signal = parsed
                     break
             if not price_at_signal:
-                price_at_signal = _find_price(pair, pred_ts, price_timeline)
+                price_at_signal = _find_price(pair, pred_ts, price_timeline, ts_index)
 
             if not price_at_signal:
                 continue
@@ -202,7 +216,7 @@ class PredictionsMixin:
             outcomes: dict[str, dict | None] = {}
             for label, hours in horizons.items():
                 future_ts = _ts_plus_hours(pred_ts, hours)
-                actual_price = _find_price(pair, future_ts, price_timeline)
+                actual_price = _find_price(pair, future_ts, price_timeline, ts_index)
                 if actual_price and actual_price > 0:
                     pct_change = (actual_price - price_at_signal) / price_at_signal * 100
                     price_went_up = actual_price > price_at_signal
@@ -271,9 +285,17 @@ class PredictionsMixin:
                 by_signal[st]["evaluated_24h"] += 1
                 if r["outcomes"]["24h"]["correct"]:
                     by_signal[st]["correct_24h"] += 1
+        # Signal weight constants (mirrors SignalScorecard.SIGNAL_WEIGHTS)
+        _SIGNAL_WEIGHTS = {
+            "strong_buy": 2.0, "strong_sell": 2.0,
+            "buy": 1.0, "sell": 1.0,
+            "weak_buy": 0.5, "weak_sell": 0.5,
+            "neutral": 0.0,
+        }
         for st in by_signal:
             s = by_signal[st]
             s["accuracy_pct"] = round(s["correct_24h"] / s["evaluated_24h"] * 100, 1) if s["evaluated_24h"] else None
+            s["weight"] = _SIGNAL_WEIGHTS.get(st, 1.0)
 
         # 7. Confidence calibration buckets (0-20%, 20-40%, ..., 80-100%)
         buckets: dict[str, dict] = {}
@@ -495,6 +517,8 @@ class PredictionsMixin:
             except (json.JSONDecodeError, TypeError):
                 continue
 
+        ts_index: list[str] = [ts for ts, _ in price_timeline]
+
         results = []
         for pred in rows:
             try:
@@ -517,14 +541,14 @@ class PredictionsMixin:
                     price_at_signal = parsed
                     break
             if not price_at_signal:
-                price_at_signal = _find_price(pair_upper, pred_ts, price_timeline)
+                price_at_signal = _find_price(pair_upper, pred_ts, price_timeline, ts_index)
             if not price_at_signal:
                 continue
 
             rec: dict = {"ts": pred_ts, "is_recent": pred_ts >= week_cutoff}
             for label, hours in [("1h", 1), ("24h", 24)]:
                 future_ts = _ts_plus_hours(pred_ts, hours)
-                actual = _find_price(pair_upper, future_ts, price_timeline)
+                actual = _find_price(pair_upper, future_ts, price_timeline, ts_index)
                 if actual and actual > 0:
                     went_up = actual > price_at_signal
                     correct = (is_bullish and went_up) or (is_bearish and not went_up)
@@ -573,6 +597,21 @@ class PredictionsMixin:
             "trend": trend,
         }
 
+    def get_weighted_pair_accuracy(
+        self, pair: str, days: int = 30, horizon_hours: int = 24
+    ) -> dict:
+        """Weighted prediction accuracy for a pair, delegating to SignalScorecard.
+
+        Strong signals (strong_buy/sell) carry 2× weight; weak signals 0.5×.
+        Returns SignalScorecard.get_weighted_accuracy result, or empty dict on error.
+        """
+        from src.utils.signal_scorecard import SignalScorecard
+        try:
+            sc = SignalScorecard(self)
+            return sc.get_weighted_accuracy(pair=pair, window_days=days, horizon_hours=horizon_hours)
+        except Exception:
+            return {}
+
     def get_tracked_pairs(self, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> dict:
         """Return pairs tracked by AI and/or humans, grouped by asset class.
 
@@ -603,11 +642,12 @@ class PredictionsMixin:
             ai_pairs: dict[str, dict] = {}
             for r in rows:
                 pair = r["pair"]
+                raw_signals = [s.strip().replace("-", "_") for s in (r["signal_types"] or "").split(",") if s.strip()]
                 ai_pairs[pair.upper()] = {
                     "pair": pair,
                     "prediction_count": r["prediction_count"],
                     "last_predicted": r["last_predicted"],
-                    "signal_types": (r["signal_types"] or "").split(","),
+                    "signal_types": sorted(set(raw_signals)),
                     "source": "ai",
                 }
 
@@ -617,10 +657,20 @@ class PredictionsMixin:
             if qc_frag:
                 human_sql += qc_frag
                 human_params.extend(qc_params)
-            try:
-                human_rows = conn.execute(human_sql, human_params).fetchall()
-            except Exception:
-                human_rows = []  # table may not exist in very old DBs
+            if exchange:
+                try:
+                    exch_human_rows = conn.execute(
+                        human_sql + " AND exchange = %s", [*human_params, exchange]
+                    ).fetchall()
+                    human_rows = exch_human_rows
+                except Exception:
+                    conn.rollback()
+                    human_rows = conn.execute(human_sql, human_params).fetchall()
+            else:
+                try:
+                    human_rows = conn.execute(human_sql, human_params).fetchall()
+                except Exception:
+                    human_rows = []  # table may not exist in very old DBs
 
         # Merge: AI pairs take priority, human-only pairs get added with source="human"
         for hr in human_rows:

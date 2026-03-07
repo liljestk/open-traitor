@@ -214,8 +214,9 @@ class HoldingsManager:
     # =========================================================================
 
     def maybe_refresh_holdings(self) -> None:
-        """Refresh live Coinbase holdings if the TTL has elapsed.
+        """Refresh live holdings if the TTL has elapsed.
 
+        Supports both Coinbase and IBKR exchanges.
         TTL-cached: only calls the API if enough time has passed since the
         last successful sync.  Graceful degradation: on failure, keeps the
         previous snapshot and does NOT update the timestamp, so the next
@@ -235,17 +236,45 @@ class HoldingsManager:
             now = time.time()
             if now - orch.state._live_snapshot_ts < orch._holdings_refresh_seconds:
                 return  # still fresh
-            try:
-                snapshot = self.live_coinbase_snapshot()
-                new_externals = orch.state.sync_live_holdings(
-                    snapshot, dust_threshold=orch._holdings_dust_threshold
-                )
-                if new_externals:
-                    self._register_external_holdings(new_externals)
-            except Exception as e:
-                logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
+
+            _is_ibkr = orch.exchange.__class__.__name__ == "IBClient"
+            if _is_ibkr:
+                self._refresh_ibkr_holdings()
+            else:
+                try:
+                    snapshot = self.live_coinbase_snapshot()
+                    new_externals = orch.state.sync_live_holdings(
+                        snapshot, dust_threshold=orch._holdings_dust_threshold
+                    )
+                    if new_externals:
+                        self._register_external_holdings(new_externals)
+                except Exception as e:
+                    logger.warning(f"⚠️ Holdings refresh failed (keeping stale data): {e}")
         finally:
             self._refresh_lock.release()
+
+    def _refresh_ibkr_holdings(self) -> None:
+        """Refresh portfolio value and cash balance from IBKR API."""
+        import time
+
+        orch = self.orchestrator
+        try:
+            pv = orch.exchange.get_portfolio_value()
+            accs = orch.exchange.get_accounts()
+            cash = 0.0
+            for acc in accs:
+                cash += acc.get("available_cash", 0.0)
+
+            orch.state.live_portfolio_value = pv
+            orch.state.cash_balance = cash
+            orch.state.live_cash_balances = {orch.state.native_currency: cash}
+            orch.state._live_snapshot_ts = time.time()
+            logger.debug(
+                f"📡 IBKR refresh: portfolio {orch.state.currency_symbol}{pv:,.2f}, "
+                f"cash {orch.state.currency_symbol}{cash:,.2f}"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ IBKR holdings refresh failed (keeping stale data): {e}")
 
     def _register_external_holdings(self, new_externals: dict[str, float]) -> None:
         """Register newly discovered external holdings in FIFO tracker and trailing stops.

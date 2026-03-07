@@ -62,7 +62,12 @@ def _get_llm_client() -> LLMClient:
                 # Load provider config from settings.yaml
                 providers_config: list[dict] = []
                 try:
-                    settings_path = os.path.join("config", "settings.yaml")
+                    # MED-7: use a path relative to this file so it works
+                    # regardless of CWD (Docker, systemd, tests, etc.).
+                    _here = os.path.dirname(os.path.abspath(__file__))
+                    settings_path = os.path.normpath(
+                        os.path.join(_here, "..", "..", "config", "settings.yaml")
+                    )
                     with open(settings_path, "r", encoding="utf-8") as f:
                         cfg = yaml.safe_load(f) or {}
                     providers_config = cfg.get("llm", {}).get("providers", [])
@@ -121,7 +126,55 @@ def _get_planning_tracer():
         return None
 
 
-# --- Helpers ------------------------------------------------------------------
+# --- Domain helpers -----------------------------------------------------------
+
+def _detect_domain(profile: str) -> str:
+    """Return 'equity' or 'crypto' by reading the profile's trading.exchange setting."""
+    try:
+        config_paths: list[str] = []
+        if profile:
+            # Sanitise: profile names must be alphanumeric + hyphen/underscore only.
+            # Prevents path traversal (e.g. "../secrets") since profile comes from
+            # Temporal workflow args which are operator-set but still untrusted input.
+            safe_profile = "".join(c for c in profile if c.isalnum() or c in "-_")
+            if safe_profile:
+                config_paths.append(os.path.join("config", f"{safe_profile}.yaml"))
+        from src.utils.settings_manager import get_settings_path
+        config_paths.append(get_settings_path())
+        for cfg_path in config_paths:
+            if os.path.exists(cfg_path):
+                with open(cfg_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                exchange = cfg.get("trading", {}).get("exchange", "coinbase")
+                return "equity" if exchange == "ibkr" else "crypto"
+    except Exception:
+        pass
+    return "crypto"
+
+
+def _get_watchlist_tickers(profile: str) -> list[str]:
+    """Return Yahoo Finance tickers for the current watchlist from profile config."""
+    try:
+        config_paths: list[str] = []
+        if profile:
+            safe_profile = "".join(c for c in profile if c.isalnum() or c in "-_")
+            if safe_profile:
+                config_paths.append(os.path.join("config", f"{safe_profile}.yaml"))
+        from src.utils.settings_manager import get_settings_path
+        config_paths.append(get_settings_path())
+        for cfg_path in config_paths:
+            if os.path.exists(cfg_path):
+                with open(cfg_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                pairs = cfg.get("trading", {}).get("pairs", [])
+                from src.core.equity_feed import pair_to_yahoo
+                return [pair_to_yahoo(p) for p in pairs if p]
+    except Exception:
+        pass
+    return []
+
+
+# --- DB helpers ---------------------------------------------------------------
 
 @contextmanager
 def _get_conn():
@@ -238,7 +291,9 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
         # Try profile-specific config first
         config_paths = []
         if profile:
-            config_paths.append(os.path.join("config", f"{profile}.yaml"))
+            _safe = "".join(c for c in profile if c.isalnum() or c in "-_")
+            if _safe:
+                config_paths.append(os.path.join("config", f"{_safe}.yaml"))
         from src.utils.settings_manager import get_settings_path
         config_paths.append(get_settings_path())
 
@@ -279,11 +334,15 @@ async def call_planning_llm(horizon: str, review_data: dict) -> dict:
     alongside trading-cycle agent spans.
 
     horizon: "daily" | "weekly" | "monthly"
-    review_data: output from fetch_portfolio_history / fetch_trade_history
+    review_data: output from fetch_portfolio_history / fetch_trade_history.
+                 May include "domain" ("crypto"|"equity") and "equity_events" dict.
     """
-    SYSTEM_PROMPTS = {
-        "daily": """You are the strategic planning module for an automated trading bot.
-Your job is to review yesterday's and last week's trading performance and produce a clear daily plan.
+    domain = review_data.get("domain", "crypto")
+
+    # ── System prompts, split by domain ───────────────────────────────────
+    _CRYPTO_PROMPTS = {
+        "daily": """You are the strategic planning module for an automated crypto trading bot.
+Review yesterday's and last week's trading performance and produce a clear daily plan.
 
 Respond ONLY with JSON:
 {
@@ -297,8 +356,8 @@ Respond ONLY with JSON:
     "summary": "2-3 sentence plain-English summary of the daily plan"
 }""",
 
-        "weekly": """You are the strategic planning module for an automated trading bot.
-Your job is to review the last month of trading performance and produce a weekly strategy.
+        "weekly": """You are the strategic planning module for an automated crypto trading bot.
+Review the last month of trading performance and produce a weekly strategy.
 
 Respond ONLY with JSON:
 {
@@ -317,12 +376,11 @@ Respond ONLY with JSON:
     "summary": "3-4 sentence weekly strategic plan"
 }
 
-For pair_outlooks: include up to 5 pairs from pairs_to_focus and pairs_to_reduce where you have meaningful conviction.
-expected_move_pct is the expected % price move over the next 7 days (e.g. 8.0 means +8% this week).
-direction is "bullish" or "bearish". Only include pairs with confidence >= 0.60.""",
+For pair_outlooks: include up to 5 pairs with meaningful conviction.
+expected_move_pct is the expected % move over 7 days. Only include pairs with confidence >= 0.60.""",
 
-        "monthly": """You are the strategic planning module for an automated cryptocurrency trading bot.
-Your job is to review the last 90 days and year-to-date performance and produce a monthly portfolio strategy.
+        "monthly": """You are the strategic planning module for an automated crypto trading bot.
+Review the last 90 days and YTD performance to produce a monthly portfolio strategy.
 
 Respond ONLY with JSON:
 {
@@ -338,9 +396,81 @@ Respond ONLY with JSON:
 }""",
     }
 
-    system_prompt = SYSTEM_PROMPTS.get(horizon, SYSTEM_PROMPTS["daily"])
+    _EQUITY_PROMPTS = {
+        "daily": """You are the strategic planning module for an automated equity trading bot (IBKR, EU large-caps).
+Review yesterday's and last week's trading performance and produce a clear daily plan.
+Consider upcoming earnings releases, ex-dividend dates, and macro events (ECB, FOMC) in your reasoning.
+Pre-earnings: stocks typically drift toward expected surprise then gap on the report day — reduce size into prints.
+Ex-dividend: price drops by approximately the dividend amount on ex-div date — avoid buying the day before.
 
-    # Format the review data as a concise user message
+Respond ONLY with JSON:
+{
+    "regime": "bullish" | "bearish" | "neutral" | "volatile",
+    "confidence": 0.0-1.0,
+    "preferred_pairs": ["ASML.AS-EUR", ...],
+    "avoid_pairs": [...],
+    "risk_posture": "aggressive" | "normal" | "conservative",
+    "event_risk_today": "Any earnings/ex-div/macro events hitting today or tomorrow worth flagging",
+    "key_observations": ["obs1", "obs2"],
+    "today_focus": "One sentence on the main trading focus for today",
+    "summary": "2-3 sentence plain-English summary of the daily plan"
+}""",
+
+        "weekly": """You are the strategic planning module for an automated equity trading bot (IBKR, EU large-caps).
+Review the last month of trading performance and produce a weekly strategy.
+Account for upcoming earnings releases, ex-dividend dates, ECB/FOMC decisions, and sector rotation.
+EU large-caps typically drift toward analyst consensus in the 2 weeks pre-earnings, then gap significantly
+on the report day — reduce or close positions before earnings to avoid uncontrolled gap risk.
+
+Respond ONLY with JSON:
+{
+    "market_regime": "bull_market" | "bear_market" | "sideways" | "volatile",
+    "regime_confidence": 0.0-1.0,
+    "strategy_adjustments": ["adjustment1", "adjustment2", ...],
+    "pairs_to_focus": ["ASML.AS-EUR", ...],
+    "pairs_to_reduce": [...],
+    "risk_posture": "aggressive" | "normal" | "conservative",
+    "earnings_season_posture": "pre_season_accumulate" | "in_season_cautious" | "post_season_momentum" | "between_seasons_normal",
+    "upcoming_earnings_risk": ["ASML.AS-EUR", "..."],
+    "sector_rotation_theme": "e.g. defensives over growth given ECB hawkishness",
+    "pattern_observations": ["pattern1", ...],
+    "loss_analysis": "What drove the losses and what to change",
+    "weekly_targets": {"win_rate_target": 0.0, "max_drawdown_tolerance": 0.0},
+    "pair_outlooks": {
+        "ASML.AS-EUR": {"direction": "bullish", "expected_move_pct": 3.0, "confidence": 0.70}
+    },
+    "summary": "3-4 sentence weekly strategic plan"
+}
+
+For pair_outlooks: EU large-caps typically move 2-8% on earnings, 0.5-2% on normal weeks.
+expected_move_pct is the expected % move over 7 days. Only include pairs with confidence >= 0.60.""",
+
+        "monthly": """You are the strategic planning module for an automated equity trading bot (IBKR, EU large-caps).
+Review the last 90 days and YTD performance to produce a monthly portfolio strategy.
+Consider macroeconomic regime (ECB policy, EUR/USD, European growth), quarterly earnings seasons,
+sector rotation patterns, and calendar effects (January effect, Q4 rebalancing, summer liquidity thin-out).
+
+Respond ONLY with JSON:
+{
+    "macro_regime": "risk_on" | "risk_off" | "transitional",
+    "ecb_stance": "dovish" | "neutral" | "hawkish",
+    "earnings_season_phase": "pre_season" | "active_season" | "post_season" | "between_seasons",
+    "sector_rotation": "e.g. rotating into defensives, value over growth",
+    "seasonal_theme": "e.g. Q1 earnings season starting, position for beat/miss patterns",
+    "portfolio_allocation_targets": {"ASML.AS-EUR": 0.0, "SAP.DE-EUR": 0.0, "cash": 0.0},
+    "max_single_position_pct": 0.0,
+    "risk_tolerance": "high" | "medium" | "low",
+    "strategic_themes": ["theme1", "theme2", ...],
+    "performance_assessment": "Assessment of last 90 days",
+    "goal_progress": "Progress toward portfolio growth targets",
+    "summary": "4-5 sentence monthly strategic plan"
+}""",
+    }
+
+    prompts = _EQUITY_PROMPTS if domain == "equity" else _CRYPTO_PROMPTS
+    system_prompt = prompts.get(horizon, prompts["daily"])
+
+    # ── Format backward-looking performance data ───────────────────────────
     stats = review_data.get("trade_stats", {})
     pairs = review_data.get("pair_breakdown", [])
     port = review_data.get("portfolio_range", {})
@@ -349,7 +479,6 @@ Respond ONLY with JSON:
     wins = stats.get("winning") or 0
     win_rate = (wins / total * 100) if total > 0 else 0
 
-    # Dynamic currency symbol -- passed through review_data or defaults to '$'
     sym = review_data.get("currency_symbol") or "$"
     native = review_data.get("native_currency") or "USD"
 
@@ -366,71 +495,111 @@ Respond ONLY with JSON:
                 rj = json.loads(r.get("reasoning_json") or "{}")
                 factors = rj.get("key_factors", [])[:2]
                 loss_reasoning.append(
-                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r.get('signal_type', '?')} "
-                    f"conf={(r.get('confidence') or 0):.0%} factors={factors}"
+                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r.get('signal_type', '?')}"
+                    f" conf={(r.get('confidence') or 0):.0%} factors={factors}"
                 )
             except Exception:
                 pass
 
     loss_text = "\n".join(loss_reasoning) or "  No recent losses with reasoning."
 
-    # NOTE on portfolio corrections:
-    # If portfolio_correction_note is set, the bot's portfolio tracking was recently
-    # corrected.  Tell the LLM to weight recent data more heavily.
     correction_note = ""
     if review_data.get("portfolio_correction_applied"):
-        correction_note = """\n
-IMPORTANT: The bot's portfolio tracking was recently corrected to reflect
-actual live Coinbase holdings. Earlier data may reflect stale or incorrect
-portfolio assumptions. Weight recent data and current holdings more heavily.\n"""
+        exchange_name = "IBKR" if domain == "equity" else "Coinbase"
+        correction_note = (
+            f"\nIMPORTANT: The bot's portfolio tracking was recently corrected to reflect "
+            f"actual live {exchange_name} holdings. Earlier data may reflect stale or incorrect "
+            f"portfolio assumptions. Weight recent data and current holdings more heavily.\n"
+        )
 
-    # -- Previous plan evaluation feedback --
     eval_data = review_data.get("previous_plan_evaluation", {})
     if eval_data.get("has_previous_plan") and eval_data.get("accuracy_score") is not None:
-        eval_block = f"""
-PREVIOUS PLAN EVALUATION:
-  {eval_data.get('summary', '')}
-  Accuracy: {eval_data['accuracy_score']:.0%}
-  Component scores: {', '.join(f'{k}={v:.0%}' for k, v in eval_data.get('component_scores', {}).items())}
-  {f"Preferred pairs PnL: {eval_data.get('actual_pair_pnl', {})}" if eval_data.get('actual_pair_pnl') else ""}
-
-Use this evaluation to improve your current plan. If accuracy was low,
-adjust your approach. If certain pair predictions were wrong, reconsider."""
+        eval_block = (
+            f"\nPREVIOUS PLAN EVALUATION:\n"
+            f"  {eval_data.get('summary', '')}\n"
+            f"  Accuracy: {eval_data['accuracy_score']:.0%}\n"
+            f"  Component scores: {', '.join(f'{k}={v:.0%}' for k, v in eval_data.get('component_scores', {}).items())}\n"
+            + (f"  Preferred pairs PnL: {eval_data.get('actual_pair_pnl', {})}\n" if eval_data.get("actual_pair_pnl") else "")
+            + "\nUse this evaluation to improve your current plan. If accuracy was low,\n"
+              "adjust your approach. If certain pair predictions were wrong, reconsider."
+        )
     elif eval_data.get("has_previous_plan"):
-        eval_block = f"""
-PREVIOUS PLAN EVALUATION:
-  {eval_data.get('summary', 'No trades since last plan -- no accuracy data.')}"""
+        eval_block = f"\nPREVIOUS PLAN EVALUATION:\n  {eval_data.get('summary', 'No trades since last plan.')}"
     else:
         eval_block = ""
 
-    user_message = f"""PERFORMANCE REVIEW ({horizon.upper()})
-{correction_note}{eval_block}
-TRADE STATISTICS:
-  Total trades: {total}
-  Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing') or 0} losses)
-  Total PnL: {sym}{stats.get('total_pnl') or 0:.2f}
-  Avg PnL per trade: {sym}{stats.get('avg_pnl') or 0:.2f}
-  Best trade: {sym}{stats.get('best_pnl') or 0:.2f}
-  Worst trade: {sym}{stats.get('worst_pnl') or 0:.2f}
-  Avg confidence: {(stats.get('avg_confidence') or 0):.0%}
-  Total volume: {sym}{stats.get('total_volume') or 0:,.2f}
-  Total fees: {sym}{stats.get('total_fees') or 0:.2f}
+    # ── Equity-only: forward-looking events block ──────────────────────────
+    equity_events_block = ""
+    if domain == "equity":
+        ev = review_data.get("equity_events", {})
+        earnings: dict = ev.get("earnings", {})
+        dividends: dict = ev.get("dividends", {})
+        macro: list = ev.get("macro", [])
+        season: dict = ev.get("earnings_season", {})
 
-PAIR BREAKDOWN:
-{pairs_text}
+        lines: list[str] = []
 
-PORTFOLIO VALUE RANGE ({native}):
-  Low: {sym}{port.get('low') or 0:,.2f}
-  High: {sym}{port.get('high') or 0:,.2f}
-  Avg: {sym}{port.get('avg') or 0:,.2f}
+        if season and season.get("season_label"):
+            phase = season.get("phase", "")
+            if phase == "active":
+                lines.append(f"  \u26a0\ufe0f  {season['season_label']} ACTIVE \u2014 heightened gap risk on individual names")
+            elif phase == "pre_season":
+                lines.append(f"  \U0001f4c5 {season['season_label']} starts in ~{season.get('days_to_peak', '?')} days \u2014 consider pre-positioning")
+            if season.get("notes"):
+                lines.append(f"     {season['notes']}")
 
-RECENT LOSS ANALYSIS (signal reasoning that led to losses):
-{loss_text}
+        if earnings:
+            lines.append("  UPCOMING EARNINGS:")
+            for ticker, info in sorted(earnings.items(), key=lambda x: x[1].get("days_away", 99)):
+                days = info["days_away"]
+                date = info["earnings_date"]
+                eps = f", est. EPS {info['eps_estimate']:.2f}" if info.get("eps_estimate") is not None else ""
+                prefix = "\u26a0\ufe0f  " if days <= 7 else "   "
+                lines.append(f"    {prefix}{ticker}: {date} ({days}d away{eps})")
 
-Generate the {horizon} plan as JSON."""
+        if dividends:
+            lines.append("  UPCOMING EX-DIVIDEND DATES:")
+            for ticker, info in sorted(dividends.items(), key=lambda x: x[1].get("days_away", 99)):
+                days = info["days_away"]
+                date = info["ex_div_date"]
+                div = f", div {sym}{info['annual_dividend']:.2f}/yr" if info.get("annual_dividend") is not None else ""
+                yld = f" ({info['yield_pct']:.1f}% yield)" if info.get("yield_pct") is not None else ""
+                lines.append(f"    {ticker}: {date} ({days}d away{div}{yld})")
 
-    # Create a planning trace in Langfuse (Cycle-3 fix: wrap in try/except
-    # so tracer failures don't crash the Temporal activity)
+        if macro:
+            lines.append("  MACRO EVENTS (ECB/FOMC):")
+            for evt in macro[:5]:
+                days = evt["days_away"]
+                timing = f"{abs(days)}d ago" if days < 0 else ("TODAY" if days == 0 else f"in {days}d")
+                lines.append(f"    {evt['event']} \u2014 {evt['date']} ({timing})")
+
+        if lines:
+            equity_events_block = "\nFORWARD-LOOKING EVENTS (next 60 days):\n" + "\n".join(lines) + "\n"
+
+    user_message = (
+        f"PERFORMANCE REVIEW ({horizon.upper()} | domain={domain.upper()})\n"
+        f"{correction_note}{eval_block}\n"
+        f"TRADE STATISTICS:\n"
+        f"  Total trades: {total}\n"
+        f"  Win rate: {win_rate:.1f}%  ({wins} wins / {stats.get('losing') or 0} losses)\n"
+        f"  Total PnL: {sym}{stats.get('total_pnl') or 0:.2f}\n"
+        f"  Avg PnL per trade: {sym}{stats.get('avg_pnl') or 0:.2f}\n"
+        f"  Best trade: {sym}{stats.get('best_pnl') or 0:.2f}\n"
+        f"  Worst trade: {sym}{stats.get('worst_pnl') or 0:.2f}\n"
+        f"  Avg confidence: {(stats.get('avg_confidence') or 0):.0%}\n"
+        f"  Total volume: {sym}{stats.get('total_volume') or 0:,.2f}\n"
+        f"  Total fees: {sym}{stats.get('total_fees') or 0:.2f}\n"
+        f"\nPAIR BREAKDOWN:\n{pairs_text}\n"
+        f"\nPORTFOLIO VALUE RANGE ({native}):\n"
+        f"  Low: {sym}{port.get('low') or 0:,.2f}\n"
+        f"  High: {sym}{port.get('high') or 0:,.2f}\n"
+        f"  Avg: {sym}{port.get('avg') or 0:,.2f}\n"
+        f"\nRECENT LOSS ANALYSIS (signal reasoning that led to losses):\n{loss_text}\n"
+        f"{equity_events_block}"
+        f"\nGenerate the {horizon} plan as JSON."
+    )
+
+    # ── Langfuse tracing ───────────────────────────────────────────────────
     trace_id = f"planning-{horizon}-{uuid.uuid4().hex[:8]}"
     trace_ctx = None
     span = None
@@ -440,7 +609,7 @@ Generate the {horizon} plan as JSON."""
             trace_ctx = tracer.start_trace(
                 cycle_id=trace_id,
                 pair="planning",
-                metadata={"horizon": horizon},
+                metadata={"horizon": horizon, "domain": domain},
             )
         if trace_ctx is not None:
             span = trace_ctx.start_span(
@@ -462,13 +631,12 @@ Generate the {horizon} plan as JSON."""
             agent_name=f"planning_{horizon}",
         )
         logger.info(
-            f"Planning LLM response for {horizon}: "
+            f"Planning LLM response for {horizon} ({domain}): "
             f"regime={result.get('regime', result.get('market_regime', result.get('macro_regime', '?')))}"
         )
-        # Attach the real Langfuse trace ID so write_strategic_context can persist it
         result["_langfuse_trace_id"] = trace_ctx.trace_id if trace_ctx else trace_id
         if trace_ctx:
-            trace_ctx.finish(metadata={"horizon": horizon, "regime": result.get("regime")})
+            trace_ctx.finish(metadata={"horizon": horizon, "domain": domain, "regime": result.get("regime")})
         return result
     except Exception as e:
         logger.error(f"Planning LLM call failed: {e}")
@@ -585,6 +753,30 @@ async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
     else:
         scores["regime_prediction"] = 0.5
 
+    # 4. Equity earnings discipline
+    # If the plan listed upcoming_earnings_risk pairs, check whether new BUY
+    # trades were placed on those pairs (which would be undisciplined).
+    # Handle both list (current schema) and legacy string values.
+    upcoming_risk_raw = prev_plan.get("upcoming_earnings_risk")
+    if isinstance(upcoming_risk_raw, list):
+        risk_pairs = set(upcoming_risk_raw)
+    elif isinstance(upcoming_risk_raw, str) and upcoming_risk_raw:
+        # Comma-separated string fallback (old plans)
+        risk_pairs = {p.strip() for p in upcoming_risk_raw.split(",") if p.strip()}
+    else:
+        risk_pairs = set()
+    if risk_pairs:
+        buys_on_risky = [
+            t for t in trades
+            if t.get("pair") in risk_pairs and t.get("action") == "buy"
+        ]
+        if not buys_on_risky:
+            scores["earnings_discipline"] = 1.0   # respected guidance — no buys near earnings
+        elif len(buys_on_risky) == 1:
+            scores["earnings_discipline"] = 0.5   # partial restraint
+        else:
+            scores["earnings_discipline"] = 0.2   # repeatedly ignored earnings risk warnings
+
     accuracy = sum(scores.values()) / len(scores) if scores else 0.5
 
     evaluation = {
@@ -626,6 +818,8 @@ async def write_strategic_context(
     """Persist a planning workflow result to StatsDB."""
     from src.utils.stats import StatsDB
     db = StatsDB()
+    # MED-8: work on a copy so we don't mutate the Temporal-serialised input.
+    plan_json = dict(plan_json)
     langfuse_trace_id = plan_json.pop("_langfuse_trace_id", None)
     row_id = db.save_strategic_context(
         horizon=horizon,
@@ -649,20 +843,50 @@ async def write_daily_plan(date: str, plan_text: str, profile: str = "") -> None
 
 
 @activity.defn
-async def fetch_pair_universe() -> dict:
+async def fetch_pair_universe(profile: str = "") -> dict:
     """Fetch the current pair universe size and product summary.
 
-    Returns a dict with universe_size and a sample of products.
-    This queries the Coinbase product catalog directly.
+    Routes to the correct data source based on the profile domain:
+      - crypto (Coinbase): queries the Coinbase product catalog
+      - equity (IBKR):     queries the equity universe via equity_feed
     """
+    domain = _detect_domain(profile)
+
+    if domain == "equity":
+        try:
+            from src.core.equity_feed import discover_pairs_detailed
+            products = discover_pairs_detailed(exchange_id="ibkr")
+            by_quote: dict[str, int] = {}
+            for p in products:
+                pid = p.get("product_id", "")
+                q = pid.split("-")[-1] if "-" in pid else "?"
+                by_quote[q] = by_quote.get(q, 0) + 1
+            top_by_volume = sorted(
+                products, key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True
+            )[:20]
+            return {
+                "domain": "equity",
+                "universe_size": len(products),
+                "by_quote_currency": by_quote,
+                "top_20_by_volume": [
+                    {
+                        "product_id": p["product_id"],
+                        "volume_24h": float(p.get("volume_24h", 0) or 0),
+                        "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
+                    }
+                    for p in top_by_volume
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"fetch_pair_universe (equity) failed: {e}")
+            return {"domain": "equity", "universe_size": 0, "error": str(e)}
+
+    # crypto / Coinbase path
     try:
         from src.core.coinbase_client import CoinbaseClient
         coinbase = CoinbaseClient()
-        products = coinbase.discover_all_pairs_detailed(
-            include_crypto_quotes=True,
-        )
-        # Summarise -- don't send full list to LLM
-        by_quote: dict[str, int] = {}
+        products = coinbase.discover_all_pairs_detailed(include_crypto_quotes=True)
+        by_quote = {}
         for p in products:
             q = p.get("quote_currency", "?")
             by_quote[q] = by_quote.get(q, 0) + 1
@@ -670,6 +894,7 @@ async def fetch_pair_universe() -> dict:
             products, key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True
         )[:20]
         return {
+            "domain": "crypto",
             "universe_size": len(products),
             "by_quote_currency": by_quote,
             "top_20_by_volume": [
@@ -682,8 +907,8 @@ async def fetch_pair_universe() -> dict:
             ],
         }
     except Exception as e:
-        logger.warning(f"fetch_pair_universe activity failed: {e}")
-        return {"universe_size": 0, "error": str(e)}
+        logger.warning(f"fetch_pair_universe (crypto) failed: {e}")
+        return {"domain": "crypto", "universe_size": 0, "error": str(e)}
 
 
 @activity.defn
@@ -705,3 +930,49 @@ async def fetch_universe_scan_summary(profile: str = "") -> dict:
     except Exception as e:
         logger.warning(f"fetch_universe_scan_summary activity failed: {e}")
         return {"summary_text": f"Error: {e}"}
+
+
+@activity.defn
+async def fetch_equity_events(profile: str = "") -> dict:
+    """Fetch earnings dates, ex-dividend dates, and macro events for the equity watchlist.
+
+    Returns a structured dict that ``call_planning_llm`` injects into the LLM context.
+    Returns ``{"domain": "crypto"}`` immediately (no external calls) for crypto profiles
+    so the workflow code can call this unconditionally without branching.
+    """
+    domain = _detect_domain(profile)
+    if domain != "equity":
+        return {"domain": "crypto", "earnings": {}, "dividends": {}, "macro": [], "earnings_season": {}}
+
+    tickers = _get_watchlist_tickers(profile)
+    if not tickers:
+        logger.warning("fetch_equity_events: no tickers found in profile config")
+        return {"domain": "equity", "earnings": {}, "dividends": {}, "macro": [], "earnings_season": {}}
+
+    try:
+        from src.core.equity_feed import (
+            get_earnings_calendar,
+            get_dividend_calendar,
+            get_macro_calendar,
+            get_earnings_season_context,
+        )
+        earnings = get_earnings_calendar(tickers, days_ahead=60)
+        dividends = get_dividend_calendar(tickers, days_ahead=60)
+        macro = get_macro_calendar(days_ahead=60)
+        earnings_season = get_earnings_season_context()
+
+        logger.info(
+            f"📅 Equity events: {len(earnings)} earnings, {len(dividends)} ex-div, "
+            f"{len(macro)} macro events for {len(tickers)} tickers"
+        )
+        return {
+            "domain": "equity",
+            "tickers": tickers,
+            "earnings": earnings,
+            "dividends": dividends,
+            "macro": macro,
+            "earnings_season": earnings_season,
+        }
+    except Exception as e:
+        logger.warning(f"fetch_equity_events failed: {e}")
+        return {"domain": "equity", "earnings": {}, "dividends": {}, "macro": [], "earnings_season": {}}

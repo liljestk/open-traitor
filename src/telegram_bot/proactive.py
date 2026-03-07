@@ -39,10 +39,12 @@ class ProactiveEngine:
       - Periodic check-in (based on verbosity interval)
     """
 
-    def __init__(self, send_callback: Callable, llm_client, personality):
+    def __init__(self, send_callback: Callable, llm_client, personality, exchange_type: str = "coinbase"):
         self._send = send_callback
         self._llm = llm_client
         self._personality = personality
+        _is_equity = exchange_type == "ibkr"
+        self._trader_type = "equity/stock trader" if _is_equity else "crypto trader"
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._events: deque[dict] = deque(maxlen=200)
@@ -248,6 +250,9 @@ class ProactiveEngine:
         # ─── 5. Record portfolio snapshot ───
         if self._stats_db:
             try:
+                _exchange = self._live_config.get("trading", {}).get("exchange", "coinbase")
+                if ctx.get("paper_mode", False):
+                    _exchange = f"{_exchange}_paper"
                 self._stats_db.record_snapshot(
                     portfolio_value=ctx.get("raw_portfolio_value", 0),
                     cash_balance=ctx.get("raw_cash_balance", 0),
@@ -257,6 +262,7 @@ class ProactiveEngine:
                     open_positions=ctx.get("raw_positions", {}),
                     current_prices=ctx.get("raw_prices", {}),
                     high_stakes_active=ctx.get("high_stakes_active", False),
+                    exchange=_exchange,
                 )
             except Exception as e:
                 logger.debug(f"Snapshot record failed: {e}")
@@ -348,7 +354,7 @@ RULES:
 
         try:
             r = await self._llm.chat(
-                system_prompt="Pro crypto trader, quick Telegram update.",
+                system_prompt=f"Pro {self._trader_type}, quick Telegram update.",
                 user_message=prompt, temperature=0.6, max_tokens=300,
             )
             if r.strip().upper() != "SKIP":
@@ -401,7 +407,7 @@ Keep it under 12 lines. Specific prices and levels."""
 
         try:
             r = await self._llm.chat(
-                system_prompt="Pro crypto trader, morning briefing.",
+                system_prompt=f"Pro {self._trader_type}, morning briefing.",
                 user_message=prompt, temperature=0.5, max_tokens=600,
             )
             self._send(r)
@@ -472,7 +478,7 @@ Keep it under 10 lines. Be honest about losses."""
 
         try:
             r = await self._llm.chat(
-                system_prompt="Pro crypto trader, evening recap.",
+                system_prompt=f"Pro {self._trader_type}, evening recap.",
                 user_message=prompt, temperature=0.5, max_tokens=500,
             )
             self._send(r)

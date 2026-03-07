@@ -14,6 +14,7 @@ import { fetchNews, type NewsArticle } from '../api'
 import { SkeletonCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import { useLiveStore } from '../store'
 
 dayjs.extend(relativeTime)
 
@@ -149,10 +150,11 @@ export default function NewsFeed() {
   const [sortKey, setSortKey] = useState<SortKey>('date')
   const [sentimentFilter, setSentimentFilter] = useState<SentimentFilter>('all')
   const [selectedTickers, setSelectedTickers] = useState<Set<string>>(new Set())
+  const profile = useLiveStore(s => s.profile)
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['news'],
-    queryFn: () => fetchNews(100),
+    queryKey: ['news', profile],
+    queryFn: () => fetchNews(100, profile),
     refetchInterval: 120_000,
   })
 

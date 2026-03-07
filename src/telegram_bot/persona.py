@@ -61,6 +61,29 @@ TOOL-CALLING BEHAVIOUR:
 - If you're unsure which tool to call, call get_account_holdings for portfolio
   queries and get_status for general status queries. Those cover most cases."""
 
+_EQUITY_OVERRIDES = {
+    "a sharp, autonomous crypto trader running 24/7.": "a sharp, autonomous equity trader running 24/7.",
+    "You manage their crypto portfolio.": "You manage their equity/stock portfolio.",
+    '"BTC looks strong here" not "BTC might possibly be going up".': '"ASML looks strong here" not "ASML might possibly be going up".',
+    '"$94,200", "+2.3%", "RSI at 68"': '"€52.40", "+2.3%", "RSI at 68"',
+    '"BTC is testing resistance at $95k."': '"ASML is testing resistance at €680."',
+}
+
+
+def build_persona(exchange_type: str = "coinbase") -> str:
+    """Return the trader persona for the given exchange type.
+
+    For IBKR (equity) exchanges the crypto-specific wording is replaced with
+    equity/stock wording so the LLM doesn't bleed crypto terminology into
+    messages about European stocks.
+    """
+    if exchange_type != "ibkr":
+        return PRO_TRADER_PERSONA
+    p = PRO_TRADER_PERSONA
+    for old, new in _EQUITY_OVERRIDES.items():
+        p = p.replace(old, new)
+    return p
+
 
 class PersonalityConfig:
     """Controls verbosity and proactive messaging behavior."""

@@ -13,6 +13,7 @@ import math
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import HTTPException, Query
@@ -142,15 +143,17 @@ def expire_confirmations() -> None:
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Rate-limit helpers for confirmation endpoints
+# (separate lock from _pending_confirmations to avoid coupling)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _confirmation_attempts: dict[str, list[float]] = {}
+_confirmation_attempts_lock = threading.Lock()
 
 
-def prune_expired_confirmations() -> None:
-    """Remove expired confirmation attempts."""
+def prune_expired_rate_entries() -> None:
+    """Remove stale rate-limit buckets (entries where all timestamps are old)."""
     now = time.monotonic()
-    with _pending_confirmations_lock:
+    with _confirmation_attempts_lock:
         expired_keys = [k for k, v in _confirmation_attempts.items()
                         if all(t < now - 300 for t in v)]
         for k in expired_keys:
@@ -160,7 +163,20 @@ def prune_expired_confirmations() -> None:
 def check_confirmation_rate(client_ip: str, max_per_window: int = 5, window_seconds: int = 300) -> bool:
     """Return True if the client is within the rate limit, False if blocked."""
     now = time.monotonic()
-    with _pending_confirmations_lock:
+    with _confirmation_attempts_lock:
+        # L3: Cap dict size to prevent unbounded memory growth
+        # Inline pruning to avoid deadlock (Lock is non-reentrant)
+        if len(_confirmation_attempts) > 10_000:
+            expired_keys = [k for k, v in _confirmation_attempts.items()
+                            if all(t < now - 300 for t in v)]
+            for k in expired_keys:
+                del _confirmation_attempts[k]
+            # If still too large after pruning, drop oldest half
+            if len(_confirmation_attempts) > 10_000:
+                to_drop = sorted(_confirmation_attempts.keys(),
+                                 key=lambda k: max(_confirmation_attempts[k], default=0))[:5000]
+                for k in to_drop:
+                    del _confirmation_attempts[k]
         attempts = _confirmation_attempts.get(client_ip, [])
         attempts = [t for t in attempts if t > now - window_seconds]
         if len(attempts) >= max_per_window:
@@ -213,11 +229,33 @@ DASHBOARD_COMMAND_SIGNING_KEY: str = (
     or os.environ.get("DASHBOARD_API_KEY", "")
 )
 
+if not DASHBOARD_COMMAND_SIGNING_KEY:
+    logger.warning(
+        "⚠️  DASHBOARD_COMMAND_SIGNING_KEY not set — trade command signing is disabled. "
+        "Set this env var to enable authenticated dashboard commands."
+    )
 
-def sign_dashboard_command(action: str, pair: str, ts: str, source: str, nonce: str) -> str:
-    """Create a deterministic HMAC signature for dashboard trade commands."""
+
+def sign_dashboard_command(
+    action: str,
+    pair: str,
+    ts: str,
+    source: str,
+    nonce: str,
+) -> str:
+    """Generate an HMAC-SHA256 signature for a dashboard command.
+
+    H13 fix: This function was referenced by commands.py and watchlist.py
+    but was never defined, causing AttributeError at runtime.
+    """
+    import hashlib
+    import hmac as _hmac
+
+    if not DASHBOARD_COMMAND_SIGNING_KEY:
+        raise RuntimeError("DASHBOARD_COMMAND_SIGNING_KEY is not configured")
+
     payload = f"{action}|{pair}|{ts}|{source}|{nonce}"
-    return hmac.new(
+    return _hmac.new(
         DASHBOARD_COMMAND_SIGNING_KEY.encode("utf-8"),
         payload.encode("utf-8"),
         hashlib.sha256,
@@ -329,5 +367,3 @@ def get_live_price(pair: str, profile: str = "") -> float | None:
         return None
 
 
-# Import datetime at module level for utcnow
-from datetime import datetime, timezone

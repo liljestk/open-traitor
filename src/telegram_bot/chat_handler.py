@@ -37,6 +37,7 @@ from src.telegram_bot.tools import ToolDef, BUILTIN_TOOL_REGISTRY
 # Extracted modules
 from src.telegram_bot.persona import (
     PRO_TRADER_PERSONA,
+    build_persona,
     PersonalityConfig,
     ConversationMemory,
 )
@@ -62,9 +63,11 @@ class TelegramChatHandler:
       4. Background: ProactiveEngine sends updates autonomously
     """
 
-    def __init__(self, llm_client, rate_limiter=None):
+    def __init__(self, llm_client, rate_limiter=None, exchange_type: str = "coinbase"):
         self.llm = llm_client
         self.rate_limiter = rate_limiter
+        self.exchange_type = exchange_type
+        self._persona = build_persona(exchange_type)
         self.personality = PersonalityConfig()
         self.memory = ConversationMemory(max_messages=30)
 
@@ -94,7 +97,7 @@ class TelegramChatHandler:
     def set_send_callback(self, callback: Callable) -> None:
         self._send_callback = callback
         # Create and start proactive engine
-        self._proactive = ProactiveEngine(callback, self.llm, self.personality)
+        self._proactive = ProactiveEngine(callback, self.llm, self.personality, exchange_type=self.exchange_type)
         self._proactive.start()
 
     def set_context_provider(self, provider: Callable) -> None:
@@ -102,10 +105,10 @@ class TelegramChatHandler:
         if self._proactive:
             self._proactive.set_context_provider(provider)
 
-    def queue_event(self, event: str) -> None:
+    def queue_event(self, event: str, severity: str = "info", pair: str | None = None) -> None:
         """Queue event for proactive engine."""
         if self._proactive:
-            self._proactive.queue_event(event)
+            self._proactive.queue_event(event, severity=severity, pair=pair)
         self.memory.add("system", f"[EVENT] {event}")
 
     # ────────────────────────────────────────────────────────────────────────
@@ -348,7 +351,7 @@ class TelegramChatHandler:
         """Build the base system prompt for the smart path."""
         now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         return (
-            f"{PRO_TRADER_PERSONA}\n\n"
+            f"{self._persona}\n\n"
             f"{self.personality.to_prompt_fragment()}\n\n"
             f"You're chatting with {user_name} on Telegram.\n\n"
             f"━━━ LIVE DATA (fetched {now_ts} — USE ONLY THESE NUMBERS) ━━━\n"

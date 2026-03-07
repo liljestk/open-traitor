@@ -174,7 +174,7 @@ def get_watchlist(
         })
     except Exception as exc:
         logger.exception("watchlist error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api/watchlist/follow", summary="Follow a pair (human)")

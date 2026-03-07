@@ -277,7 +277,7 @@ def get_setup_config():
         additional_users = ",".join(user_ids[1:]) if len(user_ids) > 1 else ""
         telegram_enabled = bool(primary_user)
 
-        # Infrastructure secrets (passed through so save preserves them)
+        # Infrastructure secrets — report presence only, never expose values (C3)
         infra_secrets = {}
         _INFRA_KEYS = [
             "REDIS_PASSWORD", "REDIS_URL",
@@ -288,8 +288,17 @@ def get_setup_config():
             "LANGFUSE_ENCRYPTION_KEY",
         ]
         for k in _INFRA_KEYS:
-            if k in config_env:
-                infra_secrets[k] = config_env[k]
+            infra_secrets[k] = {"is_set": k in config_env and bool(config_env[k].strip())}
+
+        # C3: Helper to report secret presence without exposing values
+        def _mask(val: str) -> str:
+            """Return masked representation: first 4 chars + '***' or empty."""
+            if not val or not val.strip():
+                return ""
+            v = val.strip()
+            if len(v) <= 4:
+                return "****"
+            return v[:4] + "****"
 
         state = {
             "exists": True,
@@ -301,39 +310,40 @@ def get_setup_config():
             "customCryptoPair": "",
             "ibkrPairs": yaml_pairs.get("ibkr", []),
             "customIbkrPair": "",
-            "coinbaseApiKey": env("COINBASE_API_KEY", ""),
-            "coinbaseApiSecret": env("COINBASE_API_SECRET", ""),
+            "coinbaseApiKey": _mask(env("COINBASE_API_KEY", "")),
+            "coinbaseApiKeySet": bool(env("COINBASE_API_KEY", "").strip()),
+            "coinbaseApiSecretSet": bool(env("COINBASE_API_SECRET", "").strip()),
             "ibkrHost": env("IBKR_HOST", "127.0.0.1"),
             "ibkrPort": env("IBKR_PORT", "4002"),
             "ibkrClientId": env("IBKR_CLIENT_ID", "1"),
             "ibkrCurrency": env("IBKR_CURRENCY", "USD"),
             "geminiEnabled": env("GEMINI_API_KEY", "") != "",
-            "geminiApiKey": env("GEMINI_API_KEY", ""),
+            "geminiApiKey": _mask(env("GEMINI_API_KEY", "")),
             "openrouterEnabled": env("OPENROUTER_API_KEY", "") != "",
-            "openrouterApiKey": env("OPENROUTER_API_KEY", ""),
+            "openrouterApiKey": _mask(env("OPENROUTER_API_KEY", "")),
             "openaiEnabled": env("OPENAI_API_KEY", "") != "",
-            "openaiApiKey": env("OPENAI_API_KEY", ""),
+            "openaiApiKey": _mask(env("OPENAI_API_KEY", "")),
             "groqEnabled": env("GROQ_API_KEY", "") != "",
-            "groqApiKey": env("GROQ_API_KEY", ""),
+            "groqApiKey": _mask(env("GROQ_API_KEY", "")),
             "ollamaModel": env("OLLAMA_MODEL", "qwen2.5:14b"),
             "telegramEnabled": telegram_enabled,
             "telegramUserId": primary_user,
             "telegramAdditionalUsers": additional_users,
-            "telegramCoinbaseBotToken": env("TELEGRAM_BOT_TOKEN_COINBASE", ""),
+            "telegramCoinbaseBotToken": _mask(env("TELEGRAM_BOT_TOKEN_COINBASE", "")),
             "telegramCoinbaseChatId": env("TELEGRAM_CHAT_ID_COINBASE", ""),
-            "telegramIbkrBotToken": env("TELEGRAM_BOT_TOKEN_IBKR", ""),
+            "telegramIbkrBotToken": _mask(env("TELEGRAM_BOT_TOKEN_IBKR", "")),
             "telegramIbkrChatId": env("TELEGRAM_CHAT_ID_IBKR", ""),
             "redditEnabled": env("REDDIT_CLIENT_ID", "") != "",
-            "redditClientId": env("REDDIT_CLIENT_ID", ""),
-            "redditClientSecret": env("REDDIT_CLIENT_SECRET", ""),
+            "redditClientId": _mask(env("REDDIT_CLIENT_ID", "")),
+            "redditClientSecret": _mask(env("REDDIT_CLIENT_SECRET", "")),
             "redditUserAgent": env("REDDIT_USER_AGENT", "auto-traitor/1.0"),
-            # Infra secrets so the frontend can preserve them on re-save
+            # Infra secrets: presence flags only (C3)
             "infraSecrets": infra_secrets,
         }
         return state
     except Exception as exc:
         logger.exception("setup GET error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api/setup", summary="Save initial configuration from setup wizard")
@@ -344,6 +354,54 @@ def setup_config(body: _SetupConfigBody, request: Request):
     """
     try:
         source_ip = request.client.host if request.client else "unknown"
+
+        # C4: Allowlist of keys permitted in config/.env file writes
+        _ALLOWED_CONFIG_ENV_KEYS = {
+            "COINBASE_API_KEY", "COINBASE_API_SECRET", "COINBASE_KEY_FILE",
+            "TRADING_MODE", "LIVE_TRADING_CONFIRMED", "PAPER_MODE",
+            "REDIS_URL", "REDIS_PASSWORD",
+            "OLLAMA_BASE_URL", "OLLAMA_MODEL",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY", "GROQ_API_KEY",
+            "TELEGRAM_BOT_TOKEN_COINBASE", "TELEGRAM_CHAT_ID_COINBASE",
+            "TELEGRAM_BOT_TOKEN_IBKR", "TELEGRAM_CHAT_ID_IBKR",
+            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+            "TELEGRAM_AUTHORIZED_USERS",
+            "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
+            "LANGFUSE_DB_PASSWORD", "LANGFUSE_NEXTAUTH_SECRET", "LANGFUSE_SALT",
+            "LANGFUSE_ADMIN_PASSWORD", "LANGFUSE_ENCRYPTION_KEY",
+            "TEMPORAL_HOST", "TEMPORAL_NAMESPACE",
+            "TEMPORAL_DB_USER", "TEMPORAL_DB_PASSWORD", "TEMPORAL_DB_NAME",
+            "CLICKHOUSE_PASSWORD", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
+            "DASHBOARD_API_KEY", "DASHBOARD_COMMAND_SIGNING_KEY",
+            "LOG_LEVEL",
+            "IBKR_HOST", "IBKR_PORT", "IBKR_CLIENT_ID", "IBKR_ACCOUNT",
+            "IBKR_CURRENCY",
+            "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT",
+        }
+        _ALLOWED_ROOT_ENV_KEYS = {
+            "REDIS_PASSWORD", "REDIS_URL",
+            "TEMPORAL_DB_USER", "TEMPORAL_DB_PASSWORD", "TEMPORAL_DB_NAME",
+            "LANGFUSE_DB_PASSWORD", "LANGFUSE_NEXTAUTH_SECRET", "LANGFUSE_SALT",
+            "LANGFUSE_ADMIN_PASSWORD", "LANGFUSE_ENCRYPTION_KEY",
+            "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "CLICKHOUSE_PASSWORD", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
+            "DASHBOARD_API_KEY", "DASHBOARD_COMMAND_SIGNING_KEY",
+        }
+
+        # Filter env dicts through allowlists before writing (C4)
+        filtered_config_env = {}
+        for key, value in body.config_env.items():
+            if key in _ALLOWED_CONFIG_ENV_KEYS:
+                filtered_config_env[key] = value
+            else:
+                logger.warning(f"Setup wizard: rejected non-allowlisted config env key {key!r} (ip={source_ip})")
+        filtered_root_env = {}
+        for key, value in body.root_env.items():
+            if key in _ALLOWED_ROOT_ENV_KEYS:
+                filtered_root_env[key] = value
+            else:
+                logger.warning(f"Setup wizard: rejected non-allowlisted root env key {key!r} (ip={source_ip})")
 
         # 1. Write config/.env
         config_env_path = os.path.join("config", ".env")
@@ -365,7 +423,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "# ===========================================",
             "",
         ]
-        for key, value in body.config_env.items():
+        for key, value in filtered_config_env.items():
             config_lines.append(f"{key}={str(value).replace(chr(10), '').replace(chr(13), '')}")
         config_lines.append("")
 
@@ -394,7 +452,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "# Docker Compose variable substitution — generated by setup wizard, do not commit",
             "",
         ]
-        for key, value in body.root_env.items():
+        for key, value in filtered_root_env.items():
             root_lines.append(f"{key}={str(value).replace(chr(10), '').replace(chr(13), '')}")
         root_lines.append("")
 
@@ -479,7 +537,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
             "LOG_LEVEL", "PAPER_MODE",
             "IBKR_HOST", "IBKR_PORT", "IBKR_CLIENT_ID", "IBKR_CURRENCY",
         }
-        for key, value in body.config_env.items():
+        for key, value in filtered_config_env.items():
             if key in _ALLOWED_ENV_KEYS:
                 os.environ[key] = value
             else:
@@ -531,7 +589,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
         raise
     except Exception as exc:
         logger.exception("setup POST error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -563,7 +621,7 @@ def get_settings():
         return full
     except Exception as exc:
         logger.exception("settings GET error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.put("/api/settings", summary="Update settings section or apply preset")
@@ -691,7 +749,7 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
         raise
     except Exception as exc:
         logger.exception("settings PUT error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/settings/presets", summary="List available presets")
@@ -763,7 +821,7 @@ def get_llm_providers():
         return {"providers": result}
     except Exception as exc:
         logger.exception("llm-providers GET error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/settings/openrouter-credits", summary="Check OpenRouter free-tier credits")
@@ -826,7 +884,7 @@ def update_llm_providers(body: _ProvidersUpdateBody):
         raise
     except Exception as exc:
         logger.exception("llm-providers PUT error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.put("/api/settings/api-keys", summary="Update API keys for LLM providers")
@@ -931,4 +989,4 @@ def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
         raise
     except Exception as exc:
         logger.exception("api-keys PUT error")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")

@@ -744,7 +744,9 @@ class LLMClient:
                             break  # try next opening brace
 
         logger.error(f"Could not extract JSON from response: {text[:300]}")
-        return {"error": "Failed to parse LLM response", "raw": text[:500]}
+        # H7: Don't include raw LLM output in returned dict — it may contain
+        # injected content or leak prompt details. Log it instead.
+        return {"error": "Failed to parse LLM response"}
 
     # ── Health & stats ────────────────────────────────────────────────────
 

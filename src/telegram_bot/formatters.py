@@ -8,7 +8,7 @@ import json
 
 
 def _format_status(data: dict) -> str:
-    """Format portfolio status using live Coinbase data."""
+    """Format portfolio status using live exchange data."""
     sym = data.get("currency_symbol", "$")
     pv = data.get("portfolio_value", data.get("portfolio_value_usd", 0))
     pnl = data.get("bot_pnl", data.get("bot_pnl_usd", data.get("total_pnl", 0)))
@@ -29,12 +29,12 @@ def _format_status(data: dict) -> str:
     if fetched:
         lines.append(f"_Data: {fetched}_")
 
-    # Show actual Coinbase holdings
+    # Show non-fiat holdings
     holdings = data.get("holdings", [])
-    crypto = [h for h in holdings if not h.get("is_fiat", False)][:6]
-    if crypto:
+    assets = [h for h in holdings if not h.get("is_fiat", False)][:6]
+    if assets:
         lines.append(f"\n📊 *Holdings:*")
-        for h in crypto:
+        for h in assets:
             val = h.get("native_value", 0)
             price = h.get("price", 0)
             lines.append(
@@ -73,21 +73,21 @@ def _format_balance(data: dict) -> str:
 
 
 def _format_positions(data: dict) -> str:
-    """Format actual Coinbase holdings."""
-    holdings = data.get("coinbase_holdings", [])
+    """Format actual exchange holdings."""
+    holdings = data.get("coinbase_holdings", data.get("holdings", []))
     fetched = data.get("fetched_at", "")
     if not holdings:
         # Fallback: legacy format
         positions = data.get("open_positions", {})
         if not positions:
-            return "📭 No crypto holdings found."
+            return "📭 No open positions found."
         lines = [f"📊 *{len(positions)} Bot Positions:*\n"]
         for pair, qty in positions.items():
             lines.append(f"• *{pair}*: {qty:.6f}")
         return "\n".join(lines)
 
     sym = data.get("currency_symbol", "$")
-    total_val = data.get("total_crypto_value", data.get("total_crypto_usd", sum(h.get("native_value", 0) for h in holdings)))
+    total_val = data.get("total_crypto_value", data.get("total_crypto_usd", data.get("total_value", sum(h.get("native_value", 0) for h in holdings))))
     lines = [f"📊 *{len(holdings)} Holdings (live)* — {sym}{total_val:,.2f} total\n"]
     for h in holdings:
         price = h.get("price", 0)
@@ -158,7 +158,7 @@ def _format_signals(data: dict) -> str:
 
 
 def _format_account_holdings(data: dict) -> str:
-    """Format the raw live Coinbase snapshot."""
+    """Format the raw live exchange account snapshot."""
     sym = data.get("currency_symbol", "$")
     holdings = data.get("holdings", [])
     total = data.get("total_portfolio", data.get("total_portfolio_usd", 0))

@@ -19,7 +19,7 @@ import {
   TrendingUp, TrendingDown, Activity, Target, BarChart2, Calendar, Brain, Zap,
 } from 'lucide-react'
 import { fetchPortfolioHistory, fetchAnalytics, fetchPredictionAccuracy } from '../api'
-import { useCurrencyFormatter } from '../store'
+import { useCurrencyFormatter, useLiveStore } from '../store'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
@@ -178,23 +178,24 @@ function SignalDistributionChart({ data }: {
 export default function Analytics() {
   const [range, setRange] = useState(720)
   const fmtCurrency = useCurrencyFormatter()
+  const profile = useLiveStore((s) => s.profile)
 
   const days = Math.max(1, Math.ceil(range / 24))
 
   const { data: history, isLoading: histLoading } = useQuery({
-    queryKey: ['portfolio-history', range],
+    queryKey: ['portfolio-history', range, profile],
     queryFn: () => fetchPortfolioHistory(range),
     refetchInterval: 30_000,
   })
 
   const { data: analytics, isLoading: anlLoading } = useQuery({
-    queryKey: ['analytics', range],
+    queryKey: ['analytics', range, profile],
     queryFn: () => fetchAnalytics(range),
     refetchInterval: 30_000,
   })
 
   const { data: predStats, isLoading: predLoading } = useQuery({
-    queryKey: ['prediction-accuracy', days],
+    queryKey: ['prediction-accuracy', days, profile],
     queryFn: () => fetchPredictionAccuracy(days),
     refetchInterval: 60_000,
   })

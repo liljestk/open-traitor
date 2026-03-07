@@ -164,6 +164,7 @@ class StatsDB(
                     CREATE TABLE IF NOT EXISTS events (
                         id SERIAL PRIMARY KEY,
                         ts TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+                        exchange TEXT NOT NULL DEFAULT 'coinbase',
                         event_type TEXT NOT NULL,
                         severity TEXT NOT NULL DEFAULT 'info',
                         pair TEXT DEFAULT NULL,
@@ -272,6 +273,7 @@ class StatsDB(
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summaries(date)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_reasoning_cycle ON agent_reasoning(cycle_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_reasoning_pair ON agent_reasoning(pair)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_reasoning_ts ON agent_reasoning(ts)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_strategic_horizon ON strategic_context(horizon)")
 
                 cur.execute("""
@@ -302,36 +304,78 @@ class StatsDB(
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_pair_follows_exchange ON pair_follows(exchange)")
 
             conn.commit()
-            self._migrate_db(conn)
 
-    def _migrate_db(self, conn) -> None:
+        # Run migrations on a fresh connection so any failure is fully
+        # independent of the schema-creation transaction above (MED-10).
+        self._migrate_db()
+
+    # Allowlist for DDL migrations — prevents any interpolation of
+    # unexpected identifiers into ALTER TABLE statements (CRIT-2).
+    _MIGRATION_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
+        ("agent_reasoning",      "langfuse_trace_id"),
+        ("agent_reasoning",      "langfuse_span_id"),
+        ("agent_reasoning",      "prompt_tokens"),
+        ("agent_reasoning",      "completion_tokens"),
+        ("agent_reasoning",      "latency_ms"),
+        ("agent_reasoning",      "raw_prompt"),
+        ("agent_reasoning",      "exchange"),
+        ("strategic_context",    "langfuse_trace_id"),
+        ("strategic_context",    "temporal_workflow_id"),
+        ("strategic_context",    "temporal_run_id"),
+        ("portfolio_snapshots",  "exchange"),
+        ("trades",               "exchange"),
+        ("simulated_trades",     "exchange"),
+        ("scan_results",         "exchange"),
+        ("events",               "exchange"),
+    })
+
+    def _migrate_db(self) -> None:
         """Add new columns to existing tables without breaking old installs."""
         migrations = [
-            ("agent_reasoning", "langfuse_trace_id", "TEXT DEFAULT NULL"),
-            ("agent_reasoning", "langfuse_span_id", "TEXT DEFAULT NULL"),
-            ("agent_reasoning", "prompt_tokens", "INTEGER DEFAULT 0"),
-            ("agent_reasoning", "completion_tokens", "INTEGER DEFAULT 0"),
-            ("agent_reasoning", "latency_ms", "REAL DEFAULT 0"),
-            ("agent_reasoning", "raw_prompt", "TEXT DEFAULT ''"),
-            ("strategic_context", "langfuse_trace_id", "TEXT DEFAULT NULL"),
-            ("strategic_context", "temporal_workflow_id", "TEXT DEFAULT NULL"),
-            ("strategic_context", "temporal_run_id", "TEXT DEFAULT NULL"),
-            ("portfolio_snapshots", "exchange", "TEXT NOT NULL DEFAULT 'coinbase'"),
-            ("trades", "exchange", "TEXT NOT NULL DEFAULT 'coinbase'"),
-            ("agent_reasoning", "exchange", "TEXT NOT NULL DEFAULT 'coinbase'"),
-            ("simulated_trades", "exchange", "TEXT NOT NULL DEFAULT 'coinbase'"),
-            ("scan_results", "exchange", "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("agent_reasoning",     "langfuse_trace_id",    "TEXT DEFAULT NULL"),
+            ("agent_reasoning",     "langfuse_span_id",     "TEXT DEFAULT NULL"),
+            ("agent_reasoning",     "prompt_tokens",        "INTEGER DEFAULT 0"),
+            ("agent_reasoning",     "completion_tokens",    "INTEGER DEFAULT 0"),
+            ("agent_reasoning",     "latency_ms",           "REAL DEFAULT 0"),
+            ("agent_reasoning",     "raw_prompt",           "TEXT DEFAULT ''"),
+            ("strategic_context",   "langfuse_trace_id",    "TEXT DEFAULT NULL"),
+            ("strategic_context",   "temporal_workflow_id", "TEXT DEFAULT NULL"),
+            ("strategic_context",   "temporal_run_id",      "TEXT DEFAULT NULL"),
+            ("portfolio_snapshots", "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("trades",              "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("agent_reasoning",     "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("simulated_trades",    "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("scan_results",        "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("events",              "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
         ]
-        with conn.cursor() as cur:
-            for table, column, col_type in migrations:
-                savepoint = f"sp_{table}_{column}"
-                try:
-                    cur.execute(f"SAVEPOINT {savepoint}")
-                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-                    cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                except psycopg2.errors.DuplicateColumn:
-                    cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                except Exception:
-                    cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-        conn.commit()
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                for table, column, col_type in migrations:
+                    # CRIT-2: assert identifiers are on the allowlist before
+                    # interpolating them into the DDL statement.
+                    if (table, column) not in self._MIGRATION_ALLOWLIST:
+                        logger.error(
+                            f"Migration skipped — ({table!r}, {column!r}) not in allowlist"
+                        )
+                        continue
+                    savepoint = f"sp_{table}_{column}"
+                    try:
+                        cur.execute(f"SAVEPOINT {savepoint}")
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                        cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    except psycopg2.errors.DuplicateColumn:
+                        # Column already exists — expected on every restart after first run.
+                        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    except Exception as e:
+                        # CRIT-4: log unexpected migration failures instead of silently swallowing.
+                        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        logger.warning(
+                            f"Migration {table}.{column} failed unexpectedly: {e}"
+                        )
+                # Create indexes that depend on migrated columns (must run after
+                # ALTER TABLE ADD COLUMN, not during _init_db which runs first).
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_exchange ON events(exchange)"
+                )
+            conn.commit()
 

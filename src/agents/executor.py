@@ -7,6 +7,7 @@ Supports both market and limit orders based on urgency and confidence.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 
@@ -43,6 +44,10 @@ class ExecutorAgent(BaseAgent):
         # Track consecutive close failures per trade_id to prevent infinite retry loops
         self._close_failures: dict[str, int] = {}
         self._close_failure_limit = 3
+        # HIGH-2: guard against concurrent close attempts for the same trade
+        # (e.g. stop-loss + trailing stop firing simultaneously).
+        self._closing_trades: set[str] = set()
+        self._closing_trades_lock = threading.Lock()
 
     def _should_use_limit(self, trade_info: dict) -> bool:
         """
@@ -117,6 +122,11 @@ class ExecutorAgent(BaseAgent):
         reasoning = trade_info.get("reasoning", "")
 
         use_limit = self._should_use_limit(trade_info)
+
+        # H4: Validate price is positive before using it for calculations
+        if price <= 0:
+            self.logger.error(f"❌ Trade rejected: invalid price {price} for {pair}")
+            return {"executed": False, "reason": f"Invalid price: {price}"}
 
         # Create Trade record
         trade = Trade(
@@ -318,6 +328,18 @@ class ExecutorAgent(BaseAgent):
 
     def _partial_sell(self, trade: Trade, quantity: float, price: float, reason: str) -> dict:
         """Sell a portion of a position (used for tiered exits)."""
+        # Guard: cap to actual exchange balance
+        quantity = self._cap_qty_to_balance(trade.pair, quantity)
+        if quantity <= 0:
+            self.logger.warning(
+                f"⚠️ Partial sell skipped for {trade.pair}: zero available balance."
+            )
+            return {
+                "pair": trade.pair, "reason": reason,
+                "quantity_sold": 0, "close_price": price,
+                "pnl": 0, "success": False,
+            }
+
         result = self.exchange.place_market_order(
             pair=trade.pair,
             side="SELL",
@@ -352,10 +374,11 @@ class ExecutorAgent(BaseAgent):
             self.rules.record_trade(close_price * quantity, action="sell")
 
             pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
+            _sym = getattr(self.state, "currency_symbol", "$")
             self.logger.info(
                 f"Partial sell ({reason}): {trade.pair} — "
-                f"sold {quantity:.6f} at ${close_price:,.2f}, "
-                f"PnL: ${pnl:,.2f}, remaining: {remaining:.6f}"
+                f"sold {quantity:.6f} at {_sym}{close_price:,.2f}, "
+                f"PnL: {_sym}{pnl:,.2f}, remaining: {remaining:.6f}"
             )
         else:
             pnl = 0
@@ -401,9 +424,10 @@ class ExecutorAgent(BaseAgent):
                             f"Manual close required."
                         )
                     continue
+                _sym = getattr(self.state, "currency_symbol", "$")
                 self.logger.warning(
                     f"⚠️ STOP-LOSS triggered for {trade.pair} | "
-                    f"Price: ${current_price:,.2f} <= SL: ${trade.stop_loss:,.2f}"
+                    f"Price: {_sym}{current_price:,.2f} <= SL: {_sym}{trade.stop_loss:,.2f}"
                 )
                 close_result = self._close_position(trade, current_price, "stop_loss")
                 if close_result.get("success"):
@@ -414,9 +438,10 @@ class ExecutorAgent(BaseAgent):
 
             # Check take-profit
             elif trade.take_profit and current_price >= trade.take_profit:
+                _sym = getattr(self.state, "currency_symbol", "$")
                 self.logger.info(
                     f"🎯 TAKE-PROFIT hit for {trade.pair} | "
-                    f"Price: ${current_price:,.2f} >= TP: ${trade.take_profit:,.2f}"
+                    f"Price: {_sym}{current_price:,.2f} >= TP: {_sym}{trade.take_profit:,.2f}"
                 )
                 close_result = self._close_position(trade, current_price, "take_profit")
                 closed_trades.append(close_result)
@@ -430,7 +455,42 @@ class ExecutorAgent(BaseAgent):
         Calling it unconditionally would corrupt the internal position/cash state
         if the exchange rejects the order.
         """
+        # HIGH-2: prevent duplicate sell orders if stop-loss and trailing-stop
+        # fire concurrently for the same trade.
+        with self._closing_trades_lock:
+            if trade.id in self._closing_trades:
+                self.logger.warning(
+                    f"⚠️ Skipping duplicate close for {trade.pair} ({trade.id}) — "
+                    "already being closed by another caller."
+                )
+                return {"trade_id": trade.id, "pair": trade.pair, "success": False,
+                        "reason": "duplicate_close_skipped"}
+            self._closing_trades.add(trade.id)
+
+        try:
+            return self._close_position_inner(trade, price, reason)
+        finally:
+            with self._closing_trades_lock:
+                self._closing_trades.discard(trade.id)
+
+    def _close_position_inner(self, trade: Trade, price: float, reason: str) -> dict:
+        """Internal implementation of position close (called only once per trade)."""
         qty = trade.filled_quantity if trade.filled_quantity is not None else trade.quantity
+
+        # ── Guard: cap qty to actual exchange balance to avoid
+        #    "Insufficient balance in source account" rejections.
+        qty = self._cap_qty_to_balance(trade.pair, qty)
+        if qty <= 0:
+            self.logger.error(
+                f"❌ Cannot close {trade.pair}: zero available balance on exchange. "
+                "Removing stale trade from state."
+            )
+            self.state.close_trade(trade.id, price, 0.0)
+            return {
+                "trade_id": trade.id, "pair": trade.pair,
+                "close_price": price, "pnl": 0, "reason": reason,
+                "success": True,  # position is gone; nothing left to sell
+            }
 
         result = self.exchange.place_market_order(
             pair=trade.pair,
@@ -500,6 +560,33 @@ class ExecutorAgent(BaseAgent):
             "reason": reason,
             "success": success,
         }
+
+    def _cap_qty_to_balance(self, pair: str, desired_qty: float) -> float:
+        """Cap *desired_qty* to the actual available balance on the exchange.
+
+        Prevents "Insufficient balance in source account" rejections that occur
+        when the internal state tracks a larger position than what actually
+        exists on the exchange (e.g. after partial tier exits or rounding).
+        """
+        try:
+            base_currency = pair.split("-")[0]
+            balances = self.exchange.balance  # {currency: amount}
+            actual = balances.get(base_currency, 0.0)
+            if actual <= 0:
+                self.logger.warning(
+                    f"⚠️ {pair}: exchange reports 0 {base_currency} balance — "
+                    f"state expected {desired_qty:.8f}"
+                )
+                return 0.0
+            if actual < desired_qty:
+                self.logger.warning(
+                    f"⚠️ {pair}: capping sell qty from {desired_qty:.8f} → "
+                    f"{actual:.8f} (actual exchange balance)"
+                )
+                return actual
+        except Exception as e:
+            self.logger.debug(f"Balance check failed for {pair}, using state qty: {e}")
+        return desired_qty
 
     def _record_training_outcome(self, trade: Trade, close_price: float, reason: str) -> None:
         """Record trade outcome for training data (fire-and-forget)."""

@@ -11,7 +11,7 @@ import StatCard from '../components/StatCard'
 import { SkeletonTable, SkeletonStatCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
-import { useCurrencyFormatter, useIsMobile } from '../store'
+import { useCurrencyFormatter, useIsMobile, useLiveStore } from '../store'
 
 const PAGE_SIZE = 50
 
@@ -23,6 +23,7 @@ function pnlColor(pnl: number | null): string {
 export default function CycleExplorer() {
   const [pair, setPair] = useState('')
   const [offset, setOffset] = useState(0)
+  const profile = useLiveStore((s) => s.profile)
   const navigate = useNavigate()
   const fmtCurrency = useCurrencyFormatter()
   const isMobile = useIsMobile()
@@ -42,13 +43,13 @@ export default function CycleExplorer() {
   const pairs = ['', ...(watchlistData?.active_pairs ?? [])]
 
   const { data: cyclesData, isLoading: cyclesLoading } = useQuery({
-    queryKey: ['cycles', pair, offset],
+    queryKey: ['cycles', pair, offset, profile],
     queryFn: () => fetchCycles(pair || undefined, PAGE_SIZE, offset),
     staleTime: 10_000,
   })
 
   const { data: stats } = useQuery({
-    queryKey: ['stats-summary'],
+    queryKey: ['stats-summary', profile],
     queryFn: fetchStatsSummary,
     staleTime: 30_000,
   })

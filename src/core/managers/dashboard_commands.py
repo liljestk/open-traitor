@@ -207,7 +207,7 @@ class DashboardCommandManager:
         """Exclude a pair from trading."""
         orch = self.orch
         try:
-            from src.utils.settings_manager import load_settings, save_section
+            from src.utils.settings_manager import load_settings, update_section
 
             settings = load_settings()
             excluded = settings.get("absolute_rules", {}).get(
@@ -215,7 +215,8 @@ class DashboardCommandManager:
             )
             if pair not in excluded:
                 excluded.append(pair)
-                save_section("absolute_rules", {"never_trade_pairs": excluded})
+                # H16 fix: was save_section (doesn't exist), should be update_section
+                update_section("absolute_rules", {"never_trade_pairs": excluded})
                 orch.rules.never_trade_pairs = set(excluded)
                 with orch._pairs_lock:
                     if pair in orch.pairs:

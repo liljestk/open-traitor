@@ -134,19 +134,30 @@ def main():
             except Exception as e:
                 logger.warning(f"⚠️ IBKR client not available for news: {e}")
 
-    # Load IBKR trading config for pairs (needed by fetch_ibkr_news)
+    # Load full profile configs for trading pairs (ticker extraction + IBKR news)
+    all_trading_pairs: list[str] = []
     ibkr_full_config = {}
-    if "ibkr" in profile_configs:
-        try:
-            ibkr_cfg_path = Path(config_dir) / "ibkr.yaml"
-            with open(ibkr_cfg_path) as f:
-                ibkr_full_config = yaml.safe_load(f) or {}
-        except Exception:
-            pass
+    for filename, pname in _PROFILE_FILES.items():
+        path = Path(config_dir) / filename
+        if path.exists():
+            try:
+                with open(path) as f:
+                    full_cfg = yaml.safe_load(f) or {}
+                pairs = full_cfg.get("trading", {}).get("pairs", [])
+                all_trading_pairs.extend(pairs)
+                if pname == "ibkr":
+                    ibkr_full_config = full_cfg
+            except Exception:
+                pass
 
-    # Inject IBKR trading pairs into merged config for news fetching
+    # Merge all trading pairs into config so aggregator builds dynamic ticker set
+    merged_config["trading"] = {"pairs": all_trading_pairs}
     if ibkr_full_config.get("trading", {}).get("pairs"):
-        merged_config["trading"] = ibkr_full_config.get("trading", {})
+        # Keep full IBKR trading config for fetch_ibkr_news
+        merged_config["trading"].update({
+            k: v for k, v in ibkr_full_config.get("trading", {}).items()
+            if k != "pairs"
+        })
 
     # Single aggregator with merged sources (avoids duplicate HTTP requests)
     aggregator = NewsAggregator(

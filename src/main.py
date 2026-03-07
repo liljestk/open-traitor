@@ -251,33 +251,25 @@ def main():
     
     if exchange_type == "ibkr":
         # C5 fix: Import IBClient BEFORE try block to ensure it's available in except handler
+        from src.core.ib_client import IBClient
+
         try:
-            from src.core.ib_client import IBClient
-            _ibclient_available = True
-        except ImportError:
-            _ibclient_available = False
-            logger.error("IBClient not found. Make sure it's implemented. Falling back to CoinbaseClient in paper mode.")
-            exchange = CoinbaseClient(paper_mode=True)
-        
-        if _ibclient_available:
-            try:
-                exchange: ExchangeClient = IBClient(
-                    paper_mode=paper_mode,
-                    paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
-                    ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-                    ib_port=int(os.environ.get("IBKR_PORT", "4002")),
-                    ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            exchange: ExchangeClient = IBClient(
+                paper_mode=paper_mode,
+                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            )
+        except Exception as e:
+            if not paper_mode:
+                logger.critical(
+                    f"❌ IBKR client init failed in LIVE mode: {e}. "
+                    "Refusing to silently fall back to paper. Fix the connection or switch config to paper mode."
                 )
-            except Exception as e:
-                logger.warning(f"⚠️ Could not initialise IBKR client: {e}. Forcing paper mode.")
-                paper_mode = True
-                exchange = IBClient(
-                    paper_mode=True,
-                    paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
-                    ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
-                    ib_port=int(os.environ.get("IBKR_PORT", "4002")),
-                    ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
-                )
+                sys.exit(1)
+            logger.warning(f"⚠️ Could not initialise IBKR client in paper mode: {e}")
+            raise
     else:
         exchange: ExchangeClient = CoinbaseClient(
             api_key=os.environ.get("COINBASE_API_KEY"),
@@ -301,12 +293,11 @@ def main():
         err = conn.get("error", "unknown error")
         logger.error(f"❌ Exchange API connection failed: {err}")
         if not paper_mode:
-            logger.warning(
+            logger.critical(
                 "Cannot run in LIVE mode without Exchange API access. "
-                "Automatically dropping to paper mode so other services remain online."
+                "Refusing to silently fall back to paper — fix the connection or switch config to paper mode."
             )
-            paper_mode = True
-            exchange._paper_mode = True
+            sys.exit(1)
         else:
             logger.warning("Continuing in paper mode — using mock market data.")
 

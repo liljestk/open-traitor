@@ -32,6 +32,25 @@ class StateManager:
                 json.dumps(orch.rules.get_status(), default=str),
                 ex=300,
             )
+            # Publish watched tickers for news worker's dynamic ticker matching
+            try:
+                watched = set()
+                for pair in (orch.pairs + getattr(orch, "watchlist_pairs", [])
+                             + getattr(orch, "_screener_active_pairs", [])):
+                    base = pair.split("-")[0] if "-" in pair else pair
+                    base_short = base.split(".")[0]
+                    for t in (base.upper(), base_short.upper()):
+                        if 2 <= len(t) <= 6 and t.isalpha():
+                            watched.add(t)
+                if watched:
+                    orch.redis.set(
+                        self._get_redis_key("news:watched_tickers"),
+                        json.dumps(sorted(watched)),
+                        ex=600,
+                    )
+            except Exception:
+                pass  # non-critical
+
             # Persist pending approvals so they survive restarts
             with orch._pending_approvals_lock:
                 pending_snapshot = dict(orch._pending_approvals) if orch._pending_approvals else None

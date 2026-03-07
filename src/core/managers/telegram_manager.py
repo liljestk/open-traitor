@@ -623,6 +623,7 @@ class TelegramManager:
             "raw_prices": dict(s.current_prices),
             "raw_positions": dict(s.open_positions),
             "raw_portfolio_value": s.portfolio_value,
+            "paper_mode": getattr(orch.exchange, "paper_mode", False),
             "raw_cash_balance": s.cash_balance,
             "raw_return_pct": s.return_pct,
             "raw_total_pnl": s.total_pnl,

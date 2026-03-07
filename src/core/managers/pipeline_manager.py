@@ -35,7 +35,10 @@ class PipelineManager:
         "ema_crossover": 0.55,        # trend-following weight
         "bollinger_reversion": 0.45,   # mean-reversion weight
     }
-    
+
+    # Equity calendar TTL: refresh earnings/dividend data at most every 4 hours
+    _EQUITY_CALENDAR_TTL: float = 4 * 3600
+
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
         self._candle_cache: dict[str, tuple[float, list]] = {}
@@ -43,6 +46,9 @@ class PipelineManager:
         # is accessed from both async code and from asyncio.to_thread() workers
         # (threadpool). An asyncio.Lock cannot be acquired from a thread.
         self._candle_cache_lock = threading.Lock()
+        # Equity event calendar cache (earnings + dividends for all watchlist pairs)
+        self._equity_calendar: dict = {}
+        self._equity_calendar_ts: float = 0.0
 
     def _compute_ensemble(self, strategy_signals: dict) -> dict | None:
         """Compute a weighted ensemble from individual strategy signals.
@@ -131,6 +137,82 @@ class PipelineManager:
             pass
         return dict(self._STRATEGY_WEIGHTS)
 
+    def _get_equity_event_str(self, exchange_name: str, pair: str) -> str:
+        """Return a formatted equity event string for injection into agent prompts.
+
+        Fetches the earnings / dividend calendar for the full watchlist (cached
+        4 h) and returns a short text block for the given pair.  Returns "" for
+        crypto profiles (exchange != "ibkr").
+        """
+        if exchange_name != "ibkr":
+            return ""
+
+        now = time.monotonic()
+        if now - self._equity_calendar_ts > self._EQUITY_CALENDAR_TTL or not self._equity_calendar:
+            try:
+                from src.core.equity_feed import (
+                    get_earnings_calendar,
+                    get_dividend_calendar,
+                    pair_to_yahoo,
+                )
+                orch = self.orchestrator
+                tickers = [pair_to_yahoo(p) for p in orch.pairs]
+                self._equity_calendar = {
+                    "earnings": get_earnings_calendar(tickers),
+                    "dividends": get_dividend_calendar(tickers),
+                }
+                self._equity_calendar_ts = now
+                logger.debug(
+                    f"Equity calendar refreshed: "
+                    f"{len(self._equity_calendar['earnings'])} earnings, "
+                    f"{len(self._equity_calendar['dividends'])} dividends"
+                )
+            except Exception as e:
+                logger.debug(f"Equity calendar refresh failed (non-fatal): {e}")
+                return ""
+
+        try:
+            from src.core.equity_feed import pair_to_yahoo
+            ticker = pair_to_yahoo(pair)
+            lines: list[str] = []
+
+            earnings_info = self._equity_calendar.get("earnings", {}).get(ticker)
+            if earnings_info:
+                days = earnings_info["days_away"]
+                date = earnings_info["earnings_date"]
+                eps = (
+                    f", est. EPS {earnings_info['eps_estimate']:.2f}"
+                    if earnings_info.get("eps_estimate") is not None
+                    else ""
+                )
+                urgency = "WARNING: " if days <= 3 else ("CAUTION: " if days <= 7 else "")
+                lines.append(
+                    f"{urgency}Earnings report in {days} day(s) ({date}{eps}). "
+                    + ("Avoid new long positions — gap risk is HIGH." if days <= 3
+                       else "Reduce position size or hold cash ahead of report." if days <= 7
+                       else "Consider sizing down before earnings.")
+                )
+
+            div_info = self._equity_calendar.get("dividends", {}).get(ticker)
+            if div_info:
+                days = div_info["days_away"]
+                date = div_info["ex_div_date"]
+                annual = div_info.get("annual_dividend")
+                yld = div_info.get("yield_pct")
+                detail = ""
+                if annual is not None and yld is not None:
+                    detail = f" (div {annual:.2f}/yr, {yld:.1f}% yield)"
+                lines.append(
+                    f"Ex-dividend date in {days} day(s) ({date}{detail}). "
+                    "Price typically drops by the dividend amount on ex-div date."
+                )
+
+            if lines:
+                return "EQUITY EVENT RISK:\n" + "\n".join(f"- {l}" for l in lines)
+        except Exception as e:
+            logger.debug(f"Equity event string build failed for {pair}: {e}")
+        return ""
+
     def _calibrate_confidence(self, raw_confidence: float, pair: str) -> float:
         """Run raw LLM confidence through the ALE calibrator.
 
@@ -162,6 +244,15 @@ class PipelineManager:
         cycle_id = str(uuid.uuid4())
         strategic_context = orch.context_manager.get_strategic_context()
         exchange_name = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+
+        # For equity profiles, append per-pair event risk (earnings / ex-div) to
+        # strategic_context so both the analyst and strategist see it.
+        # Wrapped in to_thread because the 4-hourly cache refresh makes sync HTTP calls.
+        _equity_event_str = await asyncio.to_thread(self._get_equity_event_str, exchange_name, pair)
+        _effective_strategic_ctx = (
+            (strategic_context + "\n\n" + _equity_event_str).strip()
+            if _equity_event_str else strategic_context
+        )
 
         # Set training data pipeline context so LLM callback knows cycle_id/pair
         tc = getattr(orch, "training_collector", None)
@@ -443,7 +534,7 @@ class PipelineManager:
             "multi_timeframe": mtf_prompt,
             "sentiment": sentiment_prompt,
             "strategy_signals": strategy_signals,
-            "strategic_context": strategic_context,
+            "strategic_context": _effective_strategic_ctx,
             "currency_symbol": orch.state.currency_symbol,
             "native_currency": orch.state.native_currency,
             "portfolio_value": _portfolio_value,
@@ -539,7 +630,7 @@ class PipelineManager:
             "open_positions": orch.state.open_positions,
             "recent_trades": [t.to_summary() for t in orch.state.recent_trades],
             "recent_outcomes": recent_outcomes,
-            "strategic_context": strategic_context,
+            "strategic_context": _effective_strategic_ctx,
             "live_holdings_summary": orch.state.holdings_summary,
             "native_currency": orch.state.native_currency,
             "currency_symbol": orch.state.currency_symbol,

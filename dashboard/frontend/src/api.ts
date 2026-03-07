@@ -542,7 +542,7 @@ export interface PredictionAccuracyData {
     accuracy_24h_pct: number | null
     accuracy_1h_pct: number | null
   }
-  by_signal_type: Record<string, { total: number; correct_24h: number; evaluated_24h: number; accuracy_pct: number | null }>
+  by_signal_type: Record<string, { total: number; correct_24h: number; evaluated_24h: number; accuracy_pct: number | null; weight?: number }>
   confidence_calibration: ConfidenceBucket[]
   daily_accuracy: DailyAccuracy[]
 }
@@ -789,8 +789,10 @@ export interface NewsArticle {
   tags: string[]
 }
 
-export const fetchNews = (count = 30) =>
-  apiFetch<{ articles: NewsArticle[]; count: number; source: string }>(`/news?count=${count}`)
+export const fetchNews = (count = 30, profile = '') =>
+  apiFetch<{ articles: NewsArticle[]; count: number; source: string }>(
+    `/news?count=${count}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`
+  )
 
 // ─── Watchlist ─────────────────────────────────────────────────────────────
 

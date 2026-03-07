@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hmac
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from src.dashboard import deps
 from src.utils.logger import get_logger
@@ -11,6 +12,12 @@ from src.utils.logger import get_logger
 logger = get_logger("dashboard.planning")
 
 router = APIRouter(tags=["Planning"])
+
+_ALLOWED_WORKFLOW_TYPES = frozenset({
+    "DailyPlanWorkflow",
+    "WeeklyReviewWorkflow",
+    "MonthlyReviewWorkflow",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +80,8 @@ async def list_temporal_runs(
         return {"runs": [], "error": "Temporal client not available"}
     try:
         query = " OR ".join(
-            f"WorkflowType = '{wt}'"
-            for wt in ("DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow")
+            f"WorkflowType = '{wt}'" for wt in _ALLOWED_WORKFLOW_TYPES
         )
-        _ALLOWED_WORKFLOW_TYPES = {"DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow"}
         if workflow_type:
             if workflow_type not in _ALLOWED_WORKFLOW_TYPES:
                 raise HTTPException(
@@ -150,7 +155,18 @@ async def get_temporal_replay(workflow_id: str, run_id: str):
 
 
 @router.post("/api/temporal/rerun/{workflow_id}/{run_id}", summary="Trigger a fresh planning workflow run")
-async def rerun_temporal_workflow(workflow_id: str, run_id: str):
+async def rerun_temporal_workflow(workflow_id: str, run_id: str, request: Request):
+    # This endpoint triggers real workflow execution — always require auth,
+    # independent of the global middleware (which is bypassed when no key is set).
+    signing_key = deps.DASHBOARD_COMMAND_SIGNING_KEY
+    if not signing_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Workflow rerun is disabled — set DASHBOARD_COMMAND_SIGNING_KEY to enable it.",
+        )
+    api_key = request.headers.get("X-API-Key", "")
+    if not hmac.compare_digest(api_key, signing_key):
+        raise HTTPException(status_code=401, detail="Unauthorized")
     """
     Starts a new execution of the same workflow type with a fresh run ID.
     Useful for debugging or forcing an out-of-schedule planning run.

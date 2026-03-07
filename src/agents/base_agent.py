@@ -68,6 +68,7 @@ class BaseAgent(ABC):
         except Exception as e:
             self._error_count += 1
             self.logger.error(f"Agent [{self.name}] error: {e}", exc_info=True)
-            error_result = {"error": str(e), "agent": self.name}
+            # H7: Don't leak raw exception details into agent output dict
+            error_result = {"error": f"Agent {self.name} encountered an internal error", "agent": self.name}
             self._update_state(error_result)
             return error_result

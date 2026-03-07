@@ -168,12 +168,13 @@ class TradesMixin:
         severity: str = "info",
         pair: Optional[str] = None,
         data: Optional[dict] = None,
+        exchange: str = "coinbase",
     ) -> None:
         with self._get_conn() as conn:
             conn.execute(
-                """INSERT INTO events (event_type, severity, pair, message, data)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (event_type, severity, pair, message, json.dumps(data or {}, default=str)),
+                """INSERT INTO events (exchange, event_type, severity, pair, message, data)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (exchange, event_type, severity, pair, message, json.dumps(data or {}, default=str)),
             )
             conn.commit()
 
@@ -232,8 +233,10 @@ class TradesMixin:
 
     def get_active_schedules(self) -> list[dict]:
         with self._get_conn() as conn:
+            # LOW-10: column is INTEGER 0/1; compare with != 0 which works
+            # regardless of whether the column is ever migrated to BOOLEAN.
             rows = conn.execute(
-                "SELECT * FROM scheduled_reports WHERE is_active = 1 ORDER BY id",
+                "SELECT * FROM scheduled_reports WHERE is_active != 0 ORDER BY id",
             ).fetchall()
             return [dict(r) for r in rows]
 

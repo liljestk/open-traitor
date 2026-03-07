@@ -50,6 +50,7 @@ from src.dashboard.routes.news import router as news_router
 from src.dashboard.routes.watchlist import router as watchlist_router
 from src.dashboard.routes.commands import router as commands_router
 from src.dashboard.routes.llm_analytics import router as llm_analytics_router
+from src.dashboard.routes.learning import router as learning_router
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +84,7 @@ def set_globals(
             api_key=api_key or None,
             api_secret=api_secret or None,
             key_file=key_file or None,
-            paper_mode=True,  # read-only; no real orders from the dashboard
+            paper_mode=False,  # real API for balance/price reads; dashboard never places orders
         )
         logger.info("✅ Dashboard Coinbase price client ready")
     except Exception as e:
@@ -191,7 +192,7 @@ async def lifespan(application: FastAPI):
                 api_key=api_key or None,
                 api_secret=api_secret or None,
                 key_file=key_file or None,
-                paper_mode=True,
+                paper_mode=False,  # real API for balance/price reads; dashboard never places orders
             )
             logger.info("✅ Dashboard exchange price client ready")
         except Exception as e:
@@ -223,11 +224,18 @@ async def lifespan(application: FastAPI):
 # Application
 # ---------------------------------------------------------------------------
 
+# Must be defined before app = FastAPI() so it's available for docs_url logic
+_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+
 app = FastAPI(
     title="Auto-Traitor Dashboard API",
     description="LLM traceability and playback for the autonomous trading agent",
     version="1.0.0",
     lifespan=lifespan,
+    # M9: Disable OpenAPI docs when API key is configured (production mode)
+    docs_url=None if _DASHBOARD_API_KEY else "/docs",
+    redoc_url=None if _DASHBOARD_API_KEY else "/redoc",
+    openapi_url=None if _DASHBOARD_API_KEY else "/openapi.json",
 )
 
 # --- CORS ---------------------------------------------------------------
@@ -237,8 +245,6 @@ _cors_origins = (
     [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
     or ["http://localhost:5173", "http://localhost:8090"]
 )
-
-_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
 
 if not _DASHBOARD_API_KEY:
     logger.warning(
@@ -260,20 +266,47 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
 
 # --- API key middleware ---------------------------------------------------
 
 
+# Mutating methods that require authentication even when API key is not set
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses (M3)."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.middleware("http")
 async def _api_key_middleware(request: Request, call_next):
-    """Require API key auth for /api/ endpoints when DASHBOARD_API_KEY is set."""
-    if _DASHBOARD_API_KEY and request.url.path.startswith("/api/"):
-        api_key = request.headers.get("X-API-Key", "")
-        if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    """Require API key auth for /api/ endpoints.
+
+    When DASHBOARD_API_KEY is set: all /api/ endpoints require X-API-Key header.
+    When DASHBOARD_API_KEY is NOT set: read-only (GET/HEAD/OPTIONS) are open,
+    but mutating methods (POST/PUT/DELETE/PATCH) are blocked (C2).
+    """
+    if request.url.path.startswith("/api/"):
+        if _DASHBOARD_API_KEY:
+            api_key = request.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
+                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+        elif request.method in _MUTATING_METHODS:
+            return JSONResponse(
+                {"detail": "DASHBOARD_API_KEY must be configured to use mutating endpoints"},
+                status_code=403,
+            )
     return await call_next(request)
 
 
@@ -290,6 +323,7 @@ app.include_router(news_router)
 app.include_router(watchlist_router)
 app.include_router(commands_router)
 app.include_router(llm_analytics_router)
+app.include_router(learning_router)
 
 
 # ---------------------------------------------------------------------------

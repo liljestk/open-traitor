@@ -338,12 +338,12 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_portfolio_risk_pct":     {"min": 0.01},   # can't zero out
         "max_trades_per_day":         {"min": 1},      # at least 1 trade/day
         "max_cash_per_trade_pct":     {"min": 0.01},   # can't zero out
-        "require_approval_above":     {},              # free to adjust
+        "require_approval_above":     {"max": 50000},  # C5: LLM cannot set absurdly high
         "never_trade_pairs":          {},              # LLM can manage exclusion list
         "only_trade_pairs":           {},              # LLM can manage inclusion list
         "min_trade_interval_seconds": {"max": 7200},   # can't slow to >2h
-        "emergency_stop_portfolio":   {},              # free to adjust
-        "always_use_stop_loss":       {},              # free to adjust
+        "emergency_stop_portfolio":   {"min": 0.01},   # C5: LLM cannot disable emergency stop
+        "always_use_stop_loss":       {},              # C5: guarded in AUTONOMOUS_BLOCKED_FIELDS
         "max_stop_loss_pct":          {},              # free to adjust
     },
     "trading": {
@@ -411,6 +411,7 @@ AUTONOMOUS_BLOCKED_FIELDS = frozenset({
     ("trading", "invalidate_strategic_context"),
     ("trading", "pair_universe_refresh_seconds"),
     ("trading", "max_active_pairs"),          # human-only: RPM guardrail enforces upper bound
+    ("absolute_rules", "always_use_stop_loss"),  # C5: LLM must NOT disable stop losses
     ("fees", "trade_fee_pct"),
     ("fees", "maker_fee_pct"),
     ("fees", "swap_cooldown_seconds"),

@@ -153,6 +153,9 @@ news:
   - https://www.cnbc.com/id/100003114/device/rss/rss.html
   - https://feeds.marketwatch.com/marketwatch/topstories
   - https://feeds.bloomberg.com/markets/news.rss
+  - https://www.theguardian.com/business/rss
+  - https://www.ecb.europa.eu/rss/press.html
+  - https://rss.dw.com/rdf/rss-en-bus
 risk:
   loss_cooldown_seconds: 600
   max_drawdown_pct: 0.2
@@ -170,20 +173,16 @@ telegram:
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
   bot_token_env: TELEGRAM_BOT_TOKEN_IBKR
   chat_id_env: TELEGRAM_CHAT_ID_IBKR
-  # Trade & Signal Alerts
   notify_on_trade: true
   notify_on_signal: true
   notify_on_signal_confidence: 0.8
-  # Win / Loss Highlights
   notify_on_big_win: true
   big_win_threshold: 50
   notify_on_big_loss: true
   big_loss_threshold: 50
-  # Price Movement Alerts
   notify_on_price_move: true
   price_move_threshold_pct: 5
   price_move_cooldown_minutes: 20
-  # Scheduled Messages
   notify_morning_plan: true
   notify_evening_summary: true
   notify_periodic_update: true
@@ -197,7 +196,7 @@ trading:
   include_crypto_quotes: false
   interval: 1800
   invalidate_strategic_context: false
-  live_holdings_sync: false
+  live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 10
   min_confidence: 0.6
@@ -217,5 +216,5 @@ trading:
   quote_currency: EUR
   reconcile_every_cycles: 10
   scan_movement_threshold_pct: 0.5
-  scan_volume_threshold: 10000
+  scan_volume_threshold: 500000000.0
   screener_interval_cycles: 3

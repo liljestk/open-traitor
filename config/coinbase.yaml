@@ -2,12 +2,12 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 0
   max_cash_per_trade_pct: 0.5
-  max_daily_loss: 500
+  max_daily_loss: 400.0
   max_daily_spend: 2000
-  max_portfolio_risk_pct: 0.5
-  max_single_trade: 10000
+  max_portfolio_risk_pct: 0.4
+  max_single_trade: 4000.0
   max_stop_loss_pct: 0.08
-  max_trades_per_day: 50
+  max_trades_per_day: 20
   min_trade_interval_seconds: 60
   never_trade_pairs: []
   only_trade_pairs: []
@@ -59,7 +59,7 @@ high_stakes:
   min_confidence: 0.5
   min_swap_gain_pct: 0.01
   swap_allocation_multiplier: 2.0
-  trade_size_multiplier: 2.5
+  trade_size_multiplier: 2.0
 journal:
   data_dir: data
   enabled: true
@@ -150,6 +150,9 @@ news:
   - https://cryptonews.com/news/feed/
   - https://decrypt.co/feed
   - https://www.coindesk.com/arc/outboundfeeds/rss/
+  - https://www.theblock.co/rss.xml
+  - https://bitcoinmagazine.com/feed
+  - https://cryptoslate.com/feed/
 risk:
   loss_cooldown_seconds: 300
   max_drawdown_pct: 0.1
@@ -183,20 +186,16 @@ telegram:
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
   bot_token_env: TELEGRAM_BOT_TOKEN_COINBASE
   chat_id_env: TELEGRAM_CHAT_ID_COINBASE
-  # Trade & Signal Alerts
   notify_on_trade: true
   notify_on_signal: false
   notify_on_signal_confidence: 0.9
-  # Win / Loss Highlights
   notify_on_big_win: true
   big_win_threshold: 50
   notify_on_big_loss: true
   big_loss_threshold: 50
-  # Price Movement Alerts
   notify_on_price_move: false
   price_move_threshold_pct: 5
   price_move_cooldown_minutes: 20
-  # Scheduled Messages
   notify_morning_plan: true
   notify_evening_summary: true
   notify_periodic_update: true
@@ -208,12 +207,12 @@ trading:
   holdings_dust_threshold: 1.0
   holdings_refresh_seconds: 60
   include_crypto_quotes: true
-  interval: 120
+  interval: 600
   invalidate_strategic_context: false
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 15
-  min_confidence: 0.55
+  min_confidence: 0.8
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 1800
@@ -231,8 +230,8 @@ trading:
   - EURC
   quote_currency: EUR
   reconcile_every_cycles: 10
-  scan_movement_threshold_pct: 0.5
-  scan_volume_threshold: 1000
+  scan_movement_threshold_pct: 1.0
+  scan_volume_threshold: 5000.0
   screener_interval_cycles: 5
 training_data:
   buffer_size: 0

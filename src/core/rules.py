@@ -65,6 +65,9 @@ class AbsoluteRules:
         # H9 fix: Track whether we've logged the emergency stop override warning
         self._emergency_stop_override_logged = False
 
+        # C8 fix: High-water mark for percentage-based emergency stop (MICRO/SMALL)
+        self._portfolio_hwm: float = 0.0
+
         # Track daily stats
         self._daily_spend = 0.0
         self._daily_loss = 0.0
@@ -95,14 +98,16 @@ class AbsoluteRules:
             tier = self._portfolio_scaler.tier
             eff_cash = tier.max_cash_per_trade_pct
             eff_risk = tier.max_portfolio_risk_pct
-            # Disable emergency stop for MICRO/SMALL (portfolio IS tiny)
+            # C8 fix: Use percentage-based emergency stop for MICRO/SMALL instead
+            # of disabling entirely. Track high-water mark; if portfolio drops
+            # 15% from its peak, halt new buys.
             if tier.name in ("MICRO", "SMALL"):
-                eff_emerg = 0.0  # effectively disabled
-                # H9 fix: Log warning when emergency stop is disabled (once per tier session)
+                self._portfolio_hwm = max(self._portfolio_hwm, portfolio_value)
+                eff_emerg = self._portfolio_hwm * 0.85  # floor = 85% of peak
                 if not self._emergency_stop_override_logged:
-                    logger.warning(
-                        f"⚠️ Emergency stop DISABLED for {tier.name} tier (portfolio ${portfolio_value:,.2f}). "
-                        f"This is intentional for small accounts but removes a safety net."
+                    logger.info(
+                        f"ℹ️ Emergency stop auto-scaled for {tier.name} tier: "
+                        f"floor ${eff_emerg:,.2f} (85% of peak ${self._portfolio_hwm:,.2f})"
                     )
                     self._emergency_stop_override_logged = True
             else:
@@ -478,13 +483,13 @@ class AbsoluteRules:
     })
 
     _RULE_BOUNDS: dict[str, tuple[float, float]] = {
-        "max_single_trade": (1.0, 1_000_000.0),
-        "max_daily_spend": (1.0, 5_000_000.0),
-        "max_daily_loss": (0.0, 1_000_000.0),
+        "max_single_trade": (1.0, 100_000.0),      # H10: tightened from 1M
+        "max_daily_spend": (1.0, 500_000.0),        # H10: tightened from 5M
+        "max_daily_loss": (0.0, 100_000.0),         # H10: tightened from 1M
         "max_portfolio_risk_pct": (0.001, 1.0),
-        "require_approval_above": (0.0, 1_000_000.0),
+        "require_approval_above": (0.0, 100_000.0), # H10: tightened from 1M
         "min_trade_interval_seconds": (0.0, 86_400.0),
-        "max_trades_per_day": (1.0, 10_000.0),
+        "max_trades_per_day": (1.0, 1_000.0),       # H10: tightened from 10K
         "max_cash_per_trade_pct": (0.001, 1.0),
         "emergency_stop_portfolio": (0.0, 10_000_000.0),
         "max_stop_loss_pct": (0.001, 0.5),
@@ -493,6 +498,13 @@ class AbsoluteRules:
     def update_param(self, param: str, value: str) -> dict:
         """
         Update a single rule parameter at runtime.
+
+        .. warning:: L17 — Runtime-only change.
+            This mutates the in-memory AbsoluteRules instance but does
+            **not** persist the new value to ``settings.yaml``.  The
+            change will be lost on restart.  Callers that want persistence
+            should also write through ``SettingsManager.update()`` (or
+            the ``/settings`` Telegram command, which does both).
 
         Args:
             param: Attribute name (must be in _NUMERIC_RULES or _BOOL_RULES).

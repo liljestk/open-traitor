@@ -4,31 +4,32 @@
  * Separated by asset class (Crypto / Equity).
  * Includes per-pair prediction overlay chart and full Trader's View.
  */
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
-  Cell, AreaChart, Area, ComposedChart, Scatter, ReferenceLine,
+  Cell, AreaChart, Area, ComposedChart, Scatter, ReferenceLine, LabelList,
 } from 'recharts'
 import {
   Target, TrendingUp, TrendingDown, Activity, Crosshair, BarChart2,
   Zap, Clock, Layers, Eye, Search, Newspaper, Shield, Brain,
   ArrowUpRight, ArrowDownRight, Minus, ExternalLink, DollarSign, X,
-  ChevronDown, ChevronRight, User, Bot,
+  ChevronDown, ChevronRight, User, Bot, Maximize2, Calendar,
 } from 'lucide-react'
 import {
   fetchPredictionAccuracy, fetchTrackedPairs, fetchPairPredictionHistory,
   fetchCycles, fetchCycleFull, fetchTrades, fetchNews, fetchPortfolioExposure,
   fetchMarketPrice,
-  type PredictionAccuracyData, type TrackedPairsData,
-  type CycleFull, type NewsArticle,
+  type PredictionAccuracyData, type TrackedPairsData, type NewsArticle,
+  type CycleFull,
 } from '../api'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import { useLiveStore } from '../store'
 
 dayjs.extend(relativeTime)
 
@@ -87,6 +88,8 @@ function classifyPair(pair: string): 'crypto' | 'equity' {
 
   // Scandinavian / European equity exchange currencies → always equity
   if (EQUITY_QUOTES.has(quote)) return 'equity'
+  // Exchange-suffix notation (ASML.AS, SAP.DE, MC.PA) → always equity
+  if (base.includes('.')) return 'equity'
   // Known crypto symbols → crypto
   if (KNOWN_CRYPTO.has(base)) return 'crypto'
   // Short all-letter ticker not known as crypto → likely equity (e.g. AAPL-USD, MSFT-EUR)
@@ -214,44 +217,230 @@ const OVERLAY_TIME_RANGES = [
   { label: '90d', days: 90 },
 ]
 
-function PredictionOverlayChart({ pair }: { pair: string }) {
-  const [overlayDays, setOverlayDays] = useState(7)
+const SIGNAL_SIZES: Record<string, number> = {
+  strong_buy: 7, buy: 5.5, weak_buy: 4,
+  neutral: 4,
+  weak_sell: 4, sell: 5.5, strong_sell: 7,
+}
 
-  const { data: history, isLoading } = useQuery({
-    queryKey: ['pair-prediction-history', pair, overlayDays],
-    queryFn: () => fetchPairPredictionHistory(pair, overlayDays),
-    enabled: !!pair,
-    refetchInterval: 120_000,
-  })
+const fmtOverlayPrice = (v: number) => v < 1 ? v.toFixed(6) : v < 100 ? v.toFixed(2) : v.toFixed(0)
 
-  if (isLoading) return <SkeletonBlock className="h-[350px]" />
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const BuyMarkerShape = (props: any) => {
+  const { cx, cy, payload } = props
+  if (cx == null || cy == null || payload?.buyMarker == null) return null
+  const sigType: string = payload.signalType || 'buy'
+  const color = SIGNAL_COLORS[sigType] || '#22c55e'
+  const isCorrect: boolean | null = payload.signalCorrect ?? null
+  const s = SIGNAL_SIZES[sigType] ?? 5.5
+  return (
+    <g>
+      <polygon
+        points={`${cx},${cy - s} ${cx - s},${cy + s * 0.7} ${cx + s},${cy + s * 0.7}`}
+        fill={color} fillOpacity={0.9}
+        stroke={isCorrect === true ? '#22c55e' : isCorrect === false ? '#ef4444' : color}
+        strokeWidth={isCorrect != null ? 1.5 : 0.5}
+      />
+      {isCorrect != null && (
+        <circle cx={cx} cy={cy} r={s + 4} fill="none"
+          stroke={isCorrect ? '#22c55eaa' : '#ef4444aa'}
+          strokeWidth={1.5}
+          strokeDasharray={isCorrect ? undefined : '3 2'}
+        />
+      )}
+    </g>
+  )
+}
 
-  if (!history || !history.price_history.length) {
-    return <EmptyState icon="chart" title={`No price data for ${pair}`} description="Price history will appear as the bot collects data." />
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const SellMarkerShape = (props: any) => {
+  const { cx, cy, payload } = props
+  if (cx == null || cy == null || payload?.sellMarker == null) return null
+  const sigType: string = payload.signalType || 'sell'
+  const color = SIGNAL_COLORS[sigType] || '#ef4444'
+  const isCorrect: boolean | null = payload.signalCorrect ?? null
+  const s = SIGNAL_SIZES[sigType] ?? 5.5
+  return (
+    <g>
+      <polygon
+        points={`${cx},${cy - s} ${cx + s},${cy} ${cx},${cy + s} ${cx - s},${cy}`}
+        fill={color} fillOpacity={0.9}
+        stroke={isCorrect === true ? '#22c55e' : isCorrect === false ? '#ef4444' : color}
+        strokeWidth={isCorrect != null ? 1.5 : 0.5}
+      />
+      {isCorrect != null && (
+        <circle cx={cx} cy={cy} r={s + 4} fill="none"
+          stroke={isCorrect ? '#22c55eaa' : '#ef4444aa'}
+          strokeWidth={1.5}
+          strokeDasharray={isCorrect ? undefined : '3 2'}
+        />
+      )}
+    </g>
+  )
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const PredictionChartTooltip = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length) return null
+  const data = payload[0]?.payload
+  if (!data) return null
+  const hasPrediction = data.buyMarker != null || data.sellMarker != null
+  const entryPrice = data.buyMarker ?? data.sellMarker
+  return (
+    <div className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-xs text-gray-300 shadow-xl max-w-[240px]">
+      <p className="text-[11px] text-gray-500 mb-1">{label}</p>
+      {data.price != null && (
+        <p>Price: <span className="text-blue-400 font-mono">{fmtOverlayPrice(data.price)}</span></p>
+      )}
+      {data.forecastPrice != null && (
+        <p>Forecast: <span className="text-amber-400 font-mono">{fmtOverlayPrice(data.forecastPrice)}</span></p>
+      )}
+      {hasPrediction && (
+        <div className="mt-1.5 pt-1.5 border-t border-gray-700/50">
+          <p className="flex items-center gap-1.5 mb-0.5">
+            <span className="w-2 h-2 rounded-full inline-block flex-shrink-0" style={{ background: SIGNAL_COLORS[data.signalType] || '#6b7280' }} />
+            <span className="font-semibold text-gray-100">
+              {SIGNAL_LABELS[data.signalType] || data.signalType}
+            </span>
+          </p>
+          <p>Entry: <span className="font-mono text-gray-100">{fmtOverlayPrice(entryPrice)}</span></p>
+          {data.signalConfidence != null && (
+            <p>Confidence: <span className="text-violet-400">{(data.signalConfidence * 100).toFixed(0)}%</span></p>
+          )}
+          {data.signalCorrect != null ? (
+            <p className="mt-1">
+              <span className={data.signalCorrect ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>
+                {data.signalCorrect ? '✓ Correct' : '✗ Incorrect'}
+              </span>
+              {data.signalOutcomePct != null && (
+                <span className="text-gray-500 ml-1.5">
+                  ({data.signalOutcomePct > 0 ? '+' : ''}{data.signalOutcomePct.toFixed(2)}%)
+                </span>
+              )}
+            </p>
+          ) : (
+            <p className="text-gray-600 italic mt-1">Pending evaluation</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Earnings / Q-event detection for equity pairs ─────────────────────────
+const EARNINGS_KEYWORDS = [
+  'earnings', 'quarterly', 'q1', 'q2', 'q3', 'q4', 'revenue', 'profit',
+  'financial results', 'annual report', 'guidance', 'dividend', 'eps',
+  'income', 'fiscal', 'outlook', 'beat', 'miss', 'forecast',
+  'results', 'report', 'shareholder',
+]
+
+interface QEvent {
+  ts: string
+  label: string
+  type: 'earnings' | 'dividend' | 'news'
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+}
+
+function detectQEvents(articles: NewsArticle[], pair: string, startTs: string, endTs: string): QEvent[] {
+  const base = pair.split('-')[0]?.toLowerCase().split('.')[0] ?? ''
+  if (!base) return []
+
+  const start = dayjs(startTs)
+  const end = dayjs(endTs)
+
+  const events: QEvent[] = []
+  const seenDays = new Set<string>()
+
+  for (const a of articles) {
+    const pubDay = dayjs(a.published)
+    if (pubDay.isBefore(start) || pubDay.isAfter(end)) continue
+
+    // Check if article is about this pair
+    const tags = (a.tags ?? []).map(t => t.toLowerCase())
+    const titleLower = a.title.toLowerCase()
+    if (!tags.includes(base) && !titleLower.includes(base)) continue
+
+    // Check if it's an earnings/financial event
+    const combined = `${titleLower} ${a.summary?.toLowerCase() ?? ''}`
+    const isEarnings = EARNINGS_KEYWORDS.some(kw => combined.includes(kw))
+    if (!isEarnings) continue
+
+    // Dedupe by day
+    const dayKey = pubDay.format('YYYY-MM-DD')
+    if (seenDays.has(dayKey)) continue
+    seenDays.add(dayKey)
+
+    const type = combined.includes('dividend') ? 'dividend' as const : 'earnings' as const
+    events.push({ ts: a.published, label: a.title.replace(/^\{[^}]+\}\s*/g, '').slice(0, 50), type, sentiment: a.sentiment })
   }
+  return events
+}
 
-  // Build merged chart data: prices + prediction markers
-  type ChartPoint = {
-    ts: string
-    fullTs: string
-    price: number | undefined
-    forecastPrice: number | undefined
-    forecastHigh: number | undefined
-    forecastLow: number | undefined
-    buyMarker: number | undefined
-    sellMarker: number | undefined
-    isForecast?: boolean
-  }
+// ── Chart Modal Shell ──────────────────────────────────────────────────────
+function ChartModal({ open, onClose, pair, children }: {
+  open: boolean; onClose: () => void; pair: string; children: React.ReactNode
+}) {
+  // Close on Escape
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
 
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="bg-[#0d1117] border border-gray-700/60 rounded-2xl shadow-2xl w-[95vw] max-w-[1400px] h-[85vh] flex flex-col overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800/60">
+          <div className="flex items-center gap-3">
+            <Eye size={16} className="text-brand-400" />
+            <span className="text-sm font-semibold text-gray-200">Prediction Overlay</span>
+            <span className="text-xs font-mono text-gray-500 bg-gray-800/60 px-2 py-0.5 rounded">{pair}</span>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-800/60 text-gray-500 hover:text-gray-300 transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+        {/* Body */}
+        <div className="flex-1 overflow-auto p-5">
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type ChartPoint = {
+  ts: string
+  fullTs: string
+  price: number | undefined
+  forecastPrice: number | undefined
+  forecastHigh: number | undefined
+  forecastLow: number | undefined
+  buyMarker: number | undefined
+  sellMarker: number | undefined
+  signalType: string | undefined
+  signalConfidence: number | undefined
+  signalCorrect: boolean | null | undefined
+  signalOutcomePct: number | null | undefined
+  isForecast?: boolean
+}
+
+function buildChartData(history: { price_history: { ts: string; price: number }[]; predictions: import('../api').PredictionMarker[] }, overlayDays: number) {
   const chartData: ChartPoint[] = history.price_history.map((ph) => ({
     ts: dayjs(ph.ts).format(overlayDays <= 1 ? 'HH:mm' : overlayDays <= 7 ? 'ddd HH:mm' : 'MMM DD'),
     fullTs: ph.ts,
     price: ph.price,
-    forecastPrice: undefined,
-    forecastHigh: undefined,
-    forecastLow: undefined,
-    buyMarker: undefined,
-    sellMarker: undefined,
+    forecastPrice: undefined, forecastHigh: undefined, forecastLow: undefined,
+    buyMarker: undefined, sellMarker: undefined,
+    signalType: undefined, signalConfidence: undefined, signalCorrect: undefined, signalOutcomePct: undefined,
   }))
 
   // Overlay prediction markers on closest price points
@@ -261,37 +450,32 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
     let closestDiff = Infinity
     for (let i = 0; i < chartData.length; i++) {
       const diff = Math.abs(dayjs(chartData[i].fullTs).diff(predTime, 'minute'))
-      if (diff < closestDiff) {
-        closestDiff = diff
-        closestIdx = i
-      }
+      if (diff < closestDiff) { closestDiff = diff; closestIdx = i }
     }
-    if (closestDiff < 120) { // within 2 hours
-      if (pred.is_bullish) {
-        chartData[closestIdx].buyMarker = pred.entry_price
-      } else {
-        chartData[closestIdx].sellMarker = pred.entry_price
-      }
+    if (closestDiff < 120) {
+      const pt = chartData[closestIdx]
+      const o24 = pred.outcomes['24h']
+      const o1 = pred.outcomes['1h']
+      const evaluated = o24 || o1
+      if (pred.is_bullish) { pt.buyMarker = pred.entry_price } else { pt.sellMarker = pred.entry_price }
+      pt.signalType = pred.signal_type
+      pt.signalConfidence = pred.confidence
+      pt.signalCorrect = evaluated ? (o24?.correct ?? o1?.correct ?? null) : null
+      pt.signalOutcomePct = o24?.pct_change ?? o1?.pct_change ?? null
     }
   }
 
-  // Stats for this pair
-  const bullish = history.predictions.filter(p => p.is_bullish).length
-  const bearish = history.predictions.filter(p => !p.is_bullish).length
+  // Stats
   const evaluatedPreds = history.predictions.filter(p => p.outcomes['24h'] || p.outcomes['1h'])
-  const correctPreds = evaluatedPreds.filter(p =>
-    (p.outcomes['24h']?.correct) || (p.outcomes['1h']?.correct)
-  )
-  const accuracy = evaluatedPreds.length > 0
-    ? Math.round(correctPreds.length / evaluatedPreds.length * 1000) / 10
-    : null
+  const correctPreds = evaluatedPreds.filter(p => (p.outcomes['24h']?.correct) || (p.outcomes['1h']?.correct))
+  const accuracy = evaluatedPreds.length > 0 ? Math.round(correctPreds.length / evaluatedPreds.length * 1000) / 10 : null
 
-  // TP/SL reference lines from the latest prediction
+  const signalTypeCounts: Record<string, number> = {}
+  for (const p of history.predictions) { signalTypeCounts[p.signal_type] = (signalTypeCounts[p.signal_type] || 0) + 1 }
+  const SIGNAL_ORDER = ['strong_buy', 'buy', 'weak_buy', 'neutral', 'weak_sell', 'sell', 'strong_sell']
+  const activeSignals = SIGNAL_ORDER.filter(s => signalTypeCounts[s])
+
   const latestPred = history.predictions[history.predictions.length - 1]
-
-  // ── Future Forecast Projection ─────────────────────────────────────────
-  // Extend the chart beyond the last known price toward the predicted target.
-  // Shows a dashed forecast line with a TP/SL confidence band.
   const lastPrice = chartData.length > 0 ? chartData[chartData.length - 1].price : undefined
   const lastTs = chartData.length > 0 ? chartData[chartData.length - 1].fullTs : undefined
   const hasForecast = !!(latestPred && lastPrice && lastTs && (latestPred.suggested_tp || latestPred.suggested_sl))
@@ -301,37 +485,20 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
     const sl = latestPred!.suggested_sl
     const isBullish = latestPred!.is_bullish
     const confidence = latestPred!.confidence ?? 0.5
-
-    // Target price = TP if bullish, SL if bearish (direction of predicted move)
     const targetPrice = isBullish
       ? (tp ?? lastPrice * (1 + 0.02 * confidence))
       : (sl ?? lastPrice * (1 - 0.02 * confidence))
-
-    // Number of forecast steps based on time range
     const forecastSteps = overlayDays <= 1 ? 6 : overlayDays <= 7 ? 8 : 6
-    // Time step in hours
     const hoursPerStep = overlayDays <= 1 ? 1 : overlayDays <= 7 ? 3 : 24
-
-    // Bridge point: last actual price also appears as first forecast point
     const bridgeTs = dayjs(lastTs)
     chartData[chartData.length - 1].forecastPrice = lastPrice
-
     for (let i = 1; i <= forecastSteps; i++) {
       const t = i / forecastSteps
       const futureTs = bridgeTs.add(hoursPerStep * i, 'hour')
       const forecastPrice = lastPrice + (targetPrice - lastPrice) * t
-
-      // Widen the band as we go further into the future
-      const bandSpread = Math.abs(
-        ((tp ?? lastPrice * 1.02) - (sl ?? lastPrice * 0.98))
-      ) * 0.5 * t + Math.abs(targetPrice - lastPrice) * 0.1 * t
-      const highBound = tp
-        ? Math.max(forecastPrice + bandSpread * 0.3, isBullish ? forecastPrice : forecastPrice + bandSpread)
-        : forecastPrice + bandSpread
-      const lowBound = sl
-        ? Math.min(forecastPrice - bandSpread * 0.3, isBullish ? forecastPrice - bandSpread : forecastPrice)
-        : forecastPrice - bandSpread
-
+      const bandSpread = Math.abs(((tp ?? lastPrice * 1.02) - (sl ?? lastPrice * 0.98))) * 0.5 * t + Math.abs(targetPrice - lastPrice) * 0.1 * t
+      const highBound = tp ? Math.max(forecastPrice + bandSpread * 0.3, isBullish ? forecastPrice : forecastPrice + bandSpread) : forecastPrice + bandSpread
+      const lowBound = sl ? Math.min(forecastPrice - bandSpread * 0.3, isBullish ? forecastPrice - bandSpread : forecastPrice) : forecastPrice - bandSpread
       chartData.push({
         ts: futureTs.format(overlayDays <= 1 ? 'HH:mm' : overlayDays <= 7 ? 'ddd HH:mm' : 'MMM DD'),
         fullTs: futureTs.toISOString(),
@@ -339,20 +506,72 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
         forecastPrice: Math.round(forecastPrice * 1e8) / 1e8,
         forecastHigh: Math.round(highBound * 1e8) / 1e8,
         forecastLow: Math.round(lowBound * 1e8) / 1e8,
-        buyMarker: undefined,
-        sellMarker: undefined,
+        buyMarker: undefined, sellMarker: undefined,
+        signalType: undefined, signalConfidence: undefined, signalCorrect: undefined, signalOutcomePct: undefined,
         isForecast: true,
       })
     }
   }
 
-  // Price range for Y axis domain — include forecast band if present
   const allValues = chartData.flatMap(d => [d.price, d.forecastPrice, d.forecastHigh, d.forecastLow].filter((v): v is number => v != null && v > 0))
   const minPrice = Math.min(...allValues) * 0.997
   const maxPrice = Math.max(...allValues) * 1.003
 
+  return { chartData, accuracy, signalTypeCounts, activeSignals, latestPred, hasForecast, minPrice, maxPrice }
+}
+
+function PredictionOverlayChart({ pair, expanded = false, articles = [] }: {
+  pair: string; expanded?: boolean; articles?: NewsArticle[]
+}) {
+  const [overlayDays, setOverlayDays] = useState(7)
+  const isEquity = classifyPair(pair) === 'equity'
+  const chartHeight = expanded ? 520 : 260
+
+  const { data: history, isLoading } = useQuery({
+    queryKey: ['pair-prediction-history', pair, overlayDays],
+    queryFn: () => fetchPairPredictionHistory(pair, overlayDays),
+    enabled: !!pair,
+    refetchInterval: 120_000,
+  })
+
+  const computed = useMemo(() => {
+    if (!history || !history.price_history.length) return null
+    return buildChartData(history, overlayDays)
+  }, [history, overlayDays])
+
+  // Q-events for equity pairs — hooks must run unconditionally
+  const qEvents = useMemo(() => {
+    if (!isEquity || !articles.length || !computed?.chartData.length) return []
+    const first = computed.chartData[0]?.fullTs
+    const last = computed.chartData[computed.chartData.length - 1]?.fullTs
+    if (!first || !last) return []
+    return detectQEvents(articles, pair, first, last)
+  }, [isEquity, articles, pair, computed])
+
+  const qEventLabels = useMemo(() => {
+    if (!qEvents.length || !computed?.chartData.length) return []
+    return qEvents.map(ev => {
+      const evTime = dayjs(ev.ts)
+      let closestIdx = 0
+      let closestDiff = Infinity
+      for (let i = 0; i < computed.chartData.length; i++) {
+        const diff = Math.abs(dayjs(computed.chartData[i].fullTs).diff(evTime, 'minute'))
+        if (diff < closestDiff) { closestDiff = diff; closestIdx = i }
+      }
+      return { ...ev, chartTs: computed.chartData[closestIdx]?.ts }
+    })
+  }, [qEvents, computed])
+
+  if (isLoading) return <SkeletonBlock className="h-[350px]" />
+  if (!computed) {
+    return <EmptyState icon="chart" title={`No price data for ${pair}`} description="Price history will appear as the bot collects data." />
+  }
+
+  const { chartData, accuracy, signalTypeCounts, activeSignals, latestPred, hasForecast, minPrice, maxPrice } = computed
+
   return (
     <div>
+      {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3">
         <div className="flex items-center gap-3">
           <div className="flex gap-1">
@@ -370,26 +589,35 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             ))}
           </div>
           <span className="text-[10px] text-gray-500">
-            {history.total_predictions} predictions · {accuracy != null ? `${accuracy}% accurate` : 'pending eval'}
+            {history?.total_predictions ?? 0} predictions · {accuracy != null ? `${accuracy}% accurate` : 'pending eval'}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[10px] ml-auto">
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-green-500" /> Buy ({bullish})
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-red-500" /> Sell ({bearish})
-          </span>
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] ml-auto">
+          {activeSignals.map(sig => (
+            <span key={sig} className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full" style={{ background: SIGNAL_COLORS[sig] }} />
+              {SIGNAL_LABELS[sig]} ({signalTypeCounts[sig]})
+            </span>
+          ))}
+          {isEquity && qEventLabels.length > 0 && (
+            <span className="flex items-center gap-1">
+              <Calendar size={10} className="text-cyan-400" /> Events ({qEventLabels.length})
+            </span>
+          )}
           {hasForecast && (
             <span className="flex items-center gap-1">
               <span className="w-2 h-2 rounded-sm bg-amber-500/60" /> Forecast
             </span>
           )}
+          <span className="flex items-center gap-2 ml-1 pl-2 border-l border-gray-700/50">
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full border border-green-500/60" />Correct</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full border border-red-500/60 border-dashed" />Wrong</span>
+          </span>
         </div>
       </div>
 
-      <ResponsiveContainer width="100%" height={260}>
-        <ComposedChart data={chartData} margin={{ top: 10, right: 15, bottom: 0, left: 5 }}>
+      <ResponsiveContainer width="100%" height={chartHeight}>
+        <ComposedChart data={chartData} margin={{ top: 10, right: expanded ? 30 : 15, bottom: expanded ? 20 : 0, left: expanded ? 10 : 5 }}>
           <defs>
             <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.2} />
@@ -404,28 +632,19 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
           <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
           <XAxis
             dataKey="ts"
-            tick={{ fontSize: 9, fill: '#6e7681' }}
-            interval="preserveStartEnd"
+            tick={{ fontSize: expanded ? 11 : 9, fill: '#6e7681' }}
+            interval={expanded ? 'preserveStart' : 'preserveStartEnd'}
+            angle={expanded ? -30 : 0}
+            textAnchor={expanded ? 'end' : 'middle'}
+            height={expanded ? 50 : 30}
           />
           <YAxis
-            tick={{ fontSize: 9, fill: '#6e7681' }}
+            tick={{ fontSize: expanded ? 11 : 9, fill: '#6e7681' }}
             domain={[minPrice, maxPrice]}
             tickFormatter={(v: number) => v < 1 ? v.toFixed(4) : v < 100 ? v.toFixed(2) : v.toFixed(0)}
+            width={expanded ? 70 : 50}
           />
-          <Tooltip
-            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
-            itemStyle={{ color: '#e5e7eb' }}
-            formatter={(value: any, name: string | undefined) => {
-              const fmt = (v: number) => v < 1 ? v.toFixed(6) : v.toFixed(2)
-              if (name === 'price') return [typeof value === 'number' ? fmt(value) : value, 'Price']
-              if (name === 'forecastPrice') return [typeof value === 'number' ? fmt(value) : value, 'Forecast']
-              if (name === 'forecastHigh') return [typeof value === 'number' ? fmt(value) : value, 'Forecast High']
-              if (name === 'forecastLow') return [typeof value === 'number' ? fmt(value) : value, 'Forecast Low']
-              if (name === 'buyMarker') return [typeof value === 'number' ? fmt(value) : value, 'Buy Signal']
-              if (name === 'sellMarker') return [typeof value === 'number' ? fmt(value) : value, 'Sell Signal']
-              return [value, name]
-            }}
-          />
+          <Tooltip content={<PredictionChartTooltip />} />
           {latestPred?.suggested_tp && (
             <ReferenceLine
               y={latestPred.suggested_tp}
@@ -490,25 +709,33 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
               connectNulls={false}
             />
           )}
-          <Scatter
-            dataKey="buyMarker"
-            fill="#22c55e"
-            shape="triangle"
-          />
-          <Scatter
-            dataKey="sellMarker"
-            fill="#ef4444"
-            shape="diamond"
-          />
+          <Scatter dataKey="buyMarker" fill="#22c55e" shape={<BuyMarkerShape />} />
+          <Scatter dataKey="sellMarker" fill="#ef4444" shape={<SellMarkerShape />} />
+          {/* Q-event markers for equity */}
+          {isEquity && qEventLabels.map((ev, i) => (
+            <ReferenceLine
+              key={`qev-${i}`}
+              x={ev.chartTs}
+              stroke={ev.type === 'dividend' ? '#a78bfa' : '#22d3ee'}
+              strokeDasharray="4 3"
+              strokeOpacity={0.6}
+              label={{
+                value: ev.type === 'dividend' ? '$' : 'Q',
+                fill: ev.type === 'dividend' ? '#a78bfa' : '#22d3ee',
+                fontSize: expanded ? 11 : 9,
+                position: 'top',
+              }}
+            />
+          ))}
         </ComposedChart>
       </ResponsiveContainer>
 
       {/* Forecast summary below chart */}
       {hasForecast && latestPred && (
-        <div className="mt-2 flex items-center gap-4 text-[10px] text-gray-500 border-t border-gray-800/50 pt-2">
+        <div className="mt-2 flex flex-wrap items-center gap-4 text-[10px] text-gray-500 border-t border-gray-800/50 pt-2">
           <span className="flex items-center gap-1">
-            <span className={`w-1.5 h-1.5 rounded-full ${latestPred.is_bullish ? 'bg-green-500' : 'bg-red-500'}`} />
-            Latest: <span className="text-gray-300 font-medium">{latestPred.is_bullish ? 'Bullish' : 'Bearish'}</span>
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: SIGNAL_COLORS[latestPred.signal_type] || (latestPred.is_bullish ? '#22c55e' : '#ef4444') }} />
+            Latest: <span className="text-gray-300 font-medium">{SIGNAL_LABELS[latestPred.signal_type] || (latestPred.is_bullish ? 'Bullish' : 'Bearish')}</span>
             <span className="text-gray-600">({(latestPred.confidence * 100).toFixed(0)}% conf)</span>
           </span>
           {latestPred.suggested_tp && (
@@ -518,6 +745,30 @@ function PredictionOverlayChart({ pair }: { pair: string }) {
             <span>Stop: <span className="text-red-400 font-mono">{latestPred.suggested_sl < 1 ? latestPred.suggested_sl.toFixed(6) : latestPred.suggested_sl.toFixed(2)}</span></span>
           )}
           <span className="text-gray-600 italic ml-auto">Dashed line = AI forecast projection</span>
+        </div>
+      )}
+
+      {/* Q-event timeline below chart — visible in expanded mode */}
+      {isEquity && qEventLabels.length > 0 && expanded && (
+        <div className="mt-3 pt-2 border-t border-gray-800/50">
+          <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+            <Calendar size={10} className="text-cyan-400" /> Financial Events
+          </h4>
+          <div className="flex flex-wrap gap-2">
+            {qEventLabels.map((ev, i) => (
+              <div key={i} className={`text-[10px] px-2.5 py-1 rounded-md border ${
+                ev.sentiment === 'bullish' ? 'border-green-800/40 bg-green-900/20 text-green-400'
+                : ev.sentiment === 'bearish' ? 'border-red-800/40 bg-red-900/20 text-red-400'
+                : 'border-cyan-800/30 bg-cyan-900/15 text-cyan-400'
+              }`}>
+                <span className="font-medium">{ev.type === 'dividend' ? '$' : 'Q'}</span>
+                <span className="mx-1.5 text-gray-600">·</span>
+                <span className="text-gray-400">{dayjs(ev.ts).format('MMM DD')}</span>
+                <span className="mx-1.5 text-gray-600">·</span>
+                <span className="truncate max-w-[200px] inline-block align-bottom">{ev.label}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -638,35 +889,131 @@ function DailyAccuracyChart({ data }: { data: PredictionAccuracyData['daily_accu
 
 // ── Signal Type Breakdown ──────────────────────────────────────────────────
 
-function SignalTypeChart({ data }: { data: PredictionAccuracyData['by_signal_type'] }) {
-  const entries = Object.entries(data).sort((a, b) => b[1].total - a[1].total)
-  if (!entries.length) return null
+// Canonical display order: bullish strongest → bearish strongest
+const SIGNAL_ORDER = ['strong_buy', 'buy', 'weak_buy', 'neutral', 'weak_sell', 'sell', 'strong_sell']
 
-  const chartData = entries.map(([type, stats]) => ({
-    name: SIGNAL_LABELS[type] ?? type,
-    accuracy: stats.accuracy_pct ?? 0,
-    total: stats.total,
-    color: SIGNAL_COLORS[type] ?? '#6b7280',
+function weightLabel(w: number | undefined): string {
+  if (w === 2) return '2×'
+  if (w === 0.5) return '½×'
+  if (w === 0) return '—'
+  return '1×'
+}
+function weightColor(w: number | undefined): string {
+  if (w === 2) return 'text-yellow-400'
+  if (w === 0.5) return 'text-gray-500'
+  if (w === 0) return 'text-gray-700'
+  return 'text-gray-400'
+}
+
+function SignalTypeChart({ data }: { data: PredictionAccuracyData['by_signal_type'] }) {
+  if (!Object.keys(data).length) return null
+
+  // Build in canonical order, only include types that have data
+  const rows = SIGNAL_ORDER
+    .filter(type => data[type])
+    .map(type => {
+      const stats = data[type]
+      return {
+        type,
+        name: SIGNAL_LABELS[type] ?? type,
+        accuracy: stats.accuracy_pct ?? 0,
+        hasAccuracy: stats.evaluated_24h > 0,
+        total: stats.total,
+        evaluated: stats.evaluated_24h,
+        color: SIGNAL_COLORS[type] ?? '#6b7280',
+        weight: stats.weight,
+      }
+    })
+
+  const totalPredictions = rows.reduce((s, r) => s + r.total, 0)
+  const chartData = rows.map(r => ({
+    ...r,
+    countPct: totalPredictions > 0 ? Math.round(r.total / totalPredictions * 100) : 0,
   }))
 
+  const chartHeight = Math.max(240, rows.length * 40 + 20)
+
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 70 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-        <XAxis type="number" tick={{ fontSize: 10, fill: '#6e7681' }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
-        <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#d1d5db' }} width={65} />
-        <Tooltip
-          contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
-          itemStyle={{ color: '#e5e7eb' }}
-          formatter={(v: any) => [`${Number(v ?? 0).toFixed(1)}%`, 'Accuracy']}
-        />
-        <Bar dataKey="accuracy" radius={[0, 3, 3, 0]}>
-          {chartData.map((entry, i) => (
-            <Cell key={i} fill={entry.color} opacity={0.85} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <div className="space-y-1">
+      {/* Legend row */}
+      <div className="flex items-center gap-4 text-[10px] text-gray-500 mb-2">
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-current opacity-85" style={{background:'#4ade80'}} /> Accuracy (24h)</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-gray-700" /> Share of signals</span>
+        <span className="ml-auto flex items-center gap-1 text-yellow-400/70">Weight = impact on quality score</span>
+      </div>
+
+      <ResponsiveContainer width="100%" height={chartHeight}>
+        <BarChart data={chartData} layout="vertical" margin={{ top: 4, right: 56, bottom: 4, left: 80 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#21262d" horizontal={false} />
+          <XAxis
+            type="number"
+            tick={{ fontSize: 10, fill: '#6e7681' }}
+            tickFormatter={(v) => `${v}%`}
+            domain={[0, 100]}
+          />
+          <YAxis
+            type="category"
+            dataKey="name"
+            tick={{ fontSize: 11, fill: '#d1d5db' }}
+            width={76}
+          />
+          <ReferenceLine x={50} stroke="#4b5563" strokeDasharray="4 2" label={{ value: '50%', position: 'insideTopRight', fontSize: 9, fill: '#4b5563' }} />
+          <Tooltip
+            contentStyle={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
+            itemStyle={{ color: '#e5e7eb' }}
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null
+              const row = payload[0]?.payload
+              if (!row) return null
+              return (
+                <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-2.5 text-xs space-y-1">
+                  <p className="font-semibold" style={{ color: row.color }}>{row.name}</p>
+                  <p className="text-gray-300">Accuracy: <span className="text-white font-medium">{row.hasAccuracy ? `${row.accuracy.toFixed(1)}%` : 'n/a'}</span> <span className="text-gray-500">({row.evaluated} evaluated)</span></p>
+                  <p className="text-gray-300">Signals: <span className="text-white font-medium">{row.total}</span> <span className="text-gray-500">({row.countPct}% of total)</span></p>
+                  <p className="text-gray-400">Quality weight: <span className={weightColor(row.weight) + ' font-semibold'}>{weightLabel(row.weight)}</span></p>
+                </div>
+              )
+            }}
+          />
+          {/* Volume bar (background) */}
+          <Bar dataKey="countPct" barSize={8} radius={[0, 2, 2, 0]} fill="#374151" opacity={0.6} />
+          {/* Accuracy bar (foreground, slightly larger) */}
+          <Bar dataKey="accuracy" barSize={14} radius={[0, 3, 3, 0]}>
+            <LabelList
+              dataKey="accuracy"
+              position="right"
+              content={(props: any) => {
+                const { x, y, width, height, value, index } = props
+                const row = chartData[index as number]
+                if (!row?.hasAccuracy) return null
+                return (
+                  <text
+                    x={(x as number) + (width as number) + 4}
+                    y={(y as number) + (height as number) / 2 + 4}
+                    fontSize={10}
+                    fill="#9ca3af"
+                    textAnchor="start"
+                  >
+                    {`${(value as number).toFixed(0)}%`}
+                  </text>
+                )
+              }}
+            />
+            {chartData.map((entry, i) => (
+              <Cell key={i} fill={entry.color} opacity={entry.hasAccuracy ? 0.85 : 0.25} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+
+      {/* Weight explanation row */}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-600 mt-1 border-t border-gray-800 pt-2">
+        <span>Quality weight: how much each signal type affects the weighted accuracy score.</span>
+        <span className="text-yellow-400/70">2× strong</span>
+        <span className="text-gray-400">1× normal</span>
+        <span className="text-gray-500">½× weak</span>
+      </div>
+    </div>
   )
 }
 
@@ -1015,7 +1362,9 @@ function AIAssessmentCard({ cycle }: { cycle: CycleFull }) {
 // ── Pair News Feed ──────────────────────────────────────────────────────────
 
 function PairNewsFeed({ pair, articles }: { pair: string; articles: NewsArticle[] }) {
-  const ticker = pairBaseTicker(pair).toLowerCase()
+  // pairBaseTicker gives "ASML.AS" for "ASML.AS-EUR"; strip exchange suffix to get "ASML"
+  const fullBase = pairBaseTicker(pair).toLowerCase()          // e.g. "asml.as"
+  const shortBase = fullBase.split('.')[0]                     // e.g. "asml"
 
   /** Strip IBKR metadata prefix like {A:800015:L:en:K:n/a:C:0.90...} from titles */
   const cleanTitle = (t: string) => t.replace(/^\{[^}]+\}\s*/g, '').trim()
@@ -1023,14 +1372,15 @@ function PairNewsFeed({ pair, articles }: { pair: string; articles: NewsArticle[
   const filtered = useMemo(() => {
     return articles.filter(a => {
       const tags = (a.tags ?? []).map(t => t.toLowerCase())
-      if (tags.includes(ticker)) return true
+      if (tags.includes(fullBase) || tags.includes(shortBase)) return true
       const title = cleanTitle(a.title).toLowerCase()
-      if (title.includes(ticker.toLowerCase())) return true
+      if (title.includes(shortBase)) return true
+      if (title.includes(fullBase)) return true
       // Also match the full pair name
       if (title.includes(pair.toLowerCase().replace('-', ' '))) return true
       return false
     }).slice(0, 15)
-  }, [articles, ticker, pair])
+  }, [articles, fullBase, shortBase, pair])
 
   const sentimentIcon = (s: string) => {
     if (s === 'bullish') return <TrendingUp size={10} className="text-green-400" />
@@ -1225,15 +1575,17 @@ export default function Predictions() {
   const [selectedPair, setSelectedPair] = useState<string | null>(null)
   const [pairSearch, setPairSearch] = useState('')
   const [trackedCollapsed, setTrackedCollapsed] = useState(false)
+  const [chartExpanded, setChartExpanded] = useState(false)
+  const profile = useLiveStore((s) => s.profile)
 
   const { data: rawData, isLoading } = useQuery({
-    queryKey: ['prediction-accuracy', days],
+    queryKey: ['prediction-accuracy', days, profile],
     queryFn: () => fetchPredictionAccuracy(days),
     refetchInterval: 120_000,
   })
 
   const { data: trackedPairs } = useQuery({
-    queryKey: ['tracked-pairs'],
+    queryKey: ['tracked-pairs', profile],
     queryFn: fetchTrackedPairs,
     refetchInterval: 300_000,
   })
@@ -1256,8 +1608,8 @@ export default function Predictions() {
   })
 
   const { data: newsData } = useQuery({
-    queryKey: ['trader-news'],
-    queryFn: () => fetchNews(100),
+    queryKey: ['trader-news', profile],
+    queryFn: () => fetchNews(100, profile),
     enabled: !!selectedPair,
     refetchInterval: 300_000,
   })
@@ -1465,18 +1817,33 @@ export default function Predictions() {
             {/* Row 2: Prediction Overlay + News */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
-                  <Eye size={14} className="text-brand-400" />
-                  Prediction Overlay
-                </h3>
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                    <Eye size={14} className="text-brand-400" />
+                    Prediction Overlay
+                  </h3>
+                  <button
+                    onClick={() => setChartExpanded(true)}
+                    className="p-1.5 rounded-lg hover:bg-gray-800/60 text-gray-500 hover:text-gray-300 transition-colors"
+                    title="Expand chart"
+                  >
+                    <Maximize2 size={14} />
+                  </button>
+                </div>
                 <p className="text-[10px] text-gray-600 mb-3">
                   Price chart with AI signal markers. ▲ = buy · ◆ = sell · Dashed = forecast.
+                  {classifyPair(selectedPair) === 'equity' && ' Q/$ = financial events.'}
                 </p>
-                <PredictionOverlayChart pair={selectedPair} />
+                <PredictionOverlayChart pair={selectedPair} articles={newsData?.articles ?? []} />
               </div>
 
               <PairNewsFeed pair={selectedPair} articles={newsData?.articles ?? []} />
             </div>
+
+            {/* Expanded chart modal */}
+            <ChartModal open={chartExpanded} onClose={() => setChartExpanded(false)} pair={selectedPair}>
+              <PredictionOverlayChart pair={selectedPair} expanded articles={newsData?.articles ?? []} />
+            </ChartModal>
 
             {/* Row 3: Trade History */}
             <PairTradeHistory pair={selectedPair} />
@@ -1537,12 +1904,13 @@ export default function Predictions() {
             </div>
 
             <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
+              <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-1">
                 <BarChart2 size={14} className="text-purple-400" />
-                Accuracy by Signal Type
+                Accuracy by Signal Strength
               </h3>
+              <p className="text-[10px] text-gray-600 mb-3">Solid bars = 24h accuracy · Ghost bars = % share of total signals · Dashed = 50% baseline</p>
               {isLoading ? (
-                <SkeletonBlock className="h-[220px]" />
+                <SkeletonBlock className="h-[280px]" />
               ) : data?.by_signal_type && Object.keys(data.by_signal_type).length ? (
                 <SignalTypeChart data={data.by_signal_type} />
               ) : (

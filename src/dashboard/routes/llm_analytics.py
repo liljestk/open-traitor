@@ -28,13 +28,25 @@ router = APIRouter(tags=["LLM Analytics"])
 # Helpers
 # ---------------------------------------------------------------------------
 
+_VALID_BUCKET_FORMATS = frozenset({"YYYY-MM-DD HH24:00", "YYYY-MM-DD", "IYYY-IW"})
+
+
 def _bucket_format(hours: int) -> str:
-    """Return PostgreSQL to_char format for time-bucket grouping based on range."""
+    """Return PostgreSQL to_char format for time-bucket grouping based on range.
+
+    The returned value is interpolated directly into SQL, so it must only ever
+    be one of the three known literal strings (CRIT-1 allowlist guard).
+    """
     if hours <= 48:
-        return "YYYY-MM-DD HH24:00"   # hourly
-    if hours <= 720:
-        return "YYYY-MM-DD"            # daily
-    return "IYYY-IW"                   # weekly (ISO year-week)
+        fmt = "YYYY-MM-DD HH24:00"   # hourly
+    elif hours <= 720:
+        fmt = "YYYY-MM-DD"            # daily
+    else:
+        fmt = "IYYY-IW"               # weekly (ISO year-week)
+    # H12: Use ValueError instead of assert (assert stripped under python -O)
+    if fmt not in _VALID_BUCKET_FORMATS:
+        raise ValueError(f"Unexpected bucket format: {fmt!r}")
+    return fmt
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +176,11 @@ def get_llm_analytics(
             p50 = p90 = p99 = None
             if latencies:
                 n = len(latencies)
-                p50 = latencies[int(n * 0.50)]
-                p90 = latencies[int(n * 0.90)]
-                p99 = latencies[min(int(n * 0.99), n - 1)]
+                # MED-4: use nearest-rank formula (0-indexed) for correct percentiles.
+                # int(n * p) overshoots by 1 slot; int((n-1) * p) is exact.
+                p50 = latencies[int((n - 1) * 0.50)]
+                p90 = latencies[int((n - 1) * 0.90)]
+                p99 = latencies[int((n - 1) * 0.99)]
             summary["p50_latency_ms"] = p50
             summary["p90_latency_ms"] = p90
             summary["p99_latency_ms"] = p99
@@ -221,7 +235,7 @@ def get_llm_analytics(
 
         except Exception as exc:
             logger.exception("llm-analytics error")
-            raise HTTPException(status_code=500, detail=str(exc))
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +338,10 @@ def apply_optimizer(body: OptimizerApplyRequest):
     try:
         changes = llm_optimizer.save_settings(body.settings, changed_by="dashboard")
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail="Validation error")
     except Exception as e:
         logger.exception("Failed to apply optimizer settings")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     logger.info(f"Optimizer settings updated: {changes}")
     return {

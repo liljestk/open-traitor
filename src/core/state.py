@@ -90,7 +90,7 @@ class TradingState:
         # Warm-start from persisted snapshot (trades + signals only; balance is live)
         self._warm_start(_get_state_file())
 
-        logger.info(f"TradingState initialized | Balance: ${initial_balance:,.2f}")
+        logger.info(f"TradingState initialized | Balance: {self.currency_symbol}{initial_balance:,.2f}")
 
     def _warm_start(self, filepath: str) -> None:
         """Load recent trades and signals from the last saved snapshot."""
@@ -100,16 +100,17 @@ class TradingState:
         try:
             with open(path) as f:
                 data = json.load(f)
-            for t in data.get("trades", []):
+            for i, t in enumerate(data.get("trades", [])):
                 try:
                     self.trades.append(Trade(**t))
-                except Exception:
-                    pass
-            for s in data.get("signals", []):
+                except Exception as exc:
+                    # M21: Log instead of silently swallowing corrupt records
+                    logger.warning(f"Warm-start: skipping corrupt trade record #{i}: {exc}")
+            for i, s in enumerate(data.get("signals", [])):
                 try:
                     self.signals.append(Signal(**s))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(f"Warm-start: skipping corrupt signal record #{i}: {exc}")
             # Restore performance counters from persisted summary
             summary = data.get("summary", {})
             self.total_trades = summary.get("total_trades", 0)
@@ -727,19 +728,30 @@ class TradingState:
                 "is_paused": self.is_paused,
                 "circuit_breaker": self.circuit_breaker_triggered,
             }
+            # HIGH-9: always include ALL open trades even if they fall
+            # outside the last-100 window, so warm-restart never loses
+            # knowledge of existing positions.
+            _recent = self.trades[-100:]
+            _open_outside_window = (
+                [t for t in self.trades[:-100] if t.is_open]
+                if len(self.trades) > 100 else []
+            )
             state_data = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "summary": summary,
-                "trades": [t.model_dump(mode="json") for t in self.trades[-100:]],
+                "trades": [t.model_dump(mode="json") for t in _open_outside_window + _recent],
                 "signals": [s.model_dump(mode="json") for s in list(self.signals)[-50:]],
             }
             
             # H4 fix: Write to temp file inside lock, then rename (atomic)
+            # M20 fix: Use os.replace() instead of Path.replace() which fails
+            # on Windows when the target already exists
             tmp_path = path.with_suffix(".tmp")
             try:
                 with open(tmp_path, "w") as f:
                     json.dump(state_data, f, indent=2, default=str)
-                tmp_path.replace(path)
+                import os as _os
+                _os.replace(str(tmp_path), str(path))
             except Exception as e:
                 logger.error(f"Failed to save state: {e}")
                 if tmp_path.exists():

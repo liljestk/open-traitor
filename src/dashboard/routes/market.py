@@ -347,4 +347,4 @@ def get_candles(
         return deps.sanitize_floats({"candles": candles, "pair": pair, "count": len(candles)})
     except Exception as exc:
         logger.warning(f"candles error for {pair}: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
