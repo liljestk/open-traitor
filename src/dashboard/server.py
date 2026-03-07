@@ -282,6 +282,8 @@ _PUBLIC_ENDPOINTS = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/set-password",
+    "/api/system/status",
+    "/api/setup",
     "/health",
 })
 

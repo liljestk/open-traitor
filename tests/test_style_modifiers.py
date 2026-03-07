@@ -8,16 +8,17 @@ Modifiers:
 """
 from __future__ import annotations
 
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Break circular import: core.__init__ → orchestrator → agents → base_agent → core
-sys.modules.setdefault("src.core.orchestrator", MagicMock())
+from src.agents.risk_manager import RiskManagerAgent
+from src.agents.executor import ExecutorAgent
+from src.core.rules import AbsoluteRules
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Helpers — imports are lazy to avoid circular-import issues
+# Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _make_config(modifiers: list[str] | None = None, **overrides) -> dict:
@@ -39,8 +40,7 @@ def _make_config(modifiers: list[str] | None = None, **overrides) -> dict:
     return cfg
 
 
-def _make_rules():
-    from src.core.rules import AbsoluteRules
+def _make_rules() -> AbsoluteRules:
     return AbsoluteRules({
         "max_single_trade": 500,
         "max_daily_spend": 2000,
@@ -52,12 +52,10 @@ def _make_rules():
         "max_cash_per_trade_pct": 0.50,
         "always_use_stop_loss": True,
         "max_stop_loss_pct": 0.10,
-        "emergency_stop_portfolio": 100,
     })
 
 
-def _make_risk_manager(modifiers: list[str] | None = None):
-    from src.agents.risk_manager import RiskManagerAgent
+def _make_risk_manager(modifiers: list[str] | None = None) -> RiskManagerAgent:
     config = _make_config(modifiers)
     llm = MagicMock()
     state = MagicMock()
@@ -67,8 +65,7 @@ def _make_risk_manager(modifiers: list[str] | None = None):
     return RiskManagerAgent(llm, state, config, rules, portfolio_scaler=None)
 
 
-def _make_executor(modifiers: list[str] | None = None, asset_class: str = "crypto"):
-    from src.agents.executor import ExecutorAgent
+def _make_executor(modifiers: list[str] | None = None, asset_class: str = "crypto") -> ExecutorAgent:
     config = _make_config(modifiers)
     llm = MagicMock()
     state = MagicMock()

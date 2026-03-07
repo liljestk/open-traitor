@@ -210,6 +210,40 @@ def health(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# System status (first-run detection)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SETUP_FLAG_PATH = os.path.join("config", ".setup-complete")
+
+
+def _is_setup_complete() -> bool:
+    """Return True if the setup wizard has been completed and the flag file exists."""
+    return os.path.isfile(_SETUP_FLAG_PATH)
+
+
+def _mark_setup_complete() -> None:
+    """Write the setup-complete flag file."""
+    os.makedirs(os.path.dirname(os.path.abspath(_SETUP_FLAG_PATH)), exist_ok=True)
+    with open(_SETUP_FLAG_PATH, "w", encoding="utf-8") as f:
+        from datetime import datetime, timezone
+        f.write(datetime.now(timezone.utc).isoformat())
+
+
+@router.get("/api/system/status", summary="System status for first-run detection")
+def system_status(request: Request):
+    """Public endpoint — returns setup_complete and auth_configured flags.
+
+    The frontend uses this on every page load to decide whether to redirect
+    to /setup (first run) or to the normal dashboard.
+    """
+    return {
+        "setup_complete": _is_setup_complete(),
+        "auth_configured": auth.is_auth_configured(),
+        "authenticated": auth.is_authenticated(request),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Setup Wizard (initial configuration)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -571,6 +605,13 @@ def setup_config(body: _SetupConfigBody, request: Request):
             f"⚙️ Setup wizard config saved: {len(body.config_env)} env vars, "
             f"yamls={updated_yamls}, llm_reloaded={llm_reloaded} (ip={source_ip})"
         )
+
+        # Mark setup as complete (creates config/.setup-complete flag file)
+        try:
+            _mark_setup_complete()
+            logger.info("✅ Setup wizard marked complete")
+        except Exception as _flag_err:
+            logger.warning(f"Could not write setup-complete flag: {_flag_err}")
 
         return {
             "ok": True,

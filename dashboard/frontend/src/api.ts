@@ -67,6 +67,18 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
+export interface SystemStatus {
+  setup_complete: boolean
+  auth_configured: boolean
+  authenticated: boolean
+}
+
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  const res = await fetch('/api/system/status', { credentials: 'include' })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
 export interface CycleSummary {
   cycle_id: string
   pair: string
