@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
+  fetchStyleModifiers,
 } from '../api'
 import {
   X, AlertTriangle, Check,
@@ -9,13 +10,14 @@ import {
   DollarSign,
   RefreshCw, Search,
   Minus, Plus, Activity, ShieldCheck,
-  Sliders,
+  Sliders, Timer, Target, Expand,
+  ChevronDown, ChevronRight,
 } from 'lucide-react'
 import { LLMProvidersSection } from './settings/LLMProviders'
 import PageTransition from '../components/PageTransition'
 import {
   SECTION_CATEGORIES, SECTION_ORDER, PRESET_CONFIG,
-  TIER_COLORS, TIER_LABELS,
+  TIER_COLORS, TIER_LABELS, MODIFIER_COLORS,
   type CategoryKey,
   detectActivePreset, buildPresetDiff, formatFieldValue,
   btnStyle, inputBase,
@@ -322,6 +324,7 @@ export default function Settings() {
   const queryClient = useQueryClient()
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
   const { data: presetsData } = useQuery({ queryKey: ['presets'], queryFn: fetchPresets })
+  const { data: modifiersData } = useQuery({ queryKey: ['style-modifiers'], queryFn: fetchStyleModifiers })
 
   const mutation = useMutation({
     mutationFn: updateSettings,
@@ -333,6 +336,7 @@ export default function Settings() {
   const [hoveredPreset, setHoveredPreset] = useState<string | null>(null)
   const [pendingPreset, setPendingPreset] = useState<string | null>(null)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+  const [advancedMode, setAdvancedMode] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const handlePreset = async (preset: string) => {
@@ -350,6 +354,20 @@ export default function Settings() {
   useEffect(() => {
     if (pendingPreset !== null) setPendingPreset(null)
   }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleToggleModifier = async (key: string) => {
+    const current: string[] = (data?.settings as any)?.trading?.style_modifiers ?? []
+    const next = current.includes(key) ? current.filter(m => m !== key) : [...current, key]
+    try {
+      await mutation.mutateAsync({ section: 'trading', updates: { style_modifiers: next } })
+      queryClient.invalidateQueries({ queryKey: ['style-modifiers'] })
+      const label = modifiersData?.modifiers?.[key]?.label ?? key
+      const action = next.includes(key) ? 'enabled' : 'disabled'
+      setToast({ message: `${label} ${action}`, type: 'success' })
+    } catch (e: unknown) {
+      setToast({ message: `Failed to toggle modifier: ${e instanceof Error ? e.message : String(e)}`, type: 'error' })
+    }
+  }
 
   const handleSaveSection = async (section: string, updates: Record<string, unknown>) => {
     const settings = data?.settings ?? {}
@@ -424,55 +442,29 @@ export default function Settings() {
 
   // Status chips for header
   const tradingSettings = (settings.trading ?? {}) as Record<string, unknown>
-  const riskSettings = (settings.risk ?? {}) as Record<string, unknown>
-  const statusChips = [
-    {
-      label: tradingSettings.mode === 'live' ? '⚡ Live mode' : '📝 Paper mode',
-      color: tradingSettings.mode === 'live' ? '#22c55e' : '#8b949e',
-      bg: tradingSettings.mode === 'live' ? '#22c55e15' : '#8b949e15',
-    },
-    {
-      label: `${tradingSettings.max_active_pairs ?? '?'} pairs`,
-      color: '#58a6ff',
-      bg: '#58a6ff12',
-    },
-    {
-      label: `${((Number(tradingSettings.min_confidence ?? 0)) * 100).toFixed(0)}% confidence`,
-      color: '#a78bfa',
-      bg: '#a78bfa12',
-    },
-    {
-      label: `every ${Number(tradingSettings.interval ?? 120) >= 60 ? `${Number(tradingSettings.interval ?? 120) / 60}m` : `${tradingSettings.interval}s`}`,
-      color: '#f59e0b',
-      bg: '#f59e0b12',
-    },
-    {
-      label: `SL ${((Number(riskSettings.stop_loss_pct ?? 0)) * 100).toFixed(1)}% / TP ${((Number(riskSettings.take_profit_pct ?? 0)) * 100).toFixed(1)}%`,
-      color: '#e6edf3',
-      bg: '#e6edf312',
-    },
-  ]
 
   return (
     <PageTransition>
     <div style={{ padding: '20px 24px', maxWidth: 960 }}>
 
       {/* ─── Header ─── */}
-      <div style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e6edf3', margin: 0 }}>Settings</h1>
-        <p style={{ fontSize: 13, color: '#8b949e', margin: '4px 0 10px' }}>
-          All changes are validated, saved to disk, and applied to the running service instantly.
-        </p>
-        {/* Status chips */}
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {statusChips.map((chip, i) => (
-            <span key={i} style={{
-              fontSize: 11, padding: '3px 10px', borderRadius: 20, fontWeight: 500,
-              color: chip.color, background: chip.bg, border: `1px solid ${chip.color}22`,
-            }}>
-              {chip.label}
-            </span>
-          ))}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e6edf3', margin: 0 }}>Settings</h1>
+            <p style={{ fontSize: 13, color: '#8b949e', margin: '4px 0 0' }}>
+              Changes are validated and applied instantly.
+            </p>
+          </div>
+          {/* Mode badge */}
+          <span style={{
+            fontSize: 12, padding: '5px 12px', borderRadius: 20, fontWeight: 600,
+            color: tradingSettings.mode === 'live' ? '#22c55e' : '#8b949e',
+            background: tradingSettings.mode === 'live' ? '#22c55e15' : '#8b949e15',
+            border: `1px solid ${tradingSettings.mode === 'live' ? '#22c55e33' : '#8b949e33'}`,
+          }}>
+            {tradingSettings.mode === 'live' ? '⚡ Live' : '📝 Paper'}
+          </span>
         </div>
       </div>
 
@@ -496,7 +488,7 @@ export default function Settings() {
             Trading is {trading_enabled ? 'ENABLED' : 'DISABLED'}
           </span>
           <span style={{ fontSize: 11, color: '#8b949e', marginLeft: 10 }}>
-            {trading_enabled ? 'The bot is actively analyzing markets and executing trades' : 'All trading activity is halted'}
+            {trading_enabled ? 'Bot is actively analyzing markets and executing trades' : 'All trading activity is halted'}
           </span>
         </div>
         <button onClick={() => handlePreset(trading_enabled ? 'disabled' : 'moderate')} style={{
@@ -504,240 +496,333 @@ export default function Settings() {
           padding: '8px 18px', fontSize: 13,
           borderColor: trading_enabled ? '#30363d' : '#238636',
         }}>
-          {trading_enabled ? 'Disable Trading' : 'Enable Trading'}
+          {trading_enabled ? 'Pause Trading' : 'Enable Trading'}
         </button>
       </div>
 
-      {/* ─── Quick Presets ─── */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Quick Presets
-          </span>
-          {activePreset ? (
+      {/* ─── Simple Presets (3 cards) ─── */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
+          Risk Profile
+          {activePreset && activePreset !== 'disabled' && (
             <span style={{
-              fontSize: 10, padding: '2px 8px', borderRadius: 10,
+              marginLeft: 8, fontSize: 10, padding: '2px 8px', borderRadius: 10,
               background: PRESET_CONFIG[activePreset].color + '18',
               color: PRESET_CONFIG[activePreset].color, fontWeight: 600,
               border: `1px solid ${PRESET_CONFIG[activePreset].color}22`,
             }}>{PRESET_CONFIG[activePreset].label} active</span>
-          ) : (
-            <span style={{
-              fontSize: 10, padding: '2px 8px', borderRadius: 10,
-              background: '#8b949e18', color: '#8b949e', fontWeight: 600, border: '1px solid #8b949e22',
-            }}>Custom configuration</span>
           )}
         </div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {Object.entries(PRESET_CONFIG).map(([key, cfg]) => {
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+          {(['conservative', 'moderate', 'aggressive'] as const).map(key => {
+            const cfg = PRESET_CONFIG[key]
             const isActive = key === activePreset
-            const isHovered = hoveredPreset === key
             return (
               <button key={key}
                 onClick={() => !isActive && handlePreset(key)}
-                onMouseEnter={() => setHoveredPreset(key)}
-                onMouseLeave={() => setHoveredPreset(null)}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
-                  background: isActive
-                    ? `linear-gradient(135deg, ${cfg.color}12, ${cfg.color}20)`
-                    : isHovered ? `${cfg.color}08` : '#0d1117',
+                  display: 'flex', alignItems: 'center', gap: 12, padding: isActive ? '14px 16px' : '15px 17px',
+                  background: isActive ? `linear-gradient(135deg, ${cfg.color}10, ${cfg.color}20)` : '#0d1117',
                   border: isActive ? `2px solid ${cfg.color}99` : `1px solid ${cfg.color}44`,
-                  borderRadius: 12,
-                  padding: isActive ? '12px 18px' : '13px 19px',
-                  cursor: isActive ? 'default' : 'pointer',
-                  color: '#e6edf3', minWidth: 160, transition: 'all 0.2s',
-                  boxShadow: isActive ? `0 0 24px ${cfg.color}25, inset 0 1px 0 ${cfg.color}20` : 'none',
+                  borderRadius: 10, cursor: isActive ? 'default' : 'pointer',
+                  color: '#e6edf3', textAlign: 'left', transition: 'all 0.15s',
+                  boxShadow: isActive ? `0 0 20px ${cfg.color}20` : 'none',
                 }}
               >
-                <span style={{ color: cfg.color, fontSize: 22 }}>{cfg.icon}</span>
-                <div style={{ textAlign: 'left' }}>
+                <span style={{ fontSize: 22, color: cfg.color, flexShrink: 0 }}>{cfg.icon}</span>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: 14 }}>{cfg.label}</div>
-                  <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#6e7681', marginTop: 1 }}>{cfg.desc}</div>
+                  <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#6e7681', marginTop: 2 }}>{cfg.desc}</div>
                 </div>
                 {isActive && (
-                  <span style={{
-                    position: 'absolute', top: -8, right: -8,
-                    width: 22, height: 22, borderRadius: '50%',
-                    background: cfg.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    boxShadow: `0 0 10px ${cfg.color}70, 0 0 4px ${cfg.color}`,
-                  }}><Check size={12} color="#fff" strokeWidth={3} /></span>
+                  <Check size={14} style={{ color: cfg.color, marginLeft: 'auto', flexShrink: 0 }} />
                 )}
               </button>
             )
           })}
         </div>
-
-        {/* Preset impact preview */}
-        {panelKey && panelDiff.length > 0 && (
-          <div style={{
-            marginTop: 12, padding: '14px 18px',
-            background: '#0d1117', border: `1px solid ${PRESET_CONFIG[panelKey]?.color ?? '#30363d'}33`,
-            borderRadius: 10, transition: 'all 0.15s',
-          }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
-              {isComparison
-                ? `Switching to ${PRESET_CONFIG[panelKey]?.label} would change ${panelDiff.filter(r => r.changed).length} setting${panelDiff.filter(r => r.changed).length !== 1 ? 's' : ''}:`
-                : `${PRESET_CONFIG[panelKey]?.label} preset values:`}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '4px 20px' }}>
-              {panelDiff.map(row => (
-                <div key={row.key} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '5px 0', fontSize: 12, borderBottom: '1px solid #161b22',
-                }}>
-                  <span style={{ color: row.changed && isComparison ? '#c9d1d9' : '#8b949e' }}>{row.label}</span>
-                  {isComparison && row.changed ? (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span style={{ color: '#484f58', textDecoration: 'line-through', fontSize: 11 }}>{formatFieldValue(row.key, row.current)}</span>
-                      <ArrowRight size={10} style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
-                      <span style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#e6edf3', fontWeight: 700, fontSize: 13 }}>{formatFieldValue(row.key, row.target)}</span>
-                    </span>
-                  ) : (
-                    <span style={{ color: row.changed ? '#f59e0b' : '#c9d1d9', fontWeight: row.changed ? 600 : 400 }}>
-                      {formatFieldValue(row.key, row.target)}
-                      {!isComparison && row.changed && <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 4 }} title="Differs from current">*</span>}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* ─── RPM Entity Budget (trading & intelligence tabs) ─── */}
-      {data.rpm_budget && !searchQuery && (activeTab === 'trading' || activeTab === 'intelligence') && (
-        <RpmBudgetCard
-          rpm_budget={data.rpm_budget}
-          current_pairs={(settings.trading as Record<string, unknown>)?.pairs
-            ? ((settings.trading as Record<string, unknown>).pairs as string[]).length
-            : 0}
-        />
-      )}
-
-      {/* ─── Quick Settings ─── */}
-      {!searchQuery && (
-        <QuickSettings
-          settings={settings}
-          liveData={data}
-          onSave={handleSaveSection}
-        />
-      )}
+      {/* ─── Core Controls (always visible) ─── */}
+      <QuickSettings
+        settings={settings}
+        liveData={data}
+        onSave={handleSaveSection}
+      />
 
       {/* ─── Config Health ─── */}
-      {!searchQuery && <ConfigHealthPanel settings={settings} />}
+      <ConfigHealthPanel settings={settings} />
 
-      {/* ─── Search bar ─── */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 10,
-        padding: '10px 14px', background: '#0d1117', border: '1px solid #21262d',
-        borderRadius: 10, marginBottom: 16,
-      }}>
-        <Search size={14} style={{ color: '#484f58' }} />
-        <input ref={searchRef} type="text" value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
-          placeholder="Search settings… (Ctrl+K)"
-          style={{ background: 'transparent', border: 'none', color: '#e6edf3', fontSize: 13, flex: 1, outline: 'none' }}
-        />
-        {searchQuery && (
-          <button onClick={() => setSearchQuery('')}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6e7681', padding: 0 }}>
-            <X size={14} />
-          </button>
+      {/* ─── Advanced toggle ─── */}
+      <button
+        onClick={() => setAdvancedMode(v => !v)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          padding: '10px 0', marginBottom: advancedMode ? 16 : 0,
+          background: 'transparent', border: '1px solid #21262d', borderRadius: 8,
+          color: '#8b949e', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+          transition: 'all 0.15s',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.borderColor = '#30363d')}
+        onMouseLeave={e => (e.currentTarget.style.borderColor = '#21262d')}
+      >
+        {advancedMode ? (
+          <><ChevronDown size={14} /> Hide Advanced Settings</>
+        ) : (
+          <><ChevronRight size={14} /> Advanced Settings</>
         )}
-        <span style={{ fontSize: 10, color: '#484f58', padding: '2px 6px', background: '#161b22', borderRadius: 4 }}>Ctrl+K</span>
-      </div>
+      </button>
 
-      {/* ─── Category tabs ─── */}
-      {!searchQuery && (
-        <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid #21262d', paddingBottom: 0 }}>
-          {(Object.entries(SECTION_CATEGORIES) as [CategoryKey, typeof SECTION_CATEGORIES[CategoryKey]][]).map(([key, cat]) => (
-            <button key={key} onClick={() => setActiveTab(key)} style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '10px 16px', fontSize: 13, fontWeight: 500,
-              background: 'transparent', border: 'none',
-              color: activeTab === key ? '#e6edf3' : '#6e7681',
-              borderBottom: activeTab === key ? '2px solid #22c55e' : '2px solid transparent',
-              cursor: 'pointer', transition: 'all 0.15s', marginBottom: -1,
-            }}>
-              {cat.icon} {cat.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* ─── Advanced section ─── */}
+      {advancedMode && (
+        <>
+          {/* Style Modifiers */}
+          {modifiersData && (
+            <div style={{ marginBottom: 20, marginTop: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Style Modifiers
+                </span>
+                <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 10, background: '#8b949e18', color: '#8b949e', fontWeight: 600, border: '1px solid #8b949e22' }}>
+                  Stack with any preset
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {Object.entries(modifiersData.modifiers).map(([key, meta]) => {
+                  const isActive = modifiersData.active.includes(key)
+                  const color = MODIFIER_COLORS[key] ?? '#8b949e'
+                  const applicableHere = meta.exchanges.includes(modifiersData.asset_class)
+                  return (
+                    <button key={key}
+                      onClick={() => handleToggleModifier(key)}
+                      title={!applicableHere ? `No effect on ${modifiersData.asset_class}` : meta.desc}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
+                        background: isActive ? `linear-gradient(135deg, ${color}12, ${color}20)` : '#0d1117',
+                        border: isActive ? `2px solid ${color}99` : `1px solid ${color}44`,
+                        borderRadius: 10, padding: isActive ? '10px 14px' : '11px 15px',
+                        cursor: 'pointer', color: '#e6edf3', minWidth: 140, transition: 'all 0.2s',
+                        opacity: applicableHere ? 1 : 0.5,
+                      }}
+                    >
+                      <Sliders size={14} style={{ color }} />
+                      <div style={{ textAlign: 'left' }}>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{meta.label}</div>
+                        <div style={{ fontSize: 10, color: isActive ? color + 'cc' : '#6e7681', marginTop: 1 }}>
+                          {meta.desc.length > 55 ? meta.desc.slice(0, 52) + '...' : meta.desc}
+                        </div>
+                      </div>
+                      {isActive && (
+                        <span style={{
+                          position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%',
+                          background: color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          boxShadow: `0 0 8px ${color}70`,
+                        }}><Check size={10} color="#fff" strokeWidth={3} /></span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
-      {/* ─── Telegram safety legend (Trading & Infra tabs) ─── */}
-      {!searchQuery && (activeTab === 'trading' || activeTab === 'infra') && (
-        <div style={{
-          display: 'flex', gap: 16, marginBottom: 14, padding: '8px 14px',
-          background: '#0d111788', borderRadius: 8, fontSize: 11, color: '#6e7681',
-          alignItems: 'center', flexWrap: 'wrap', border: '1px solid #21262d',
-        }}>
-          <Info size={12} style={{ flexShrink: 0 }} />
-          <span>Telegram access tiers:</span>
-          {Object.entries(TIER_LABELS).map(([tier, label]) => (
-            <span key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 3, background: TIER_COLORS[tier] }} /> {label}
-            </span>
-          ))}
-        </div>
-      )}
+          {/* All presets + diff panel */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
+              All Presets
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {Object.entries(PRESET_CONFIG).map(([key, cfg]) => {
+                const isActive = key === activePreset
+                const isHovered = hoveredPreset === key
+                return (
+                  <button key={key}
+                    onClick={() => !isActive && handlePreset(key)}
+                    onMouseEnter={() => setHoveredPreset(key)}
+                    onMouseLeave={() => setHoveredPreset(null)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
+                      background: isActive ? `linear-gradient(135deg, ${cfg.color}12, ${cfg.color}20)` : isHovered ? `${cfg.color}08` : '#0d1117',
+                      border: isActive ? `2px solid ${cfg.color}99` : `1px solid ${cfg.color}44`,
+                      borderRadius: 12, padding: isActive ? '12px 18px' : '13px 19px',
+                      cursor: isActive ? 'default' : 'pointer', color: '#e6edf3', minWidth: 150, transition: 'all 0.2s',
+                    }}
+                  >
+                    <span style={{ color: cfg.color, fontSize: 20 }}>{cfg.icon}</span>
+                    <div style={{ textAlign: 'left' }}>
+                      <div style={{ fontWeight: 700, fontSize: 13 }}>{cfg.label}</div>
+                      <div style={{ fontSize: 11, color: isActive ? cfg.color + 'cc' : '#6e7681', marginTop: 1 }}>{cfg.desc}</div>
+                    </div>
+                    {isActive && (
+                      <span style={{
+                        position: 'absolute', top: -8, right: -8, width: 20, height: 20, borderRadius: '50%',
+                        background: cfg.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        boxShadow: `0 0 10px ${cfg.color}70`,
+                      }}><Check size={10} color="#fff" strokeWidth={3} /></span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            {/* Preset diff panel */}
+            {panelKey && panelDiff.length > 0 && (
+              <div style={{
+                marginTop: 12, padding: '14px 18px',
+                background: '#0d1117', border: `1px solid ${PRESET_CONFIG[panelKey]?.color ?? '#30363d'}33`,
+                borderRadius: 10,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
+                  {isComparison
+                    ? `Switching to ${PRESET_CONFIG[panelKey]?.label} would change ${panelDiff.filter(r => r.changed).length} setting(s):`
+                    : `${PRESET_CONFIG[panelKey]?.label} preset values:`}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '4px 20px' }}>
+                  {panelDiff.map(row => (
+                    <div key={row.key} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '5px 0', fontSize: 12, borderBottom: '1px solid #161b22',
+                    }}>
+                      <span style={{ color: row.changed && isComparison ? '#c9d1d9' : '#8b949e' }}>{row.label}</span>
+                      {isComparison && row.changed ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ color: '#484f58', textDecoration: 'line-through', fontSize: 11 }}>{formatFieldValue(row.key, row.current)}</span>
+                          <ArrowRight size={9} style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#8b949e' }} />
+                          <span style={{ color: PRESET_CONFIG[panelKey]?.color ?? '#e6edf3', fontWeight: 700 }}>{formatFieldValue(row.key, row.target)}</span>
+                        </span>
+                      ) : (
+                        <span style={{ color: row.changed ? '#f59e0b' : '#c9d1d9', fontWeight: row.changed ? 600 : 400 }}>
+                          {formatFieldValue(row.key, row.target)}
+                          {!isComparison && row.changed && <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 4 }}>*</span>}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
-      {/* ─── Search results info ─── */}
-      {searchQuery && (
-        <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-          <Search size={12} />
-          Showing all sections matching &quot;<strong style={{ color: '#e6edf3' }}>{searchQuery}</strong>&quot;
-        </div>
-      )}
-
-      {/* ─── Appearance tab content ─── */}
-      {!searchQuery && activeTab === 'appearance' && <DensityToggle />}
-
-      {/* ─── LLM Providers (AI tab or search mode) ─── */}
-      {(searchQuery || activeTab === 'intelligence') && <LLMProvidersSection />}
-
-      {/* ─── Telegram Setup Guide (Infra tab) ─── */}
-      {!searchQuery && activeTab === 'infra' && <TelegramSetupGuide />}
-
-      {/* ─── Setting sections ─── */}
-      {visibleSections.map(sectionName => {
-        // Telegram gets a dedicated grouped notifications card
-        if (sectionName === 'telegram') {
-          return (
-            <TelegramNotificationsCard
-              key="telegram"
-              values={(settings.telegram ?? {}) as Record<string, unknown>}
-              onSave={handleSaveSection}
-              searchQuery={searchQuery}
+          {/* RPM Budget */}
+          {data.rpm_budget && (
+            <RpmBudgetCard
+              rpm_budget={data.rpm_budget}
+              current_pairs={(settings.trading as Record<string, unknown>)?.pairs
+                ? ((settings.trading as Record<string, unknown>).pairs as string[]).length
+                : 0}
             />
-          )
-        }
-        const sectionSchema = schema?.[sectionName]
-        const telegramTier = sectionSchema?.telegram_tier ?? 'blocked'
-        return (
-          <SectionCard
-            key={sectionName}
-            name={sectionName}
-            label={section_labels[sectionName] ?? sectionName}
-            values={(settings[sectionName] ?? {}) as Record<string, unknown>}
-            schema={sectionSchema}
-            telegramTier={telegramTier}
-            onSave={handleSaveSection}
-            searchQuery={searchQuery}
-          />
-        )
-      })}
+          )}
 
-      {/* Empty search */}
-      {searchQuery && visibleSections.length === 0 && (
-        <div style={{ padding: 40, textAlign: 'center', color: '#6e7681' }}>
-          <Search size={24} style={{ marginBottom: 12, opacity: 0.5 }} />
-          <div style={{ fontSize: 14 }}>No settings match &quot;{searchQuery}&quot;</div>
-          <div style={{ fontSize: 12, marginTop: 4 }}>Try a different search term</div>
-        </div>
+          {/* LLM Providers */}
+          <LLMProvidersSection />
+
+          {/* Search bar */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '10px 14px', background: '#0d1117', border: '1px solid #21262d',
+            borderRadius: 10, marginBottom: 16,
+          }}>
+            <Search size={14} style={{ color: '#484f58' }} />
+            <input ref={searchRef} type="text" value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search settings… (Ctrl+K)"
+              style={{ background: 'transparent', border: 'none', color: '#e6edf3', fontSize: 13, flex: 1, outline: 'none' }}
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6e7681', padding: 0 }}>
+                <X size={14} />
+              </button>
+            )}
+            <span style={{ fontSize: 10, color: '#484f58', padding: '2px 6px', background: '#161b22', borderRadius: 4 }}>Ctrl+K</span>
+          </div>
+
+          {/* Category tabs */}
+          {!searchQuery && (
+            <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid #21262d', paddingBottom: 0 }}>
+              {(Object.entries(SECTION_CATEGORIES) as [CategoryKey, typeof SECTION_CATEGORIES[CategoryKey]][]).map(([key, cat]) => (
+                <button key={key} onClick={() => setActiveTab(key)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '10px 16px', fontSize: 13, fontWeight: 500,
+                  background: 'transparent', border: 'none',
+                  color: activeTab === key ? '#e6edf3' : '#6e7681',
+                  borderBottom: activeTab === key ? '2px solid #22c55e' : '2px solid transparent',
+                  cursor: 'pointer', transition: 'all 0.15s', marginBottom: -1,
+                }}>
+                  {cat.icon} {cat.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Telegram safety legend */}
+          {!searchQuery && (activeTab === 'trading' || activeTab === 'infra') && (
+            <div style={{
+              display: 'flex', gap: 16, marginBottom: 14, padding: '8px 14px',
+              background: '#0d111788', borderRadius: 8, fontSize: 11, color: '#6e7681',
+              alignItems: 'center', flexWrap: 'wrap', border: '1px solid #21262d',
+            }}>
+              <Info size={12} style={{ flexShrink: 0 }} />
+              <span>Telegram access tiers:</span>
+              {Object.entries(TIER_LABELS).map(([tier, label]) => (
+                <span key={tier} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 3, background: TIER_COLORS[tier] }} /> {label}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Search results info */}
+          {searchQuery && (
+            <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Search size={12} />
+              Showing all sections matching &quot;<strong style={{ color: '#e6edf3' }}>{searchQuery}</strong>&quot;
+            </div>
+          )}
+
+          {/* Appearance tab */}
+          {!searchQuery && activeTab === 'appearance' && <DensityToggle />}
+
+          {/* Telegram Setup Guide */}
+          {!searchQuery && activeTab === 'infra' && <TelegramSetupGuide />}
+
+          {/* Setting sections */}
+          {visibleSections.map(sectionName => {
+            if (sectionName === 'telegram') {
+              return (
+                <TelegramNotificationsCard
+                  key="telegram"
+                  values={(settings.telegram ?? {}) as Record<string, unknown>}
+                  onSave={handleSaveSection}
+                  searchQuery={searchQuery}
+                />
+              )
+            }
+            const sectionSchema = schema?.[sectionName]
+            const telegramTier = sectionSchema?.telegram_tier ?? 'blocked'
+            return (
+              <SectionCard
+                key={sectionName}
+                name={sectionName}
+                label={section_labels[sectionName] ?? sectionName}
+                values={(settings[sectionName] ?? {}) as Record<string, unknown>}
+                schema={sectionSchema}
+                telegramTier={telegramTier}
+                onSave={handleSaveSection}
+                searchQuery={searchQuery}
+              />
+            )
+          })}
+
+          {/* Empty search */}
+          {searchQuery && visibleSections.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center', color: '#6e7681' }}>
+              <Search size={24} style={{ marginBottom: 12, opacity: 0.5 }} />
+              <div style={{ fontSize: 14 }}>No settings match &quot;{searchQuery}&quot;</div>
+              <div style={{ fontSize: 12, marginTop: 4 }}>Try a different search term</div>
+            </div>
+          )}
+        </>
       )}
 
       {/* Toast */}

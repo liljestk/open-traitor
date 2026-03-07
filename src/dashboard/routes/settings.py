@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel as _BaseModel
 
 import src.dashboard.deps as deps
+from src.dashboard import auth
 from src.utils.logger import get_logger
 from src.utils.rpm_budget import compute_rpm_entity_cap
 
@@ -41,14 +42,14 @@ from src.utils.settings_manager import (
     TELEGRAM_SAFETY_TIERS as _SM_TG_TIERS,
     get_llm_providers as _sm_get_providers,
     update_llm_providers as _sm_update_providers,
+    STYLE_MODIFIER_META as _SM_STYLE_MODIFIERS,
+    VALID_STYLE_MODIFIERS as _SM_VALID_MODIFIERS,
 )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Local helpers / constants
 # ═══════════════════════════════════════════════════════════════════════════
-
-_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
 
 _CONFIRM_TTL_SECONDS = 120  # 2-minute window to confirm
 
@@ -196,13 +197,7 @@ _SETTINGS_CONFIRM_SECTIONS = frozenset({
 @router.get("/health", include_in_schema=False)
 def health(request: Request):
     # Return minimal info when unauthenticated to avoid leaking service topology.
-    # When the API key is configured and presented correctly, expose full detail.
-    authenticated = (
-        not _DASHBOARD_API_KEY
-        or hmac.compare_digest(
-            request.headers.get("X-API-Key", ""), _DASHBOARD_API_KEY
-        )
-    )
+    authenticated = auth.is_authenticated(request)
     base = {"status": "ok", "ts": deps.utcnow()}
     if authenticated:
         base.update({
@@ -212,6 +207,40 @@ def health(request: Request):
             "ws_clients": len(deps.ws_connections),
         })
     return base
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# System status (first-run detection)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SETUP_FLAG_PATH = os.path.join("config", ".setup-complete")
+
+
+def _is_setup_complete() -> bool:
+    """Return True if the setup wizard has been completed and the flag file exists."""
+    return os.path.isfile(_SETUP_FLAG_PATH)
+
+
+def _mark_setup_complete() -> None:
+    """Write the setup-complete flag file."""
+    os.makedirs(os.path.dirname(os.path.abspath(_SETUP_FLAG_PATH)), exist_ok=True)
+    with open(_SETUP_FLAG_PATH, "w", encoding="utf-8") as f:
+        from datetime import datetime, timezone
+        f.write(datetime.now(timezone.utc).isoformat())
+
+
+@router.get("/api/system/status", summary="System status for first-run detection")
+def system_status(request: Request):
+    """Public endpoint — returns setup_complete and auth_configured flags.
+
+    The frontend uses this on every page load to decide whether to redirect
+    to /setup (first run) or to the normal dashboard.
+    """
+    return {
+        "setup_complete": _is_setup_complete(),
+        "auth_configured": auth.is_auth_configured(),
+        "authenticated": auth.is_authenticated(request),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -577,6 +606,13 @@ def setup_config(body: _SetupConfigBody, request: Request):
             f"yamls={updated_yamls}, llm_reloaded={llm_reloaded} (ip={source_ip})"
         )
 
+        # Mark setup as complete (creates config/.setup-complete flag file)
+        try:
+            _mark_setup_complete()
+            logger.info("✅ Setup wizard marked complete")
+        except Exception as _flag_err:
+            logger.warning(f"Could not write setup-complete flag: {_flag_err}")
+
         return {
             "ok": True,
             "config_env_path": config_env_path,
@@ -762,6 +798,24 @@ def get_presets():
             "summary": _sm_preset_summary(name),
         }
     return {"presets": result, "current_enabled": _sm_is_trading_enabled()}
+
+
+@router.get("/api/settings/style-modifiers", summary="List available style modifiers")
+def get_style_modifiers():
+    """Returns all style modifiers with metadata and which are currently active."""
+    try:
+        cfg = deps.get_config()
+        active = cfg.get("trading", {}).get("style_modifiers", [])
+        exchange = cfg.get("trading", {}).get("exchange", "coinbase")
+        asset_class = "equity" if exchange == "ibkr" else "crypto"
+        return {
+            "modifiers": _SM_STYLE_MODIFIERS,
+            "active": active,
+            "asset_class": asset_class,
+        }
+    except Exception:
+        logger.exception("style-modifiers GET error")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api/settings/telegram-tiers", summary="Telegram safety tier plan")

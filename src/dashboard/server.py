@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import src.dashboard.deps as deps
+from src.dashboard import auth
 from src.utils.logger import get_logger
 
 logger = get_logger("dashboard")
@@ -51,6 +52,7 @@ from src.dashboard.routes.watchlist import router as watchlist_router
 from src.dashboard.routes.commands import router as commands_router
 from src.dashboard.routes.llm_analytics import router as llm_analytics_router
 from src.dashboard.routes.learning import router as learning_router
+from src.dashboard.routes.auth_routes import router as auth_router
 
 
 # ---------------------------------------------------------------------------
@@ -224,18 +226,18 @@ async def lifespan(application: FastAPI):
 # Application
 # ---------------------------------------------------------------------------
 
-# Must be defined before app = FastAPI() so it's available for docs_url logic
-_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+# Auth configuration check
+_AUTH_CONFIGURED: bool = auth.is_auth_configured()
 
 app = FastAPI(
-    title="Auto-Traitor Dashboard API",
+    title="OpenTraitor Dashboard API",
     description="LLM traceability and playback for the autonomous trading agent",
     version="1.0.0",
     lifespan=lifespan,
-    # M9: Disable OpenAPI docs when API key is configured (production mode)
-    docs_url=None if _DASHBOARD_API_KEY else "/docs",
-    redoc_url=None if _DASHBOARD_API_KEY else "/redoc",
-    openapi_url=None if _DASHBOARD_API_KEY else "/openapi.json",
+    # Disable OpenAPI docs when auth is configured (production mode)
+    docs_url=None if _AUTH_CONFIGURED else "/docs",
+    redoc_url=None if _AUTH_CONFIGURED else "/redoc",
+    openapi_url=None if _AUTH_CONFIGURED else "/openapi.json",
 )
 
 # --- CORS ---------------------------------------------------------------
@@ -246,72 +248,117 @@ _cors_origins = (
     or ["http://localhost:5173", "http://localhost:8090"]
 )
 
-if not _DASHBOARD_API_KEY:
+if not _AUTH_CONFIGURED:
     logger.warning(
-        "⚠️  DASHBOARD_API_KEY not set — the dashboard API is open to all network "
-        "clients. Set this env var to require X-API-Key header authentication."
+        "⚠️  No authentication configured — the dashboard API is open to all network "
+        "clients. Set DASHBOARD_PASSWORD_HASH or DASHBOARD_API_KEY to enable auth."
     )
 
+# CORS hardening: never allow wildcard origin (prevents credential leakage)
 if "*" in _cors_origins:
-    if not _DASHBOARD_API_KEY:
-        logger.error(
-            "⚠️ CORS wildcard with no DASHBOARD_API_KEY is dangerous — "
-            "restricting to localhost origins"
-        )
-        _cors_origins = ["http://localhost:5173", "http://localhost:8090"]
-    else:
-        logger.warning("⚠️ CORS allow_origins contains wildcard — restrict via DASHBOARD_CORS_ORIGINS env var")
+    logger.error(
+        "⚠️ CORS wildcard '*' is not allowed — restricting to localhost origins. "
+        "Set DASHBOARD_CORS_ORIGINS to specific origins instead."
+    )
+    _cors_origins = ["http://localhost:5173", "http://localhost:8090"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=False,
+    allow_credentials=True,  # Required for httpOnly session cookies
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+    allow_headers=["Content-Type", "X-API-Key", "X-CSRF-Token", "Authorization"],
 )
 
 # --- API key middleware ---------------------------------------------------
 
 
-# Mutating methods that require authentication even when API key is not set
+# Mutating methods that require CSRF validation
 _MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+# Endpoints that are always public (login flow, health)
+_PUBLIC_ENDPOINTS = frozenset({
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/set-password",
+    "/api/system/status",
+    "/api/setup",
+    "/health",
+})
 
 
 @app.middleware("http")
 async def _security_headers_middleware(request: Request, call_next):
-    """Add security headers to all responses (M3)."""
+    """Add comprehensive security headers to all responses."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Cache-Control"] = "no-store"
+    # Content Security Policy — restrict script/style sources
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "font-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    # HSTS — instruct browsers to always use HTTPS (1 year)
+    if os.environ.get("DASHBOARD_HTTPS", "").lower() in ("1", "true", "yes"):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
 @app.middleware("http")
-async def _api_key_middleware(request: Request, call_next):
-    """Require API key auth for /api/ endpoints.
+async def _auth_middleware(request: Request, call_next):
+    """Session-based auth middleware for /api/ endpoints.
 
-    When DASHBOARD_API_KEY is set: all /api/ endpoints require X-API-Key header.
-    When DASHBOARD_API_KEY is NOT set: read-only (GET/HEAD/OPTIONS) are open,
-    but mutating methods (POST/PUT/DELETE/PATCH) are blocked (C2).
+    - Public endpoints (login, status, health) always pass through.
+    - When auth is configured: all other /api/ endpoints require valid session.
+    - When auth is NOT configured: read-only (GET/HEAD/OPTIONS) are open,
+      mutating methods are blocked.
+    - Mutating requests from session-authenticated users require CSRF token.
     """
-    if request.url.path.startswith("/api/"):
-        if _DASHBOARD_API_KEY:
-            api_key = request.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
-        elif request.method in _MUTATING_METHODS:
-            return JSONResponse(
-                {"detail": "DASHBOARD_API_KEY must be configured to use mutating endpoints"},
-                status_code=403,
-            )
+    path = request.url.path
+
+    if path.startswith("/api/"):
+        # Always allow public endpoints
+        if path in _PUBLIC_ENDPOINTS:
+            return await call_next(request)
+
+        if _AUTH_CONFIGURED:
+            # Check session-based auth or legacy API key
+            if not auth.is_authenticated(request):
+                return JSONResponse({"detail": "Authentication required"}, status_code=401)
+
+            # CSRF protection for mutating requests (skip for legacy API key auth)
+            if request.method in _MUTATING_METHODS:
+                session_token = auth.get_session_from_request(request)
+                if session_token and session_token != "__legacy_api_key__":
+                    csrf_token = request.headers.get("X-CSRF-Token", "")
+                    if not csrf_token or not auth.validate_csrf_token(session_token, csrf_token):
+                        return JSONResponse({"detail": "Invalid or missing CSRF token"}, status_code=403)
+        else:
+            # No auth configured — block mutating methods
+            if request.method in _MUTATING_METHODS:
+                return JSONResponse(
+                    {"detail": "Authentication must be configured to use mutating endpoints. "
+                     "Set a password via POST /api/auth/set-password."},
+                    status_code=403,
+                )
+
     return await call_next(request)
 
 
 # --- Register routers ----------------------------------------------------
 
+app.include_router(auth_router)
 app.include_router(cycles_router)
 app.include_router(trades_router)
 app.include_router(stats_router)

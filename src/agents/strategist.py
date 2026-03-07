@@ -111,6 +111,12 @@ class StrategistAgent(BaseAgent):
         # Quick filter: skip LLM if signal is weak/non-actionable and below threshold.
         # The skip set is hot-reloadable from the optimizer (30s cache).
         _NON_ACTIONABLE = set(llm_optimizer.get("strategist_skip_signals", ["neutral", "weak_buy", "weak_sell"]))
+
+        # high_conviction_only modifier: expand skip set to also reject buy/sell
+        _style_mods = set(self.config.get("trading", {}).get("style_modifiers", []))
+        if "high_conviction_only" in _style_mods:
+            _NON_ACTIONABLE |= {"buy", "sell", "weak_buy", "weak_sell", "neutral"}
+
         if confidence < effective_min_confidence and signal_type in _NON_ACTIONABLE:
             self.logger.debug(
                 f"Signal too weak ({signal_type}/{confidence:.2f}), skipping LLM "

@@ -10,7 +10,7 @@ import {
   Sparkles, Coins, BarChart3, Newspaper, Activity,
   Settings2, MessageSquare, TrendingUp, Rocket,
   ChevronDown, ChevronRight, RefreshCw, CircleAlert, CheckCircle2,
-  Terminal, Globe, Server,
+  Terminal, Globe, Server, Lock, Eye, EyeOff,
 } from 'lucide-react'
 import {
   type WizardState, type StepValidation,
@@ -25,6 +25,7 @@ import {
   StepWelcome, StepExchange, StepTradingMode, StepAssets,
   StepCoinbaseApi, StepIbkrConnection, StepLLM, StepTelegram, StepNews,
 } from './wizard/WizardSteps'
+import { setCsrfToken } from '../api'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Steps Definition
@@ -254,12 +255,38 @@ export default function SetupWizard() {
   const [loading, setLoading] = useState(true)
   const mainRef = useRef<HTMLDivElement>(null)
 
+  // ── Auth gate state ──
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [authConfigured, setAuthConfigured] = useState(false)
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState('')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+
   // Load live config from server on mount
   useEffect(() => {
     let cancelled = false
       ; (async () => {
         try {
-          const res = await fetch('/api/setup')
+          // Check auth status first
+          const authRes = await fetch('/api/auth/status', { credentials: 'include' })
+          if (authRes.ok) {
+            const authData = await authRes.json()
+            if (!cancelled) {
+              setAuthConfigured(authData.auth_configured)
+              setIsAuthenticated(authData.authenticated || !authData.auth_configured)
+              if (authData.csrf_token) setCsrfToken(authData.csrf_token)
+            }
+          } else {
+            // Auth endpoint failed — assume open (dev mode)
+            if (!cancelled) setIsAuthenticated(true)
+          }
+        } catch {
+          if (!cancelled) setIsAuthenticated(true)
+        }
+
+        try {
+          const res = await fetch('/api/setup', { credentials: 'include' })
           if (!res.ok) throw new Error('fetch failed')
           const data = await res.json()
           if (!cancelled && data?.exists) {
@@ -379,6 +406,27 @@ export default function SetupWizard() {
     URL.revokeObjectURL(url)
   }, [state])
 
+  const handleLogin = useCallback(async () => {
+    setLoginLoading(true)
+    setLoginError('')
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword }),
+        credentials: 'include',
+      })
+      if (!res.ok) throw new Error('Invalid password')
+      const data = await res.json()
+      if (data.csrf_token) setCsrfToken(data.csrf_token)
+      setIsAuthenticated(true)
+    } catch {
+      setLoginError('Incorrect password. Check the Docker container logs for the setup password.')
+    } finally {
+      setLoginLoading(false)
+    }
+  }, [loginPassword])
+
   // ── Loading screen ──
   if (loading) {
     return (
@@ -391,6 +439,102 @@ export default function SetupWizard() {
           <RefreshCw size={28} color="#22c55e" style={{ animation: 'at-spin 1s linear infinite', marginBottom: 16 }} />
           <div style={{ fontSize: 14 }}>Loading configuration…</div>
         </div>
+      </div>
+    )
+  }
+
+  // ── Login gate ──
+  if (!isAuthenticated && authConfigured) {
+    return (
+      <div style={{
+        height: '100vh', background: '#080c10', display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        fontFamily: "'Inter', system-ui, sans-serif", color: '#e6edf3',
+      }}>
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{
+            width: 56, height: 56, borderRadius: 14,
+            background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            margin: '0 auto 16px',
+          }}>
+            <Sparkles size={28} color="#fff" />
+          </div>
+          <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.5, marginBottom: 4 }}>AUTO-TRAITOR</div>
+          <div style={{ fontSize: 13, color: '#8b949e' }}>Enter your setup password to continue</div>
+        </div>
+
+        <div style={{
+          width: '100%', maxWidth: 400, padding: '28px 32px',
+          background: '#0d1117', border: '1px solid #21262d', borderRadius: 14,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+            <Lock size={16} style={{ color: '#22c55e' }} />
+            <span style={{ fontSize: 15, fontWeight: 700, color: '#e6edf3' }}>Setup Authentication</span>
+          </div>
+
+          <div style={{ marginBottom: 8, fontSize: 12, color: '#8b949e' }}>
+            Find your setup password in the Docker container logs:
+          </div>
+          <div style={{
+            padding: '8px 12px', background: '#161b22', borderRadius: 7,
+            fontSize: 11, color: '#6e7681', fontFamily: 'monospace', marginBottom: 20,
+          }}>
+            docker logs auto-traitor-dashboard
+          </div>
+
+          <div style={{ position: 'relative', marginBottom: loginError ? 10 : 20 }}>
+            <input
+              type={showPassword ? 'text' : 'password'}
+              value={loginPassword}
+              onChange={e => setLoginPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && loginPassword && handleLogin()}
+              placeholder="Setup password"
+              autoFocus
+              style={{
+                width: '100%', padding: '11px 40px 11px 14px', borderRadius: 8,
+                background: '#161b22', border: '1px solid #30363d',
+                color: '#e6edf3', fontSize: 14, outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+            <button type="button" onClick={() => setShowPassword(v => !v)} style={{
+              position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+              background: 'none', border: 'none', cursor: 'pointer', color: '#6e7681', padding: 0,
+            }}>
+              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+
+          {loginError && (
+            <div style={{
+              marginBottom: 16, padding: '10px 14px', borderRadius: 8,
+              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+              color: '#fca5a5', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              <CircleAlert size={14} /> {loginError}
+            </div>
+          )}
+
+          <button type="button" onClick={handleLogin}
+            disabled={!loginPassword || loginLoading}
+            style={{
+              width: '100%', padding: '11px 0', borderRadius: 8,
+              background: loginPassword && !loginLoading
+                ? 'linear-gradient(135deg, #22c55e, #16a34a)' : '#21262d',
+              color: loginPassword && !loginLoading ? '#000' : '#484f58',
+              border: 'none', fontSize: 14, fontWeight: 700,
+              cursor: loginPassword && !loginLoading ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              transition: 'all 0.15s',
+            }}
+          >
+            {loginLoading
+              ? <><RefreshCw size={15} style={{ animation: 'at-spin 1s linear infinite' }} /> Verifying…</>
+              : <><Check size={15} /> Continue to Setup</>}
+          </button>
+        </div>
+        <style>{`@keyframes at-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       </div>
     )
   }

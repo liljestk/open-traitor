@@ -111,6 +111,13 @@ def get_news(
                 for sub in expected_subs:
                     if sub in source:
                         return True
+                # Match RSS articles whose source title contains domain keywords
+                if "rss" in tags and expected_rss:
+                    for rid in expected_rss:
+                        # e.g. "feeds_bloomberg_com" → check "bloomberg" in source
+                        parts = rid.split("_")
+                        if any(p in source for p in parts if len(p) > 3):
+                            return True
                 # Match by human-followed pair symbols appearing in tags or title
                 if followed_symbols:
                     if tags & followed_symbols:

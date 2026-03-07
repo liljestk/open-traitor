@@ -58,6 +58,9 @@ class RiskManagerAgent(BaseAgent):
         self.kelly_fraction = self.risk_config.get("kelly_fraction", 0.5)  # Half-Kelly
         self.use_correlation_penalty = self.risk_config.get("use_correlation_penalty", True)
         self.correlation_threshold = self.risk_config.get("correlation_threshold", 0.7)
+        self._style_modifiers: set[str] = set(
+            self.trading_config.get("style_modifiers", [])
+        )
 
     def _compute_kelly_size(
         self,
@@ -228,7 +231,22 @@ class RiskManagerAgent(BaseAgent):
                     f"minimum {min_signal_confidence:.0%} — not worth the fee risk"
                 ),
             }
-
+        # ─── High-conviction-only modifier ───────────────────────
+        # Reject anything weaker than strong_buy / strong_sell.
+        if "high_conviction_only" in self._style_modifiers and action == "buy":
+            if signal_type not in self._STRONG_SIGNAL_TYPES:
+                self.logger.info(
+                    f"🚫 High-conviction-only: rejecting {signal_type} signal for {proposal.get('pair', '?')}"
+                )
+                return {
+                    "approved": False,
+                    "action": action,
+                    "pair": proposal.get("pair", "?"),
+                    "reason": (
+                        f"Style modifier 'high_conviction_only' active — "
+                        f"{signal_type} rejected (only strong_buy/strong_sell allowed)"
+                    ),
+                }
         # ─── Portfolio-tier scaling ───────────────────────────────
         # Override static config values with tier-appropriate ones.
         if self.scaler and portfolio_value > 0:
@@ -243,6 +261,16 @@ class RiskManagerAgent(BaseAgent):
             effective_take_profit_pct = self.take_profit_pct
             effective_max_position_pct = self.risk_config.get("max_position_pct", 0.05)
             effective_max_open = self.trading_config.get("max_open_positions", 3)
+
+        # ─── Wider-targets modifier ───────────────────────────────
+        # Let winners run: TP ×2.0, SL ×1.33 (more breathing room).
+        if "wider_targets" in self._style_modifiers:
+            effective_take_profit_pct *= 2.0
+            effective_stop_loss_pct *= 1.33
+            self.logger.info(
+                f"🎛 wider_targets: TP→{effective_take_profit_pct:.1%}, "
+                f"SL→{effective_stop_loss_pct:.1%}"
+            )
 
         pair = proposal.get("pair", "BTC-EUR")
         quote_amount = float(proposal.get("quote_amount", proposal.get("usd_amount", 0)) or 0)

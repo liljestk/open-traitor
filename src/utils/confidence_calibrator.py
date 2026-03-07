@@ -11,6 +11,7 @@ New DB table: ``calibration_models``
 
 from __future__ import annotations
 
+import io
 import json
 import pickle
 import time
@@ -28,6 +29,36 @@ _MIN_PAIR_SAMPLES = 100
 # Clamp calibrated confidence to this range
 _CLAMP_MIN = 0.05
 _CLAMP_MAX = 0.95
+
+# ── Safe deserialization ──────────────────────────────────────────────────
+# Only allow sklearn and numpy types to be unpickled (blocks arbitrary code exec).
+
+_SAFE_PICKLE_MODULES = frozenset({
+    "sklearn.isotonic",
+    "sklearn.utils._bunch",
+    "numpy",
+    "numpy.core.multiarray",
+    "numpy.core._multiarray_umath",
+    "numpy._core.multiarray",
+    "builtins",
+    "collections",
+})
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler that only allows a whitelist of safe modules."""
+
+    def find_class(self, module: str, name: str) -> type:
+        if module in _SAFE_PICKLE_MODULES:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(
+            f"Blocked unsafe pickle class: {module}.{name}"
+        )
+
+
+def _safe_pickle_loads(data: bytes) -> Any:
+    """Deserialize using restricted unpickler (blocks arbitrary code execution)."""
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
 
 
 class ConfidenceCalibrator:
@@ -203,7 +234,7 @@ class ConfidenceCalibrator:
                 try:
                     # model_bytes is already bytes from psycopg2
                     raw = bytes(model_bytes) if not isinstance(model_bytes, bytes) else model_bytes
-                    model = pickle.loads(raw)
+                    model = _safe_pickle_loads(raw)
                     if scope == "global":
                         self._models[None] = model
                     elif scope.startswith("pair:"):

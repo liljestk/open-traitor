@@ -1,5 +1,5 @@
 /**
- * API client helpers for the Auto-Traitor dashboard.
+ * API client helpers for the OpenTraitor dashboard.
  * All requests are relative so Vite's dev proxy (port 5173 → 8090)
  * works seamlessly; in Docker the frontend is served from the same port.
  */
@@ -8,8 +8,12 @@ import { useLiveStore } from './store'
 
 const BASE = '/api'
 
-// ─── API Key helpers ────────────────────────────────────────────────────────
+// ─── Auth helpers ───────────────────────────────────────────────────────
 
+// In-memory CSRF token (set after login, cleared on logout)
+let _csrfToken = ''
+
+// Legacy API key support (backward compat — will be removed)
 const API_KEY_STORAGE_KEY = 'auto_traitor_api_key'
 
 export function getApiKey(): string {
@@ -20,6 +24,14 @@ export function setApiKey(key: string): void {
   localStorage.setItem(API_KEY_STORAGE_KEY, key)
 }
 
+export function setCsrfToken(token: string): void {
+  _csrfToken = token
+}
+
+export function getCsrfToken(): string {
+  return _csrfToken
+}
+
 // ─── Generic fetch wrapper ─────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -27,13 +39,25 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const sep = path.includes('?') ? '&' : '?'
   const finalPath = profile ? `${path}${sep}profile=${encodeURIComponent(profile)}` : path
 
-  const apiKey = getApiKey()
   const headers = new Headers(options?.headers)
+
+  // Legacy API key support (will be removed)
+  const apiKey = getApiKey()
   if (apiKey) {
     headers.set('X-API-Key', apiKey)
   }
 
-  const res = await fetch(`${BASE}${finalPath}`, { ...options, headers })
+  // CSRF token for mutating requests
+  const method = (options?.method || 'GET').toUpperCase()
+  if (_csrfToken && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+    headers.set('X-CSRF-Token', _csrfToken)
+  }
+
+  const res = await fetch(`${BASE}${finalPath}`, {
+    ...options,
+    headers,
+    credentials: 'include',  // Send httpOnly cookies
+  })
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
@@ -42,6 +66,18 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 // ─── Types ─────────────────────────────────────────────────────────────────
+
+export interface SystemStatus {
+  setup_complete: boolean
+  auth_configured: boolean
+  authenticated: boolean
+}
+
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  const res = await fetch('/api/system/status', { credentials: 'include' })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
 
 export interface CycleSummary {
   cycle_id: string
@@ -328,6 +364,24 @@ export const updateSettings = (data: { section?: string; updates?: Record<string
 
 export const fetchPresets = () =>
   apiFetch<{ presets: Record<string, PresetInfo>; current_enabled: boolean }>('/settings/presets')
+
+// ─── Style Modifiers ─────────────────────────────────────────────────────
+
+export interface StyleModifierMeta {
+  label: string
+  desc: string
+  exchanges: string[]
+  icon: string
+}
+
+export interface StyleModifiersResponse {
+  modifiers: Record<string, StyleModifierMeta>
+  active: string[]
+  asset_class: string
+}
+
+export const fetchStyleModifiers = () =>
+  apiFetch<StyleModifiersResponse>('/settings/style-modifiers')
 
 // ─── LLM Providers ────────────────────────────────────────────────────────
 
@@ -917,6 +971,59 @@ export interface TrailingStopData {
 
 export const fetchTrailingStops = () =>
   apiFetch<{ stops: Record<string, TrailingStopData>; source: string }>('/trailing-stops')
+
+// ─── Authentication ────────────────────────────────────────────────────────
+
+export interface AuthStatus {
+  authenticated: boolean
+  auth_configured: boolean
+  has_password: boolean
+  session_ttl: number
+}
+
+export interface LoginResult {
+  ok: boolean
+  csrf_token?: string
+  error?: string
+}
+
+export const fetchAuthStatus = async (): Promise<AuthStatus> => {
+  const res = await fetch(`${BASE}/auth/status`, { credentials: 'include' })
+  return res.json()
+}
+
+export const login = async (password: string): Promise<LoginResult> => {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+    credentials: 'include',
+  })
+  const data = await res.json()
+  if (data.ok && data.csrf_token) {
+    setCsrfToken(data.csrf_token)
+  }
+  return data
+}
+
+export const logout = async (): Promise<void> => {
+  await fetch(`${BASE}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: _csrfToken ? { 'X-CSRF-Token': _csrfToken } : {},
+  })
+  setCsrfToken('')
+}
+
+export const setPassword = async (password: string): Promise<{ ok: boolean; error?: string }> => {
+  const res = await fetch(`${BASE}/auth/set-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+    credentials: 'include',
+  })
+  return res.json()
+}
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
