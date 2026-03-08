@@ -204,12 +204,14 @@ class UniverseScanner:
                 f"{p}={d['composite_score']}" for p, d in top_movers
             )
             try:
+                exchange_name = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
                 orch.stats_db.save_scan_results(
                     universe_size=len(orch._pair_universe),
                     scanned_pairs=len(scan_results),
                     results_json=scan_results,
                     top_movers=top_movers_list,
                     summary_text=self.get_scan_summary(),
+                    exchange=exchange_name,
                 )
             except Exception as e:
                 logger.debug(f"Failed to persist scan results: {e}")
@@ -358,7 +360,7 @@ class UniverseScanner:
                                 exchange_name = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
                                 # Remove old LLM follows, then add new ones
                                 for rp in removed:
-                                    orch.stats_db.unfollow_pair(rp, followed_by="llm")
+                                    orch.stats_db.unfollow_pair(rp, followed_by="llm", exchange=exchange_name)
                                 for ap in added:
                                     orch.stats_db.follow_pair(ap, followed_by="llm", exchange=exchange_name)
                             except Exception as db_err:

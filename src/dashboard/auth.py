@@ -36,8 +36,16 @@ logger = get_logger("dashboard.auth")
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Read config/.env via dotenv (override=True) so that the raw value is used
+# instead of the Docker Compose-mangled version (Compose interpolates $ in
+# bcrypt hashes like $2b$12$... breaking the hash).
+from dotenv import dotenv_values as _dotenv_values
+
+_config_env_path = os.path.join("config", ".env")
+_dotenv_cfg = _dotenv_values(_config_env_path) if os.path.isfile(_config_env_path) else {}
+
 # bcrypt hash of the dashboard password (set via setup wizard or CLI)
-_PASSWORD_HASH: str = os.environ.get("DASHBOARD_PASSWORD_HASH", "")
+_PASSWORD_HASH: str = _dotenv_cfg.get("DASHBOARD_PASSWORD_HASH", "") or os.environ.get("DASHBOARD_PASSWORD_HASH", "")
 
 # Secret for CSRF derivation — auto-generated per process if not set
 _SESSION_SECRET_FROM_ENV = os.environ.get("DASHBOARD_SESSION_SECRET", "")

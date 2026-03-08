@@ -275,6 +275,7 @@ class Orchestrator:
         # ─── Training Data Collector (for future fine-tuning) ───
         self.training_collector = TrainingDataCollector(config)
         self.executor.training_collector = self.training_collector
+        self.executor.stats_db = self.stats_db
         # Hook LLM callback so every prompt/response is captured
         llm_cb = self.training_collector.make_llm_callback()
         if llm_cb:
@@ -390,9 +391,11 @@ class Orchestrator:
         # Restore LLM-followed pairs from DB so a container restart
         # doesn't lose the screener's selection (cold-start fix)
         try:
+            _exchange_name = trading_cfg.get("exchange", "coinbase").lower()
             restored = self.stats_db.get_followed_pairs_set(
                 followed_by="llm",
                 quote_currency=trading_cfg.get("quote_currency"),
+                exchange=_exchange_name,
             )
             if restored:
                 self._screener_active_pairs = sorted(restored)
@@ -409,6 +412,7 @@ class Orchestrator:
             human_followed = self.stats_db.get_followed_pairs_set(
                 followed_by="human",
                 quote_currency=trading_cfg.get("quote_currency"),
+                exchange=_exchange_name,
             )
             if human_followed:
                 new_wl = list(dict.fromkeys(

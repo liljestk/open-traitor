@@ -36,19 +36,21 @@ class SimulatedMixin:
             conn.commit()
             return row["id"]
 
-    def get_simulated_trades(self, include_closed: bool = False, quote_currency: str | list[str] | None = None) -> list[dict]:
-        """Return all (open, or all including closed) simulated trades."""
+    def get_simulated_trades(self, include_closed: bool = False, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> list[dict]:
+        """Return all (open, or all including closed) simulated trades, optionally filtered by exchange."""
         with self._get_conn() as conn:
             qc_frag, qc_params = qc_where(quote_currency)
+            ex_frag = " AND exchange = %s" if exchange else ""
+            ex_params = [exchange] if exchange else []
             if include_closed:
                 rows = conn.execute(
-                    "SELECT * FROM simulated_trades WHERE 1=1" + qc_frag + " ORDER BY ts DESC",
-                    qc_params,
+                    "SELECT * FROM simulated_trades WHERE 1=1" + ex_frag + qc_frag + " ORDER BY ts DESC",
+                    ex_params + qc_params,
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM simulated_trades WHERE status = 'open'" + qc_frag + " ORDER BY ts DESC",
-                    qc_params,
+                    "SELECT * FROM simulated_trades WHERE status = 'open'" + ex_frag + qc_frag + " ORDER BY ts DESC",
+                    ex_params + qc_params,
                 ).fetchall()
             return [dict(r) for r in rows]
 
@@ -107,15 +109,17 @@ class SimulatedMixin:
         results_json: dict,
         top_movers: list[dict] | None = None,
         summary_text: str = "",
+        exchange: str = "coinbase",
     ) -> int:
         """Persist a universe scan snapshot (technicals per pair)."""
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO scan_results
-                   (universe_size, scanned_pairs, results_json, top_movers, summary_text)
-                   VALUES (%s, %s, %s, %s, %s)
+                   (exchange, universe_size, scanned_pairs, results_json, top_movers, summary_text)
+                   VALUES (%s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (
+                    exchange,
                     universe_size,
                     scanned_pairs,
                     json.dumps(results_json, default=str),
@@ -127,12 +131,18 @@ class SimulatedMixin:
             conn.commit()
             return row["id"]
 
-    def get_latest_scan_results(self) -> Optional[dict]:
-        """Get the most recent universe scan results."""
+    def get_latest_scan_results(self, exchange: str | None = None) -> Optional[dict]:
+        """Get the most recent universe scan results, optionally filtered by exchange."""
         with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM scan_results ORDER BY ts DESC LIMIT 1",
-            ).fetchone()
+            if exchange:
+                row = conn.execute(
+                    "SELECT * FROM scan_results WHERE exchange = %s ORDER BY ts DESC LIMIT 1",
+                    (exchange,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM scan_results ORDER BY ts DESC LIMIT 1",
+                ).fetchone()
         if not row:
             return None
         result = dict(row)
@@ -181,21 +191,30 @@ class SimulatedMixin:
             except Exception:
                 return False
 
-    def unfollow_pair(self, pair: str, followed_by: str = "human") -> bool:
+    def unfollow_pair(self, pair: str, followed_by: str = "human", exchange: str | None = None) -> bool:
         """Remove a pair follow. Returns True if actually deleted."""
         with self._get_conn() as conn:
-            cursor = conn.execute(
-                "DELETE FROM pair_follows WHERE pair = %s AND followed_by = %s",
-                (pair.upper(), followed_by),
-            )
+            if exchange:
+                cursor = conn.execute(
+                    "DELETE FROM pair_follows WHERE pair = %s AND followed_by = %s AND exchange = %s",
+                    (pair.upper(), followed_by, exchange),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM pair_follows WHERE pair = %s AND followed_by = %s",
+                    (pair.upper(), followed_by),
+                )
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_followed_pairs_set(self, followed_by: str | None = None, quote_currency: str | list[str] | None = None) -> set[str]:
+    def get_followed_pairs_set(self, followed_by: str | None = None, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> set[str]:
         """Return a set of followed pair names for quick lookup."""
         with self._get_conn() as conn:
             sql = "SELECT DISTINCT pair FROM pair_follows WHERE 1=1"
             params: list = []
+            if exchange:
+                sql += " AND exchange = %s"
+                params.append(exchange)
             if followed_by:
                 sql += " AND followed_by = %s"
                 params.append(followed_by)

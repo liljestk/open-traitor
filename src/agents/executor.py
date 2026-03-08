@@ -37,6 +37,7 @@ class ExecutorAgent(BaseAgent):
         self.rules = rules
         self._telegram = telegram  # H1/H2: for orphaned order alerts
         self.training_collector = None  # set by orchestrator if enabled
+        self.stats_db = None  # set by orchestrator for trade persistence
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
@@ -395,6 +396,26 @@ class ExecutorAgent(BaseAgent):
             self.rules.record_trade(close_price * quantity, action="sell")
 
             pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
+
+            # Persist partial sell trade to stats DB (was previously missing)
+            if self.stats_db:
+                try:
+                    _exchange = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    self.stats_db.record_trade(
+                        pair=trade.pair,
+                        action="sell",
+                        price=close_price,
+                        quantity=quantity,
+                        quote_amount=close_price * quantity,
+                        confidence=trade.confidence or 0,
+                        signal_type=reason,
+                        reasoning=reason,
+                        pnl=pnl,
+                        fee_quote=fees,
+                        exchange=_exchange,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Failed to record partial sell in StatsDB: {e}")
             _sym = getattr(self.state, "currency_symbol", "$")
             self.logger.info(
                 f"Partial sell ({reason}): {trade.pair} — "
@@ -551,6 +572,26 @@ class ExecutorAgent(BaseAgent):
                 self.rules.record_trade(qty * close_price, action="sell")
                 if closed.pnl and closed.pnl < 0:
                     self.rules.record_loss(abs(closed.pnl))
+
+                # Persist sell trade to stats DB (was previously missing)
+                if self.stats_db:
+                    try:
+                        _exchange = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                        self.stats_db.record_trade(
+                            pair=trade.pair,
+                            action="sell",
+                            price=close_price,
+                            quantity=qty,
+                            quote_amount=qty * close_price,
+                            confidence=trade.confidence or 0,
+                            signal_type=reason,
+                            reasoning=reason,
+                            pnl=closed.pnl,
+                            fee_quote=fees,
+                            exchange=_exchange,
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Failed to record sell in StatsDB: {e}")
 
             self._record_training_outcome(trade, close_price, reason)
 

@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Download, Search, RefreshCw, TrendingUp, TrendingDown, CircleDollarSign, Hash, ExternalLink } from 'lucide-react'
+import { Download, Search, RefreshCw, TrendingUp, TrendingDown, CircleDollarSign, Hash, ExternalLink, CloudDownload } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { fetchTrades, exportTradesUrl } from '../api'
+import { fetchTrades, exportTradesUrl, syncTrades } from '../api'
 import { SkeletonTable } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
@@ -33,11 +33,20 @@ const btnPrimary: React.CSSProperties = {
     color: '#22c55e',
 }
 
+type SourceFilter = 'all' | 'bot' | 'exchange'
+
+function sourceLabel(approvedBy: string, _signalType: string | null): { text: string; color: string; bg: string; border: string } {
+    if (approvedBy === 'exchange') return { text: 'Exchange', color: '#58a6ff', bg: '#58a6ff18', border: '#58a6ff30' }
+    return { text: 'Bot', color: '#22c55e', bg: '#22c55e18', border: '#22c55e30' }
+}
+
 export default function TradesLog() {
     const navigate = useNavigate()
+    const queryClient = useQueryClient()
     const [pairFilter, setPairFilter] = useState('')
     const [hours, setHours] = useState(168)
     const [limit, setLimit] = useState(500)
+    const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
     const fmtCurrency = useCurrencyFormatter()
     const isMobile = useIsMobile()
     const profile = useLiveStore((s) => s.profile)
@@ -48,6 +57,13 @@ export default function TradesLog() {
         refetchInterval: 30000,
     })
 
+    const syncMutation = useMutation({
+        mutationFn: syncTrades,
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['trades', pairFilter, limit, hours, profile] })
+        },
+    })
+
     const fmtDate = (iso: string) => {
         try {
             const d = new Date(iso)
@@ -56,7 +72,14 @@ export default function TradesLog() {
         } catch { return iso }
     }
 
-    const trades = data?.trades ?? []
+    const allTrades = data?.trades ?? []
+    const trades = sourceFilter === 'all' ? allTrades : allTrades.filter(t => {
+        const src = sourceLabel(t.approved_by, t.signal_type)
+        if (sourceFilter === 'bot') return src.text === 'Bot'
+        if (sourceFilter === 'exchange') return src.text !== 'Bot'
+        return true
+    })
+    const botTrades = allTrades.filter(t => sourceLabel(t.approved_by, t.signal_type).text === 'Bot')
     const wins = trades.filter(t => (t.pnl ?? 0) > 0).length
     const losses = trades.filter(t => (t.pnl ?? 0) < 0).length
     const netPnl = trades.reduce((a, b) => a + (b.pnl ?? 0), 0)
@@ -89,7 +112,27 @@ export default function TradesLog() {
                         <option value={8760}>All time</option>
                     </select>
 
+                    <select
+                        style={{ ...inputStyle, cursor: 'pointer' }}
+                        value={sourceFilter}
+                        onChange={e => setSourceFilter(e.target.value as SourceFilter)}
+                    >
+                        <option value="all">All Sources</option>
+                        <option value="bot">Bot Only</option>
+                        <option value="exchange">Exchange Only</option>
+                    </select>
+
                     <div style={{ flex: 1 }} />
+
+                    <button
+                        style={{ ...btnBase, padding: '6px 8px' }}
+                        onClick={() => syncMutation.mutate()}
+                        disabled={syncMutation.isPending}
+                        title="Sync orders from exchange"
+                    >
+                        <CloudDownload size={14} className={syncMutation.isPending ? 'animate-spin' : ''} style={{ color: syncMutation.isPending ? '#58a6ff' : undefined }} />
+                        {!isMobile && <span style={{ fontSize: 12 }}>Sync</span>}
+                    </button>
 
                     <button
                         style={{ ...btnBase, padding: '6px 8px' }}
@@ -107,7 +150,7 @@ export default function TradesLog() {
                 {/* Stats strip */}
                 <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: 12 }}>
                     {[
-                        { label: 'Total Trades', value: trades.length, icon: <Hash size={14} />, color: '#8b949e' },
+                        { label: 'Total Trades', value: `${trades.length}${sourceFilter === 'all' && botTrades.length !== allTrades.length ? ` (${botTrades.length} bot)` : ''}`, icon: <Hash size={14} />, color: '#8b949e' },
                         { label: 'Win Rate', value: `${winRate}%`, icon: <TrendingUp size={14} />, color: '#22c55e' },
                         { label: 'Losing', value: losses, icon: <TrendingDown size={14} />, color: '#f85149' },
                         {
@@ -169,20 +212,33 @@ export default function TradesLog() {
                                         key={trade.id}
                                         style={{ padding: '12px 16px', borderBottom: '1px solid #161b22' }}
                                     >
-                                        {/* Row 1: pair + action badge */}
+                                        {/* Row 1: pair + action + source badges */}
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                                             <span style={{
                                                 background: '#21262d', border: '1px solid #30363d',
                                                 borderRadius: 4, padding: '2px 7px', fontSize: 12,
                                                 fontFamily: 'JetBrains Mono, monospace', fontWeight: 500, color: '#e6edf3',
                                             }}>{trade.pair}</span>
-                                            <span style={{
-                                                padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                                                fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
-                                                background: isBuy ? '#22c55e18' : '#f8514918',
-                                                color: isBuy ? '#22c55e' : '#f85149',
-                                                border: `1px solid ${isBuy ? '#22c55e30' : '#f8514930'}`,
-                                            }}>{trade.action}</span>
+                                            <div style={{ display: 'flex', gap: 4 }}>
+                                                {(() => {
+                                                    const src = sourceLabel(trade.approved_by, trade.signal_type)
+                                                    return src.text !== 'Bot' ? (
+                                                        <span style={{
+                                                            padding: '2px 7px', borderRadius: 4, fontSize: 10,
+                                                            fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+                                                            background: src.bg, color: src.color,
+                                                            border: `1px solid ${src.border}`,
+                                                        }}>{src.text}</span>
+                                                    ) : null
+                                                })()}
+                                                <span style={{
+                                                    padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                                                    fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+                                                    background: isBuy ? '#22c55e18' : '#f8514918',
+                                                    color: isBuy ? '#22c55e' : '#f85149',
+                                                    border: `1px solid ${isBuy ? '#22c55e30' : '#f8514930'}`,
+                                                }}>{trade.action}</span>
+                                            </div>
                                         </div>
                                         {/* Row 2: PnL + timestamp */}
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -237,7 +293,7 @@ export default function TradesLog() {
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                                 <thead style={{ position: 'sticky', top: 0, background: '#161b22', zIndex: 1 }}>
                                     <tr>
-                                        {['Time', 'Pair', 'Action', 'Price', 'Amount', 'PnL', 'Fee', 'Signal', 'Conf.', ''].map(h => (
+                                        {['Time', 'Pair', 'Action', 'Source', 'Price', 'Amount', 'PnL', 'Fee', 'Signal', 'Conf.', ''].map(h => (
                                             <th key={h} style={{
                                                 padding: '10px 14px', textAlign: 'left', fontWeight: 600,
                                                 fontSize: 11, color: '#6e7681', textTransform: 'uppercase',
@@ -249,9 +305,9 @@ export default function TradesLog() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {isLoading && <SkeletonTable rows={10} cols={10} />}
+                                    {isLoading && <SkeletonTable rows={10} cols={11} />}
                                     {!isLoading && trades.length === 0 && (
-                                        <tr><td colSpan={10}>
+                                        <tr><td colSpan={11}>
                                             <EmptyState
                                                 icon="trades"
                                                 title="No trades yet"
@@ -297,6 +353,21 @@ export default function TradesLog() {
                                                         }}>
                                                             {trade.action}
                                                         </span>
+                                                    </td>
+                                                    <td style={{ padding: '9px 14px' }}>
+                                                        {(() => {
+                                                            const src = sourceLabel(trade.approved_by, trade.signal_type)
+                                                            return (
+                                                                <span style={{
+                                                                    padding: '2px 7px', borderRadius: 4, fontSize: 10,
+                                                                    fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+                                                                    background: src.bg, color: src.color,
+                                                                    border: `1px solid ${src.border}`,
+                                                                }}>
+                                                                    {src.text}
+                                                                </span>
+                                                            )
+                                                        })()}
                                                     </td>
                                                     <td style={{ padding: '9px 14px', textAlign: 'right', fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#c9d1d9' }}>
                                                         {fmtCurrency(trade.price)}

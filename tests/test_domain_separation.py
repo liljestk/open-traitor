@@ -267,3 +267,171 @@ class TestFrontendQueryKeysIncludeProfile:
                 "`useLiveStore((s) => s.profile)` is called in the component."
             )
             pytest.fail("\n".join(msg_lines))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dashboard DB methods — exchange column filtering in SQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSimulatedMixinExchangeFilter:
+    """SimulatedMixin DB methods must include exchange filtering when provided."""
+
+    def _make_mixin(self):
+        """Build a SimulatedMixin with a mocked connection."""
+        from src.utils.stats_simulated import SimulatedMixin
+
+        mixin = SimulatedMixin.__new__(SimulatedMixin)
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_cursor.fetchone.return_value = None
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        mixin._get_conn = MagicMock(return_value=mock_conn)
+        return mixin, mock_conn
+
+    # --- get_simulated_trades ------------------------------------------------
+
+    def test_simulated_trades_with_exchange_filters_sql(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_simulated_trades(exchange="coinbase")
+
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "coinbase" in params
+
+    def test_simulated_trades_without_exchange_no_filter(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_simulated_trades()
+
+        sql = conn.execute.call_args[0][0]
+        assert "exchange" not in sql
+
+    # --- get_latest_scan_results ---------------------------------------------
+
+    def test_scan_results_with_exchange_filters_sql(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_latest_scan_results(exchange="ibkr")
+
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "ibkr" in params
+
+    def test_scan_results_without_exchange_no_filter(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_latest_scan_results()
+
+        sql = conn.execute.call_args[0][0]
+        assert "exchange" not in sql
+
+    # --- get_pair_follows ----------------------------------------------------
+
+    def test_pair_follows_with_exchange_filters_sql(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_pair_follows(exchange="coinbase")
+
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "coinbase" in params
+
+    def test_pair_follows_without_exchange_no_filter(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_pair_follows()
+
+        sql = conn.execute.call_args[0][0]
+        assert "exchange = %s" not in sql
+
+    # --- get_followed_pairs_set ----------------------------------------------
+
+    def test_followed_pairs_set_with_exchange_filters_sql(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_followed_pairs_set(exchange="ibkr")
+
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "ibkr" in params
+
+    def test_followed_pairs_set_without_exchange_no_filter(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_followed_pairs_set()
+
+        sql = conn.execute.call_args[0][0]
+        assert "exchange = %s" not in sql
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Dashboard routes — static analysis: every DB call must pass exchange
+# ═══════════════════════════════════════════════════════════════════════════
+
+import ast
+import textwrap
+
+# Methods that MUST have exchange= when called from dashboard routes
+_EXCHANGE_REQUIRED_METHODS = {
+    "get_simulated_trades",
+    "get_latest_scan_results",
+    "get_pair_follows",
+    "get_followed_pairs_set",
+}
+
+_ROUTES_DIR = Path(__file__).resolve().parent.parent / "src" / "dashboard" / "routes"
+
+
+class TestDashboardRoutesPassExchange:
+    """Static analysis: every call to exchange-filterable DB methods in
+    dashboard route files must pass the `exchange` keyword argument.
+
+    If this test fails, the fix is:
+      1. Add `resolved = deps.resolve_profile(profile)` in the route handler.
+      2. Pass `exchange=resolved or None` to the DB method call.
+    """
+
+    def _collect_violations(self) -> list[tuple[str, int, str]]:
+        violations: list[tuple[str, int, str]] = []
+        if not _ROUTES_DIR.exists():
+            pytest.skip("Dashboard routes directory not found")
+
+        for py_file in sorted(_ROUTES_DIR.glob("*.py")):
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+            try:
+                tree = ast.parse(source, filename=str(py_file))
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                # Match db.get_xxx() or self.get_xxx() style calls
+                func_name = ""
+                if isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                if func_name not in _EXCHANGE_REQUIRED_METHODS:
+                    continue
+                # Check if exchange= is passed as a keyword
+                kw_names = {kw.arg for kw in node.keywords if kw.arg is not None}
+                if "exchange" not in kw_names:
+                    violations.append((py_file.name, node.lineno, func_name))
+
+        return violations
+
+    def test_all_db_calls_pass_exchange(self):
+        violations = self._collect_violations()
+        if violations:
+            msg_lines = [
+                "Dashboard route DB calls missing `exchange=` — will cause cross-domain data bleed:",
+            ]
+            for fname, line, method in violations:
+                msg_lines.append(f"  {fname}:{line}  {method}() missing exchange=")
+            msg_lines.append(
+                "\nFix: pass `exchange=resolved or None` where "
+                "`resolved = deps.resolve_profile(profile)`."
+            )
+            pytest.fail("\n".join(msg_lines))

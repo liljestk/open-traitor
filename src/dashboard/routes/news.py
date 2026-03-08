@@ -56,7 +56,7 @@ def get_news(
         # Build set of base symbols from human-followed pairs for relevance matching
         followed_symbols: set[str] = set()
         try:
-            human_pairs = db.get_followed_pairs_set(followed_by="human", quote_currency=qc)
+            human_pairs = db.get_followed_pairs_set(followed_by="human", quote_currency=qc, exchange=resolved or None)
             for p in human_pairs:
                 base = p.split("-")[0].lower() if "-" in p else p.lower()
                 followed_symbols.add(base)

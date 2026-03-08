@@ -55,12 +55,13 @@ def get_watchlist(
     """Returns the latest universe scan results + active pair configuration."""
     config = deps.get_config_for_profile(profile)
     qc = deps.quote_currency_for(profile)
+    resolved = deps.resolve_profile(profile)
     try:
-        scan = db.get_latest_scan_results()
+        scan = db.get_latest_scan_results(exchange=resolved or None)
         pairs = config.get("trading", {}).get("pairs", [])
 
         # Fetch all follows once — used for both LLM merge and follow status
-        all_follows = db.get_pair_follows(quote_currency=qc)
+        all_follows = db.get_pair_follows(exchange=resolved or None, quote_currency=qc)
 
         # Also include LLM-followed pairs from the DB (runtime-discovered by the screener)
         llm_db_pairs = [
@@ -206,7 +207,8 @@ def unfollow_pair(pair: str, profile: str = Query(""), db=Depends(deps.get_profi
     Only removes the human follow — LLM follows (config pairs) are unaffected.
     """
     pair = pair.upper().strip()
-    deleted = db.unfollow_pair(pair=pair, followed_by="human")
+    resolved = deps.resolve_profile(profile)
+    deleted = db.unfollow_pair(pair=pair, followed_by="human", exchange=resolved or None)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Not following {pair!r}")
     _notify_orchestrator("remove_watchlist_pair", pair, profile=profile)

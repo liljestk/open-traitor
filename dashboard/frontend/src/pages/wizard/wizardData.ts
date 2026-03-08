@@ -226,8 +226,11 @@ export function generateEnvContent(state: WizardState): string {
   if (state.tradingMode === 'live' && state.liveConfirmed) add('LIVE_TRADING_CONFIRMED', 'I UNDERSTAND THE RISKS', 'Headless live mode confirmation')
   blank()
   if (state.exchanges.coinbase) {
-    add('COINBASE_API_KEY', state.coinbaseApiKey, 'Coinbase Advanced Trade — API Key Name')
-    add('COINBASE_API_SECRET', state.coinbaseApiSecret, 'Coinbase Advanced Trade — EC Private Key (PEM)')
+    // Skip masked placeholders (xxxx****) — backend preserves existing real values
+    if (state.coinbaseApiKey && !state.coinbaseApiKey.includes('****'))
+      add('COINBASE_API_KEY', state.coinbaseApiKey, 'Coinbase Advanced Trade — API Key Name')
+    if (state.coinbaseApiSecret && !state.coinbaseApiSecret.includes('****'))
+      add('COINBASE_API_SECRET', state.coinbaseApiSecret, 'Coinbase Advanced Trade — EC Private Key (PEM)')
     blank()
   }
   if (state.exchanges.ibkr) {
@@ -237,16 +240,16 @@ export function generateEnvContent(state: WizardState): string {
     add('IBKR_CURRENCY', state.ibkrCurrency)
     blank()
   }
-  if (state.geminiEnabled && state.geminiApiKey) add('GEMINI_API_KEY', state.geminiApiKey, 'Google Gemini API (provider 1 — fastest)')
+  if (state.geminiEnabled && state.geminiApiKey && !state.geminiApiKey.includes('****')) add('GEMINI_API_KEY', state.geminiApiKey, 'Google Gemini API (provider 1 — fastest)')
   else lines.push('# GEMINI_API_KEY= (not configured)')
   blank()
-  if (state.openrouterEnabled && state.openrouterApiKey) add('OPENROUTER_API_KEY', state.openrouterApiKey, 'OpenRouter API (provider 2 — 200+ models, free tier)')
+  if (state.openrouterEnabled && state.openrouterApiKey && !state.openrouterApiKey.includes('****')) add('OPENROUTER_API_KEY', state.openrouterApiKey, 'OpenRouter API (provider 2 — 200+ models, free tier)')
   else lines.push('# OPENROUTER_API_KEY= (not configured)')
   blank()
-  if (state.openaiEnabled && state.openaiApiKey) add('OPENAI_API_KEY', state.openaiApiKey, 'OpenAI API (provider 3 — fallback)')
+  if (state.openaiEnabled && state.openaiApiKey && !state.openaiApiKey.includes('****')) add('OPENAI_API_KEY', state.openaiApiKey, 'OpenAI API (provider 3 — fallback)')
   else lines.push('# OPENAI_API_KEY= (not configured)')
   blank()
-  if (state.groqEnabled && state.groqApiKey) add('GROQ_API_KEY', state.groqApiKey, 'Groq API (free tier — llama-3.3-70b + llama-4-maverick)')
+  if (state.groqEnabled && state.groqApiKey && !state.groqApiKey.includes('****')) add('GROQ_API_KEY', state.groqApiKey, 'Groq API (free tier — llama-3.3-70b + llama-4-maverick)')
   else lines.push('# GROQ_API_KEY= (not configured)')
   blank()
   add('OLLAMA_MODEL', state.ollamaModel, 'Ollama LLM model')
@@ -256,7 +259,7 @@ export function generateEnvContent(state: WizardState): string {
     const all = [state.telegramUserId, ...state.telegramAdditionalUsers.split(',').map(s => s.trim()).filter(Boolean)].join(',')
     add('TELEGRAM_AUTHORIZED_USERS', all, 'SECURITY: Only these user IDs can control the bot')
     blank()
-    if (state.exchanges.coinbase && state.telegramCoinbaseBotToken) {
+    if (state.exchanges.coinbase && state.telegramCoinbaseBotToken && !state.telegramCoinbaseBotToken.includes('****')) {
       const cid = state.telegramCoinbaseChatId || state.telegramUserId
       add('TELEGRAM_BOT_TOKEN_COINBASE', state.telegramCoinbaseBotToken, 'Telegram Bot — Coinbase agent')
       add('TELEGRAM_CHAT_ID_COINBASE', cid)
@@ -264,7 +267,7 @@ export function generateEnvContent(state: WizardState): string {
       add('TELEGRAM_CHAT_ID', cid)
       blank()
     }
-    if (state.exchanges.ibkr && state.telegramIbkrBotToken) {
+    if (state.exchanges.ibkr && state.telegramIbkrBotToken && !state.telegramIbkrBotToken.includes('****')) {
       const cid = state.telegramIbkrChatId || state.telegramUserId
       add('TELEGRAM_BOT_TOKEN_IBKR', state.telegramIbkrBotToken, 'Telegram Bot — IBKR agent')
       add('TELEGRAM_CHAT_ID_IBKR', cid)
@@ -277,23 +280,25 @@ export function generateEnvContent(state: WizardState): string {
   blank()
   const rs = (n: number) => { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a).map(b => c[b % c.length]).join('') }
   const rh = (n: number) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a).map(b => b.toString(16).padStart(2, '0')).join('') }
-  // Reuse existing infrastructure secrets if loaded from server, otherwise generate new ones
+  // Reuse existing infrastructure secrets if loaded from server, otherwise generate new ones.
+  // Backend sends presence flags ({is_set: true}), not actual values — only use real strings.
   const s = state.infraSecrets || {}
-  const rp = s.REDIS_PASSWORD || rs(32)
-  add('REDIS_PASSWORD', rp, 'Redis (auto-generated)'); add('REDIS_URL', s.REDIS_URL || `redis://default:${rp}@redis:6379/0`); blank()
-  add('TEMPORAL_DB_USER', s.TEMPORAL_DB_USER || 'temporal', 'Temporal (auto-generated)')
-  add('TEMPORAL_DB_PASSWORD', s.TEMPORAL_DB_PASSWORD || rs(32))
-  add('TEMPORAL_DB_NAME', s.TEMPORAL_DB_NAME || 'temporal'); blank()
-  add('LANGFUSE_DB_PASSWORD', s.LANGFUSE_DB_PASSWORD || rs(32), 'Langfuse (auto-generated)')
-  add('LANGFUSE_NEXTAUTH_SECRET', s.LANGFUSE_NEXTAUTH_SECRET || rs(48))
-  add('LANGFUSE_SALT', s.LANGFUSE_SALT || rs(48))
-  add('LANGFUSE_ADMIN_PASSWORD', s.LANGFUSE_ADMIN_PASSWORD || rs(20))
-  add('LANGFUSE_PUBLIC_KEY', s.LANGFUSE_PUBLIC_KEY || 'at-public-key', 'Langfuse project init keys')
-  add('LANGFUSE_SECRET_KEY', s.LANGFUSE_SECRET_KEY || 'at-secret-key'); blank()
-  add('CLICKHOUSE_PASSWORD', s.CLICKHOUSE_PASSWORD || rs(32), 'Langfuse v3 — ClickHouse + MinIO (auto-generated)')
-  add('MINIO_ROOT_USER', s.MINIO_ROOT_USER || 'minio')
-  add('MINIO_ROOT_PASSWORD', s.MINIO_ROOT_PASSWORD || rs(32))
-  add('LANGFUSE_ENCRYPTION_KEY', s.LANGFUSE_ENCRYPTION_KEY || rh(32)); blank()
+  const sv = (key: string): string | undefined => { const v = s[key]; return typeof v === 'string' && v ? v : undefined }
+  const rp = sv('REDIS_PASSWORD') ?? rs(32)
+  add('REDIS_PASSWORD', rp, 'Redis (auto-generated)'); add('REDIS_URL', sv('REDIS_URL') ?? `redis://default:${rp}@redis:6379/0`); blank()
+  add('TEMPORAL_DB_USER', sv('TEMPORAL_DB_USER') ?? 'temporal', 'Temporal (auto-generated)')
+  add('TEMPORAL_DB_PASSWORD', sv('TEMPORAL_DB_PASSWORD') ?? rs(32))
+  add('TEMPORAL_DB_NAME', sv('TEMPORAL_DB_NAME') ?? 'temporal'); blank()
+  add('LANGFUSE_DB_PASSWORD', sv('LANGFUSE_DB_PASSWORD') ?? rs(32), 'Langfuse (auto-generated)')
+  add('LANGFUSE_NEXTAUTH_SECRET', sv('LANGFUSE_NEXTAUTH_SECRET') ?? rs(48))
+  add('LANGFUSE_SALT', sv('LANGFUSE_SALT') ?? rs(48))
+  add('LANGFUSE_ADMIN_PASSWORD', sv('LANGFUSE_ADMIN_PASSWORD') ?? rs(20))
+  add('LANGFUSE_PUBLIC_KEY', sv('LANGFUSE_PUBLIC_KEY') ?? 'at-public-key', 'Langfuse project init keys')
+  add('LANGFUSE_SECRET_KEY', sv('LANGFUSE_SECRET_KEY') ?? 'at-secret-key'); blank()
+  add('CLICKHOUSE_PASSWORD', sv('CLICKHOUSE_PASSWORD') ?? rs(32), 'Langfuse v3 — ClickHouse + MinIO (auto-generated)')
+  add('MINIO_ROOT_USER', sv('MINIO_ROOT_USER') ?? 'minio')
+  add('MINIO_ROOT_PASSWORD', sv('MINIO_ROOT_PASSWORD') ?? rs(32))
+  add('LANGFUSE_ENCRYPTION_KEY', sv('LANGFUSE_ENCRYPTION_KEY') ?? rh(32)); blank()
   return lines.join('\n')
 }
 

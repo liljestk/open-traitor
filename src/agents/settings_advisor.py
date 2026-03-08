@@ -138,7 +138,7 @@ class SettingsAdvisorAgent(BaseAgent):
 
     # ── Main execution ───────────────────────────────────────────────────
 
-    def _compute_confidence_recommendation(self, stats_db) -> str:
+    def _compute_confidence_recommendation(self, stats_db, exchange: str | None = None) -> str:
         """Pre-compute a min_confidence adjustment suggestion based on win rate.
 
         Returns a string to inject into the LLM prompt.  The LLM is free
@@ -147,7 +147,7 @@ class SettingsAdvisorAgent(BaseAgent):
         if stats_db is None:
             return ""
         try:
-            wl = stats_db.get_win_loss_stats()
+            wl = stats_db.get_win_loss_stats(exchange=exchange)
             sample = wl.get("sample_size", 0)
             if sample < 10:
                 return (
@@ -221,7 +221,7 @@ class SettingsAdvisorAgent(BaseAgent):
             f"- Market Volatility: {market_vol}\n"
             f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n"
             f"- Universe Size: {context.get('universe_size', 'unknown')}\n"
-            f"{self._compute_confidence_recommendation(stats_db)}\n\n"
+            f"{self._compute_confidence_recommendation(stats_db, exchange=exchange)}\n\n"
             f"Based on these conditions, should we adjust any trading parameters?\n"
             f"If everything is working well, return an empty changes array.\n"
             f"Respond with JSON only."

@@ -569,20 +569,29 @@ export default function Settings() {
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
                     background: isActive
-                      ? `linear-gradient(135deg, ${color}12, ${color}20)`
+                      ? `linear-gradient(135deg, ${color}1a, ${color}30)`
                       : '#0d1117',
-                    border: isActive ? `2px solid ${color}99` : `1px solid ${color}44`,
+                    border: isActive ? `2px solid ${color}cc` : `1px solid ${color}44`,
                     borderRadius: 12,
                     padding: isActive ? '10px 16px' : '11px 17px',
                     cursor: 'pointer',
                     color: '#e6edf3', minWidth: 150, transition: 'all 0.2s',
                     opacity: applicableHere ? 1 : 0.5,
-                    boxShadow: isActive ? `0 0 20px ${color}20` : 'none',
+                    boxShadow: isActive ? `0 0 24px ${color}40, inset 0 0 20px ${color}10` : 'none',
                   }}
                 >
                   <Icon size={16} style={{ color }} />
                   <div style={{ textAlign: 'left' }}>
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{meta.label}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: isActive ? color : '#e6edf3' }}>{meta.label}</span>
+                      {isActive && (
+                        <span style={{
+                          fontSize: 9, fontWeight: 700, letterSpacing: '0.05em',
+                          padding: '1px 6px', borderRadius: 4,
+                          background: color + '30', color, border: `1px solid ${color}50`,
+                        }}>ACTIVE</span>
+                      )}
+                    </div>
                     <div style={{ fontSize: 10, color: isActive ? color + 'cc' : '#6e7681', marginTop: 1 }}>
                       {meta.desc.length > 60 ? meta.desc.slice(0, 57) + '...' : meta.desc}
                     </div>
@@ -595,10 +604,10 @@ export default function Settings() {
                   {isActive && (
                     <span style={{
                       position: 'absolute', top: -6, right: -6,
-                      width: 18, height: 18, borderRadius: '50%',
+                      width: 20, height: 20, borderRadius: '50%',
                       background: color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      boxShadow: `0 0 8px ${color}70`,
-                    }}><Check size={10} color="#fff" strokeWidth={3} /></span>
+                      boxShadow: `0 0 10px ${color}90`,
+                    }}><Check size={11} color="#fff" strokeWidth={3} /></span>
                   )}
                 </button>
               )
@@ -675,26 +684,36 @@ export default function Settings() {
                       title={!applicableHere ? `No effect on ${modifiersData.asset_class}` : meta.desc}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 10, position: 'relative',
-                        background: isActive ? `linear-gradient(135deg, ${color}12, ${color}20)` : '#0d1117',
-                        border: isActive ? `2px solid ${color}99` : `1px solid ${color}44`,
+                        background: isActive ? `linear-gradient(135deg, ${color}1a, ${color}30)` : '#0d1117',
+                        border: isActive ? `2px solid ${color}cc` : `1px solid ${color}44`,
                         borderRadius: 10, padding: isActive ? '10px 14px' : '11px 15px',
                         cursor: 'pointer', color: '#e6edf3', minWidth: 140, transition: 'all 0.2s',
                         opacity: applicableHere ? 1 : 0.5,
+                        boxShadow: isActive ? `0 0 24px ${color}40, inset 0 0 20px ${color}10` : 'none',
                       }}
                     >
                       <Sliders size={14} style={{ color }} />
                       <div style={{ textAlign: 'left' }}>
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>{meta.label}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontWeight: 600, fontSize: 13, color: isActive ? color : '#e6edf3' }}>{meta.label}</span>
+                          {isActive && (
+                            <span style={{
+                              fontSize: 9, fontWeight: 700, letterSpacing: '0.05em',
+                              padding: '1px 6px', borderRadius: 4,
+                              background: color + '30', color, border: `1px solid ${color}50`,
+                            }}>ACTIVE</span>
+                          )}
+                        </div>
                         <div style={{ fontSize: 10, color: isActive ? color + 'cc' : '#6e7681', marginTop: 1 }}>
                           {meta.desc.length > 55 ? meta.desc.slice(0, 52) + '...' : meta.desc}
                         </div>
                       </div>
                       {isActive && (
                         <span style={{
-                          position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%',
+                          position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: '50%',
                           background: color, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          boxShadow: `0 0 8px ${color}70`,
-                        }}><Check size={10} color="#fff" strokeWidth={3} /></span>
+                          boxShadow: `0 0 10px ${color}90`,
+                        }}><Check size={11} color="#fff" strokeWidth={3} /></span>
                       )}
                     </button>
                   )

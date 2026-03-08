@@ -19,7 +19,7 @@ export default function Login({ onSuccess }: LoginProps) {
     setError('')
     try {
       const result = await login(password)
-      if (result.ok) {
+      if (result.status === 'ok') {
         if (result.csrf_token) setCsrfToken(result.csrf_token)
         onSuccess()
       } else {

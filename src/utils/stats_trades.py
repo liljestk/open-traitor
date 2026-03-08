@@ -48,6 +48,38 @@ class TradesMixin:
             conn.commit()
             return row["id"]
 
+    def record_synced_trade(
+        self,
+        *,
+        ts: str,
+        external_id: str,
+        pair: str,
+        action: str,
+        price: float,
+        quantity: float = 0,
+        quote_amount: float = 0,
+        fee_quote: float = 0,
+        signal_type: str = "exchange_sync",
+        approved_by: str = "exchange",
+        exchange: str = "coinbase",
+    ) -> int | None:
+        """Insert a trade from an external exchange sync, skipping duplicates via external_id."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO trades
+                   (ts, exchange, pair, action, quantity, price, quote_amount,
+                    confidence, signal_type, stop_loss, take_profit, reasoning,
+                    pnl, fee_quote, is_rotation, approved_by, external_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, 0, 0, '', NULL, %s, 0, %s, %s)
+                   ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING
+                   RETURNING id""",
+                (ts, exchange, pair, action, quantity, price, quote_amount,
+                 signal_type, fee_quote, approved_by, external_id),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return row["id"] if row else None
+
     def get_trades(self, hours: int = 24, pair: Optional[str] = None, limit: int = 50, quote_currency: str | list[str] | None = None, exchange: str | None = None) -> list[dict]:
         with self._get_conn() as conn:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()

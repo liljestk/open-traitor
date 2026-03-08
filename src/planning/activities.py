@@ -952,7 +952,7 @@ async def fetch_universe_scan_summary(profile: str = "") -> dict:
     try:
         from src.utils.stats import StatsDB
         db = StatsDB()
-        scan = db.get_latest_scan_results()
+        scan = db.get_latest_scan_results(exchange=profile or None)
         if scan:
             return {
                 "universe_size": scan.get("universe_size", 0),

@@ -455,7 +455,7 @@ class PipelineManager:
         # ─── Kelly Criterion stats (from StatsDB) ───
         kelly_stats = {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0}
         try:
-            kelly_stats = await asyncio.to_thread(orch.stats_db.get_win_loss_stats)
+            kelly_stats = await asyncio.to_thread(orch.stats_db.get_win_loss_stats, exchange=exchange_name)
         except Exception as e:
             logger.debug(f"Kelly stats unavailable: {e}")
 

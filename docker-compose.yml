@@ -227,6 +227,7 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
+      - DASHBOARD_SESSION_SECRET=ada8753f087f3f04a6018234cc4d36465a202ef44c5924f58e8e68f6f03f5094
       # Allow dashboard to reach IB Gateway for IBKR price/news lookups
       - IBKR_HOST=host.docker.internal
     # Allow container to reach IB Gateway on the host machine

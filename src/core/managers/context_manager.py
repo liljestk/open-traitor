@@ -270,7 +270,7 @@ class ContextManager:
             parts: list[str] = []
 
             # Historical trade performance from StatsDB (24h)
-            perf = orch.stats_db.get_performance_summary(hours=24)
+            perf = orch.stats_db.get_performance_summary(hours=24, exchange=orch.config.get("trading", {}).get("exchange", "coinbase").lower())
             stats = perf.get("trade_stats", {})
             total_trades = stats.get("total_trades", 0)
             winning = stats.get("winning", 0)

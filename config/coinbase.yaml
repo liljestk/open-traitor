@@ -206,6 +206,8 @@ telegram:
 trading:
   exchange: coinbase
   holdings_dust_threshold: 1.0
+  style_modifiers:
+  - wider_targets
   holdings_refresh_seconds: 60
   include_crypto_quotes: true
   interval: 600

@@ -48,6 +48,7 @@ llm_client = None         # LLMClient instance (optional, for provider status)
 
 PROFILE_ALIASES: dict[str, str] = {
     "crypto": "coinbase",
+    "equity": "ibkr",
 }
 
 PROFILE_USE_DEFAULT_DB: set[str] = {"settings"}

@@ -49,7 +49,8 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
   // CSRF token for mutating requests
   const method = (options?.method || 'GET').toUpperCase()
-  if (_csrfToken && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+  const isMutating = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)
+  if (_csrfToken && isMutating) {
     headers.set('X-CSRF-Token', _csrfToken)
   }
 
@@ -58,6 +59,35 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     headers,
     credentials: 'include',  // Send httpOnly cookies
   })
+
+  // Auto-refresh CSRF token on 403 and retry once
+  if (res.status === 403 && isMutating) {
+    try {
+      const statusRes = await fetch(`${BASE}/auth/status`, { credentials: 'include' })
+      const status = await statusRes.json()
+      if (status.csrf_token) {
+        setCsrfToken(status.csrf_token)
+        const retryHeaders = new Headers(options?.headers)
+        if (apiKey) retryHeaders.set('X-API-Key', apiKey)
+        retryHeaders.set('X-CSRF-Token', status.csrf_token)
+        const retry = await fetch(`${BASE}${finalPath}`, {
+          ...options,
+          headers: retryHeaders,
+          credentials: 'include',
+        })
+        if (!retry.ok) {
+          const text = await retry.text()
+          throw new Error(`HTTP ${retry.status}: ${text}`)
+        }
+        return retry.json() as Promise<T>
+      }
+    } catch {
+      // If refresh fails, fall through to original error
+    }
+    const text = await res.text()
+    throw new Error(`HTTP ${res.status}: ${text}`)
+  }
+
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
@@ -265,6 +295,9 @@ export const fetchTrades = (pair?: string, limit = 500, hours = 168) =>
 
 export const exportTradesUrl = (hours = 720) => `${BASE}/trades/export?hours=${hours}`
 
+export const syncTrades = () =>
+  apiFetch<{ synced: number; total_exchange: number; error?: string }>('/trades/sync', { method: 'POST' })
+
 export const fetchEvents = (eventType?: string, limit = 500, hours = 168) =>
   apiFetch<{ events: EventLog[]; count: number }>(
     `/events?limit=${limit}&hours=${hours}${eventType ? `&event_type=${eventType}` : ''}`
@@ -345,6 +378,8 @@ export interface SettingsUpdateResult {
   section?: string
   changes: Record<string, any>
   trading_enabled: boolean
+  confirmation_required?: boolean
+  confirmation_token?: string
 }
 
 export interface PresetInfo {
@@ -355,12 +390,22 @@ export interface PresetInfo {
 export const fetchSettings = () =>
   apiFetch<SettingsResponse>('/settings')
 
-export const updateSettings = (data: { section?: string; updates?: Record<string, any>; preset?: string }) =>
-  apiFetch<SettingsUpdateResult>('/settings', {
+export async function updateSettings(data: { section?: string; updates?: Record<string, any>; preset?: string }): Promise<SettingsUpdateResult> {
+  const result = await apiFetch<SettingsUpdateResult>('/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   })
+  // Auto-confirm: if backend requires confirmation, re-send with the token
+  if (result.confirmation_required && result.confirmation_token) {
+    return apiFetch<SettingsUpdateResult>('/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...data, confirmation_token: result.confirmation_token }),
+    })
+  }
+  return result
+}
 
 export const fetchPresets = () =>
   apiFetch<{ presets: Record<string, PresetInfo>; current_enabled: boolean }>('/settings/presets')
@@ -982,7 +1027,7 @@ export interface AuthStatus {
 }
 
 export interface LoginResult {
-  ok: boolean
+  status: string
   csrf_token?: string
   error?: string
 }
@@ -1000,7 +1045,7 @@ export const login = async (password: string): Promise<LoginResult> => {
     credentials: 'include',
   })
   const data = await res.json()
-  if (data.ok && data.csrf_token) {
+  if (data.status === 'ok' && data.csrf_token) {
     setCsrfToken(data.csrf_token)
   }
   return data

@@ -44,6 +44,7 @@ class ProactiveEngine:
         self._llm = llm_client
         self._personality = personality
         _is_equity = exchange_type == "ibkr"
+        self._exchange_type = exchange_type.lower()
         self._trader_type = "equity/stock trader" if _is_equity else "crypto trader"
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -322,7 +323,7 @@ class ProactiveEngine:
         stats_text = ""
         if self._stats_db:
             try:
-                s = self._stats_db.get_trade_stats(hours=4)
+                s = self._stats_db.get_trade_stats(hours=4, exchange=self._exchange_type)
                 if s.get("total_trades", 0) > 0:
                     sym = self._currency_symbol
                     stats_text = (
@@ -369,9 +370,9 @@ RULES:
         overnight_text = ""
         if self._stats_db:
             try:
-                trades = self._stats_db.get_trades(hours=12)
-                events = self._stats_db.get_events(hours=12)
-                stats = self._stats_db.get_trade_stats(hours=12)
+                trades = self._stats_db.get_trades(hours=12, exchange=self._exchange_type)
+                events = self._stats_db.get_events(hours=12, exchange=self._exchange_type)
+                stats = self._stats_db.get_trade_stats(hours=12, exchange=self._exchange_type)
                 sym = self._currency_symbol
                 overnight_text = (
                     f"\nOvernight activity (12h):\n"
@@ -420,9 +421,9 @@ Keep it under 12 lines. Specific prices and levels."""
         day_text = ""
         if self._stats_db:
             try:
-                stats = self._stats_db.get_trade_stats(hours=16)
-                bw = self._stats_db.get_best_worst_trades(hours=16)
-                port_range = self._stats_db.get_portfolio_range(hours=16)
+                stats = self._stats_db.get_trade_stats(hours=16, exchange=self._exchange_type)
+                bw = self._stats_db.get_best_worst_trades(hours=16, exchange=self._exchange_type)
+                port_range = self._stats_db.get_portfolio_range(hours=16, exchange=self._exchange_type)
                 sym = self._currency_symbol
                 # MED-11: only show portfolio range when we have actual samples.
                 port_range_text = ""
@@ -552,11 +553,11 @@ Keep it under 10 lines. Be honest about losses."""
             data = self._stats_db.get_pair_stats(pair, hours)
         elif query_type == "performance":
             hours = params.get("hours", 24)
-            data = self._stats_db.get_performance_summary(hours)
+            data = self._stats_db.get_performance_summary(hours, exchange=self._exchange_type)
         elif query_type == "portfolio_history":
-            data = self._stats_db.get_portfolio_range(params.get("hours", 24))
+            data = self._stats_db.get_portfolio_range(params.get("hours", 24), exchange=self._exchange_type)
         elif query_type == "trades":
-            data = {"trades": self._stats_db.get_trades(params.get("hours", 24))}
+            data = {"trades": self._stats_db.get_trades(params.get("hours", 24), exchange=self._exchange_type)}
         else:
             data = ctx
 

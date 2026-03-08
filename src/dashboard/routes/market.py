@@ -38,7 +38,8 @@ def _get_products_for_profile(profile: str) -> list[dict]:
         # Also include any human-followed pairs from the DB
         try:
             db = deps.require_db(profile)
-            follows = db.get_pair_follows(quote_currency=qc)
+            resolved = deps.resolve_profile(profile)
+            follows = db.get_pair_follows(exchange=resolved or None, quote_currency=qc)
             existing_ids = {prod["id"].upper() for prod in products}
             for f in follows:
                 fpair = f["pair"].upper()
@@ -236,6 +237,7 @@ def create_simulated_trade(body: SimulatedTradeCreate, profile: str = Query(""),
     else:
         quantity = body.from_amount * entry_price  # selling crypto → getting quote
 
+    resolved = deps.resolve_profile(profile)
     sim_id = db.record_simulated_trade(
         pair=pair,
         from_currency=from_currency,
@@ -244,6 +246,7 @@ def create_simulated_trade(body: SimulatedTradeCreate, profile: str = Query(""),
         quantity=quantity,
         to_currency=to_currency,
         notes=body.notes,
+        exchange=resolved or "coinbase",
     )
     return {
         "id": sim_id,
@@ -270,7 +273,8 @@ def list_simulated_trades(
     live and PnL (absolute + %) is computed on the fly.
     """
     qc = deps.quote_currency_for(profile)
-    rows = db.get_simulated_trades(include_closed=include_closed, quote_currency=qc)
+    resolved = deps.resolve_profile(profile)
+    rows = db.get_simulated_trades(include_closed=include_closed, quote_currency=qc, exchange=resolved or None)
 
     # Enrich open rows with live PnL
     for row in rows:
@@ -314,7 +318,8 @@ def close_simulated_trade_route(sim_id: int, profile: str = Query(""), db=Depend
     """
 
     # First, look up the sim to get the pair
-    rows = db.get_simulated_trades(include_closed=False)
+    resolved = deps.resolve_profile(profile)
+    rows = db.get_simulated_trades(include_closed=False, exchange=resolved or None)
     target = next((r for r in rows if r["id"] == sim_id), None)
     if not target:
         raise HTTPException(status_code=404, detail=f"Open simulation {sim_id} not found")

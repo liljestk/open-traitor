@@ -324,6 +324,7 @@ class StatsDB(
         ("strategic_context",    "temporal_run_id"),
         ("portfolio_snapshots",  "exchange"),
         ("trades",               "exchange"),
+        ("trades",               "external_id"),
         ("simulated_trades",     "exchange"),
         ("scan_results",         "exchange"),
         ("events",               "exchange"),
@@ -347,6 +348,7 @@ class StatsDB(
             ("simulated_trades",    "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("scan_results",        "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("events",              "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("trades",              "external_id",          "TEXT DEFAULT NULL"),
         ]
         with self._get_conn() as conn:
             with conn.cursor() as cur:
@@ -376,6 +378,9 @@ class StatsDB(
                 # ALTER TABLE ADD COLUMN, not during _init_db which runs first).
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_events_exchange ON events(exchange)"
+                )
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_external_id ON trades(external_id) WHERE external_id IS NOT NULL"
                 )
             conn.commit()
 

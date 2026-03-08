@@ -26,6 +26,25 @@ router = APIRouter(tags=["Settings"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Profile-aware config path resolver
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Sections that are per-profile (strategy/investment — differ between crypto & equity)
+_PER_PROFILE_SECTIONS = frozenset({
+    "trading", "risk", "absolute_rules", "high_stakes", "rotation",
+    "analysis", "analysis.technical", "analysis.sentiment",
+})
+
+
+def _resolve_config_path(profile: str) -> str | None:
+    """Resolve profile query param to a config file path, or None for default."""
+    if not profile:
+        return None
+    resolved = deps.resolve_profile(profile)
+    return deps.PROFILE_CONFIG_FILES.get(resolved)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Settings-manager imports
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -437,6 +456,52 @@ def setup_config(body: _SetupConfigBody, request: Request):
         config_env_path = os.path.join("config", ".env")
         os.makedirs("config", exist_ok=True)
 
+        # Preserve existing secrets when the wizard sends invalid/masked values
+        _INFRA_SECRET_KEYS = {
+            "REDIS_PASSWORD", "REDIS_URL",
+            "TEMPORAL_DB_USER", "TEMPORAL_DB_PASSWORD", "TEMPORAL_DB_NAME",
+            "LANGFUSE_DB_PASSWORD", "LANGFUSE_NEXTAUTH_SECRET", "LANGFUSE_SALT",
+            "LANGFUSE_ADMIN_PASSWORD", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "CLICKHOUSE_PASSWORD", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
+            "LANGFUSE_ENCRYPTION_KEY",
+        }
+        # API keys that the GET endpoint masks (first4 + "****") — never write
+        # the masked placeholder back; preserve the real value instead.
+        _MASKED_SECRET_KEYS = {
+            "COINBASE_API_KEY", "COINBASE_API_SECRET",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+            "GROQ_API_KEY", "ANTHROPIC_API_KEY",
+            "TELEGRAM_BOT_TOKEN_COINBASE", "TELEGRAM_BOT_TOKEN_IBKR",
+            "TELEGRAM_BOT_TOKEN",
+            "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET",
+        }
+
+        def _is_masked(val: str) -> bool:
+            """Return True if the value looks like a masked placeholder."""
+            return "****" in val or val == "[object Object]"
+
+        existing_env = _parse_env_file(config_env_path)
+        if existing_env:
+            for k in _INFRA_SECRET_KEYS:
+                new_val = filtered_config_env.get(k, "")
+                old_val = existing_env.get(k, "")
+                if _is_masked(new_val) and old_val and not _is_masked(old_val):
+                    filtered_config_env[k] = old_val
+                    logger.warning(f"Setup wizard: preserved existing value for {k!r} (masked/invalid new value)")
+            for k in _MASKED_SECRET_KEYS:
+                new_val = filtered_config_env.get(k, "")
+                old_val = existing_env.get(k, "")
+                if (not new_val or _is_masked(new_val)) and old_val and not _is_masked(old_val):
+                    filtered_config_env[k] = old_val
+                    logger.info(f"Setup wizard: preserved existing {k!r} (wizard sent masked placeholder)")
+            for k in _INFRA_SECRET_KEYS & set(filtered_root_env):
+                new_val = filtered_root_env.get(k, "")
+                if _is_masked(new_val):
+                    existing_root = _parse_env_file(os.path.join("config", "root.env")) or _parse_env_file(".env") or {}
+                    old_val = existing_root.get(k, "")
+                    if old_val and not _is_masked(old_val):
+                        filtered_root_env[k] = old_val
+
         # Backup existing config/.env if present
         if os.path.exists(config_env_path):
             backup_path = f"{config_env_path}.backup.{int(time.time())}"
@@ -637,19 +702,37 @@ def setup_config(body: _SetupConfigBody, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════
 
 @router.get("/api/settings", summary="Get all settings with metadata")
-def get_settings():
-    """Returns the full settings.yaml content, schema metadata, and presets info."""
+def get_settings(profile: str = Query("")):
+    """Returns settings content, schema metadata, and presets info.
+
+    When a profile is active (e.g. ?profile=crypto), per-profile sections
+    (trading, risk, absolute_rules, etc.) are loaded from the profile config
+    file and merged over the base settings.yaml.
+    """
     try:
         full = _sm_get_full()
         full["schema"] = _sm_get_schema()
 
+        # Overlay per-profile sections when a profile is active
+        profile_path = _resolve_config_path(profile)
+        if profile_path:
+            from src.utils.settings_manager import load_settings as _load
+            try:
+                profile_cfg = _load(profile_path)
+                base_settings = full["settings"]
+                for section in _PER_PROFILE_SECTIONS:
+                    if "." not in section and section in profile_cfg:
+                        base_settings[section] = profile_cfg[section]
+            except Exception as _e:
+                logger.debug(f"Profile overlay skipped ({profile}): {_e}")
+
         # Attach RPM budget breakdown so frontend can show limits
         try:
-            cfg = deps.get_config()
-            providers = cfg.get("llm_providers", [])
-            interval = cfg.get("trading", {}).get("interval", 120)
+            cfg_for_rpm = full["settings"]
+            providers = cfg_for_rpm.get("llm_providers", []) or cfg_for_rpm.get("llm", {}).get("providers", [])
+            interval = cfg_for_rpm.get("trading", {}).get("interval", 120)
             max_entities, breakdown = compute_rpm_entity_cap(providers, interval)
-            configured_max = cfg.get("trading", {}).get("max_active_pairs", 5)
+            configured_max = cfg_for_rpm.get("trading", {}).get("max_active_pairs", 5)
             full["rpm_budget"] = {
                 **breakdown,
                 "configured_max": configured_max,
@@ -665,7 +748,7 @@ def get_settings():
 
 
 @router.put("/api/settings", summary="Update settings section or apply preset")
-def update_settings(body: _SettingsUpdateBody, request: Request):
+def update_settings(body: _SettingsUpdateBody, request: Request, profile: str = Query("")):
     """
     Two modes:
       1. ``{ "preset": "moderate" }`` — apply a named preset
@@ -707,19 +790,20 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
             if pending.get("preset") != body.preset:
                 raise HTTPException(status_code=400, detail="Preset does not match confirmation")
 
-            ok, err, changes = _sm_apply_preset(body.preset)
+            ok, err, changes = _sm_apply_preset(body.preset, path=_resolve_config_path(profile))
             if not ok:
                 raise HTTPException(status_code=400, detail=err)
             _sm_push_runtime(deps.rules_instance, deps.config, changes)
+            resolved = deps.resolve_profile(profile) if profile else ""
             logger.warning(
                 f"⚙️ Settings preset applied: {body.preset} "
-                f"({len(changes)} changes, ip={source_ip})"
+                f"({len(changes)} changes, profile={resolved or 'default'}, ip={source_ip})"
             )
             return {
                 "ok": True,
                 "preset": body.preset,
                 "changes": changes,
-                "trading_enabled": _sm_is_trading_enabled(),
+                "trading_enabled": _sm_is_trading_enabled(_resolve_config_path(profile)),
             }
 
         # Mode 2: Section update
@@ -767,23 +851,30 @@ def update_settings(body: _SettingsUpdateBody, request: Request):
             if pending.get("updates_hash") and pending["updates_hash"] != current_hash:
                 raise HTTPException(status_code=400, detail="Updates payload changed since confirmation was issued")
 
-        ok, err, changes = _sm_update_section(body.section, body.updates)
+        # Route per-profile sections to the profile config file
+        base_section = body.section.split(".", 1)[0]
+        config_path = None
+        if base_section in _PER_PROFILE_SECTIONS:
+            config_path = _resolve_config_path(profile)
+
+        ok, err, changes = _sm_update_section(body.section, body.updates, path=config_path)
         if not ok:
             raise HTTPException(status_code=400, detail=err)
 
         # Use deps.config (== orch.config, the live dict) not deps.get_config()
         # which returns a throwaway dict loaded from disk.
         _sm_push_section(body.section, changes, deps.rules_instance, deps.config)
+        resolved = deps.resolve_profile(profile) if profile else ""
         logger.warning(
             f"⚙️ Settings updated: section={body.section}, "
             f"fields={sorted(changes.keys()) if isinstance(changes, dict) else changes} "
-            f"(ip={source_ip})"
+            f"(profile={resolved or 'default'}, ip={source_ip})"
         )
         return {
             "ok": True,
             "section": body.section,
             "changes": changes,
-            "trading_enabled": _sm_is_trading_enabled(),
+            "trading_enabled": _sm_is_trading_enabled(config_path),
         }
     except HTTPException:
         raise
@@ -805,10 +896,15 @@ def get_presets():
 
 
 @router.get("/api/settings/style-modifiers", summary="List available style modifiers")
-def get_style_modifiers():
+def get_style_modifiers(profile: str = Query("")):
     """Returns all style modifiers with metadata and which are currently active."""
     try:
-        cfg = deps.get_config()
+        profile_path = _resolve_config_path(profile)
+        if profile_path:
+            from src.utils.settings_manager import load_settings as _load
+            cfg = _load(profile_path)
+        else:
+            cfg = deps.get_config()
         active = cfg.get("trading", {}).get("style_modifiers", [])
         exchange = cfg.get("trading", {}).get("exchange", "coinbase")
         asset_class = "equity" if exchange == "ibkr" else "crypto"

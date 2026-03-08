@@ -263,15 +263,18 @@ class TelegramManager:
         ch.register_function("update_settings", _update_settings)
         ch.register_function("get_settings_tiers", _get_settings_tiers)
 
+        _exch = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+
         # ─── Stats & Analytics functions ───────────────────────────────
         ch.register_function("get_stats", lambda p: orch.stats_db.get_performance_summary(
-            hours=int(p.get("hours", 24))
+            hours=int(p.get("hours", 24)), exchange=_exch
         ))
 
         ch.register_function("get_trade_history", lambda p: {
             "trades": orch.stats_db.get_trades(
                 hours=int(p.get("hours", 24)),
                 pair=p.get("pair"),
+                exchange=_exch,
             )
         })
 
@@ -281,11 +284,11 @@ class TelegramManager:
         ))
 
         ch.register_function("get_daily_summaries", lambda p: {
-            "summaries": orch.stats_db.get_daily_summaries(days=int(p.get("days", 7)))
+            "summaries": orch.stats_db.get_daily_summaries(days=int(p.get("days", 7)), exchange=_exch)
         })
 
         ch.register_function("get_best_worst", lambda p: orch.stats_db.get_best_worst_trades(
-            hours=int(p.get("hours", 168))
+            hours=int(p.get("hours", 168)), exchange=_exch
         ))
 
         ch.register_function("schedule_report", lambda p: {
@@ -502,6 +505,7 @@ class TelegramManager:
                 quantity=quantity,
                 to_currency=to_currency,
                 notes=notes,
+                exchange=orch.config.get("trading", {}).get("exchange", "coinbase").lower(),
             )
             return {
                 "ok": True,
@@ -519,7 +523,7 @@ class TelegramManager:
 
         def _list_simulations(p: dict) -> dict:
             include_closed = bool(p.get("include_closed", False))
-            rows = orch.stats_db.get_simulated_trades(include_closed=include_closed)
+            rows = orch.stats_db.get_simulated_trades(include_closed=include_closed, exchange=orch.config.get("trading", {}).get("exchange", "coinbase").lower())
             # Enrich open rows with live PnL
             for row in rows:
                 if row["status"] == "open":
@@ -552,7 +556,7 @@ class TelegramManager:
             except (TypeError, ValueError):
                 return {"ok": False, "error": "sim_id must be an integer"}
             # Fetch current price for this sim
-            rows = orch.stats_db.get_simulated_trades(include_closed=False)
+            rows = orch.stats_db.get_simulated_trades(include_closed=False, exchange=orch.config.get("trading", {}).get("exchange", "coinbase").lower())
             target = next((r for r in rows if r["id"] == sim_id), None)
             if not target:
                 return {"ok": False, "error": f"No open simulation with id={sim_id}"}

@@ -280,19 +280,47 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
                         live_balances = client.balance  # {currency: total_qty}
                         qc_list = qc if isinstance(qc, list) else ([qc] if qc else [])
                         fiat = {"USD", "EUR", "GBP", "CHF", "SEK", "NOK", "DKK",
-                                "CAD", "AUD", "JPY", "USDC", "USDT"}
+                                "CAD", "AUD", "JPY", "USDC", "USDT", "EURC"}
                         live_positions: dict[str, float] = {}
+                        _usd_eur_rate: float | None = None  # lazy-loaded
+
                         for currency, qty in live_balances.items():
                             if currency.upper() in fiat or qty <= 0:
                                 continue
-                            # Match to a pair using the profile's quote currencies
+                            # Try quote currencies in order (e.g. EUR, EURC)
+                            placed = False
                             for q in qc_list:
                                 pair = f"{currency.upper()}-{q.upper()}"
+                                live_price = client.get_current_price(pair)
+                                if live_price and live_price > 0:
+                                    live_positions[pair] = qty
+                                    prices[pair] = live_price
+                                    placed = True
+                                    break
+                            # Fallback: try USD pair and convert to primary quote
+                            if not placed:
+                                usd_pair = f"{currency.upper()}-USD"
+                                usd_price = client.get_current_price(usd_pair)
+                                if usd_price and usd_price > 0:
+                                    if _usd_eur_rate is None:
+                                        eur_usd = client.get_current_price("EUR-USD") or 0
+                                        _usd_eur_rate = (1.0 / eur_usd) if eur_usd > 0 else 0
+                                        if _usd_eur_rate == 0:
+                                            # Try EURC-USDC as proxy
+                                            eurc_usdc = client.get_current_price("EURC-USDC") or 0
+                                            _usd_eur_rate = (1.0 / eurc_usdc) if eurc_usdc > 0 else 0.92
+                                    primary_q = qc_list[0] if qc_list else "EUR"
+                                    pair = f"{currency.upper()}-{primary_q.upper()}"
+                                    eur_price = usd_price * _usd_eur_rate
+                                    live_positions[pair] = qty
+                                    prices[pair] = eur_price
+                                    placed = True
+                            # Last resort: include with no price
+                            if not placed:
+                                primary_q = qc_list[0] if qc_list else "EUR"
+                                pair = f"{currency.upper()}-{primary_q.upper()}"
                                 live_positions[pair] = qty
-                                break
-                            else:
-                                # No quote currency filter — keep as-is
-                                live_positions[currency] = qty
+
                         if live_positions:
                             positions = live_positions
                             # Update cash balance from live EUR/fiat balance
@@ -350,6 +378,12 @@ def get_portfolio_exposure(profile: str = Query(""), db=Depends(deps.get_profile
                 else:
                     qty = float(pos) if pos else 0
                     price = prices.get(pair, 0)
+                    # If no price in snapshot/cache, try a live lookup
+                    if not price and client:
+                        try:
+                            price = client.get_current_price(pair) or 0
+                        except Exception:
+                            pass
                     entry_price = avg_entry_by_pair.get(pair, price)
                 value = qty * price
                 pct = (value / portfolio_val * 100) if portfolio_val else 0
