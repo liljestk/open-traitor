@@ -479,12 +479,26 @@ export const updateLLMProviders = (providers: LLMProviderConfig[]) =>
     body: JSON.stringify({ providers }),
   })
 
-export const updateApiKeys = (keys: Record<string, string>) =>
-  apiFetch<{ ok: boolean; updated: string[] }>('/settings/api-keys', {
+export const updateApiKeys = async (keys: Record<string, string>): Promise<{ ok: boolean; updated: string[] }> => {
+  // Step 1: request confirmation token
+  const step1 = await apiFetch<{
+    ok: boolean; confirmation_required?: boolean;
+    confirmation_token?: string; updated?: string[];
+  }>('/settings/api-keys', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keys }),
   })
+  if (step1.ok) return step1 as { ok: boolean; updated: string[] }
+  if (!step1.confirmation_required || !step1.confirmation_token)
+    throw new Error('Unexpected response from API key update')
+  // Step 2: confirm with token
+  return apiFetch<{ ok: boolean; updated: string[] }>('/settings/api-keys', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys, confirmation_token: step1.confirmation_token }),
+  })
+}
 
 export interface OpenRouterCreditsInfo {
   ok: boolean

@@ -1,73 +1,99 @@
-# 🤖 Auto-Traitor: Autonomous LLM Crypto Trading Agent
+# 🤖 Auto-Traitor: Autonomous Multi-Asset LLM Trading System
 
-An autonomous, LLM-powered cryptocurrency trading agent that runs **entirely locally** using **Ollama** and interfaces with the **Coinbase Advanced Trade API**. Communicates via **Telegram** for notifications, approvals, and receiving commands. Features **autonomous portfolio rotation** (crypto-to-crypto swaps), **fee-aware trading**, and a **time-limited high-stakes mode**.
+An autonomous, LLM-powered trading system supporting **cryptocurrency** (Coinbase) and **equities** (Interactive Brokers). Uses a multi-provider LLM fallback chain (OpenRouter → Groq → Ollama) with GPU-accelerated local inference. Features a multi-agent pipeline, **strict domain separation** between asset classes, **Temporal-orchestrated planning**, a **real-time dashboard**, and **conversational Telegram control**.
+
+> **Full architecture docs:** [`docs/high-level-architecture.md`](docs/high-level-architecture.md) &nbsp;|&nbsp; **Decision log:** [`docs/ADR/`](docs/ADR/)
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    DOCKER COMPOSE                        │
-│                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │   Ollama     │  │    Redis     │  │  News Worker  │  │
-│  │  (Local LLM) │  │  (State &    │  │  (Background) │  │
-│  │  GPU Accel.  │  │   Cache)     │  │  Reddit/RSS   │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘  │
-│         │                 │                  │          │
-│  ┌──────┴─────────────────┴──────────────────┴───────┐  │
-│  │              TRADING AGENT (Daemon)                │  │
-│  │                                                   │  │
-│  │  ┌──────────────┐  ┌──────────────┐               │  │
-│  │  │   WebSocket  │  │   Telegram   │               │  │
-│  │  │  (Real-time  │  │    Bot       │──── 📱 You    │  │
-│  │  │   Prices)    │  │  (🔒 Strict) │               │  │
-│  │  └──────┬───────┘  └──────┬───────┘               │  │
-│  │         │                 │                       │  │
-│  │  ┌──────┴─────────────────┴────────────────────┐  │  │
-│  │  │           ORCHESTRATOR                       │  │  │
-│  │  │                                              │  │  │
-│  │  │  Market Analyst → Strategist → Risk Mgr     │  │  │
-│  │  │      │                            │          │  │  │
-│  │  │  Technical     ┌──────────────┐   Rules      │  │  │
-│  │  │  + Sentiment   │  Absolute    │   Engine     │  │  │
-│  │  │  + Fear&Greed  │   Rules      │     │        │  │  │
-│  │  │  + Multi-TF    │ (NEVER BREAK)│     ▼        │  │  │
-│  │  │               └──────────────┘  Executor     │  │  │
-│  │  │                                    │         │  │  │
-│  │  │  ┌──────────────┐  ┌────────────┐  │         │  │  │
-│  │  │  │ Fee Manager  │  │ Portfolio  │  │         │  │  │
-│  │  │  │ (Loss Prev.) │  │ Rotator   │  │         │  │  │
-│  │  │  └──────────────┘  └────────────┘  │         │  │  │
-│  │  │                                    │         │  │  │
-│  │  └────────────────────────────────────┼─────────┘  │  │
-│  │                                       │            │  │
-│  │                              ┌────────┴─────────┐  │  │
-│  │                              │   Coinbase API   │  │  │
-│  │                              │   (REST + WS)    │  │  │
-│  │                              └──────────────────┘  │  │
-│  └────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         DOCKER COMPOSE                           │
+│                                                                  │
+│  ┌───────────┐ ┌───────────┐ ┌────────────┐ ┌────────────────┐  │
+│  │  Ollama   │ │   Redis   │ │ PostgreSQL │ │   Langfuse v3  │  │
+│  │ (GPU LLM) │ │ (Cache &  │ │ (Trading   │ │ (LLM Traces)   │  │
+│  │ RTX 5080  │ │  State)   │ │  Stats DB) │ │ +ClickHouse    │  │
+│  └─────┬─────┘ └─────┬─────┘ └─────┬──────┘ │ +MinIO         │  │
+│        │              │             │        └───────┬────────┘  │
+│  ┌─────┴──────────────┴─────────────┴────────────────┴───────┐   │
+│  │                    TRADING AGENTS                          │   │
+│  │                                                           │   │
+│  │  ┌─────────────────┐      ┌─────────────────┐            │   │
+│  │  │ agent-coinbase  │      │   agent-ibkr    │            │   │
+│  │  │ (Crypto)        │      │   (Equities)    │            │   │
+│  │  │ ════════════    │      │   ════════════  │            │   │
+│  │  │ Domain-isolated │      │ Domain-isolated │            │   │
+│  │  └────────┬────────┘      └────────┬────────┘            │   │
+│  │           │     SHARED PIPELINE     │                    │   │
+│  │  ┌────────┴─────────────────────────┴────────────────┐   │   │
+│  │  │              ORCHESTRATOR                          │   │   │
+│  │  │                                                    │   │   │
+│  │  │  Market Analyst → Strategist → Risk Mgr → Exec.  │   │   │
+│  │  │       │                           │                │   │   │
+│  │  │  Technical    ┌──────────────┐    AbsoluteRules   │   │   │
+│  │  │  +Sentiment   │  Absolute    │    +Kelly/ATR      │   │   │
+│  │  │  +Fear&Greed  │   Rules      │    +Correlation    │   │   │
+│  │  │  +Multi-TF    │ (NEVER BREAK)│         │          │   │   │
+│  │  │               └──────────────┘    Fee Manager     │   │   │
+│  │  │                                        │          │   │   │
+│  │  │  ┌──────────────┐ ┌────────────────┐   │          │   │   │
+│  │  │  │  Portfolio   │ │ Trailing Stop  │   │          │   │   │
+│  │  │  │  Rotator     │ │   Manager      │   │          │   │   │
+│  │  │  └──────────────┘ └────────────────┘   │          │   │   │
+│  │  └────────────────────────────────────────┼──────────┘   │   │
+│  │                                           │              │   │
+│  │  ┌──────────┐  ┌────────────┐   ┌────────┴──────────┐   │   │
+│  │  │ Telegram │  │  WebSocket │   │  Exchange APIs    │   │   │
+│  │  │ Bot 📱   │  │  Feeds     │   │ Coinbase / IBKR   │   │   │
+│  │  └──────────┘  └────────────┘   └───────────────────┘   │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
+│  │  Dashboard   │  │ News Worker  │  │  Temporal + Worker    │  │
+│  │  (FastAPI +  │  │ (Reddit/RSS) │  │  (Planning Workflows) │  │
+│  │   Vue 3 SPA) │  │              │  │  Daily/Weekly/Monthly │  │
+│  │  :8090       │  │              │  │  :7233 / :8233        │  │
+│  └──────────────┘  └──────────────┘  └───────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## ✨ Key Features
 
-- **🧠 Local LLM (Ollama)** — All AI runs on YOUR machine. No data leaves your network.
+### Trading Engine
+- **🧠 Multi-Provider LLM** — OpenRouter → Groq → Ollama fallback chain with tier-aware routing
 - **🔒 Absolute Rules** — Hard limits that can NEVER be broken (max spend, daily loss, etc.)
-- **📱 Telegram Bot** — Full 2-way communication: alerts, approvals, tasks, high-stakes mode
-- **🔄 Portfolio Rotation** — Autonomous crypto-to-crypto swaps based on relative strength
+- **📊 Multi-Agent Pipeline** — Market Analyst → Strategist → Risk Manager → Executor
+- **🎯 Position Sizing** — Kelly Criterion, ATR volatility adjustment, correlation penalties
 - **💰 Fee-Aware Trading** — Only trades when expected gain exceeds fees × safety margin
-- **⚡ High-Stakes Mode** — Owner-activated time-limited elevated trading via Telegram
-- **📰 News Aggregation** — Reddit, RSS (CoinTelegraph, CoinDesk), CoinGecko trending
-- **📡 WebSocket Feed** — Real-time prices via Coinbase WebSocket (low latency)
-- **📊 Multi-Timeframe Analysis** — 15m, 1h, 4h, 1d confluence scoring
-- **😱 Fear & Greed Index** — Sentiment analysis from alternative.me
 - **🎯 Trailing Stop-Loss** — Dynamic stops that lock in profits as price moves
+- **🔄 Portfolio Rotation** — Autonomous crypto-to-crypto swaps based on relative strength
+- **⚡ High-Stakes Mode** — Owner-activated time-limited elevated trading via Telegram
+- **📝 Paper Trading** — Full simulation with realistic fee modeling before going live
+
+### Analysis & Intelligence
+- **📡 WebSocket Feed** — Real-time prices via Coinbase WebSocket (low latency)
+- **📊 Multi-Timeframe Analysis** — 1h, 4h, 1d, 1w confluence scoring
+- **📈 Strategy Ensemble** — EMA Crossover + Bollinger Reversion with adaptive weighting
+- **😱 Fear & Greed Index** — Crypto sentiment from alternative.me
+- **📰 News Aggregation** — Reddit, RSS (CoinTelegraph, CoinDesk), ticker-specific matching
+- **🧪 Adaptive Learning** — Tracks prediction accuracy, adjusts strategy weights over time
+
+### Operations & Observability
+- **📱 Telegram Bot** — Conversational LLM-powered control (not slash-command-only)
+- **🖥️ Real-Time Dashboard** — Vue 3 SPA with FastAPI backend, WebSocket updates
+- **📅 Temporal Planning** — Daily/weekly/monthly strategic planning workflows
+- **🔭 Langfuse Tracing** — Full LLM observability (prompts, tokens, costs, latency)
 - **📋 Trade Journal** — Every decision logged (JSONL + CSV)
-- **🔐 Audit Log** — Hash-chained tamper-evident log of all critical operations
-- **❤️ Health Check** — HTTP endpoints for Docker HEALTHCHECK and Prometheus
-- **🛡️ Security** — Non-root Docker, strict Telegram auth, prompt injection protection
-- **📝 Paper Trading** — Test safely with simulated money before going live
-- **🐳 Docker Compose** — One command to deploy everything
+- **🔐 Audit Log** — Hash-chained tamper-evident record of all critical operations
+- **❤️ Health Check** — HTTP endpoints for Docker HEALTHCHECK
+- **🐳 Docker Compose** — One command to deploy the full 12+ service stack
+
+### Security & Isolation
+- **🏛️ Domain Separation** — Crypto and equity data never mix (SQL, Redis keys, UI)
+- **🛡️ Strict Auth** — Telegram allowlist, dashboard 2FA + TOTP, request signing
+- **🔐 Container Hardening** — Read-only FS, no-new-privileges, non-root execution
+- **🧱 Pre-Commit Guards** — Domain separation + security tests block broken commits
 
 ## 🚀 Quick Start
 
@@ -250,48 +276,85 @@ Bot: ⚡ HIGH-STAKES MODE ACTIVATED
 ```
 auto-traitor/
 ├── config/
-│   ├── .env                # Environment config (created by setup.ps1)
-│   ├── settings.yaml       # Trading, risk, fees, rotation config
+│   ├── .env                # Environment secrets (created by setup.ps1)
+│   ├── coinbase.yaml       # Crypto profile config
+│   ├── ibkr.yaml           # Equity profile config
+│   ├── settings.yaml       # Default/template config
 │   └── Modelfile           # Custom Ollama model definition
+├── docs/
+│   ├── high-level-architecture.md  # System architecture overview
+│   └── ADR/                # Architecture Decision Records
 ├── src/
 │   ├── agents/             # Multi-agent LLM system
+│   │   ├── base_agent.py   # Abstract agent interface
 │   │   ├── market_analyst.py # Technical + sentiment analysis
-│   │   ├── strategist.py   # Strategy generation
-│   │   ├── risk_manager.py # Risk validation + rules check
-│   │   └── executor.py     # Trade execution on Coinbase
+│   │   ├── strategist.py   # Trade strategy generation
+│   │   ├── risk_manager.py # Risk validation + position sizing
+│   │   ├── executor.py     # Order routing + execution
+│   │   └── settings_advisor.py # Autonomous parameter tuning
 │   ├── analysis/           # Market analysis
 │   │   ├── technical.py    # RSI, MACD, Bollinger, EMA
+│   │   ├── sentiment.py    # Keyword-based sentiment scoring
 │   │   ├── fear_greed.py   # Fear & Greed Index integration
 │   │   └── multi_timeframe.py # Multi-TF confluence scoring
-│   ├── backtesting/        # Backtesting engine
-│   │   └── engine.py       # Historical replay simulation
 │   ├── core/               # Core engine
-│   │   ├── coinbase_client.py # Coinbase REST API wrapper
-│   │   ├── ws_feed.py      # Coinbase WebSocket (real-time)
-│   │   ├── llm_client.py   # Ollama LLM client
 │   │   ├── orchestrator.py # Main pipeline coordinator
-│   │   ├── portfolio_rotator.py # Autonomous crypto swaps
-│   │   ├── fee_manager.py  # Fee-aware trading logic
-│   │   ├── high_stakes.py  # Time-limited elevated mode
-│   │   ├── trailing_stop.py # Trailing stop-loss manager
-│   │   ├── health.py       # HTTP health check server
+│   │   ├── managers/       # Pipeline, State, Telegram, Universe, etc.
+│   │   ├── coinbase_client.py # Coinbase REST + WebSocket
+│   │   ├── ib_client.py    # Interactive Brokers connector
+│   │   ├── llm_client.py   # Multi-provider LLM with fallback
+│   │   ├── llm_providers.py # Provider definitions + routing
 │   │   ├── rules.py        # Absolute rules engine
-│   │   └── state.py        # Shared trading state
+│   │   ├── state.py        # Thread-safe shared trading state
+│   │   ├── fee_manager.py  # Fee-aware trading logic
+│   │   ├── portfolio_rotator.py # Autonomous crypto swaps
+│   │   ├── portfolio_scaler.py  # Tier-based limit scaling
+│   │   ├── trailing_stop.py # Dynamic trailing stop-loss
+│   │   ├── route_finder.py # Crypto swap path discovery
+│   │   ├── high_stakes.py  # Time-limited elevated mode
+│   │   ├── stats_db.py     # PostgreSQL stats persistence
+│   │   └── health.py       # HTTP health check server
+│   ├── dashboard/          # Web dashboard backend
+│   │   ├── server.py       # FastAPI app + middleware
+│   │   ├── auth.py         # Session auth + 2FA (TOTP)
+│   │   ├── deps.py         # Profile routing + dependencies
+│   │   └── routes/         # API endpoints (trades, stats, etc.)
+│   ├── models/             # Pydantic data models
+│   │   ├── trade.py        # Trade, TradeAction, TradeStatus
+│   │   └── signal.py       # Signal, SignalType, MarketCondition
 │   ├── news/               # News aggregation
-│   │   ├── aggregator.py   # Reddit, RSS, CoinGecko
+│   │   ├── aggregator.py   # Reddit, RSS, ticker matching
 │   │   └── worker.py       # Background news daemon
+│   ├── planning/           # Temporal workflow orchestration
+│   │   ├── workflows.py    # Daily/weekly/monthly plan workflows
+│   │   └── activities.py   # Side-effectful activity implementations
+│   ├── strategies/         # Deterministic strategy ensemble
+│   │   ├── base.py         # Abstract strategy + StrategySignal
+│   │   ├── ema_crossover.py # Trend-following EMA strategy
+│   │   ├── bollinger_reversion.py # Mean-reversion strategy
+│   │   └── pairs_monitor.py # Correlation divergence detector
 │   ├── telegram_bot/       # Telegram integration
 │   │   ├── bot.py          # LLM-powered bot interface
-│   │   └── chat_handler.py # Conversational engine + memory
+│   │   ├── chat_handler.py # Conversational engine
+│   │   ├── fast_path.py    # Low-latency critical commands
+│   │   ├── formatters.py   # Mobile-friendly output formatting
+│   │   └── proactive.py    # Autonomous event alerts
 │   ├── utils/              # Utilities
 │   │   ├── journal.py      # Trade journal (JSONL + CSV)
 │   │   ├── audit.py        # Hash-chained audit log
-│   │   ├── rate_limiter.py # API rate limiting
 │   │   ├── security.py     # Input sanitization, HMAC
-│   │   └── logger.py       # Rich logging
-│   └── main.py             # Entry point
-├── docker-compose.yml      # Full stack deployment
-├── Dockerfile              # Agent container
+│   │   ├── settings_manager.py # Runtime config management
+│   │   ├── tax.py          # FIFO cost-basis tax tracking
+│   │   ├── training_data.py # LLM fine-tuning data capture
+│   │   ├── rate_limiter.py # Token-bucket rate limiting
+│   │   └── logger.py       # Structured colored logging
+│   └── main.py             # Entry point (paper/live/daemon modes)
+├── dashboard/frontend/     # Vue 3 + TypeScript SPA
+├── tests/                  # Comprehensive test suite
+├── scripts/                # Migration, inspection, watchdog scripts
+├── docker-compose.yml      # Full 12+ service stack
+├── Dockerfile              # Trading agent container
+├── Dockerfile.dashboard    # Dashboard container
 ├── setup.ps1               # Interactive setup wizard
 └── requirements.txt        # Python dependencies
 ```

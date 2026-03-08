@@ -65,7 +65,7 @@ journal:
   enabled: true
 llm:
   max_retries: 3
-  max_tokens: 2000
+  max_tokens: 3000
   model: llama3.1:8b
   providers:
   - api_key_env: OPENROUTER_API_KEY
@@ -105,6 +105,18 @@ llm:
     rpm_limit: 20
     tier: paid
     timeout: 45
+  - api_key_env: GROQ_API_KEY
+    api_key_set: true
+    base_url: https://api.groq.com/openai/v1
+    cooldown_seconds: 30
+    daily_request_limit: 0
+    daily_token_limit: 100000
+    enabled: true
+    model: llama-3.3-70b-versatile
+    name: groq
+    rpm_limit: 30
+    tier: free
+    timeout: 30
   - api_key_env: OPENAI_API_KEY
     api_key_set: false
     base_url: https://api.openai.com/v1
