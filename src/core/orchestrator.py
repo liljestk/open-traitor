@@ -172,6 +172,12 @@ class Orchestrator:
         self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
         self.interval = config.get("trading", {}).get("interval", 120)
 
+        # Tell the health endpoint about our cycle interval
+        from src.core.health import _lock as _health_lock
+        import src.core.health as _health_mod
+        with _health_lock:
+            _health_mod._cycle_interval = self.interval
+
         # Portfolio scaler — adapts limits based on account tier
         self.portfolio_scaler = PortfolioScaler(config)
 
@@ -1017,6 +1023,8 @@ class Orchestrator:
                                     "interval", self.interval
                                 ))
                                 self.interval = new_interval
+                                with _health_lock:
+                                    _health_mod._cycle_interval = new_interval
                                 # Recompute RPM budget with new interval
                                 rpm_max, rpm_bd = compute_rpm_entity_cap(
                                     self.config.get("llm_providers", []),

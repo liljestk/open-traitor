@@ -27,6 +27,7 @@ _health_state: dict[str, Any] = {
     "components": {},
     "cycle_duration_s": None,
 }
+_cycle_interval: int = 120  # default; updated by orchestrator
 _lock = threading.Lock()
 
 
@@ -100,7 +101,9 @@ def health():
     if state["last_cycle"]:
         last = datetime.fromisoformat(state["last_cycle"])
         age = (datetime.now(timezone.utc) - last).total_seconds()
-        if age > 300:  # 5 minutes without a cycle = problem
+        # Allow 2x the cycle interval + 60s buffer before marking stale
+        max_age = _cycle_interval * 2 + 60
+        if age > max_age:
             is_healthy = False
             state["status"] = "stale"
 
