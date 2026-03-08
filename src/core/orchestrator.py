@@ -673,134 +673,175 @@ class Orchestrator:
                 # Fee manager: update min_gain_after_fees for current tier
                 self.fee_manager.min_gain_after_fees_pct = tier.min_gain_after_fees_pct
 
-                # Run pipelines — parallelised across pairs using asyncio
-                # Sort pairs: planning-preferred first, then normal, avoid last
-                priority_map = getattr(self, "_pair_priority_map", {})
-
-                # ─── Universe Scan + LLM Screener (funnel system) ─────
-                try:
-                    self.universe_scanner.refresh_pair_universe()
-                    self.universe_scanner.run_universe_scan()
-
-                    self._screener_cycle_counter += 1
-                    # Run screener immediately when no pairs are active (cold start)
-                    # or on the regular interval
-                    no_pairs = not self._screener_active_pairs and not self.pairs
-                    if no_pairs or self._screener_cycle_counter >= self._SCREENER_INTERVAL:
-                        self._screener_cycle_counter = 0
-                        self.universe_scanner.run_llm_screener()
-                except Exception as _uf_err:
-                    logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
-
-                # Effective base pairs: screener-selected (if any) or configured seed list
-                # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
-                # Read both pairs and watchlist under lock to prevent race with settings advisor
-                with self._pairs_lock:
-                    base_pairs = self._screener_active_pairs or list(self.pairs[:effective_max_active])
-                    current_watchlist = list(self.watchlist_pairs)
-                base_pairs = base_pairs[:effective_max_active]  # enforce cap
-                
-                # Watchlist pairs bypass the LLM screener cap since they are explicitly requested
-                # Combine base pairs and watchlist pairs, removing duplicates while preserving order
-                effective_pairs = list(dict.fromkeys(base_pairs + current_watchlist))
-
-                if not effective_pairs:
-                    logger.warning(
-                        "⚠️ No active pairs to trade this cycle "
-                        f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}, watchlist={len(current_watchlist)}). "
-                        "Waiting for LLM screener to pick pairs..."
-                    )
-
-                sorted_pairs = sorted(
-                    effective_pairs,
-                    key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
+                # ─── Monitoring Mode ──────────────────────────────────
+                # When all capital is tied up in positions with trailing stops
+                # and there's not enough cash for a new trade, skip the
+                # expensive LLM pipeline and just monitor exits.
+                _active_stops = self.trailing_stops.get_active_count()
+                _cash = (
+                    sum(self.state.live_cash_balances.values())
+                    if self.state.live_cash_balances
+                    else self.state.cash_balance
+                )
+                _min_trade = self.fee_manager.get_dynamic_min_trade(_pv)
+                _monitoring_mode = (
+                    _active_stops > 0
+                    and _cash < _min_trade
+                    and len(self.state.open_positions) >= tier.max_open_positions
                 )
 
-                # ─── Market hours filter (equity only) ────────────────
-                _asset_class = getattr(self.exchange, "asset_class", "crypto")
-                if _asset_class == "equity":
-                    _open_pairs, _closed_pairs = [], []
-                    for _p in sorted_pairs:
-                        (_open_pairs if _is_market_open(_p, _asset_class) else _closed_pairs).append(_p)
-                    if _closed_pairs:
-                        logger.info(
-                            f"🕐 Market closed — skipping {_closed_pairs} "
-                            f"({len(_open_pairs)}/{len(sorted_pairs)} pairs open)"
-                        )
-                    sorted_pairs = _open_pairs
-
-                # ─── Batch scan: select the most-urgent/stale N pairs ─────────
-                _all_pairs_count = len(sorted_pairs)
-                if self.scan_batch_size and self.scan_batch_size < _all_pairs_count:
-                    _now_mono = time.monotonic()
-                    _open_pairs_set = {t.pair for t in self.state.trades if t.is_open}
-                    with self._pairs_lock:
-                        _watchlist_set = set(self.watchlist_pairs)
-
-                    def _batch_score(p: str) -> float:
-                        # Tier: open position (-2) → watchlist (-1) → normal (0)
-                        if p in _open_pairs_set:
-                            tier = -2.0
-                        elif p in _watchlist_set:
-                            tier = -1.0
+                if _monitoring_mode:
+                    # Refresh prices for trailing stop accuracy
+                    _stop_pairs = list(self.trailing_stops.get_all_stops().keys())
+                    for _sp in _stop_pairs:
+                        if self.ws_feed:
+                            _ws_p = self.ws_feed.get_price(_sp)
+                            if _ws_p > 0:
+                                self.state.update_price(_sp, _ws_p)
                         else:
-                            tier = 0.0
-                        # Staleness: 0 (just scanned) → -1.0 (≥3 cycles overdue)
-                        age = _now_mono - self._last_pipeline_ts.get(p, 0.0)
-                        staleness = min(age / (3 * self.interval), 1.0)
-                        return tier - staleness  # most-negative = scan first
-
-                    sorted_pairs = sorted(sorted_pairs, key=_batch_score)[:self.scan_batch_size]
+                            try:
+                                _rest_p = self.exchange.get_current_price(_sp)
+                                if _rest_p > 0:
+                                    self.state.update_price(_sp, _rest_p)
+                            except Exception:
+                                pass
+                    sorted_pairs = []  # skip pipeline — no LLM calls
                     logger.info(
-                        f"🔄 Batch scan: {len(sorted_pairs)}/{_all_pairs_count} pairs "
-                        f"(batch_size={self.scan_batch_size}, "
-                        f"with_open={len(_open_pairs_set & set(sorted_pairs))})"
+                        f"👁️ Monitoring mode — {_active_stops} trailing stop(s) active, "
+                        f"cash {format_currency(_cash, self.state.currency_symbol)} "
+                        f"< min trade {format_currency(_min_trade, self.state.currency_symbol)}. "
+                        f"Skipping LLM pipeline."
                     )
+                else:
+                    # ─── Full Pipeline Mode ───────────────────────────────
+                    # Run pipelines — parallelised across pairs using asyncio
+                    # Sort pairs: planning-preferred first, then normal, avoid last
+                    priority_map = getattr(self, "_pair_priority_map", {})
 
-                # ─── RPM utilisation log (every 10 cycles) ────────────
-                if cycle_count % 10 == 0:
-                    _n_pairs = len(sorted_pairs)
-                    _worst_calls = _n_pairs * 2 + self._rpm_breakdown.get('overhead', 2)
-                    _budget = self._rpm_breakdown.get('available_per_cycle', 0)
-                    logger.info(
-                        f"📈 RPM utilisation: {_n_pairs}/{self._max_active_pairs} entities, "
-                        f"est. {_worst_calls} calls/cycle (budget: {_budget})"
-                    )
+                    # ─── Universe Scan + LLM Screener (funnel system) ─────
+                    try:
+                        self.universe_scanner.refresh_pair_universe()
+                        self.universe_scanner.run_universe_scan()
 
-                try:
-                    tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
-                    # Impose a hard timeout so no single cycle can hang forever.
-                    # Budget: ~60s per pair × max_pairs, capped at 10 min.
-                    _cycle_deadline = min(60.0 * len(sorted_pairs), 600.0)
-                    self._loop.run_until_complete(
-                        asyncio.wait_for(
-                            asyncio.gather(*tasks, return_exceptions=True),
-                            timeout=_cycle_deadline,
+                        self._screener_cycle_counter += 1
+                        # Run screener immediately when no pairs are active (cold start)
+                        # or on the regular interval
+                        no_pairs = not self._screener_active_pairs and not self.pairs
+                        if no_pairs or self._screener_cycle_counter >= self._SCREENER_INTERVAL:
+                            self._screener_cycle_counter = 0
+                            self.universe_scanner.run_llm_screener()
+                    except Exception as _uf_err:
+                        logger.warning(f"Universe funnel error (non-fatal): {_uf_err}")
+
+                    # Effective base pairs: screener-selected (if any) or configured seed list
+                    # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
+                    # Read both pairs and watchlist under lock to prevent race with settings advisor
+                    with self._pairs_lock:
+                        base_pairs = self._screener_active_pairs or list(self.pairs[:effective_max_active])
+                        current_watchlist = list(self.watchlist_pairs)
+                    base_pairs = base_pairs[:effective_max_active]  # enforce cap
+                    
+                    # Watchlist pairs bypass the LLM screener cap since they are explicitly requested
+                    # Combine base pairs and watchlist pairs, removing duplicates while preserving order
+                    effective_pairs = list(dict.fromkeys(base_pairs + current_watchlist))
+
+                    if not effective_pairs:
+                        logger.warning(
+                            "⚠️ No active pairs to trade this cycle "
+                            f"(screener={len(self._screener_active_pairs)}, config={len(self.pairs)}, watchlist={len(current_watchlist)}). "
+                            "Waiting for LLM screener to pick pairs..."
                         )
+
+                    sorted_pairs = sorted(
+                        effective_pairs,
+                        key=lambda p: priority_map.get(p, 0.0),  # negative = preferred → first
                     )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        f"⚠️ Cycle #{cycle_count} pipelines timed out after "
-                        f"{_cycle_deadline:.0f}s — moving to next cycle"
-                    )
-                except Exception as _pe:
-                    logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
 
-                # Record scan timestamps so the next cycle's batch-scorer knows
-                # which pairs are freshest and can deprioritise them.
-                _ts_now = time.monotonic()
-                for _p in sorted_pairs:
-                    self._last_pipeline_ts[_p] = _ts_now
+                    # ─── Market hours filter (equity only) ────────────────
+                    _asset_class = getattr(self.exchange, "asset_class", "crypto")
+                    if _asset_class == "equity":
+                        _open_pairs, _closed_pairs = [], []
+                        for _p in sorted_pairs:
+                            (_open_pairs if _is_market_open(_p, _asset_class) else _closed_pairs).append(_p)
+                        if _closed_pairs:
+                            logger.info(
+                                f"🕐 Market closed — skipping {_closed_pairs} "
+                                f"({len(_open_pairs)}/{len(sorted_pairs)} pairs open)"
+                            )
+                        sorted_pairs = _open_pairs
 
-                # ─── Check pending limit orders ───
-                try:
-                    self.executor.check_pending_orders()
-                except Exception as _po_err:
-                    logger.debug(f"Pending order check error: {_po_err}")
+                    # ─── Batch scan: select the most-urgent/stale N pairs ─────────
+                    _all_pairs_count = len(sorted_pairs)
+                    if self.scan_batch_size and self.scan_batch_size < _all_pairs_count:
+                        _now_mono = time.monotonic()
+                        _open_pairs_set = {t.pair for t in self.state.trades if t.is_open}
+                        with self._pairs_lock:
+                            _watchlist_set = set(self.watchlist_pairs)
 
-                # ─── Portfolio Rotation (autonomous swaps) ───
-                if self.rotator is not None:
-                    self._run_rotation()
+                        def _batch_score(p: str) -> float:
+                            # Tier: open position (-2) → watchlist (-1) → normal (0)
+                            if p in _open_pairs_set:
+                                tier = -2.0
+                            elif p in _watchlist_set:
+                                tier = -1.0
+                            else:
+                                tier = 0.0
+                            # Staleness: 0 (just scanned) → -1.0 (≥3 cycles overdue)
+                            age = _now_mono - self._last_pipeline_ts.get(p, 0.0)
+                            staleness = min(age / (3 * self.interval), 1.0)
+                            return tier - staleness  # most-negative = scan first
+
+                        sorted_pairs = sorted(sorted_pairs, key=_batch_score)[:self.scan_batch_size]
+                        logger.info(
+                            f"🔄 Batch scan: {len(sorted_pairs)}/{_all_pairs_count} pairs "
+                            f"(batch_size={self.scan_batch_size}, "
+                            f"with_open={len(_open_pairs_set & set(sorted_pairs))})"
+                        )
+
+                    # ─── RPM utilisation log (every 10 cycles) ────────────
+                    if cycle_count % 10 == 0:
+                        _n_pairs = len(sorted_pairs)
+                        _worst_calls = _n_pairs * 2 + self._rpm_breakdown.get('overhead', 2)
+                        _budget = self._rpm_breakdown.get('available_per_cycle', 0)
+                        logger.info(
+                            f"📈 RPM utilisation: {_n_pairs}/{self._max_active_pairs} entities, "
+                            f"est. {_worst_calls} calls/cycle (budget: {_budget})"
+                        )
+
+                    try:
+                        tasks = [self.pipeline_manager.run_pipeline(p) for p in sorted_pairs]
+                        # Impose a hard timeout so no single cycle can hang forever.
+                        # Budget: ~60s per pair × max_pairs, capped at 10 min.
+                        _cycle_deadline = min(60.0 * len(sorted_pairs), 600.0)
+                        self._loop.run_until_complete(
+                            asyncio.wait_for(
+                                asyncio.gather(*tasks, return_exceptions=True),
+                                timeout=_cycle_deadline,
+                            )
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"⚠️ Cycle #{cycle_count} pipelines timed out after "
+                            f"{_cycle_deadline:.0f}s — moving to next cycle"
+                        )
+                    except Exception as _pe:
+                        logger.error(f"Pipeline worker error: {_pe}", exc_info=True)
+
+                    # Record scan timestamps so the next cycle's batch-scorer knows
+                    # which pairs are freshest and can deprioritise them.
+                    _ts_now = time.monotonic()
+                    for _p in sorted_pairs:
+                        self._last_pipeline_ts[_p] = _ts_now
+
+                    # ─── Check pending limit orders ───
+                    try:
+                        self.executor.check_pending_orders()
+                    except Exception as _po_err:
+                        logger.debug(f"Pending order check error: {_po_err}")
+
+                    # ─── Portfolio Rotation (autonomous swaps) ───
+                    if self.rotator is not None:
+                        self._run_rotation()
 
                 # Update trailing stops with current prices — execute sells for triggered stops
                 triggered = self.trailing_stops.update_prices(
