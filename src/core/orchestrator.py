@@ -684,12 +684,11 @@ class Orchestrator:
 
                 # Effective base pairs: screener-selected (if any) or configured seed list
                 # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
-                base_pairs = self._screener_active_pairs or self.pairs[:effective_max_active]
-                base_pairs = base_pairs[:effective_max_active]  # enforce cap
-
-                # M6 fix: Read watchlist_pairs under lock to prevent race
+                # Read both pairs and watchlist under lock to prevent race with settings advisor
                 with self._pairs_lock:
+                    base_pairs = self._screener_active_pairs or list(self.pairs[:effective_max_active])
                     current_watchlist = list(self.watchlist_pairs)
+                base_pairs = base_pairs[:effective_max_active]  # enforce cap
                 
                 # Watchlist pairs bypass the LLM screener cap since they are explicitly requested
                 # Combine base pairs and watchlist pairs, removing duplicates while preserving order
@@ -872,8 +871,8 @@ class Orchestrator:
                                     quantity=te_qty,
                                     sale_price_per_unit=te_price,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"FIFO record_sell failed: {e}")
 
                             tier_msg = (
                                 f"Tier exit +{te_pct:.0f}% on {te_pair}: "

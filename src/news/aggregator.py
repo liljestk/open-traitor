@@ -599,9 +599,14 @@ class NewsAggregator:
             return local
 
         # Cache miss — try to hydrate from Redis (written by news-worker)
+        # Prefer profile-scoped key to prevent cross-domain news bleed
         if self.redis:
             try:
-                raw = self.redis.get("news:latest")
+                raw = None
+                if self.profile:
+                    raw = self.redis.get(f"news:{self.profile}:latest")
+                if not raw:
+                    raw = self.redis.get("news:latest")
                 if raw:
                     data = json.loads(raw)
                     articles = []

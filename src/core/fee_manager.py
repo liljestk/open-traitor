@@ -306,6 +306,15 @@ class FeeManager:
         Returns:
             (is_worthwhile, fee_estimate)
         """
+        # M3 fix: Guard against non-positive quote amounts
+        if quote_amount <= 0:
+            estimate = FeeEstimate(
+                sell_fee_pct=0, buy_fee_pct=0, total_fee_pct=0,
+                sell_fee_quote=0, buy_fee_quote=0, total_fee_quote=0,
+                breakeven_move_pct=0, is_profitable=False,
+            )
+            return False, estimate
+
         # Too small to trade — use dynamic minimum based on portfolio size
         effective_min = self.get_dynamic_min_trade(portfolio_value)
         if quote_amount < effective_min:

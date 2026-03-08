@@ -104,7 +104,7 @@ class RiskManagerAgent(BaseAgent):
         # Cap at tier-aware max (caller may further cap via effective_max_position_pct)
         config_max = self.risk_config.get("max_position_pct", 0.05)
         tier_max = self.scaler.tier.max_position_pct if self.scaler else config_max
-        max_pct = max(config_max, tier_max)  # Use the larger of config/tier
+        max_pct = min(config_max, tier_max)  # Use the stricter of config/tier
         position_frac = min(position_frac, max_pct)
 
         self.logger.info(

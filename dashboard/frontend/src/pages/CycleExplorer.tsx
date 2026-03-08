@@ -36,7 +36,7 @@ export default function CycleExplorer() {
 
   // Dynamic pair filter from watchlist (profile-aware via apiFetch)
   const { data: watchlistData } = useQuery({
-    queryKey: ['watchlist-pairs-filter'],
+    queryKey: ['watchlist-pairs-filter', profile],
     queryFn: fetchWatchlist,
     staleTime: 60_000,
   })

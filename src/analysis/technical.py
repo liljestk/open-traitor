@@ -62,6 +62,8 @@ class TechnicalAnalyzer:
 
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
+        # When avg_loss is 0 (no down moves), RSI = 100; when avg_gain is 0, RSI = 0
+        rsi = rsi.where(avg_loss != 0, other=np.where(avg_gain > 0, 100.0, 50.0))
         return rsi
 
     def compute_macd(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:

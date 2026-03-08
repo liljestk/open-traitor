@@ -212,22 +212,31 @@ def _execute(conn, sql, params=None):
 async def fetch_trade_history(days: int = 7, pair: str | None = None, profile: str = "") -> list[dict]:
     """Fetch closed trade history from StatsDB for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    # Build exchange filter to prevent cross-domain bleed
+    _exch_frag = ""
+    _exch_params: tuple = ()
+    if profile:
+        _resolved = profile.lower()
+        if _resolved in ("crypto",):
+            _resolved = "coinbase"
+        _exch_frag = " AND (exchange = %s OR exchange = %s)"
+        _exch_params = (_resolved, f"{_resolved}_paper")
     with _get_conn() as conn:
         if pair:
             cur = _execute(conn,
-                """SELECT ts, pair, action, price, quote_amount, confidence,
+                f"""SELECT ts, pair, action, price, quote_amount, confidence,
                           signal_type, pnl, fee_quote, reasoning
-                   FROM trades WHERE ts >= %s AND pair = %s AND pnl IS NOT NULL
+                   FROM trades WHERE ts >= %s AND pair = %s AND pnl IS NOT NULL{_exch_frag}
                    ORDER BY ts DESC LIMIT 500""",
-                (cutoff, pair),
+                (cutoff, pair, *_exch_params),
             )
         else:
             cur = _execute(conn,
-                """SELECT ts, pair, action, price, quote_amount, confidence,
+                f"""SELECT ts, pair, action, price, quote_amount, confidence,
                           signal_type, pnl, fee_quote, reasoning
-                   FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+                   FROM trades WHERE ts >= %s AND pnl IS NOT NULL{_exch_frag}
                    ORDER BY ts DESC LIMIT 500""",
-                (cutoff,),
+                (cutoff, *_exch_params),
             )
         return [dict(r) for r in cur.fetchall()]
 
@@ -236,10 +245,19 @@ async def fetch_trade_history(days: int = 7, pair: str | None = None, profile: s
 async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
     """Fetch portfolio performance summary for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    # Build exchange filter to prevent cross-domain bleed
+    _exch_frag = ""
+    _exch_params: tuple = ()
+    if profile:
+        _resolved = profile.lower()
+        if _resolved in ("crypto",):
+            _resolved = "coinbase"
+        _exch_frag = " AND (exchange = %s OR exchange = %s)"
+        _exch_params = (_resolved, f"{_resolved}_paper")
 
     with _get_conn() as conn:
         trade_stats = _execute(conn,
-            """SELECT
+            f"""SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning,
                 SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing,
@@ -250,38 +268,47 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
                 COALESCE(AVG(confidence), 0) as avg_confidence,
                 COALESCE(SUM(quote_amount), 0) as total_volume,
                 COALESCE(SUM(fee_quote), 0) as total_fees
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL""",
-            (cutoff,),
+               FROM trades WHERE ts >= %s AND pnl IS NOT NULL{_exch_frag}""",
+            (cutoff, *_exch_params),
         ).fetchone()
 
         pair_breakdown = _execute(conn,
-            """SELECT pair,
+            f"""SELECT pair,
                 COUNT(*) as trades,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 COALESCE(SUM(pnl), 0) as pnl,
                 COALESCE(AVG(confidence), 0) as avg_confidence
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+               FROM trades WHERE ts >= %s AND pnl IS NOT NULL{_exch_frag}
                GROUP BY pair ORDER BY pnl DESC""",
-            (cutoff,),
+            (cutoff, *_exch_params),
         ).fetchall()
 
+        _snap_frag = ""
+        _snap_params: tuple = (cutoff,)
+        if profile:
+            _snap_resolved = profile.lower()
+            if _snap_resolved in ("crypto",):
+                _snap_resolved = "coinbase"
+            _snap_frag = " AND exchange = %s"
+            _snap_params = (cutoff, _snap_resolved)
         portfolio_range = _execute(conn,
-            """SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
+            f"""SELECT MIN(portfolio_value) as low, MAX(portfolio_value) as high,
                       AVG(portfolio_value) as avg
-               FROM portfolio_snapshots WHERE ts >= %s""",
-            (cutoff,),
+               FROM portfolio_snapshots WHERE ts >= %s{_snap_frag}""",
+            _snap_params,
         ).fetchone()
 
         # Fetch reasoning traces to understand what drove losses
+        _t_exch_frag = _exch_frag.replace("exchange", "t.exchange") if _exch_frag else ""
         reasoning_sample = _execute(conn,
-            """SELECT ar.ts, ar.pair, ar.signal_type, ar.confidence,
+            f"""SELECT ar.ts, ar.pair, ar.signal_type, ar.confidence,
                       ar.reasoning_json, t.action, t.pnl
                FROM agent_reasoning ar
                LEFT JOIN trades t ON t.id = ar.trade_id
                WHERE ar.ts >= %s AND ar.agent_name = 'market_analyst'
-                 AND t.pnl IS NOT NULL
+                 AND t.pnl IS NOT NULL{_t_exch_frag}
                ORDER BY t.pnl ASC LIMIT 20""",
-            (cutoff,),
+            (cutoff, *_exch_params),
         ).fetchall()
 
     # Detect native currency from profile-specific config (or fallback to settings)
@@ -674,11 +701,19 @@ async def evaluate_previous_plan(horizon: str, profile: str = "") -> dict:
         plan_ts: str = row["ts"]
 
         # Actual trade outcomes since (and including) the plan timestamp
+        _exch_frag = ""
+        _exch_params: tuple = ()
+        if profile:
+            _resolved = profile.lower()
+            if _resolved in ("crypto",):
+                _resolved = "coinbase"
+            _exch_frag = " AND (exchange = %s OR exchange = %s)"
+            _exch_params = (_resolved, f"{_resolved}_paper")
         trades = _execute(conn,
-            """SELECT pair, action, pnl, confidence, signal_type
-               FROM trades WHERE ts >= %s AND pnl IS NOT NULL
+            f"""SELECT pair, action, pnl, confidence, signal_type
+               FROM trades WHERE ts >= %s AND pnl IS NOT NULL{_exch_frag}
                ORDER BY ts DESC LIMIT 500""",
-            (plan_ts,),
+            (plan_ts, *_exch_params),
         ).fetchall()
         trades = [dict(t) for t in trades]
 

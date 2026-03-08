@@ -117,21 +117,22 @@ function InterventionPanel() {
   const [confirm, setConfirm] = useState<{ pair: string; action: 'liquidate' | 'tighten_stop' | 'pause' } | null>(null)
   const fmtCurrency = useCurrencyFormatter()
   const qc = useQueryClient()
+  const profile = useLiveStore((s) => s.profile)
 
   const { data: exposure } = useQuery({
-    queryKey: ['exposure'],
+    queryKey: ['exposure', profile],
     queryFn: fetchPortfolioExposure,
     refetchInterval: 15_000,
   })
 
   const { data: stops } = useQuery({
-    queryKey: ['trailing-stops'],
+    queryKey: ['trailing-stops', profile],
     queryFn: fetchTrailingStops,
     refetchInterval: 15_000,
   })
 
   const { data: cmdHistory } = useQuery({
-    queryKey: ['command-history'],
+    queryKey: ['command-history', profile],
     queryFn: () => fetchCommandHistory(),
     refetchInterval: 10_000,
     enabled: showHistory,
@@ -140,9 +141,9 @@ function InterventionPanel() {
   const mutation = useMutation({
     mutationFn: (cmd: { pair: string; action: 'liquidate' | 'tighten_stop' | 'pause' }) => sendTradeCommand(cmd.pair, cmd.action),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['exposure'] })
-      qc.invalidateQueries({ queryKey: ['trailing-stops'] })
-      qc.invalidateQueries({ queryKey: ['command-history'] })
+      qc.invalidateQueries({ queryKey: ['exposure', profile] })
+      qc.invalidateQueries({ queryKey: ['trailing-stops', profile] })
+      qc.invalidateQueries({ queryKey: ['command-history', profile] })
     },
   })
 
@@ -312,7 +313,7 @@ function AgentStatusPanel() {
 
   if (!stats) return null
 
-  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : profile === 'crypto' || !profile ? 'Coinbase (Crypto)' : profile
+  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : 'Coinbase (Crypto)'
   const portfolioVal = stats.portfolio?.portfolio_value
 
   return (
@@ -362,7 +363,7 @@ export default function LiveMonitor() {
 
   const spanEvents = events.filter((e) => e.type !== 'ping')
 
-  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : profile === 'crypto' || !profile ? 'Coinbase (Crypto)' : profile
+  const profileLabel = profile === 'ibkr' ? 'IBKR (Stocks)' : 'Coinbase (Crypto)'
 
   return (
     <PageTransition>

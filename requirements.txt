@@ -33,6 +33,10 @@ uvicorn[standard]>=0.41.0
 httpx>=0.28.1
 python-multipart>=0.0.22
 
+# 2FA (TOTP)
+pyotp>=2.9.0
+qrcode[pil]>=8.0.0
+
 # LLM Observability (Langfuse)
 langfuse>=3.14.4
 

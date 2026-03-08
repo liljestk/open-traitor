@@ -17,6 +17,7 @@ import RiskExposure from './pages/RiskExposure'
 import Predictions from './pages/Predictions'
 import SetupWizard from './pages/SetupWizard'
 import LLMAnalytics from './pages/LLMAnalytics'
+import Login from './pages/Login'
 import { fetchSystemStatus, type SystemStatus } from './api'
 
 const queryClient = new QueryClient({
@@ -55,6 +56,11 @@ function AppRoutes() {
 
   // Show nothing while checking status (avoids flash of wrong page)
   if (status === null) return null
+
+  // Auth gate: if auth is configured but user isn't authenticated, show login
+  if (status.setup_complete && status.auth_configured && !status.authenticated) {
+    return <Login onSuccess={() => setStatus({ ...status, authenticated: true })} />
+  }
 
   return (
     <Routes>

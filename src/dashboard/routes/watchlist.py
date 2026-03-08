@@ -18,7 +18,7 @@ logger = get_logger("dashboard.watchlist")
 router = APIRouter(tags=["Watchlist"])
 
 
-def _notify_orchestrator(action: str, pair: str) -> None:
+def _notify_orchestrator(action: str, pair: str, profile: str = "") -> None:
     """Push a signed watchlist-update command to the orchestrator via Redis.
 
     Silently no-ops if Redis or the signing key is not configured.
@@ -36,7 +36,8 @@ def _notify_orchestrator(action: str, pair: str) -> None:
             "nonce": nonce,
             "signature": deps.sign_dashboard_command(action, pair, ts, "dashboard", nonce),
         }
-        deps.redis_client.rpush("dashboard:commands_queue", json.dumps(cmd))
+        _prefix = deps.resolve_profile(profile) or "coinbase"
+        deps.redis_client.rpush(f"{_prefix}:dashboard:commands_queue", json.dumps(cmd))
     except Exception as exc:
         logger.debug(f"watchlist: Redis notify failed ({action} {pair}): {exc}")
 
@@ -194,12 +195,12 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
     exchange = body.exchange or resolved or "coinbase"
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
-    _notify_orchestrator("add_watchlist_pair", pair)
+    _notify_orchestrator("add_watchlist_pair", pair, profile=profile)
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}
 
 
 @router.delete("/api/watchlist/follow/{pair}", summary="Unfollow a pair (human)")
-def unfollow_pair(pair: str, db=Depends(deps.get_profile_db)):
+def unfollow_pair(pair: str, profile: str = Query(""), db=Depends(deps.get_profile_db)):
     """Remove a pair from the human-curated watchlist.
 
     Only removes the human follow — LLM follows (config pairs) are unaffected.
@@ -208,5 +209,5 @@ def unfollow_pair(pair: str, db=Depends(deps.get_profile_db)):
     deleted = db.unfollow_pair(pair=pair, followed_by="human")
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Not following {pair!r}")
-    _notify_orchestrator("remove_watchlist_pair", pair)
+    _notify_orchestrator("remove_watchlist_pair", pair, profile=profile)
     return {"ok": True, "pair": pair, "unfollowed": True}

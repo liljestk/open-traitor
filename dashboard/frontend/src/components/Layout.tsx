@@ -1,19 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, ChevronDown, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
 
 /**
- * All possible profiles.  Filtered at render-time to only show
- * exchanges that are actually configured on the backend.
- * The `sub` label is dynamically resolved from exchangeCurrencies.
+ * Strict two-mode profiles — no combined "All Systems" view.
+ * Each profile maps to exactly one exchange backend.
  */
-const ALL_PROFILES: { id: string; label: string; exchange: string | null }[] = [
-  { id: '', label: 'Default', exchange: null },
+const ALL_PROFILES: { id: string; label: string; exchange: string }[] = [
   { id: 'crypto', label: 'Crypto', exchange: 'coinbase' },
   { id: 'ibkr', label: 'Equities', exchange: 'ibkr' },
 ]
+
+/** Domain accent colors — always consistent across the entire UI */
+const DOMAIN_COLORS: Record<string, { accent: string; bg: string; label: string }> = {
+  crypto: { accent: '#22c55e', bg: 'rgba(34,197,94,0.10)', label: 'CRYPTO' },
+  ibkr:   { accent: '#3b82f6', bg: 'rgba(59,130,246,0.10)', label: 'EQUITIES' },
+}
 
 const NAV = [
   {
@@ -111,8 +115,13 @@ export default function Layout() {
     .find(([path]) => location.pathname.startsWith(path))?.[1] ?? 'Dashboard'
 
   const profileOptions = ALL_PROFILES.filter(
-    (p) => p.exchange === null || availableExchanges[p.exchange]
+    (p) => availableExchanges[p.exchange]
   )
+
+  // Resolve current profile to a domain key (never empty)
+  const currentProfile = useLiveStore.getState().profile || 'crypto'
+  const domain = DOMAIN_COLORS[currentProfile] ?? DOMAIN_COLORS.crypto
+  const currentProfileObj = ALL_PROFILES.find((p) => p.id === currentProfile) ?? ALL_PROFILES[0]
 
   // ─── Mobile layout ────────────────────────────────────────────────────────
   if (isMobile) {
@@ -126,7 +135,7 @@ export default function Layout() {
           height: 52,
           flexShrink: 0,
           background: '#0d1117',
-          borderBottom: '1px solid #21262d',
+          borderBottom: `2px solid ${domain.accent}`,
           display: 'flex',
           alignItems: 'center',
           padding: '0 16px',
@@ -137,7 +146,7 @@ export default function Layout() {
         }}>
           <div style={{
             width: 28, height: 28, borderRadius: 7,
-            background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+            background: `linear-gradient(135deg, ${domain.accent}, ${domain.accent}aa)`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             flexShrink: 0,
           }}>
@@ -145,6 +154,13 @@ export default function Layout() {
           </div>
           <span style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3', letterSpacing: '-0.01em' }}>
             {pageTitle}
+          </span>
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
+            color: domain.accent, background: domain.bg,
+            padding: '2px 6px', borderRadius: 4,
+          }}>
+            {domain.label}
           </span>
           <div style={{ flex: 1 }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: connected ? '#22c55e' : '#6e7681' }}>
@@ -261,45 +277,46 @@ export default function Layout() {
                 </button>
               </div>
 
-              {/* Profile switcher */}
+              {/* Domain switcher — segmented control */}
               <div style={{ padding: '10px 16px 4px' }}>
                 <div style={{ fontSize: 10, fontWeight: 600, color: '#6e7681', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
-                  Profile
+                  Domain
                 </div>
-                <div style={{ position: 'relative' }}>
-                  <select
-                    value={useLiveStore.getState().profile}
-                    onChange={(e) => {
-                      useLiveStore.getState().setProfile(e.target.value)
-                      window.location.reload()
-                    }}
-                    style={{
-                      width: '100%',
-                      appearance: 'none',
-                      background: '#161b22',
-                      border: '1px solid #30363d',
-                      borderRadius: 8,
-                      padding: '9px 32px 9px 10px',
-                      color: '#e6edf3',
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      outline: 'none',
-                      fontFamily: 'inherit',
-                    }}
-                  >
-                    {profileOptions.map((p) => {
-                      const sub = p.exchange === null
-                        ? 'All Systems'
-                        : (exchangeCurrencies[p.exchange] ?? 'EUR')
-                      return (
-                        <option key={p.id} value={p.id} style={{ background: '#161b22', color: '#e6edf3' }}>
-                          {p.label} ({sub})
-                        </option>
-                      )
-                    })}
-                  </select>
-                  <ChevronDown size={13} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: '#6e7681', pointerEvents: 'none' }} />
+                <div style={{
+                  display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden',
+                  border: '1px solid #30363d', background: '#161b22',
+                }}>
+                  {profileOptions.map((p) => {
+                    const isActive = currentProfile === p.id
+                    const dc = DOMAIN_COLORS[p.id] ?? DOMAIN_COLORS.crypto
+                    const ccy = exchangeCurrencies[p.exchange] ?? 'EUR'
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          if (!isActive) {
+                            useLiveStore.getState().setProfile(p.id)
+                            window.location.reload()
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: '10px 0',
+                          background: isActive ? dc.bg : 'transparent',
+                          border: 'none',
+                          borderRight: '1px solid #30363d',
+                          color: isActive ? dc.accent : '#8b949e',
+                          fontSize: 13, fontWeight: isActive ? 700 : 500,
+                          cursor: isActive ? 'default' : 'pointer',
+                          fontFamily: 'inherit',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        {p.label}
+                        <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>({ccy})</span>
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -326,7 +343,7 @@ export default function Layout() {
                         background: isActive ? '#21262d' : 'transparent',
                         textDecoration: 'none',
                         marginBottom: 2,
-                        borderLeft: isActive ? '2px solid #22c55e' : '2px solid transparent',
+                        borderLeft: isActive ? `2px solid ${domain.accent}` : '2px solid transparent',
                         WebkitTapHighlightColor: 'transparent',
                       })}
                     >
@@ -364,12 +381,12 @@ export default function Layout() {
         flexDirection: 'column',
         overflow: 'hidden',
       }}>
-        {/* Logo */}
-        <div style={{ padding: '20px 16px 16px', borderBottom: '1px solid #21262d' }}>
+        {/* Logo + domain badge */}
+        <div style={{ padding: '20px 16px 16px', borderBottom: `2px solid ${domain.accent}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{
               width: 32, height: 32, borderRadius: 8,
-              background: 'linear-gradient(135deg, #22c55e, #16a34a)',
+              background: `linear-gradient(135deg, ${domain.accent}, ${domain.accent}aa)`,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               flexShrink: 0,
             }}>
@@ -380,56 +397,66 @@ export default function Layout() {
               <div style={{ fontSize: 11, color: '#8b949e', marginTop: 1 }}>LLM Trading Ops</div>
             </div>
           </div>
+          {/* Domain indicator strip */}
+          <div style={{
+            marginTop: 12,
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '5px 8px', borderRadius: 6,
+            background: domain.bg,
+          }}>
+            <span style={{
+              width: 7, height: 7, borderRadius: '50%',
+              background: domain.accent, display: 'inline-block',
+            }} />
+            <span style={{ fontSize: 10, fontWeight: 700, color: domain.accent, letterSpacing: '0.1em' }}>
+              {domain.label}
+            </span>
+            <span style={{ fontSize: 10, color: '#8b949e', marginLeft: 'auto' }}>
+              {exchangeCurrencies[currentProfileObj.exchange] ?? 'EUR'}
+            </span>
+          </div>
         </div>
 
-        {/* Profile Switcher */}
+        {/* Domain Switcher — segmented toggle */}
         <div style={{ padding: '10px 8px 4px' }}>
-          <div style={{ position: 'relative' }}>
-            <select
-              value={useLiveStore.getState().profile}
-              onChange={(e) => {
-                useLiveStore.getState().setProfile(e.target.value)
-                window.location.reload()
-              }}
-              style={{
-                width: '100%',
-                appearance: 'none',
-                background: 'linear-gradient(145deg, #161b22, #0d1117)',
-                border: '1px solid #30363d',
-                borderRadius: 8,
-                padding: '8px 32px 8px 10px',
-                color: '#e6edf3',
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                outline: 'none',
-                fontFamily: 'inherit',
-              }}
-            >
-              {ALL_PROFILES
-                .filter((p) => p.exchange === null || availableExchanges[p.exchange])
-                .map((p) => {
-                const sub = p.exchange === null
-                  ? 'All Systems'
-                  : (exchangeCurrencies[p.exchange] ?? 'EUR')
-                return (
-                <option key={p.id} value={p.id} style={{ background: '#161b22', color: '#e6edf3' }}>
-                  {p.label} ({sub})
-                </option>
-              )})
-              }
-            </select>
-            <ChevronDown
-              size={13}
-              style={{
-                position: 'absolute',
-                right: 10,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                color: '#6e7681',
-                pointerEvents: 'none',
-              }}
-            />
+          <div style={{
+            display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden',
+            border: '1px solid #30363d', background: '#161b22',
+          }}>
+            {ALL_PROFILES
+              .filter((p) => availableExchanges[p.exchange])
+              .map((p, i, arr) => {
+              const isActive = currentProfile === p.id
+              const dc = DOMAIN_COLORS[p.id] ?? DOMAIN_COLORS.crypto
+              const ccy = exchangeCurrencies[p.exchange] ?? 'EUR'
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    if (!isActive) {
+                      useLiveStore.getState().setProfile(p.id)
+                      window.location.reload()
+                    }
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '8px 0',
+                    background: isActive ? dc.bg : 'transparent',
+                    border: 'none',
+                    borderRight: i < arr.length - 1 ? '1px solid #30363d' : 'none',
+                    color: isActive ? dc.accent : '#6e7681',
+                    fontSize: 11, fontWeight: isActive ? 700 : 500,
+                    cursor: isActive ? 'default' : 'pointer',
+                    fontFamily: 'inherit',
+                    transition: 'all 0.15s',
+                    letterSpacing: '0.02em',
+                  }}
+                >
+                  {p.label}
+                  <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 3 }}>({ccy})</span>
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -458,7 +485,7 @@ export default function Layout() {
                     textDecoration: 'none',
                     marginBottom: 1,
                     transition: 'all 0.1s',
-                    borderLeft: isActive ? '2px solid #22c55e' : '2px solid transparent',
+                    borderLeft: isActive ? `2px solid ${domain.accent}` : '2px solid transparent',
                   })}
                 >
                   <span style={{ color: 'inherit', opacity: 0.85 }}>{icon}</span>
@@ -498,6 +525,13 @@ export default function Layout() {
           gap: 12,
         }}>
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: '#e6edf3' }}>{pageTitle}</h1>
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
+            color: domain.accent, background: domain.bg,
+            padding: '3px 8px', borderRadius: 4,
+          }}>
+            {domain.label}
+          </span>
           <div style={{ flex: 1 }} />
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,

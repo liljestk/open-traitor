@@ -144,6 +144,11 @@ class ExecutorAgent(BaseAgent):
             self.logger.error(f"❌ Trade rejected: invalid price {price} for {pair}")
             return {"executed": False, "reason": f"Invalid price: {price}"}
 
+        # H11: Validate amounts are positive before executing
+        if quote_amount <= 0 or quantity < 0:
+            self.logger.error(f"❌ Trade rejected: invalid amounts quote_amount={quote_amount}, quantity={quantity}")
+            return {"executed": False, "reason": "Invalid trade amounts"}
+
         # Create Trade record
         trade = Trade(
             pair=pair,
@@ -632,8 +637,8 @@ class ExecutorAgent(BaseAgent):
                 hold_duration_seconds=hold_secs,
                 exit_reason=reason,
             )
-        except Exception:
-            pass  # never break executor
+        except Exception as e:
+            self.logger.debug(f"Training data recording failed (non-fatal): {e}")
 
     # =========================================================================
     # Limit Order Lifecycle Management

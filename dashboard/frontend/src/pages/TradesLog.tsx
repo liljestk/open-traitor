@@ -7,7 +7,7 @@ import { fetchTrades, exportTradesUrl } from '../api'
 import { SkeletonTable } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
-import { useCurrencyFormatter, useIsMobile } from '../store'
+import { useCurrencyFormatter, useIsMobile, useLiveStore } from '../store'
 
 const inputStyle: React.CSSProperties = {
     background: '#161b22',
@@ -40,9 +40,10 @@ export default function TradesLog() {
     const [limit, setLimit] = useState(500)
     const fmtCurrency = useCurrencyFormatter()
     const isMobile = useIsMobile()
+    const profile = useLiveStore((s) => s.profile)
 
     const { data, isLoading, isFetching, refetch } = useQuery({
-        queryKey: ['trades', pairFilter, limit, hours],
+        queryKey: ['trades', pairFilter, limit, hours, profile],
         queryFn: () => fetchTrades(pairFilter || undefined, limit, hours),
         refetchInterval: 30000,
     })

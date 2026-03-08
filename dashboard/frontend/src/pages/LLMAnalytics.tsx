@@ -22,6 +22,7 @@ import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import { useLiveStore } from '../store'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -360,8 +361,9 @@ function calcSimulation(
 
 function OptimizerTab({ hours }: { hours: number }) {
   const qc = useQueryClient()
+  const profile = useLiveStore((s) => s.profile)
   const { data: optData, isLoading } = useQuery({
-    queryKey: ['llm-optimizer', hours],
+    queryKey: ['llm-optimizer', hours, profile],
     queryFn: () => fetchOptimizer(hours),
     refetchInterval: 30_000,
   })
@@ -378,7 +380,7 @@ function OptimizerTab({ hours }: { hours: number }) {
     mutationFn: () => applyOptimizer(draft),
     onSuccess: () => {
       setDraft({})
-      qc.invalidateQueries({ queryKey: ['llm-optimizer'] })
+      qc.invalidateQueries({ queryKey: ['llm-optimizer', hours, profile] })
     },
   })
 
@@ -675,9 +677,10 @@ function OptimizerTab({ hours }: { hours: number }) {
 export default function LLMAnalytics() {
   const [hours, setHours] = useState(168)
   const [tab, setTab] = useState<'overview' | 'optimizer'>('overview')
+  const profile = useLiveStore((s) => s.profile)
 
   const { data, isLoading } = useQuery({
-    queryKey: ['llm-analytics', hours],
+    queryKey: ['llm-analytics', hours, profile],
     queryFn: () => fetchLLMAnalytics(hours),
     refetchInterval: 60_000,
   })

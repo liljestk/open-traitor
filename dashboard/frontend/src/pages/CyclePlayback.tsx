@@ -12,6 +12,7 @@ import CandlestickChart from '../components/CandlestickChart'
 import SpanWaterfall from '../components/SpanWaterfall'
 import PageTransition from '../components/PageTransition'
 import { SkeletonBlock } from '../components/Skeleton'
+import { useLiveStore } from '../store'
 
 const OUTCOME_CONFIG = {
   executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
@@ -114,8 +115,9 @@ function TradeChartContext({
   trade?: CycleFull['trade']
   startedAt: string
 }) {
+  const profile = useLiveStore((s) => s.profile)
   const { data: candleData, isLoading } = useQuery({
-    queryKey: ['candles-context', pair, startedAt],
+    queryKey: ['candles-context', pair, startedAt, profile],
     queryFn: () => fetchCandles(pair, 'FIVE_MINUTE', 200),
     staleTime: 300_000,
   })
@@ -159,8 +161,9 @@ function TradeChartContext({
 
 export default function CyclePlayback() {
   const { cycleId } = useParams<{ cycleId: string }>()
+  const profile = useLiveStore((s) => s.profile)
   const { data: cycle, isLoading, error } = useQuery({
-    queryKey: ['cycle', cycleId],
+    queryKey: ['cycle', cycleId, profile],
     queryFn: () => fetchCycleFull(cycleId!),
     enabled: !!cycleId,
   })

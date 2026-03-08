@@ -170,13 +170,13 @@ export default function RiskExposure() {
   const profile = useLiveStore((s) => s.profile)
 
   const { data: exposure, isLoading: expLoading } = useQuery({
-    queryKey: ['exposure'],
+    queryKey: ['exposure', profile],
     queryFn: fetchPortfolioExposure,
     refetchInterval: 30_000,
   })
 
   const { data: stops, isLoading: stopsLoading } = useQuery({
-    queryKey: ['trailing-stops'],
+    queryKey: ['trailing-stops', profile],
     queryFn: fetchTrailingStops,
     refetchInterval: 15_000,
   })

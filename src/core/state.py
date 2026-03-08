@@ -329,13 +329,13 @@ class TradingState:
                             f"Insufficient position for sell {trade.pair}: have={position:.8f}, need={trade.quantity:.8f}"
                         )
 
+            # M5 fix: Trim old closed trades BEFORE appending to avoid peak memory spikes
+            if len(self.trades) >= self._max_trades_in_memory:
+                self._trim_closed_trades()
+
             self.trades.append(trade)
             self.total_trades += 1
             self.last_trade_time = trade.timestamp
-
-            # M5 fix: Trim old closed trades if list exceeds max length
-            if len(self.trades) > self._max_trades_in_memory:
-                self._trim_closed_trades()
 
             if trade.action.value == "buy":
                 self.positions[trade.pair] = (

@@ -21,6 +21,7 @@ router = APIRouter(tags=["Commands"])
 def send_trade_command(
     pair: str,
     action: str = Query(..., description="Command: liquidate, tighten_stop, pause"),
+    profile: str = Query("", description="Exchange profile"),
 ):
     """Publish a trade command via Redis for the orchestrator to execute.
 
@@ -63,12 +64,13 @@ def send_trade_command(
             nonce=nonce,
         )
         # Push to processing queue (orchestrator polls this)
-        deps.redis_client.rpush("dashboard:commands_queue", json.dumps(command))
+        _prefix = deps.resolve_profile(profile) or "coinbase"
+        deps.redis_client.rpush(f"{_prefix}:dashboard:commands_queue", json.dumps(command))
         # Also publish for real-time subscribers
         deps.redis_client.publish("dashboard:commands", json.dumps(command))
-        # Audit trail
-        deps.redis_client.lpush("dashboard:command_history", json.dumps(command))
-        deps.redis_client.ltrim("dashboard:command_history", 0, 99)
+        # Audit trail (profile-scoped)
+        deps.redis_client.lpush(f"{_prefix}:dashboard:command_history", json.dumps(command))
+        deps.redis_client.ltrim(f"{_prefix}:dashboard:command_history", 0, 99)
 
         logger.info(f"📤 HITL command sent: {action} for {pair}")
         return {"status": "command_sent", "action": action, "pair": pair}
@@ -78,12 +80,13 @@ def send_trade_command(
 
 
 @router.get("/api/trade/commands/history", summary="Recent HITL command history")
-def get_command_history(limit: int = Query(20, ge=1, le=100)):
+def get_command_history(limit: int = Query(20, ge=1, le=100), profile: str = Query("")):
     """Returns recent dashboard-initiated commands."""
     if not deps.redis_client:
         return {"commands": []}
     try:
-        raw_list = deps.redis_client.lrange("dashboard:command_history", 0, limit - 1)
+        _prefix = deps.resolve_profile(profile) or "coinbase"
+        raw_list = deps.redis_client.lrange(f"{_prefix}:dashboard:command_history", 0, limit - 1)
         commands = []
         for raw in raw_list:
             try:
@@ -105,7 +108,8 @@ def get_trailing_stops(profile: str = Query("")):
     if not deps.redis_client:
         return {"stops": {}, "source": "unavailable"}
     try:
-        raw = deps.redis_client.get("trailing_stops:state")
+        _prefix = deps.resolve_profile(profile) or "coinbase"
+        raw = deps.redis_client.get(f"{_prefix}:trailing_stops:state")
         if not raw:
             return {"stops": {}, "source": "redis_empty"}
         stops = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())

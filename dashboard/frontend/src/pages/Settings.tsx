@@ -543,7 +543,6 @@ export default function Settings() {
         </div>
       </div>
 
-<<<<<<< HEAD
       {/* ─── Style Modifiers ─── */}
       {modifiersData && !searchQuery && (
         <div style={{ marginBottom: 20 }}>

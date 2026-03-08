@@ -282,6 +282,7 @@ _PUBLIC_ENDPOINTS = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/set-password",
+    "/api/auth/2fa/verify",  # Needed during login flow
     "/api/system/status",
     "/api/setup",
     "/health",
@@ -301,10 +302,10 @@ async def _security_headers_middleware(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
-        "font-src 'self'; "
+        "font-src 'self' https://fonts.gstatic.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"

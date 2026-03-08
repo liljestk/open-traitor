@@ -30,6 +30,11 @@ def get_stats_summary(
     qc_frag, qc_params = qc_where(qc)
     with db._get_conn() as conn:
         try:
+            # Build exchange filter early — applied to ALL queries
+            resolved_exch = deps.resolve_profile(profile) or None
+            exch_frag = " AND (exchange = %s OR exchange = %s)" if resolved_exch else ""
+            exch_params_ar = [resolved_exch, f"{resolved_exch}_paper"] if resolved_exch else []
+
             # Overall trade stats
             trade_sql = """SELECT
                     COUNT(*) as total_trades,
@@ -41,7 +46,7 @@ def get_stats_summary(
                     ROUND(CAST(MIN(pnl) AS numeric), 2) as worst_trade
                    FROM trades
                    WHERE pnl IS NOT NULL"""
-            trade_row = conn.execute(trade_sql + qc_frag, qc_params).fetchone()
+            trade_row = conn.execute(trade_sql + qc_frag + exch_frag, (*qc_params, *exch_params_ar)).fetchone()
 
             # Last 24h
             cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
@@ -50,18 +55,17 @@ def get_stats_summary(
                     ROUND(CAST(SUM(pnl) AS numeric), 2) as pnl_24h
                    FROM trades
                    WHERE ts >= %s AND pnl IS NOT NULL"""
-            recent_row = conn.execute(recent_sql + qc_frag, (cutoff_24h, *qc_params)).fetchone()
+            recent_row = conn.execute(recent_sql + qc_frag + exch_frag, (cutoff_24h, *qc_params, *exch_params_ar)).fetchone()
 
             # Active pairs
-            resolved_exch = deps.resolve_profile(profile) or None
-            exch_frag = " AND exchange = %s" if resolved_exch else ""
-            exch_params_ar = [resolved_exch] if resolved_exch else []
+            exch_frag_single = " AND exchange = %s" if resolved_exch else ""
+            exch_params_single = [resolved_exch] if resolved_exch else []
             pairs_sql = "SELECT COUNT(DISTINCT pair) as active_pairs FROM agent_reasoning WHERE ts >= %s"
-            pairs_row = conn.execute(pairs_sql + qc_frag + exch_frag, (cutoff_24h, *qc_params, *exch_params_ar)).fetchone()
+            pairs_row = conn.execute(pairs_sql + qc_frag + exch_frag_single, (cutoff_24h, *qc_params, *exch_params_single)).fetchone()
 
             # Cycle count last 24h
             cycle_sql = "SELECT COUNT(DISTINCT cycle_id) as cycles_24h FROM agent_reasoning WHERE ts >= %s"
-            cycle_row = conn.execute(cycle_sql + qc_frag + exch_frag, (cutoff_24h, *qc_params, *exch_params_ar)).fetchone()
+            cycle_row = conn.execute(cycle_sql + qc_frag + exch_frag_single, (cutoff_24h, *qc_params, *exch_params_single)).fetchone()
 
             # Latest portfolio snapshot (filtered by exchange when profile is set)
             snapshot_sql = """SELECT portfolio_value, total_pnl, ts

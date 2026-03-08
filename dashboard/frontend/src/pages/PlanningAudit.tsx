@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
+import { useLiveStore } from '../store'
 import {
   fetchStrategic,
   fetchTemporalRuns,
@@ -93,8 +94,9 @@ function TemporalRunRow({ run }: { run: TemporalRun }) {
   const [showReplay, setShowReplay] = useState(false)
   const qc = useQueryClient()
 
+  const profile = useLiveStore((s) => s.profile)
   const { data: replay, refetch: loadReplay, isFetching } = useQuery({
-    queryKey: ['temporal-replay', run.workflow_id, run.run_id],
+    queryKey: ['temporal-replay', run.workflow_id, run.run_id, profile],
     queryFn: () => fetchTemporalReplay(run.workflow_id, run.run_id),
     enabled: false,
   })
@@ -102,7 +104,7 @@ function TemporalRunRow({ run }: { run: TemporalRun }) {
   const rerunMutation = useMutation({
     mutationFn: () => triggerTemporalRerun(run.workflow_id, run.run_id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['temporal-runs'] })
+      qc.invalidateQueries({ queryKey: ['temporal-runs', profile] })
     },
   })
 
@@ -171,15 +173,16 @@ function TemporalRunRow({ run }: { run: TemporalRun }) {
 export default function PlanningAudit() {
   const [horizon, setHorizon] = useState('')
   const [activeTab, setActiveTab] = useState<'plans' | 'temporal'>('plans')
+  const profile = useLiveStore((s) => s.profile)
 
   const { data: plansData, isLoading: plansLoading } = useQuery({
-    queryKey: ['strategic', horizon],
+    queryKey: ['strategic', horizon, profile],
     queryFn: () => fetchStrategic(horizon || undefined, 30),
     staleTime: 30_000,
   })
 
   const { data: runsData, isLoading: runsLoading, isError: runsIsError, error: runsError } = useQuery({
-    queryKey: ['temporal-runs'],
+    queryKey: ['temporal-runs', profile],
     queryFn: () => fetchTemporalRuns(undefined, 50),
     staleTime: 15_000,
     enabled: activeTab === 'temporal',

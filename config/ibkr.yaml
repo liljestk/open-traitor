@@ -174,24 +174,24 @@ routing:
   enabled: false
 telegram:
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
+  big_loss_threshold: 50
+  big_win_threshold: 50
   bot_token_env: TELEGRAM_BOT_TOKEN_IBKR
   chat_id_env: TELEGRAM_CHAT_ID_IBKR
-  notify_on_trade: true
-  notify_on_signal: true
-  notify_on_signal_confidence: 0.8
-  notify_on_big_win: true
-  big_win_threshold: 50
-  notify_on_big_loss: true
-  big_loss_threshold: 50
-  notify_on_price_move: true
-  price_move_threshold_pct: 5
-  price_move_cooldown_minutes: 20
-  notify_morning_plan: true
-  notify_evening_summary: true
-  notify_periodic_update: true
-  status_update_interval: 3600
   daily_summary: true
   daily_summary_hour: 8
+  notify_evening_summary: true
+  notify_morning_plan: true
+  notify_on_big_loss: true
+  notify_on_big_win: true
+  notify_on_price_move: true
+  notify_on_signal: true
+  notify_on_signal_confidence: 0.8
+  notify_on_trade: true
+  notify_periodic_update: true
+  price_move_cooldown_minutes: 20
+  price_move_threshold_pct: 5
+  status_update_interval: 3600
 trading:
   exchange: ibkr
   holdings_dust_threshold: 0.01
@@ -206,12 +206,7 @@ trading:
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
-  pairs:
-  - ASML.AS-EUR
-  - SAP.DE-EUR
-  - MC.PA-EUR
-  - SIE.DE-EUR
-  - ALV.DE-EUR
+  pairs: []
   paper_slippage_pct: 0.0003
   portfolio_scaling: true
   quote_currencies:

@@ -54,10 +54,14 @@ async def ws_live(websocket: WebSocket):
                 proto = proto.strip()
                 if proto.startswith("apikey."):
                     try:
-                        api_key = base64.b64decode(proto[7:]).decode("utf-8")
+                        raw = proto[7:]
+                        if len(raw) > 256:
+                            logger.warning("WebSocket auth: base64 payload too large, rejected")
+                            break
+                        api_key = base64.b64decode(raw).decode("utf-8")
                         _auth_subprotocol = proto
                     except Exception:
-                        pass
+                        logger.warning("WebSocket auth: invalid base64 in subprotocol")
                     break
             api_key = api_key or websocket.headers.get("x-api-key", "")
 

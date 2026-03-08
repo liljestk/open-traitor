@@ -52,6 +52,7 @@ def _make_rules() -> AbsoluteRules:
         "max_cash_per_trade_pct": 0.50,
         "always_use_stop_loss": True,
         "max_stop_loss_pct": 0.10,
+        "emergency_stop_portfolio": 0,
     })
 
 

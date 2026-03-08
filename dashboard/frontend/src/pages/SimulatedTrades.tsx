@@ -112,14 +112,14 @@ export default function SimulatedTrades() {
 
     // Auto-refreshing query for all simulations
     const { data, isLoading } = useQuery({
-        queryKey: ['simulations', showClosed],
+        queryKey: ['simulations', showClosed, profile],
         queryFn: () => fetchSimulatedTrades(showClosed),
         refetchInterval: 30_000, // refresh live PnL every 30s
     })
 
     // Live price preview for the form
     const { data: priceData } = useQuery({
-        queryKey: ['market-price', pair],
+        queryKey: ['market-price', pair, profile],
         queryFn: () => fetchMarketPrice(pair),
         staleTime: 10_000,
     })
@@ -127,14 +127,14 @@ export default function SimulatedTrades() {
     const createMut = useMutation({
         mutationFn: createSimulatedTrade,
         onSuccess: () => {
-            qc.invalidateQueries({ queryKey: ['simulations'] })
+            qc.invalidateQueries({ queryKey: ['simulations', showClosed, profile] })
             setNotes('')
         },
     })
 
     const closeMut = useMutation({
         mutationFn: closeSimulatedTrade,
-        onSuccess: () => qc.invalidateQueries({ queryKey: ['simulations'] }),
+        onSuccess: () => qc.invalidateQueries({ queryKey: ['simulations', showClosed, profile] }),
     })
 
     const sims = data?.simulations ?? []
@@ -160,7 +160,7 @@ export default function SimulatedTrades() {
                     <Activity className="text-brand-400" />
                     Simulated Trades
                 </h2>
-                <p className="text-sm text-gray-400">Paper trade against live Coinbase prices</p>
+                <p className="text-sm text-gray-400">Paper trade against live {profile === 'ibkr' ? 'IBKR' : 'Coinbase'} prices</p>
             </div>
 
             {/* New Simulation Form */}

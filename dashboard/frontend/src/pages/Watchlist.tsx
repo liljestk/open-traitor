@@ -10,7 +10,7 @@ import {
   Bot, UserRound, Plus, Search, Loader2, Gauge, AlertTriangle,
 } from 'lucide-react'
 import { fetchWatchlist, fetchCandles, followPair, unfollowPair, searchProducts, type PairInfo, type ProductResult } from '../api'
-import { useCurrencyFormatter } from '../store'
+import { useCurrencyFormatter, useLiveStore } from '../store'
 import CandlestickChart from '../components/CandlestickChart'
 import { SkeletonCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
@@ -303,15 +303,16 @@ export default function Watchlist() {
   const [selectedPair, setSelectedPair] = useState<string | null>(null)
   const fmtCurrency = useCurrencyFormatter()
   const qc = useQueryClient()
+  const profile = useLiveStore((s) => s.profile)
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['watchlist'],
+    queryKey: ['watchlist', profile],
     queryFn: fetchWatchlist,
     refetchInterval: 30_000,
   })
 
   const { data: candleData, isLoading: candleLoading } = useQuery({
-    queryKey: ['candles', selectedPair],
+    queryKey: ['candles', selectedPair, profile],
     queryFn: () => fetchCandles(selectedPair!, 'ONE_HOUR', 200),
     enabled: !!selectedPair,
     staleTime: 60_000,
@@ -320,11 +321,11 @@ export default function Watchlist() {
   /* Mutations for follow / unfollow */
   const followMut = useMutation({
     mutationFn: (pair: string) => followPair(pair),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist', profile] }),
   })
   const unfollowMut = useMutation({
     mutationFn: (pair: string) => unfollowPair(pair),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist'] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlist', profile] }),
   })
   const isToggling = followMut.isPending || unfollowMut.isPending
 

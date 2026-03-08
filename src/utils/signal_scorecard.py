@@ -601,7 +601,7 @@ class SignalScorecard:
     # ------------------------------------------------------------------
 
     def get_strategy_accuracy(
-        self, window_days: int = 14, horizon_hours: int = 4
+        self, window_days: int = 14, horizon_hours: int = 4, exchange: str = "",
     ) -> dict[str, dict]:
         """Get accuracy stats per deterministic strategy.
 
@@ -612,17 +612,22 @@ class SignalScorecard:
         Falls back to trade-level directional accuracy per strategy.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+        _exch_frag = ""
+        _exch_params: tuple = ()
+        if exchange:
+            _exch_frag = " AND (t.exchange = %s OR t.exchange = %s)"
+            _exch_params = (exchange, f"{exchange}_paper")
 
         with self._db._get_conn() as conn:
             # Get trades with their associated reasoning
             rows = conn.execute(
-                """
+                f"""
                 SELECT t.pair, t.action, t.pnl, ar.reasoning_json
                 FROM trades t
                 JOIN agent_reasoning ar ON ar.trade_id = t.id AND ar.agent_name = 'strategist'
-                WHERE t.ts >= %s AND t.pnl IS NOT NULL
+                WHERE t.ts >= %s AND t.pnl IS NOT NULL{_exch_frag}
                 """,
-                (cutoff,),
+                (cutoff, *_exch_params),
             ).fetchall()
 
         strategy_stats: dict[str, dict] = defaultdict(

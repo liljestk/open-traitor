@@ -24,6 +24,7 @@ mechanically impossible.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -132,6 +133,7 @@ class PortfolioScaler:
         self._config = config
         self._portfolio_value: float = 0.0
         self._tier: Tier = _TIERS[2][1]  # default MEDIUM
+        self._lock = threading.Lock()  # M6 fix: Thread-safe tier updates
         self._scaling_enabled: bool = config.get(
             "trading", {}
         ).get("portfolio_scaling", True)
@@ -153,17 +155,18 @@ class PortfolioScaler:
         if not self._scaling_enabled:
             return self._tier
 
-        old_tier = self._tier
-        self._portfolio_value = portfolio_value
-        self._tier = get_tier(portfolio_value)
+        with self._lock:
+            old_tier = self._tier
+            self._portfolio_value = portfolio_value
+            self._tier = get_tier(portfolio_value)
 
-        if self._tier.name != old_tier.name:
-            logger.info(
-                f"📊 Portfolio tier changed: {old_tier.name} → {self._tier.name} "
-                f"(portfolio: €{portfolio_value:,.2f})"
-            )
+            if self._tier.name != old_tier.name:
+                logger.info(
+                    f"📊 Portfolio tier changed: {old_tier.name} → {self._tier.name} "
+                    f"(portfolio: €{portfolio_value:,.2f})"
+                )
 
-        return self._tier
+            return self._tier
 
     def get_max_position_pct(self) -> float:
         """Max position size as fraction of portfolio."""

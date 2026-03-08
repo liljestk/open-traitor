@@ -330,7 +330,8 @@ class PipelineManager:
             )
         elif orch.redis:
             try:
-                cached = orch.redis.get("news:latest")
+                _news_profile = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+                cached = orch.redis.get(f"news:{_news_profile}:latest") or orch.redis.get("news:latest")
                 if cached:
                     articles = json.loads(cached)
                     news_headlines = "\n".join(
@@ -366,7 +367,8 @@ class PipelineManager:
             if orch.sentiment:
                 news_items = []
                 if orch.redis:
-                    cached = orch.redis.get("news:latest")
+                    _news_profile = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    cached = orch.redis.get(f"news:{_news_profile}:latest") or orch.redis.get("news:latest")
                     if cached:
                         news_items = json.loads(cached)
                 sentiment_data = orch.sentiment.score_for_pair(pair, news_items)
@@ -462,7 +464,8 @@ class PipelineManager:
             _outcomes_n = llm_optimizer.get("recent_outcomes_n", 10)
             recent_outcomes = await asyncio.to_thread(
                 orch.stats_db.get_recent_outcomes,
-                pair, n=_outcomes_n, currency_symbol=orch.state.currency_symbol
+                pair, n=_outcomes_n, currency_symbol=orch.state.currency_symbol,
+                exchange=orch.config.get("trading", {}).get("exchange", "").lower(),
             )
         except Exception as e:
             logger.debug(f"Failed to load recent outcomes: {e}")

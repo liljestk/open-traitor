@@ -41,7 +41,8 @@ class AbsoluteRules:
     This is the final gatekeeper before any trade is executed.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, exchange: str = ""):
+        self.exchange = exchange
         self.max_single_trade = config.get("max_single_trade", config.get("max_single_trade_usd", 500))
         self.max_daily_spend = config.get("max_daily_spend", config.get("max_daily_spend_usd", 2000))
         self.max_daily_loss = config.get("max_daily_loss", config.get("max_daily_loss_usd", 300))
@@ -74,6 +75,9 @@ class AbsoluteRules:
         self._daily_trade_count = 0
         self._last_reset_date: Optional[datetime] = None
         self._last_trade_time: Optional[datetime] = None
+
+        # C5 fix: Track whether daily counter seeding failed
+        self._seeding_failed: bool = False
 
         logger.info("\U0001f512 Absolute Rules Engine initialized")
         self._log_rules()
@@ -145,24 +149,31 @@ class AbsoluteRules:
             conn.autocommit = True
             try:
                 cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                # Build exchange filter to prevent cross-domain counter bleed
+                _ex_filter = ""
+                _ex_params: tuple = (today_start,)
+                if self.exchange:
+                    # Match both live and paper variants (e.g. 'coinbase', 'coinbase_paper')
+                    _ex_filter = " AND (exchange = %s OR exchange = %s)"
+                    _ex_params = (today_start, self.exchange, f"{self.exchange}_paper")
                 # Only sum BUY trades for spend - sell proceeds are not an expense.
                 cur.execute(
-                    """SELECT COUNT(*) as cnt, COALESCE(SUM(quote_amount), 0) as spend
-                       FROM trades WHERE ts >= %s""",
-                    (today_start,),
+                    f"""SELECT COUNT(*) as cnt, COALESCE(SUM(quote_amount), 0) as spend
+                       FROM trades WHERE ts >= %s{_ex_filter}""",
+                    _ex_params,
                 )
                 row = cur.fetchone()
                 cur.execute(
-                    """SELECT COALESCE(SUM(quote_amount), 0) as spend
-                       FROM trades WHERE ts >= %s AND action = 'buy'""",
-                    (today_start,),
+                    f"""SELECT COALESCE(SUM(quote_amount), 0) as spend
+                       FROM trades WHERE ts >= %s AND action = 'buy'{_ex_filter}""",
+                    _ex_params,
                 )
                 spend_row = cur.fetchone()
 
                 cur.execute(
-                    """SELECT COALESCE(SUM(ABS(pnl)), 0) as loss
-                       FROM trades WHERE ts >= %s AND pnl < 0""",
-                    (today_start,),
+                    f"""SELECT COALESCE(SUM(ABS(pnl)), 0) as loss
+                       FROM trades WHERE ts >= %s AND pnl < 0{_ex_filter}""",
+                    _ex_params,
                 )
                 loss_row = cur.fetchone()
 
@@ -181,10 +192,12 @@ class AbsoluteRules:
                     f"spend={self._daily_spend:.2f}, loss={self._daily_loss:.2f}, "
                     f"trades={self._daily_trade_count}"
                 )
+                self._seeding_failed = False  # C5 fix: Clear flag on successful seed
             finally:
                 conn.close()
         except Exception as e:
             logger.error(f"\u274c Could not seed daily counters from DB \u2014 trading with zero counters (risk of exceeding daily limits): {e}")
+            self._seeding_failed = True
 
     def _log_rules(self) -> None:
         """Log all active rules."""
@@ -254,6 +267,16 @@ class AbsoluteRules:
         has_stop_loss: bool = False,
     ) -> tuple[bool, list[RuleViolation], bool]:
         """Inner implementation - caller must hold self._lock."""
+        # C5 fix: Block buys if daily counter seeding failed — we can't
+        # enforce spend/loss limits without knowing today's totals.
+        if self._seeding_failed and action == TradeAction.BUY:
+            return False, [RuleViolation(
+                "SEEDING_FAILED",
+                "Daily counter seeding from DB failed",
+                "Cannot enforce daily spend/loss limits — blocking new buys until "
+                "seed_daily_counters() succeeds. Sells are still allowed.",
+            )], False
+
         self._reset_daily_if_needed()
 
         is_buy = action == TradeAction.BUY

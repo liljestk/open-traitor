@@ -31,6 +31,8 @@ class DashboardCommandManager:
 
     def __init__(self, orch: Orchestrator) -> None:
         self.orch = orch
+        # Profile prefix for Redis keys to prevent cross-domain bleed
+        self._profile = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
 
     # ── Trailing-stop state publishing ───────────────────────────────────
 
@@ -43,7 +45,7 @@ class DashboardCommandManager:
             stops = self.orch.trailing_stops.get_all_stops()
             import json as _json
             redis.set(
-                "trailing_stops:state",
+                f"{self._profile}:trailing_stops:state",
                 _json.dumps(stops, default=str),
                 ex=300,  # 5 min TTL
             )
@@ -61,7 +63,7 @@ class DashboardCommandManager:
             import json as _json
             # Process up to 5 commands per cycle to avoid blocking
             for _ in range(5):
-                raw = redis.lpop("dashboard:commands_queue")
+                raw = redis.lpop(f"{self._profile}:dashboard:commands_queue")
                 if not raw:
                     break
                 try:

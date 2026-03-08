@@ -141,10 +141,18 @@ class FinetuningPipeline:
         """Gather trade examples with full context from DB."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
 
+        # Build exchange filter to prevent cross-domain training data bleed
+        _exchange = self._config.get("trading", {}).get("exchange", "").lower()
+        _exch_frag = ""
+        _exch_params: tuple = (cutoff,)
+        if _exchange:
+            _exch_frag = " AND (t.exchange = %s OR t.exchange = %s)"
+            _exch_params = (cutoff, _exchange, f"{_exchange}_paper")
+
         with self._db._get_conn() as conn:
             # Get trades with associated reasoning and meaningful PnL
             trades = conn.execute(
-                """
+                f"""
                 SELECT t.id, t.ts, t.pair, t.action, t.price, t.quantity,
                        t.pnl, t.confidence, t.signal_type, t.stop_loss,
                        t.take_profit, t.reasoning,
@@ -155,10 +163,10 @@ class FinetuningPipeline:
                 WHERE t.ts >= %s
                   AND t.pnl IS NOT NULL
                   AND t.price > 0
-                  AND t.quantity > 0
+                  AND t.quantity > 0{_exch_frag}
                 ORDER BY t.ts ASC
                 """,
-                (cutoff,),
+                _exch_params,
             ).fetchall()
 
         examples = []

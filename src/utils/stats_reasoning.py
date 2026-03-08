@@ -59,25 +59,30 @@ class ReasoningMixin:
             )
             conn.commit()
 
-    def get_recent_outcomes(self, pair: str, n: int = 10, currency_symbol: str = "$") -> str:
+    def get_recent_outcomes(self, pair: str, n: int = 10, currency_symbol: str = "$", exchange: str = "") -> str:
         """
         Return a human-readable summary of the last N closed trades for a pair,
         with the reasoning that produced them. Used for outcome feedback injection
         into agent prompts.
         """
         sym = currency_symbol
+        _exch_frag = ""
+        _exch_params: tuple = ()
+        if exchange:
+            _exch_frag = " AND (t.exchange = %s OR t.exchange = %s)"
+            _exch_params = (exchange, f"{exchange}_paper")
         with self._get_conn() as conn:
             rows = conn.execute(
-                """SELECT
+                f"""SELECT
                     t.ts, t.action, t.price, t.pnl, t.confidence, t.signal_type,
                     ar.reasoning_json, ar.agent_name
                    FROM trades t
                    LEFT JOIN agent_reasoning ar
                        ON ar.trade_id = t.id AND ar.agent_name = 'market_analyst'
-                   WHERE t.pair = %s AND t.pnl IS NOT NULL
+                   WHERE t.pair = %s AND t.pnl IS NOT NULL{_exch_frag}
                    ORDER BY t.ts DESC
                    LIMIT %s""",
-                (pair, n),
+                (pair, *_exch_params, n),
             ).fetchall()
 
         if not rows:

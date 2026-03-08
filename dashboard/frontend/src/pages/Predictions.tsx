@@ -41,7 +41,6 @@ const TIME_RANGES = [
 ]
 
 const ASSET_TABS = [
-  { id: 'all', label: 'All Assets' },
   { id: 'crypto', label: 'Crypto' },
   { id: 'equity', label: 'Shares' },
 ]
@@ -99,8 +98,6 @@ function classifyPair(pair: string): 'crypto' | 'equity' {
 
 // Filter predictions by asset class
 function filterByAsset(data: PredictionAccuracyData, tab: string): PredictionAccuracyData {
-  if (tab === 'all') return data
-
   const filteredPredictions = data.predictions.filter(p => classifyPair(p.pair) === tab)
   const filteredPerPair: typeof data.per_pair = {}
   for (const [pair, stats] of Object.entries(data.per_pair)) {
@@ -150,19 +147,13 @@ const SOURCE_BADGE: Record<string, { icon: typeof Bot; label: string; color: str
 function TrackedPairsSection({ data, assetTab, onSelectPair, selectedPair }: {
   data: TrackedPairsData; assetTab: string; onSelectPair: (pair: string) => void; selectedPair: string | null
 }) {
-  const pairs = assetTab === 'equity' ? data.equity
-    : assetTab === 'crypto' ? data.crypto
-      : [...data.crypto, ...data.equity]
+  const pairs = assetTab === 'equity' ? data.equity : data.crypto
 
   if (!pairs.length) {
-    const emptyTitle = assetTab === 'equity' ? 'No shares tracked yet'
-      : assetTab === 'crypto' ? 'No crypto pairs tracked yet'
-        : 'No pairs tracked yet'
+    const emptyTitle = assetTab === 'equity' ? 'No shares tracked yet' : 'No crypto pairs tracked yet'
     const emptyDesc = assetTab === 'equity'
       ? 'Follow shares from the Watchlist or let the AI discover them.'
-      : assetTab === 'crypto'
-        ? 'Follow crypto pairs from the Watchlist or let the AI discover them.'
-        : 'Follow pairs from the Watchlist or let the AI discover them.'
+      : 'Follow crypto pairs from the Watchlist or let the AI discover them.'
     return (
       <EmptyState icon="chart" title={emptyTitle} description={emptyDesc} />
     )
@@ -526,9 +517,10 @@ function PredictionOverlayChart({ pair, expanded = false, articles = [] }: {
   const [overlayDays, setOverlayDays] = useState(7)
   const isEquity = classifyPair(pair) === 'equity'
   const chartHeight = expanded ? 520 : 260
+  const profile = useLiveStore((s) => s.profile)
 
   const { data: history, isLoading } = useQuery({
-    queryKey: ['pair-prediction-history', pair, overlayDays],
+    queryKey: ['pair-prediction-history', pair, overlayDays, profile],
     queryFn: () => fetchPairPredictionHistory(pair, overlayDays),
     enabled: !!pair,
     refetchInterval: 120_000,
@@ -1071,15 +1063,17 @@ function indicatorBg(text: string): string {
 function TraderViewHeader({ pair, onClose }: {
   pair: string; onClose: () => void
 }) {
+  const profile = useLiveStore((s) => s.profile)
+
   const { data: priceData } = useQuery({
-    queryKey: ['market-price', pair],
+    queryKey: ['market-price', pair, profile],
     queryFn: () => fetchMarketPrice(pair),
     enabled: !!pair,
     refetchInterval: 30_000,
   })
 
   const { data: exposure } = useQuery({
-    queryKey: ['portfolio-exposure-trader'],
+    queryKey: ['portfolio-exposure-trader', profile],
     queryFn: fetchPortfolioExposure,
     enabled: !!pair,
     refetchInterval: 60_000,
@@ -1435,8 +1429,9 @@ function PairNewsFeed({ pair, articles }: { pair: string; articles: NewsArticle[
 // ── Pair Trade History ──────────────────────────────────────────────────────
 
 function PairTradeHistory({ pair }: { pair: string }) {
+  const profile = useLiveStore((s) => s.profile)
   const { data, isLoading } = useQuery({
-    queryKey: ['pair-trades', pair],
+    queryKey: ['pair-trades', pair, profile],
     queryFn: () => fetchTrades(pair, 20, 720),
     enabled: !!pair,
     refetchInterval: 60_000,
@@ -1570,13 +1565,13 @@ function RecentPredictions({ data, selectedPair }: { data: PredictionAccuracyDat
 // ── Main Page ──────────────────────────────────────────────────────────────
 
 export default function Predictions() {
+  const profile = useLiveStore((s) => s.profile)
   const [days, setDays] = useState(30)
-  const [assetTab, setAssetTab] = useState('all')
+  const [assetTab, setAssetTab] = useState(() => profile === 'ibkr' ? 'equity' : 'crypto')
   const [selectedPair, setSelectedPair] = useState<string | null>(null)
   const [pairSearch, setPairSearch] = useState('')
   const [trackedCollapsed, setTrackedCollapsed] = useState(false)
   const [chartExpanded, setChartExpanded] = useState(false)
-  const profile = useLiveStore((s) => s.profile)
 
   const { data: rawData, isLoading } = useQuery({
     queryKey: ['prediction-accuracy', days, profile],
@@ -1592,7 +1587,7 @@ export default function Predictions() {
 
   // ── Trader's View data fetches (only when pair selected) ──
   const { data: cyclesData } = useQuery({
-    queryKey: ['pair-cycles', selectedPair],
+    queryKey: ['pair-cycles', selectedPair, profile],
     queryFn: () => fetchCycles(selectedPair!, 1),
     enabled: !!selectedPair,
     refetchInterval: 120_000,
@@ -1601,7 +1596,7 @@ export default function Predictions() {
   const latestCycleId = cyclesData?.cycles?.[0]?.cycle_id ?? null
 
   const { data: cycleFull } = useQuery({
-    queryKey: ['cycle-full', latestCycleId],
+    queryKey: ['cycle-full', latestCycleId, profile],
     queryFn: () => fetchCycleFull(latestCycleId!),
     enabled: !!latestCycleId,
     refetchInterval: 120_000,
@@ -1759,24 +1754,19 @@ export default function Predictions() {
               : <ChevronDown size={14} className="text-gray-500 group-hover:text-gray-300 transition-colors" />}
             <Layers size={14} className="text-violet-400" />
             <h3 className="text-sm font-semibold text-gray-300">
-              {assetTab === 'equity' ? 'Tracked Shares' : assetTab === 'crypto' ? 'Tracked Crypto' : 'Tracked Pairs'}
+              {assetTab === 'equity' ? 'Tracked Shares' : 'Tracked Crypto'}
             </h3>
             {trackedPairs && (
               <span className="text-[10px] font-normal text-gray-600">
                 {assetTab === 'equity'
                   ? `${trackedPairs.equity.length} shares`
-                  : assetTab === 'crypto'
-                    ? `${trackedPairs.crypto.length} pairs`
-                    : `${trackedPairs.crypto.length} crypto · ${trackedPairs.equity.length} shares`}
+                  : `${trackedPairs.crypto.length} pairs`}
               </span>
             )}
             <span className="ml-auto inline-flex items-center gap-2 text-[10px] text-gray-600">
               <span className="inline-flex items-center gap-0.5"><Bot size={10} className="text-violet-400" /> AI</span>
               <span className="inline-flex items-center gap-0.5"><User size={10} className="text-amber-400" /> Manual</span>
-              {assetTab === 'all' && <>
-                <span className="inline-flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" /> Crypto</span>
-                <span className="inline-flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block" /> Shares</span>
-              </>}
+
             </span>
           </button>
           {!trackedCollapsed && (

@@ -1,5 +1,5 @@
 """
-Dashboard authentication — session-based auth with bcrypt password hashing.
+Dashboard authentication — session-based auth with bcrypt password hashing + TOTP 2FA.
 
 Provides:
   - Password hashing & verification (bcrypt)
@@ -7,11 +7,15 @@ Provides:
   - CSRF token generation & validation
   - Login rate limiting
   - httpOnly cookie helpers
+  - TOTP 2FA (pyotp) with QR code generation
+  - Backup codes for 2FA recovery
 
 Environment variables:
   DASHBOARD_PASSWORD_HASH   bcrypt hash of the dashboard password
   DASHBOARD_SESSION_SECRET  secret used to derive CSRF tokens (auto-generated if missing)
   DASHBOARD_SESSION_TTL     session lifetime in seconds (default: 3600 = 1h)
+  DASHBOARD_2FA_ENABLED     enable 2FA (default: false)
+  DASHBOARD_2FA_SECRET      TOTP secret (base32, auto-generated if missing)
 """
 
 from __future__ import annotations
@@ -36,13 +40,29 @@ logger = get_logger("dashboard.auth")
 _PASSWORD_HASH: str = os.environ.get("DASHBOARD_PASSWORD_HASH", "")
 
 # Secret for CSRF derivation — auto-generated per process if not set
-_SESSION_SECRET: str = os.environ.get("DASHBOARD_SESSION_SECRET", "") or secrets.token_hex(32)
+_SESSION_SECRET_FROM_ENV = os.environ.get("DASHBOARD_SESSION_SECRET", "")
+_SESSION_SECRET: str = _SESSION_SECRET_FROM_ENV or secrets.token_hex(32)
+if not _SESSION_SECRET_FROM_ENV:
+    logger.warning(
+        "DASHBOARD_SESSION_SECRET not set — auto-generated per process. "
+        "Set this env var for multi-worker / multi-container deployments."
+    )
 
 # Session lifetime (seconds); default 1 hour
 SESSION_TTL: int = int(os.environ.get("DASHBOARD_SESSION_TTL", "3600"))
 
 # Legacy API key (backward compat — if set, still accepted as bearer auth)
 _LEGACY_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+
+# 2FA configuration
+_2FA_ENABLED: bool = os.environ.get("DASHBOARD_2FA_ENABLED", "").lower() in ("1", "true", "yes")
+_2FA_SECRET: str = os.environ.get("DASHBOARD_2FA_SECRET", "")
+_2FA_ISSUER: str = os.environ.get("DASHBOARD_2FA_ISSUER", "Auto-Traitor")
+_2FA_ACCOUNT: str = os.environ.get("DASHBOARD_2FA_ACCOUNT", "dashboard@auto-traitor")
+
+# Backup codes (in-memory storage; persisted via env or config file in production)
+_backup_codes: set[str] = set()
+_backup_codes_lock = threading.Lock()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -58,9 +78,11 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     """Verify a plaintext password against a bcrypt hash."""
     import bcrypt
+    if not hashed or not isinstance(hashed, str):
+        return False
     try:
         return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
+    except (ValueError, AttributeError, UnicodeDecodeError):
         return False
 
 
@@ -201,6 +223,235 @@ def check_login_rate(client_ip: str) -> bool:
         attempts.append(now)
         _login_attempts[client_ip] = attempts
         return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOTP 2FA (Time-based One-Time Password)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_totp_secret() -> str:
+    """Generate a new TOTP secret (base32 encoded)."""
+    import pyotp
+    return pyotp.random_base32()
+
+
+def get_totp_secret() -> str:
+    """Return the configured TOTP secret (may be empty)."""
+    return _2FA_SECRET
+
+
+def set_totp_secret(secret: str) -> None:
+    """Update the in-memory TOTP secret."""
+    global _2FA_SECRET
+    _2FA_SECRET = secret
+
+
+def is_2fa_enabled() -> bool:
+    """Return True if 2FA is enabled and configured."""
+    return _2FA_ENABLED and bool(_2FA_SECRET)
+
+
+def enable_2fa() -> None:
+    """Enable 2FA."""
+    global _2FA_ENABLED
+    _2FA_ENABLED = True
+
+
+def disable_2fa() -> None:
+    """Disable 2FA."""
+    global _2FA_ENABLED
+    _2FA_ENABLED = False
+
+
+def verify_totp(code: str, secret: str | None = None) -> bool:
+    """Verify a TOTP code against the configured secret.
+    
+    Args:
+        code: 6-digit TOTP code
+        secret: Override secret (for setup verification), uses global if None
+        
+    Returns:
+        True if code is valid, False otherwise
+    """
+    import pyotp
+    
+    secret = secret or _2FA_SECRET
+    if not secret:
+        return False
+    
+    try:
+        totp = pyotp.TOTP(secret)
+        # Accept codes within ±1 time window (30s each) = 90s tolerance
+        return totp.verify(code, valid_window=1)
+    except Exception as e:
+        logger.warning(f"TOTP verification error: {e}")
+        return False
+
+
+def generate_totp_qr_uri(secret: str | None = None, account: str | None = None) -> str:
+    """Generate a TOTP provisioning URI for QR code generation.
+    
+    Args:
+        secret: Base32 TOTP secret (uses global if None)
+        account: Account identifier for authenticator app
+        
+    Returns:
+        otpauth:// URI string
+    """
+    import pyotp
+    
+    secret = secret or _2FA_SECRET
+    account = account or _2FA_ACCOUNT
+    
+    if not secret:
+        raise ValueError("No TOTP secret configured")
+    
+    totp = pyotp.TOTP(secret)
+    return totp.provisioning_uri(name=account, issuer_name=_2FA_ISSUER)
+
+
+def generate_totp_qr_code_data_uri(secret: str | None = None, account: str | None = None) -> str:
+    """Generate a QR code as a data URI for embedding in HTML/JSON.
+    
+    Args:
+        secret: Base32 TOTP secret (uses global if None)
+        account: Account identifier
+        
+    Returns:
+        data:image/png;base64,... URI string
+    """
+    import base64
+    import io
+    import qrcode
+    
+    uri = generate_totp_qr_uri(secret, account)
+    
+    # Generate QR code
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(uri)
+    qr.make(fit=True)
+    
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Convert to data URI
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    
+    return f"data:image/png;base64,{b64}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Backup codes (for 2FA recovery)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_backup_codes(count: int = 8) -> list[str]:
+    """Generate backup codes for 2FA recovery.
+    
+    Args:
+        count: Number of codes to generate (default: 8)
+        
+    Returns:
+        List of 10-character alphanumeric codes
+    """
+    codes = []
+    for _ in range(count):
+        # Generate 10-char alphanumeric code (format: XXXX-XXXX-XX)
+        code = secrets.token_hex(5).upper()  # 10 hex chars
+        codes.append(code)
+    return codes
+
+
+def set_backup_codes(codes: list[str]) -> None:
+    """Store backup codes (hashed for security)."""
+    global _backup_codes
+    with _backup_codes_lock:
+        _backup_codes = {hashlib.sha256(c.encode()).hexdigest() for c in codes}
+
+
+def verify_backup_code(code: str) -> bool:
+    """Verify and consume a backup code (one-time use).
+    
+    Args:
+        code: Backup code to verify
+        
+    Returns:
+        True if code is valid and unused, False otherwise
+    """
+    code_hash = hashlib.sha256(code.upper().encode()).hexdigest()
+    with _backup_codes_lock:
+        if code_hash in _backup_codes:
+            _backup_codes.remove(code_hash)
+            logger.info("✅ Backup code used successfully")
+            return True
+        return False
+
+
+def get_backup_codes_count() -> int:
+    """Return the number of remaining backup codes."""
+    with _backup_codes_lock:
+        return len(_backup_codes)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pending 2FA sessions (intermediate state during 2-step login)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_pending_2fa: dict[str, dict] = {}  # temp_token → {created, ip}
+_pending_2fa_lock = threading.Lock()
+_PENDING_2FA_TTL = 300  # 5 minutes to complete 2FA
+
+
+def create_pending_2fa_session(client_ip: str = "") -> str:
+    """Create a pending 2FA session (password verified, awaiting TOTP)."""
+    token = secrets.token_urlsafe(48)
+    now = time.monotonic()
+    with _pending_2fa_lock:
+        # Evict expired
+        expired = [t for t, s in _pending_2fa.items() if now - s["created"] > _PENDING_2FA_TTL]
+        for t in expired:
+            del _pending_2fa[t]
+        
+        _pending_2fa[token] = {
+            "created": now,
+            "ip": client_ip,
+        }
+    return token
+
+
+def validate_pending_2fa_session(token: str) -> bool:
+    """Check if a pending 2FA session is valid."""
+    if not token:
+        return False
+    now = time.monotonic()
+    with _pending_2fa_lock:
+        session = _pending_2fa.get(token)
+        if not session:
+            return False
+        if now - session["created"] > _PENDING_2FA_TTL:
+            del _pending_2fa[token]
+            return False
+        return True
+
+
+def revoke_pending_2fa_session(token: str) -> None:
+    """Revoke a pending 2FA session."""
+    with _pending_2fa_lock:
+        _pending_2fa.pop(token, None)
+
+
+def upgrade_pending_2fa_to_full_session(pending_token: str, client_ip: str = "") -> str:
+    """Convert a pending 2FA session to a full authenticated session.
+    
+    Args:
+        pending_token: The pending 2FA token
+        client_ip: Client IP address
+        
+    Returns:
+        Full session token
+    """
+    revoke_pending_2fa_session(pending_token)
+    return create_session(client_ip)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -59,10 +59,11 @@ class EnsembleOptimizer:
         optimizer.update_weights()                            # weekly
     """
 
-    def __init__(self, stats_db, scorecard, audit=None):
+    def __init__(self, stats_db, scorecard, audit=None, exchange: str = ""):
         self._db = stats_db
         self._scorecard = scorecard
         self._audit = audit
+        self._exchange = exchange
         # In-memory: {regime: {strategy: weight}}
         self._weights: dict[str, dict[str, float]] = {
             r: dict(_DEFAULT_WEIGHTS) for r in REGIMES
@@ -126,7 +127,7 @@ class EnsembleOptimizer:
         Returns summary of changes.
         """
         strat_accuracy = self._scorecard.get_strategy_accuracy(
-            window_days=window_days, horizon_hours=4
+            window_days=window_days, horizon_hours=4, exchange=self._exchange,
         )
 
         if not strat_accuracy:

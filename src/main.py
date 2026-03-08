@@ -373,8 +373,9 @@ def main():
             exchange._paper_balance[native_currency] = initial_paper
         logger.info(f"📝 Paper balance: {initial_paper:,.2f} {native_currency}")
 
-    # Absolute Rules
-    rules = AbsoluteRules(config.get("absolute_rules", {}))
+    # Absolute Rules — scoped to this profile's exchange to prevent cross-domain counter bleed
+    _exchange_id = config.get("trading", {}).get("exchange", "coinbase").lower()
+    rules = AbsoluteRules(config.get("absolute_rules", {}), exchange=_exchange_id)
     rules.seed_daily_counters()  # Seed today's counters from DB (survives restarts)
 
     # News Aggregator

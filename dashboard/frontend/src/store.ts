@@ -33,11 +33,13 @@ interface LiveStore {
 function currencyForProfile(profile: string, currencies: Record<string, string>): string {
   const key = profile.toLowerCase()
   // 'crypto' profile maps to coinbase exchange
-  const exchangeKey = key === '' || key === 'crypto' ? 'coinbase' : key
+  const exchangeKey = key === 'crypto' ? 'coinbase' : (key || 'coinbase')
   return currencies[exchangeKey] ?? FALLBACK_CURRENCY
 }
 
-const initialProfile = localStorage.getItem('auto_traitor_profile') || ''
+// Never allow empty profile — default to 'crypto' (Coinbase)
+const _storedProfile = localStorage.getItem('auto_traitor_profile') || ''
+const initialProfile = _storedProfile === '' ? 'crypto' : _storedProfile
 const initialDensity = (localStorage.getItem('auto_traitor_density') || 'comfortable') as Density
 
 export const useLiveStore = create<LiveStore>((set, get) => ({

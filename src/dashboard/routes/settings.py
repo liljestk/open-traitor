@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -523,11 +524,13 @@ def setup_config(body: _SetupConfigBody, request: Request):
 
         # 3. Update trading pairs in YAML configs if provided
         updated_yamls: list[str] = []
+        _PAIR_RE = re.compile(r"^[A-Za-z0-9]{1,20}-[A-Za-z0-9]{1,10}$")
         if body.assets:
             import yaml
 
             coinbase_pairs = body.assets.get("coinbase_pairs")
             if coinbase_pairs and isinstance(coinbase_pairs, list):
+                coinbase_pairs = [p for p in coinbase_pairs if isinstance(p, str) and _PAIR_RE.match(p)]
                 cb_path = os.path.join("config", "coinbase.yaml")
                 if os.path.exists(cb_path):
                     with open(cb_path, "r", encoding="utf-8") as f:
@@ -540,6 +543,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
 
             ibkr_pairs = body.assets.get("ibkr_pairs")
             if ibkr_pairs and isinstance(ibkr_pairs, list):
+                ibkr_pairs = [p for p in ibkr_pairs if isinstance(p, str) and _PAIR_RE.match(p)]
                 ib_path = os.path.join("config", "ibkr.yaml")
                 if os.path.exists(ib_path):
                     with open(ib_path, "r", encoding="utf-8") as f:

@@ -273,9 +273,10 @@ class LLMClient:
                         f"🚫 OpenRouter: blacklisted dead model {old_model} "
                         f"({len(OPENROUTER_FREE_MODELS)} free models remaining)"
                     )
-                    if not OPENROUTER_FREE_MODELS:
-                        logger.error("All OpenRouter free models exhausted!")
-                        return
+                if not OPENROUTER_FREE_MODELS:
+                    logger.error("All OpenRouter free models exhausted — no rotation possible")
+                    return
+                if blacklist_current:
                     p._free_model_index = p._free_model_index % len(OPENROUTER_FREE_MODELS)
                 else:
                     p._free_model_index = (p._free_model_index + 1) % len(OPENROUTER_FREE_MODELS)

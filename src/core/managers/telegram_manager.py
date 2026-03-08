@@ -751,17 +751,20 @@ class TelegramManager:
 
     def cmd_news(self, data: dict) -> str:
         orch = self.orchestrator
+        _asset = getattr(orch.exchange, "asset_class", "crypto")
+        _label = "Crypto" if _asset == "crypto" else "Equity"
         if orch.news:
             headlines = orch.news.get_headlines(10)
-            return f"📰 *Latest Crypto News*\n\n{headlines}"
+            return f"📰 *Latest {_label} News*\n\n{headlines}"
 
         if orch.redis:
             try:
-                cached = orch.redis.get("news:latest")
+                _news_profile = orch.config.get("trading", {}).get("exchange", "coinbase").lower()
+                cached = orch.redis.get(f"news:{_news_profile}:latest") or orch.redis.get("news:latest")
                 if cached:
                     articles = json.loads(cached)
                     lines = [f"- {a.get('title', '')}" for a in articles[:10]]
-                    return "📰 *Latest News*\n\n" + "\n".join(lines)
+                    return f"📰 *Latest {_label} News*\n\n" + "\n".join(lines)
             except Exception:
                 pass
         return "📰 No news available."

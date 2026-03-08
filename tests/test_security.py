@@ -23,23 +23,33 @@ import pytest
 def _clean_auth_state():
     """Reset auth module state between tests."""
     from src.dashboard.auth import (
-        _sessions, _login_attempts,
+        _sessions, _login_attempts, _pending_2fa, _backup_codes,
     )
     import src.dashboard.auth as _auth_mod
     # Save originals
     orig_pw = _auth_mod._PASSWORD_HASH
     orig_legacy = _auth_mod._LEGACY_API_KEY
+    orig_2fa_enabled = _auth_mod._2FA_ENABLED
+    orig_2fa_secret = _auth_mod._2FA_SECRET
     # Clear
     _auth_mod._PASSWORD_HASH = ""
     _auth_mod._LEGACY_API_KEY = ""
+    _auth_mod._2FA_ENABLED = False
+    _auth_mod._2FA_SECRET = ""
     _sessions.clear()
     _login_attempts.clear()
+    _pending_2fa.clear()
+    _backup_codes.clear()
     yield
     # Restore
     _auth_mod._PASSWORD_HASH = orig_pw
     _auth_mod._LEGACY_API_KEY = orig_legacy
+    _auth_mod._2FA_ENABLED = orig_2fa_enabled
+    _auth_mod._2FA_SECRET = orig_2fa_secret
     _sessions.clear()
     _login_attempts.clear()
+    _pending_2fa.clear()
+    _backup_codes.clear()
 
 
 def _make_request(cookies=None, headers=None):

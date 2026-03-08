@@ -168,7 +168,10 @@ class LearningManager:
 
             self._scorecard = SignalScorecard(self._stats_db)
             self._calibrator = ConfidenceCalibrator(self._stats_db, self._scorecard)
-            self._ensemble = EnsembleOptimizer(self._stats_db, self._scorecard, self._audit)
+            self._ensemble = EnsembleOptimizer(
+                self._stats_db, self._scorecard, self._audit,
+                exchange=self._config.get("trading", {}).get("exchange", "").lower(),
+            )
             self._prompt_evolver = PromptEvolver(
                 self._stats_db, self._scorecard, self.orch.llm, self._audit
             )

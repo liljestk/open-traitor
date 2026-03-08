@@ -160,7 +160,7 @@ risk:
   max_position_pct: 0.4
   max_total_exposure_pct: 0.2
   max_trades_per_hour: 10
-  stop_loss_pct: 0.05
+  stop_loss_pct: 0.04
   take_profit_pct: 0.08
   trailing_stop_pct: 0.03
 rotation:
@@ -185,24 +185,24 @@ routing:
   slippage_factor: 0.001
 telegram:
   authorized_users_env: TELEGRAM_AUTHORIZED_USERS
+  big_loss_threshold: 50
+  big_win_threshold: 50
   bot_token_env: TELEGRAM_BOT_TOKEN_COINBASE
   chat_id_env: TELEGRAM_CHAT_ID_COINBASE
-  notify_on_trade: true
-  notify_on_signal: false
-  notify_on_signal_confidence: 0.9
-  notify_on_big_win: true
-  big_win_threshold: 50
-  notify_on_big_loss: true
-  big_loss_threshold: 50
-  notify_on_price_move: false
-  price_move_threshold_pct: 5
-  price_move_cooldown_minutes: 20
-  notify_morning_plan: true
-  notify_evening_summary: true
-  notify_periodic_update: true
-  status_update_interval: 3600
   daily_summary: true
   daily_summary_hour: 8
+  notify_evening_summary: true
+  notify_morning_plan: true
+  notify_on_big_loss: true
+  notify_on_big_win: true
+  notify_on_price_move: false
+  notify_on_signal: false
+  notify_on_signal_confidence: 0.9
+  notify_on_trade: true
+  notify_periodic_update: true
+  price_move_cooldown_minutes: 20
+  price_move_threshold_pct: 5
+  status_update_interval: 3600
 trading:
   exchange: coinbase
   holdings_dust_threshold: 1.0
