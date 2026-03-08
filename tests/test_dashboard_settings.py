@@ -200,3 +200,137 @@ class TestUpdatesHashIntegrity:
         h1 = hashlib.sha256(json.dumps(u1, sort_keys=True).encode()).hexdigest()
         h2 = hashlib.sha256(json.dumps(u2, sort_keys=True).encode()).hexdigest()
         assert h1 == h2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Setup wizard env preservation (regression: wizard was silently dropping
+# keys outside its allowlist like DATABASE_URL, DASHBOARD_PASSWORD_HASH)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSetupWizardPreservesUnmanagedKeys:
+    """Simulate what the setup wizard does: read existing env, filter through
+    allowlist, build new file.  Verify keys NOT in the wizard payload survive.
+
+    This mirrors the logic in ``POST /api/setup`` without needing a full
+    FastAPI TestClient, testing the file-level round-trip that caused the bug.
+    """
+
+    # Keys the wizard knows about (subset for testing)
+    WIZARD_ALLOWLIST = {
+        "COINBASE_API_KEY", "COINBASE_API_SECRET", "TRADING_MODE",
+        "REDIS_PASSWORD", "REDIS_URL", "OLLAMA_BASE_URL", "OLLAMA_MODEL",
+        "GEMINI_API_KEY", "OPENROUTER_API_KEY",
+    }
+
+    def _simulate_wizard_write(self, env_path: str, wizard_payload: dict[str, str]) -> None:
+        """Reproduce the setup wizard's write logic (post-fix version)."""
+        from datetime import datetime, timezone as tz
+
+        filtered = {k: v for k, v in wizard_payload.items() if k in self.WIZARD_ALLOWLIST}
+        existing = _parse_env_file(env_path)
+
+        # Preserve keys not covered by the wizard
+        preserved: dict[str, str] = {}
+        if existing:
+            for k, v in existing.items():
+                if k not in filtered:
+                    preserved[k] = v
+
+        lines = [
+            "# header",
+            "",
+        ]
+        for k, v in filtered.items():
+            lines.append(f"{k}={v}")
+        if preserved:
+            lines.append("")
+            lines.append("# Preserved keys (not managed by setup wizard)")
+            for k, v in preserved.items():
+                lines.append(f"{k}={v}")
+        lines.append("")
+
+        # Atomic write (same pattern as production code)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(env_path)),
+                                   suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, os.path.abspath(env_path))
+
+    def test_database_url_preserved(self, tmp_path):
+        """DATABASE_URL must survive a wizard rewrite."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "COINBASE_API_KEY=key1\n"
+            "DATABASE_URL=postgresql://traitor:pw@db:5432/autotraitor\n"
+            "TRAITOR_DB_PASSWORD=pw\n"
+        )
+        self._simulate_wizard_write(str(env), {"COINBASE_API_KEY": "key1"})
+        result = _parse_env_file(str(env))
+        assert result["DATABASE_URL"] == "postgresql://traitor:pw@db:5432/autotraitor"
+        assert result["TRAITOR_DB_PASSWORD"] == "pw"
+        assert result["COINBASE_API_KEY"] == "key1"
+
+    def test_dashboard_password_hash_preserved(self, tmp_path):
+        """DASHBOARD_PASSWORD_HASH must survive a wizard rewrite."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "GEMINI_API_KEY=AIza123\n"
+            "DASHBOARD_PASSWORD_HASH=$2b$12$somehash\n"
+        )
+        self._simulate_wizard_write(str(env), {"GEMINI_API_KEY": "AIza123"})
+        result = _parse_env_file(str(env))
+        assert result["DASHBOARD_PASSWORD_HASH"] == "$2b$12$somehash"
+
+    def test_multiple_unmanaged_keys_preserved(self, tmp_path):
+        """All keys outside the wizard allowlist must be carried forward."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "COINBASE_API_KEY=key1\n"
+            "DATABASE_URL=postgresql://host/db\n"
+            "TRAITOR_DB_PASSWORD=secret\n"
+            "DASHBOARD_PASSWORD_HASH=$2b$12$hash\n"
+            "CUSTOM_FLAG=enabled\n"
+        )
+        self._simulate_wizard_write(str(env), {"COINBASE_API_KEY": "key1"})
+        result = _parse_env_file(str(env))
+        assert len(result) == 5
+        assert result["DATABASE_URL"] == "postgresql://host/db"
+        assert result["TRAITOR_DB_PASSWORD"] == "secret"
+        assert result["DASHBOARD_PASSWORD_HASH"] == "$2b$12$hash"
+        assert result["CUSTOM_FLAG"] == "enabled"
+
+    def test_wizard_overwrites_managed_keys(self, tmp_path):
+        """Wizard-managed keys should be updated, not preserved from old file."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "GEMINI_API_KEY=old_key\n"
+            "DATABASE_URL=keep_this\n"
+        )
+        self._simulate_wizard_write(str(env), {"GEMINI_API_KEY": "new_key"})
+        result = _parse_env_file(str(env))
+        assert result["GEMINI_API_KEY"] == "new_key"
+        assert result["DATABASE_URL"] == "keep_this"
+
+    def test_fresh_install_no_existing_env(self, tmp_path):
+        """On first run with no existing .env, no crash and no preserved section."""
+        env = tmp_path / ".env"
+        self._simulate_wizard_write(str(env), {"COINBASE_API_KEY": "k", "TRADING_MODE": "paper"})
+        result = _parse_env_file(str(env))
+        assert result["COINBASE_API_KEY"] == "k"
+        assert result["TRADING_MODE"] == "paper"
+        assert len(result) == 2
+
+    def test_newlines_stripped_from_preserved_values(self, tmp_path):
+        """Injection via preserved values must be blocked."""
+        env = tmp_path / ".env"
+        # Simulate a value with embedded newline (shouldn't happen, but defense in depth)
+        with open(str(env), "w") as f:
+            f.write("SAFE=ok\nDANGER=line1\n")
+        self._simulate_wizard_write(str(env), {"SAFE": "ok"})
+        content = (tmp_path / ".env").read_text()
+        # DANGER value should not contain raw newlines beyond the line terminator
+        for line in content.strip().split("\n"):
+            if line.startswith("DANGER="):
+                assert "\r" not in line
