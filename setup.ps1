@@ -708,6 +708,14 @@ Append-EnvBlank
 
 Write-OK "Redis password generated."
 
+# --- Trading Stats DB (traitor-db) ---
+$traitorDbPassword = -join ((1..32) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+
+Append-Env -Key "TRAITOR_DB_PASSWORD" -Value $traitorDbPassword -Comment "Trading stats PostgreSQL (auto-generated)"
+Append-EnvBlank
+
+Write-OK "Trading DB password generated."
+
 # --- Temporal ---
 $temporalDbUser = "temporal"
 $temporalDbPassword = -join ((1..32) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
@@ -756,6 +764,8 @@ $rootEnv = @(
     "# Mirrors the substitution keys from config/.env"
     ""
     "OLLAMA_MODEL=$ollamaModel"
+    ""
+    "TRAITOR_DB_PASSWORD=$traitorDbPassword"
     ""
     "LANGFUSE_NEXTAUTH_SECRET=$lf_secret"
     "LANGFUSE_SALT=$lf_salt"
