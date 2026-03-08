@@ -4,13 +4,11 @@ trading:
   quote_currencies:
   - EUR
   - EURC
-  pairs:
-  - ATOM-EUR
-  - BTC-EUR
-  - ETH-EUR
+  pairs: []
   quote_currency: EUR
   interval: 120
   min_confidence: 0.55
+  min_signal_confidence: 0.65
   max_open_positions: 8
   reconcile_every_cycles: 10
   paper_slippage_pct: 0.0005
@@ -24,6 +22,7 @@ trading:
   scan_volume_threshold: 1000
   scan_movement_threshold_pct: 1.0
   screener_interval_cycles: 5
+  style_modifiers: []
 absolute_rules:
   max_single_trade: 500
   max_daily_spend: 2000
@@ -53,43 +52,81 @@ llm:
   max_tokens: 2000
   max_retries: 3
   timeout: 60
-  persona: 'You are a cautious, analytical cryptocurrency trading assistant.
-
-    You prioritize capital preservation over aggressive gains.
-
-    You always consider risk-reward ratios before suggesting trades.
-
-    You never recommend trading with more than the user''s specified limits.
-
-    When uncertain, you recommend holding or waiting for better setups.
-
-    '
+  recovery_check_interval: 120
   providers:
-    - name: gemini
-      enabled: true
-      base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-      api_key_env: GEMINI_API_KEY
-      model: gemini-2.0-flash
-      timeout: 30
-      rpm_limit: 14
-      daily_token_limit: 950000
-      cooldown_seconds: 65
-    - name: openai
-      enabled: true
-      base_url: https://api.openai.com/v1
-      api_key_env: OPENAI_API_KEY
-      model: gpt-4o-mini
-      timeout: 45
-      rpm_limit: 450
-      daily_token_limit: 0
-      cooldown_seconds: 30
-    - name: ollama
-      enabled: true
-      model: llama3.1:8b
-      base_url_env: OLLAMA_BASE_URL
-      model_env: OLLAMA_MODEL
-      timeout: 60
-      is_local: true
+  - name: openrouter
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: meta-llama/llama-3.3-70b-instruct:free
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: groq
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.3-70b-versatile
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 100000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: groq-fallback
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: meta-llama/llama-4-maverick-17b-128e-instruct
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 500000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: gemini
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash-lite
+    timeout: 30
+    rpm_limit: 8
+    daily_token_limit: 200000
+    daily_request_limit: 18
+    cooldown_seconds: 180
+    tier: free
+    reserve_for_priority: high
+  - name: openrouter-paid
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: meta-llama/llama-3.3-70b-instruct
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 0
+    cooldown_seconds: 30
+    tier: paid
+  - name: openai
+    enabled: false
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+    timeout: 45
+    rpm_limit: 450
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    tier: free
+  - name: ollama
+    enabled: true
+    base_url_env: OLLAMA_BASE_URL
+    model_env: OLLAMA_MODEL
+    model: llama3.1:8b
+    timeout: 60
+    is_local: true
 analysis:
   technical:
     rsi_period: 14
@@ -126,9 +163,23 @@ news:
   max_articles: 100
   articles_for_analysis: 15
 telegram:
-  status_update_interval: 3600
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+  authorized_users_env: TELEGRAM_AUTHORIZED_USERS
   notify_on_trade: true
-  notify_on_signal_confidence: 0.8
+  notify_on_signal: false
+  notify_on_signal_confidence: 0.9
+  notify_on_big_win: true
+  big_win_threshold: 50
+  notify_on_big_loss: true
+  big_loss_threshold: 50
+  notify_on_price_move: false
+  price_move_threshold_pct: 5
+  price_move_cooldown_minutes: 20
+  notify_morning_plan: true
+  notify_evening_summary: true
+  notify_periodic_update: true
+  status_update_interval: 3600
   daily_summary: true
   daily_summary_hour: 8
 logging:
@@ -168,11 +219,12 @@ rotation:
   llm_validation: true
   llm_validation_temperature: 0.3
 fees:
+  model_type: crypto_percentage
   trade_fee_pct: 0.006
   maker_fee_pct: 0.004
   safety_margin: 1.5
-  min_gain_after_fees_pct: 0.005
-  min_trade_quote: 50
+  min_gain_after_fees_pct: 0.02
+  min_trade_quote: 0.0
   swap_cooldown_seconds: 3600
 high_stakes:
   trade_size_multiplier: 2.5
@@ -181,6 +233,17 @@ high_stakes:
   min_swap_gain_pct: 0.01
   auto_approve_up_to: 500
 routing:
-  bridge_currencies: ["EUR", "EURC", "USDC", "BTC"]
+  enabled: true
+  bridge_currencies:
+  - EUR
+  - EURC
+  - USDC
+  - BTC
   min_bridge_volume_24h: 10000
   slippage_factor: 0.001
+training_data:
+  enabled: true
+  include_raw_candles: false
+  include_prompts: true
+  max_candles_per_snapshot: 50
+  buffer_size: 0

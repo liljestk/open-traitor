@@ -6,11 +6,13 @@ Supports both market and limit orders based on urgency and confidence.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
-from src.core.coinbase_client import CoinbaseClient
+from src.core.exchange_client import ExchangeClient
 from src.core.rules import AbsoluteRules
 from src.models.trade import Trade, TradeAction, TradeStatus
 from src.utils.logger import get_logger
@@ -26,16 +28,30 @@ class ExecutorAgent(BaseAgent):
         llm,
         state,
         config,
-        coinbase: CoinbaseClient,
+        exchange: ExchangeClient,
         rules: AbsoluteRules,
+        telegram=None,
     ):
         super().__init__("executor", llm, state, config)
-        self.coinbase = coinbase
+        self.exchange = exchange
         self.rules = rules
+        self._telegram = telegram  # H1/H2: for orphaned order alerts
+        self.training_collector = None  # set by orchestrator if enabled
+        self.stats_db = None  # set by orchestrator for trade persistence
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
         self.urgency_threshold = exec_cfg.get("urgency_confidence_threshold", 0.8)
+        # Track consecutive close failures per trade_id to prevent infinite retry loops
+        self._close_failures: dict[str, int] = {}
+        self._close_failure_limit = 3
+        # HIGH-2: guard against concurrent close attempts for the same trade
+        # (e.g. stop-loss + trailing stop firing simultaneously).
+        self._closing_trades: set[str] = set()
+        self._closing_trades_lock = threading.Lock()
+        self._style_modifiers: set[str] = set(
+            config.get("trading", {}).get("style_modifiers", [])
+        )
 
     def _should_use_limit(self, trade_info: dict) -> bool:
         """
@@ -53,6 +69,19 @@ class ExecutorAgent(BaseAgent):
         """
         if not self.use_limit_orders:
             return False
+
+        # prefer_maker modifier: force limit orders for all buys on crypto.
+        # On equity, maker/taker fees are identical (flat per-share), so skip.
+        if "prefer_maker" in self._style_modifiers:
+            action = trade_info.get("action", "hold")
+            reason = trade_info.get("reasoning", "").lower()
+            is_urgent_exit = any(
+                kw in reason
+                for kw in ["stop_loss", "stop loss", "trailing stop", "take_profit", "take profit"]
+            )
+            is_crypto = getattr(self.exchange, "asset_class", "crypto") == "crypto"
+            if action == "buy" and is_crypto and not is_urgent_exit:
+                return True
 
         order_type = trade_info.get("order_type", "auto")
         if order_type == "market":
@@ -111,6 +140,16 @@ class ExecutorAgent(BaseAgent):
 
         use_limit = self._should_use_limit(trade_info)
 
+        # H4: Validate price is positive before using it for calculations
+        if price <= 0:
+            self.logger.error(f"❌ Trade rejected: invalid price {price} for {pair}")
+            return {"executed": False, "reason": f"Invalid price: {price}"}
+
+        # H11: Validate amounts are positive before executing
+        if quote_amount <= 0 or quantity < 0:
+            self.logger.error(f"❌ Trade rejected: invalid amounts quote_amount={quote_amount}, quantity={quantity}")
+            return {"executed": False, "reason": "Invalid trade amounts"}
+
         # Create Trade record
         trade = Trade(
             pair=pair,
@@ -131,24 +170,29 @@ class ExecutorAgent(BaseAgent):
                 # Limit buy: place slightly below current price to ensure maker fee
                 limit_price = price * (1 - self.limit_price_offset_pct)
                 base_size = str(round(quote_amount / limit_price, 8))
-                result = self.coinbase.limit_order_buy(
-                    product_id=pair,
-                    base_size=base_size,
-                    limit_price=str(round(limit_price, 2)),
+                result = self.exchange.place_limit_order(
+                    pair=pair,
+                    side="BUY",
+                    size=float(base_size),
+                    price=limit_price,
                 )
                 self.logger.info(
                     f"📋 Limit BUY placed for {pair} @ {limit_price:,.2f} "
                     f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
                 )
             elif action == "buy":
-                result = self.coinbase.market_order_buy(
-                    product_id=pair,
-                    quote_size=str(round(quote_amount, 2)),
+                result = self.exchange.place_market_order(
+                    pair=pair,
+                    side="BUY",
+                    amount=quote_amount,
+                    amount_is_base=False,
                 )
             else:
-                result = self.coinbase.market_order_sell(
-                    product_id=pair,
-                    base_size=str(quantity),
+                result = self.exchange.place_market_order(
+                    pair=pair,
+                    side="SELL",
+                    amount=quantity,
+                    amount_is_base=True,
                 )
 
             if result.get("success", True) and "error" not in result:
@@ -161,6 +205,10 @@ class ExecutorAgent(BaseAgent):
                     # Limit order resting — record as PENDING
                     trade.status = TradeStatus.PENDING
                     trade.coinbase_order_id = order_id
+                    # Cycle-3 fix: update quantity to match actual order size
+                    if use_limit and action == "buy":
+                        trade.quantity = float(base_size)
+                        trade.price = limit_price
                     self.state.add_trade(trade)
                     self.logger.info(
                         f"📋 Limit order resting: {trade.to_summary()} — "
@@ -175,11 +223,11 @@ class ExecutorAgent(BaseAgent):
                     }
 
                 # Verify fill status for live orders
-                if order_id and not self.coinbase.paper_mode:
-                    order = self._verify_fill(order_id, order)
+                if order_id and not getattr(self.exchange, "paper_mode", False):
+                    order = await self._verify_fill(order_id, order)
 
                 fill_status = order.get("status", "FILLED")
-                if fill_status == "FILLED" or self.coinbase.paper_mode:
+                if fill_status == "FILLED" or getattr(self.exchange, "paper_mode", False):
                     trade.status = TradeStatus.FILLED
                 elif fill_status in ("CANCELLED", "FAILED", "EXPIRED"):
                     trade.status = TradeStatus.FAILED
@@ -199,6 +247,7 @@ class ExecutorAgent(BaseAgent):
                 trade.fees = float(order.get("fee", 0))
 
                 # Slippage measurement
+                slippage_pct = 0.0
                 if expected_price > 0 and trade.filled_price > 0:
                     slippage_pct = (trade.filled_price - expected_price) / expected_price * 100
                     if action == "sell":
@@ -211,7 +260,27 @@ class ExecutorAgent(BaseAgent):
                     )
 
                 # Record in state and rules
-                self.state.add_trade(trade)
+                # H27 fix: if add_trade raises ValueError (insufficient balance/position),
+                # the exchange order is already filled — M1 fix: force-record it anyway
+                # since exchange state is the source of truth.
+                try:
+                    self.state.add_trade(trade)
+                except ValueError as ve:
+                    self.logger.warning(
+                        f"⚠️ Balance validation failed for {pair}: {ve} \u2014 "
+                        f"force-recording anyway since exchange filled order_id={trade.coinbase_order_id}"
+                    )
+                    # M1 fix: Force-record the trade to keep state in sync with exchange
+                    self.state.add_trade(trade, force=True)
+                    # Alert user about the state drift
+                    if self._telegram:
+                        self._telegram.send_message(
+                            f"⚠️ *State drift detected*\n\n"
+                            f"Exchange filled order but local balance check failed:\n"
+                            f"Pair: `{pair}` | Action: `{action}`\n"
+                            f"Warning: {ve}\n\n"
+                            f"Trade recorded anyway. Holdings refresh recommended."
+                        )
                 self.rules.record_trade(quote_amount, action=action)
 
                 self.logger.info(f"✅ Trade executed: {trade.to_summary()}")
@@ -221,10 +290,7 @@ class ExecutorAgent(BaseAgent):
                     "trade": trade.model_dump(mode="json"),
                     "order": order,
                     "order_type": "limit" if use_limit else "market",
-                    "slippage_pct": (
-                        (trade.filled_price - expected_price) / expected_price * 100
-                        if expected_price > 0 else 0
-                    ),
+                    "slippage_pct": slippage_pct if expected_price > 0 else 0,
                 }
             else:
                 trade.status = TradeStatus.FAILED
@@ -237,7 +303,7 @@ class ExecutorAgent(BaseAgent):
             self.logger.error(f"❌ Execution error: {e}", exc_info=True)
             return {"executed": False, "error": str(e), "trade_id": trade.id}
 
-    def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
+    async def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
         """Poll order status to verify fill (for live orders).
 
         Uses a short initial poll interval (200 ms) with exponential back-off
@@ -246,14 +312,14 @@ class ExecutorAgent(BaseAgent):
         delay = 0.2  # Start at 200 ms
         for attempt in range(max_attempts):
             try:
-                order = self.coinbase.get_order(order_id)
+                order = self.exchange.get_order(order_id)
                 status = order.get("status", "")
                 if status in ("FILLED", "CANCELLED", "FAILED", "EXPIRED"):
                     self.logger.info(f"Order {order_id} status: {status}")
                     return order
             except Exception as e:
                 self.logger.debug(f"Fill check attempt {attempt + 1} failed: {e}")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
             delay = min(delay * 2, 2.0)  # Back-off up to 2 s
         self.logger.warning(
             f"⚠️ Order {order_id} fill not confirmed after {max_attempts} attempts — "
@@ -273,6 +339,9 @@ class ExecutorAgent(BaseAgent):
         """
         for trade in self.state.get_open_trades():
             if trade.pair == pair and trade.action == TradeAction.BUY:
+                # Cycle-4 fix: skip PENDING trades that haven't filled yet
+                if trade.status not in (TradeStatus.FILLED, TradeStatus.PARTIALLY_FILLED):
+                    continue
                 if quantity > 0:
                     return self._partial_sell(trade, quantity, price, reason)
                 return self._close_position(trade, price, reason)
@@ -281,9 +350,23 @@ class ExecutorAgent(BaseAgent):
 
     def _partial_sell(self, trade: Trade, quantity: float, price: float, reason: str) -> dict:
         """Sell a portion of a position (used for tiered exits)."""
-        result = self.coinbase.market_order_sell(
-            product_id=trade.pair,
-            base_size=str(quantity),
+        # Guard: cap to actual exchange balance
+        quantity = self._cap_qty_to_balance(trade.pair, quantity)
+        if quantity <= 0:
+            self.logger.warning(
+                f"⚠️ Partial sell skipped for {trade.pair}: zero available balance."
+            )
+            return {
+                "pair": trade.pair, "reason": reason,
+                "quantity_sold": 0, "close_price": price,
+                "pnl": 0, "success": False,
+            }
+
+        result = self.exchange.place_market_order(
+            pair=trade.pair,
+            side="SELL",
+            amount=quantity,
+            amount_is_base=True,
         )
 
         success = result.get("success", True) and "error" not in result
@@ -295,19 +378,49 @@ class ExecutorAgent(BaseAgent):
             close_price = float(order.get("average_filled_price", price))
             fees = float(order.get("fee", 0))
 
-            # Reduce the trade's remaining quantity (don't close it)
-            remaining = (trade.filled_quantity or trade.quantity) - quantity
+            # Update trade state via public method (M12 fix: don't access state._lock directly)
+            remaining = max(0.0, (trade.filled_quantity or trade.quantity) - quantity)
             if remaining > 0:
-                trade.filled_quantity = remaining
+                # H5 fix: pass sold_quantity so positions are deducted
+                # Cycle-3: also credit sell proceeds to cash_balance
+                sell_proceeds = close_price * quantity - fees
+                self.state.update_partial_fill(trade.id, remaining, sold_quantity=quantity, sell_proceeds=sell_proceeds)
             else:
                 # Position fully exited by tiers
+                pass
+
+            if remaining <= 0:
                 self.state.close_trade(trade.id, close_price, fees)
 
+            # H3+M3 fix: Record partial sell for daily trade count tracking
+            self.rules.record_trade(close_price * quantity, action="sell")
+
             pnl = (close_price - (trade.filled_price or trade.price)) * quantity - fees
+
+            # Persist partial sell trade to stats DB (was previously missing)
+            if self.stats_db:
+                try:
+                    _exchange = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                    self.stats_db.record_trade(
+                        pair=trade.pair,
+                        action="sell",
+                        price=close_price,
+                        quantity=quantity,
+                        quote_amount=close_price * quantity,
+                        confidence=trade.confidence or 0,
+                        signal_type=reason,
+                        reasoning=reason,
+                        pnl=pnl,
+                        fee_quote=fees,
+                        exchange=_exchange,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Failed to record partial sell in StatsDB: {e}")
+            _sym = getattr(self.state, "currency_symbol", "$")
             self.logger.info(
                 f"Partial sell ({reason}): {trade.pair} — "
-                f"sold {quantity:.6f} at ${close_price:,.2f}, "
-                f"PnL: ${pnl:,.2f}, remaining: {remaining:.6f}"
+                f"sold {quantity:.6f} at {_sym}{close_price:,.2f}, "
+                f"PnL: {_sym}{pnl:,.2f}, remaining: {remaining:.6f}"
             )
         else:
             pnl = 0
@@ -329,6 +442,9 @@ class ExecutorAgent(BaseAgent):
         for trade in self.state.get_open_trades():
             if trade.action != TradeAction.BUY:
                 continue
+            # Cycle-4 fix: skip trades that haven't filled yet
+            if trade.status not in (TradeStatus.FILLED, TradeStatus.PARTIALLY_FILLED):
+                continue
 
             current_price = self.state.current_prices.get(trade.pair, 0)
             if current_price <= 0:
@@ -336,18 +452,38 @@ class ExecutorAgent(BaseAgent):
 
             # Check stop-loss
             if trade.stop_loss and current_price <= trade.stop_loss:
+                failures = self._close_failures.get(trade.id, 0)
+                if failures >= self._close_failure_limit:
+                    self.logger.error(
+                        f"🛑 Giving up on stop-loss close for {trade.pair} after "
+                        f"{failures} failed attempts — manual intervention required."
+                    )
+                    if self._telegram:
+                        self._telegram.send_alert(
+                            f"🛑 *Stuck Position*\n\n"
+                            f"Stop-loss for `{trade.pair}` failed {failures}x and will no longer retry.\n"
+                            f"Trade ID: `{trade.id}`\n"
+                            f"Manual close required."
+                        )
+                    continue
+                _sym = getattr(self.state, "currency_symbol", "$")
                 self.logger.warning(
                     f"⚠️ STOP-LOSS triggered for {trade.pair} | "
-                    f"Price: ${current_price:,.2f} <= SL: ${trade.stop_loss:,.2f}"
+                    f"Price: {_sym}{current_price:,.2f} <= SL: {_sym}{trade.stop_loss:,.2f}"
                 )
                 close_result = self._close_position(trade, current_price, "stop_loss")
+                if close_result.get("success"):
+                    self._close_failures.pop(trade.id, None)
+                else:
+                    self._close_failures[trade.id] = failures + 1
                 closed_trades.append(close_result)
 
             # Check take-profit
             elif trade.take_profit and current_price >= trade.take_profit:
+                _sym = getattr(self.state, "currency_symbol", "$")
                 self.logger.info(
                     f"🎯 TAKE-PROFIT hit for {trade.pair} | "
-                    f"Price: ${current_price:,.2f} >= TP: ${trade.take_profit:,.2f}"
+                    f"Price: {_sym}{current_price:,.2f} >= TP: {_sym}{trade.take_profit:,.2f}"
                 )
                 close_result = self._close_position(trade, current_price, "take_profit")
                 closed_trades.append(close_result)
@@ -361,32 +497,118 @@ class ExecutorAgent(BaseAgent):
         Calling it unconditionally would corrupt the internal position/cash state
         if the exchange rejects the order.
         """
-        qty = trade.filled_quantity or trade.quantity
+        # HIGH-2: prevent duplicate sell orders if stop-loss and trailing-stop
+        # fire concurrently for the same trade.
+        with self._closing_trades_lock:
+            if trade.id in self._closing_trades:
+                self.logger.warning(
+                    f"⚠️ Skipping duplicate close for {trade.pair} ({trade.id}) — "
+                    "already being closed by another caller."
+                )
+                return {"trade_id": trade.id, "pair": trade.pair, "success": False,
+                        "reason": "duplicate_close_skipped"}
+            self._closing_trades.add(trade.id)
 
-        result = self.coinbase.market_order_sell(
-            product_id=trade.pair,
-            base_size=str(qty),
+        try:
+            return self._close_position_inner(trade, price, reason)
+        finally:
+            with self._closing_trades_lock:
+                self._closing_trades.discard(trade.id)
+
+    def _close_position_inner(self, trade: Trade, price: float, reason: str) -> dict:
+        """Internal implementation of position close (called only once per trade)."""
+        qty = trade.filled_quantity if trade.filled_quantity is not None else trade.quantity
+
+        # ── Guard: cap qty to actual exchange balance to avoid
+        #    "Insufficient balance in source account" rejections.
+        qty = self._cap_qty_to_balance(trade.pair, qty)
+        if qty <= 0:
+            self.logger.error(
+                f"❌ Cannot close {trade.pair}: zero available balance on exchange. "
+                "Removing stale trade from state."
+            )
+            self.state.close_trade(trade.id, price, 0.0)
+            return {
+                "trade_id": trade.id, "pair": trade.pair,
+                "close_price": price, "pnl": 0, "reason": reason,
+                "success": True,  # position is gone; nothing left to sell
+            }
+
+        result = self.exchange.place_market_order(
+            pair=trade.pair,
+            side="SELL",
+            amount=qty,
+            amount_is_base=True,
         )
 
         success = result.get("success", True) and "error" not in result
         close_price = price
         fees = 0.0
+        closed = None  # Initialize before conditional assignment
 
         if success:
             order = result.get("order", result)
             close_price = float(order.get("average_filled_price", price))
             fees = float(order.get("fee", 0))
 
-            self.state.close_trade(trade.id, close_price, fees)
+            # C2 fix: check return value — exchange sell already placed
+            closed = self.state.close_trade(trade.id, close_price, fees)
+            if not closed:
+                self.logger.error(
+                    f"❌ close_trade returned None for {trade.id} ({trade.pair}) — "
+                    "exchange sold but state not updated; potential divergence"
+                )
+                success = False  # H2 fix: report failure when state diverges
+                # Escalate to user
+                if self._telegram:
+                    self._telegram.send_message(
+                        f"\U0001f6a8 *STATE DIVERGENCE*\n\n"
+                        f"Sold `{trade.pair}` on exchange but state update failed.\n"
+                        f"Trade ID: `{trade.id}`\n"
+                        f"Manual check required."
+                    )
+            else:
+                # H3+M3 fix: Record successful stop-loss/take-profit exit for daily trade count
+                self.rules.record_trade(qty * close_price, action="sell")
+                if closed.pnl and closed.pnl < 0:
+                    self.rules.record_loss(abs(closed.pnl))
 
-            if trade.pnl and trade.pnl < 0:
-                self.rules.record_loss(abs(trade.pnl))
+                # Persist sell trade to stats DB (was previously missing)
+                if self.stats_db:
+                    try:
+                        _exchange = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                        self.stats_db.record_trade(
+                            pair=trade.pair,
+                            action="sell",
+                            price=close_price,
+                            quantity=qty,
+                            quote_amount=qty * close_price,
+                            confidence=trade.confidence or 0,
+                            signal_type=reason,
+                            reasoning=reason,
+                            pnl=closed.pnl,
+                            fee_quote=fees,
+                            exchange=_exchange,
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Failed to record sell in StatsDB: {e}")
+
+            self._record_training_outcome(trade, close_price, reason)
 
             self.logger.info(
                 f"Position closed ({reason}): {trade.to_summary()}"
             )
         else:
-            error = result.get("error", "Unknown error")
+            err_resp = result.get("error_response") or {}
+            error = (
+                result.get("error")
+                or err_resp.get("message")
+                or err_resp.get("error")
+                or err_resp.get("preview_failure_reason")
+                or err_resp.get("new_order_failure_reason")
+                or result.get("failure_reason")
+                or "Unknown error"
+            )
             self.logger.error(
                 f"❌ Failed to close position for {trade.pair} ({reason}): {error} — "
                 f"position state NOT updated; will retry on next cycle."
@@ -396,10 +618,68 @@ class ExecutorAgent(BaseAgent):
             "trade_id": trade.id,
             "pair": trade.pair,
             "close_price": close_price,
-            "pnl": trade.pnl if success else None,
+            "pnl": closed.pnl if (success and closed) else (trade.pnl if success else None),
             "reason": reason,
             "success": success,
         }
+
+    def _cap_qty_to_balance(self, pair: str, desired_qty: float) -> float:
+        """Cap *desired_qty* to the actual available balance on the exchange.
+
+        Prevents "Insufficient balance in source account" rejections that occur
+        when the internal state tracks a larger position than what actually
+        exists on the exchange (e.g. after partial tier exits or rounding).
+        """
+        try:
+            base_currency = pair.split("-")[0]
+            balances = self.exchange.balance  # {currency: amount}
+            actual = balances.get(base_currency, 0.0)
+            if actual <= 0:
+                self.logger.warning(
+                    f"⚠️ {pair}: exchange reports 0 {base_currency} balance — "
+                    f"state expected {desired_qty:.8f}"
+                )
+                return 0.0
+            if actual < desired_qty:
+                self.logger.warning(
+                    f"⚠️ {pair}: capping sell qty from {desired_qty:.8f} → "
+                    f"{actual:.8f} (actual exchange balance)"
+                )
+                return actual
+        except Exception as e:
+            self.logger.debug(f"Balance check failed for {pair}, using state qty: {e}")
+        return desired_qty
+
+    def _record_training_outcome(self, trade: Trade, close_price: float, reason: str) -> None:
+        """Record trade outcome for training data (fire-and-forget)."""
+        try:
+            tc = self.training_collector
+            if not tc or not tc.enabled:
+                return
+            entry = trade.filled_price or trade.price
+            pnl = trade.pnl or 0.0
+            pnl_pct = ((close_price / entry) - 1) * 100 if entry and entry > 0 else 0.0
+            hold_secs = 0.0
+            if trade.closed_at and trade.timestamp:
+                try:
+                    hold_secs = (trade.closed_at - trade.timestamp).total_seconds()
+                except Exception:
+                    pass
+            tc.record_outcome(
+                trade_id=trade.id,
+                pair=trade.pair,
+                action=trade.action.value if hasattr(trade.action, "value") else str(trade.action),
+                entry_price=entry or 0.0,
+                exit_price=close_price,
+                quantity=trade.filled_quantity or trade.quantity or 0.0,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                fees=trade.fees or 0.0,
+                hold_duration_seconds=hold_secs,
+                exit_reason=reason,
+            )
+        except Exception as e:
+            self.logger.debug(f"Training data recording failed (non-fatal): {e}")
 
     # =========================================================================
     # Limit Order Lifecycle Management
@@ -433,13 +713,14 @@ class ExecutorAgent(BaseAgent):
 
         for trade in pending_trades:
             try:
-                order = self.coinbase.get_order(trade.coinbase_order_id)
+                order = self.exchange.get_order(trade.coinbase_order_id)
                 if not order:
                     self.logger.warning(
                         f"⚠️ Order {trade.coinbase_order_id} for {trade.pair} "
                         "not found — marking as FAILED"
                     )
-                    trade.status = TradeStatus.FAILED
+                    # H4 fix: use state method instead of direct mutation
+                    self.state.mark_trade_status(trade.id, TradeStatus.FAILED)
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
@@ -452,52 +733,64 @@ class ExecutorAgent(BaseAgent):
                 status = order.get("status", "")
 
                 if status == "FILLED":
-                    # Order filled — update trade and record
-                    trade.status = TradeStatus.FILLED
-                    trade.filled_price = float(order.get("average_filled_price", trade.price))
-                    trade.filled_quantity = float(order.get("filled_size", trade.quantity))
-                    trade.fees = float(order.get("fee", 0))
+                    # H4 fix: update trade atomically under state lock
+                    filled_price = float(order.get("average_filled_price", trade.price))
+                    filled_quantity = float(order.get("filled_size", trade.quantity))
+                    fees = float(order.get("fee", 0))
+                    self.state.update_trade_fill(
+                        trade.id, filled_price, filled_quantity, fees,
+                        status=TradeStatus.FILLED,
+                    )
 
                     # Record spend in rules (for daily limit tracking)
-                    quote_amount = trade.filled_price * trade.filled_quantity
+                    quote_amount = filled_price * filled_quantity
                     self.rules.record_trade(quote_amount, action=trade.action.value)
 
                     self.logger.info(
                         f"✅ Limit order FILLED: {trade.pair} @ "
-                        f"{trade.filled_price:,.2f} (qty: {trade.filled_quantity:.6f})"
+                        f"{filled_price:,.2f} (qty: {filled_quantity:.6f})"
                     )
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
                         "order_id": trade.coinbase_order_id,
                         "action": "filled",
-                        "filled_price": trade.filled_price,
-                        "filled_quantity": trade.filled_quantity,
+                        "filled_price": filled_price,
+                        "filled_quantity": filled_quantity,
                     })
 
                 elif status in ("CANCELLED", "FAILED", "EXPIRED"):
-                    trade.status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
-                    # Reverse the position/cash booking from add_trade
-                    with self.state._lock:
-                        if trade.action == TradeAction.BUY:
-                            self.state.positions[trade.pair] = (
-                                self.state.positions.get(trade.pair, 0) - trade.quantity
-                            )
-                            self.state.cash_balance += trade.value
-                        elif trade.action == TradeAction.SELL:
-                            self.state.positions[trade.pair] = (
-                                self.state.positions.get(trade.pair, 0) + trade.quantity
-                            )
-                            self.state.cash_balance -= trade.value
+                    # C4 fix: Update trade with exchange's latest fill before reversing.
+                    # A partial fill may have occurred between fetch and now.
+                    exchange_filled_qty = float(order.get("filled_size", 0) or 0)
+                    exchange_filled_price = float(order.get("average_filled_price", trade.price) or trade.price)
+                    
+                    # Update the trade object's filled_quantity to exchange reality
+                    # so reverse_trade_booking only reverses the UNFILLED portion.
+                    if exchange_filled_qty > 0 and exchange_filled_qty != trade.filled_quantity:
+                        self.logger.info(
+                            f"📋 Order {trade.coinbase_order_id} had partial fill: "
+                            f"local={trade.filled_quantity:.6f}, exchange={exchange_filled_qty:.6f}"
+                        )
+                        trade.filled_quantity = exchange_filled_qty
+                        trade.filled_price = exchange_filled_price
+                    
+                    # H4 fix: set status under lock
+                    new_status = TradeStatus.CANCELLED if status == "CANCELLED" else TradeStatus.FAILED
+                    self.state.mark_trade_status(trade.id, new_status)
+                    # Reverse the position/cash booking from add_trade (unfilled portion only)
+                    self.state.reverse_trade_booking(trade)
                     self.logger.info(
                         f"📋 Pending order {status}: {trade.pair} — "
-                        "state booking reversed"
+                        f"state booking reversed (filled={exchange_filled_qty:.6f})"
                     )
                     results.append({
                         "trade_id": trade.id,
                         "pair": trade.pair,
                         "order_id": trade.coinbase_order_id,
                         "action": f"marked_{status.lower()}",
+                        "partial_fill": exchange_filled_qty > 0,
+                        "filled_quantity": exchange_filled_qty,
                     })
 
                 elif status == "OPEN":
@@ -538,22 +831,12 @@ class ExecutorAgent(BaseAgent):
             f"(age: {time.time() - trade.timestamp.timestamp():.0f}s > "
             f"TTL: {self._LIMIT_ORDER_TTL:.0f}s)"
         )
-        cancel_result = self.coinbase.cancel_order(trade.coinbase_order_id)
+        cancel_result = self.exchange.cancel_order(trade.coinbase_order_id)
 
         if cancel_result.get("success"):
-            trade.status = TradeStatus.CANCELLED
-            # Reverse the position/cash booking
-            with self.state._lock:
-                if trade.action == TradeAction.BUY:
-                    self.state.positions[trade.pair] = (
-                        self.state.positions.get(trade.pair, 0) - trade.quantity
-                    )
-                    self.state.cash_balance += trade.value
-                elif trade.action == TradeAction.SELL:
-                    self.state.positions[trade.pair] = (
-                        self.state.positions.get(trade.pair, 0) + trade.quantity
-                    )
-                    self.state.cash_balance -= trade.value
+            self.state.mark_trade_status(trade.id, TradeStatus.CANCELLED)
+            # Reverse the position/cash booking via public API
+            self.state.reverse_trade_booking(trade)
             self.logger.info(
                 f"✅ Stale limit order cancelled: {trade.pair} — state reversed"
             )

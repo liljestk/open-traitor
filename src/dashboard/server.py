@@ -1,20 +1,14 @@
 """
-Auto-Traitor Dashboard API Server.
+Auto-Traitor Dashboard API Server (slim core).
 
-FastAPI app running on port 8090 (configurable).  Provides:
-  REST
-  ───
-  GET  /api/cycles               - Paginated cycle list (Cycle Explorer)
-  GET  /api/cycles/{cycle_id}    - Full span chain for one cycle (Playback)
-  GET  /api/stats/summary        - Portfolio + trade stats overview
-  GET  /api/strategic            - Recent strategic context (planning plans)
-  GET  /api/temporal/runs        - Temporal planning workflow run list
-  GET  /api/temporal/replay/{workflow_id}/{run_id}  - Full Temporal history
-  POST /api/temporal/rerun/{workflow_id}/{run_id}   - Trigger a fresh run
+FastAPI app running on port 8090 (configurable).  All REST endpoints live in
+``src.dashboard.routes.*`` sub-modules — this file contains only:
 
-  WebSocket
-  ─────────
-  WS   /ws/live                  - Real-time LLM span events from Redis pub/sub
+  - Shared-state injection (``set_globals``)
+  - The ASGI lifespan (Redis subscriber, Temporal connect, self-init)
+  - CORS + API-key middleware
+  - Router registration
+  - Static-file / SPA serving
 
 Start via:
     uvicorn src.dashboard.server:app --host 0.0.0.0 --port 8090
@@ -28,77 +22,106 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
-import math
 import os
-import sqlite3
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
-from typing import Any, AsyncGenerator, Optional
-
 from pathlib import Path
-import io
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import src.dashboard.deps as deps
+from src.dashboard import auth
 from src.utils.logger import get_logger
 
 logger = get_logger("dashboard")
 
 # ---------------------------------------------------------------------------
-# Shared state (injected at startup via create_app / set_globals)
+# Route imports
+# ---------------------------------------------------------------------------
+from src.dashboard.routes.cycles import router as cycles_router
+from src.dashboard.routes.trades import router as trades_router
+from src.dashboard.routes.stats import router as stats_router
+from src.dashboard.routes.market import router as market_router
+from src.dashboard.routes.planning import router as planning_router
+from src.dashboard.routes.websocket import router as ws_router, redis_subscriber
+from src.dashboard.routes.settings import router as settings_router
+from src.dashboard.routes.news import router as news_router
+from src.dashboard.routes.watchlist import router as watchlist_router
+from src.dashboard.routes.commands import router as commands_router
+from src.dashboard.routes.llm_analytics import router as llm_analytics_router
+from src.dashboard.routes.learning import router as learning_router
+from src.dashboard.routes.auth_routes import router as auth_router
+
+
+# ---------------------------------------------------------------------------
+# set_globals — inject shared services before uvicorn starts
 # ---------------------------------------------------------------------------
 
-_stats_db = None          # StatsDB instance
-_redis_client = None      # redis.Redis instance (optional)
-_temporal_client = None   # temporalio.client.Client instance (optional)
-_temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
-_temporal_namespace: str = os.environ.get("TEMPORAL_NAMESPACE", "default")
-_config: dict = {}
-_coinbase_client = None   # CoinbaseClient instance (optional, for price lookups)
-
-_ws_connections: list[WebSocket] = []
-
-
-_rules_instance = None    # AbsoluteRules instance (optional, for runtime push)
-_llm_client = None        # LLMClient instance (optional, for provider status)
-
-
-def set_globals(*, stats_db, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None):
+def set_globals(
+    *,
+    stats_db,
+    redis_client=None,
+    temporal_client=None,
+    config: dict | None = None,
+    rules_instance=None,
+    llm_client=None,
+):
     """Inject shared services.  Called from main.py before uvicorn starts."""
-    global _stats_db, _redis_client, _temporal_client, _config, _coinbase_client, _rules_instance, _llm_client
-    _stats_db = stats_db
-    _redis_client = redis_client
-    _temporal_client = temporal_client
-    _config = config
-    _rules_instance = rules_instance
-    _llm_client = llm_client
+    deps.stats_db = stats_db
+    deps.redis_client = redis_client
+    deps.temporal_client = temporal_client
+    deps.config = config or {}
+    deps.rules_instance = rules_instance
+    deps.llm_client = llm_client
+
     # Spin up a read-only Coinbase client for live price lookups (market data only)
     try:
         from src.core.coinbase_client import CoinbaseClient
         key_file = os.environ.get("COINBASE_KEY_FILE", "")
         api_key = os.environ.get("COINBASE_API_KEY", "")
         api_secret = os.environ.get("COINBASE_API_SECRET", "")
-        _coinbase_client = CoinbaseClient(
+        deps.exchange_client = CoinbaseClient(
             api_key=api_key or None,
             api_secret=api_secret or None,
             key_file=key_file or None,
-            paper_mode=True,  # read-only; no real orders from the dashboard
+            paper_mode=False,  # real API for balance/price reads; dashboard never places orders
         )
         logger.info("✅ Dashboard Coinbase price client ready")
     except Exception as e:
-        logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
+        logger.warning(f"⚠️ Dashboard Exchange client not available: {e}")
+
+    # Also try to create an IBKR client for IBKR profile price lookups
+    try:
+        ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+        ib_port = int(os.environ.get("IBKR_PORT", "4001"))
+        ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+        from src.core.ib_client import IBClient
+        deps.ibkr_exchange_client = IBClient(
+            paper_mode=False,
+            ib_host=ib_host,
+            ib_port=ib_port,
+            ib_client_id=ib_client_id + 10,
+        )
+        logger.info("✅ Dashboard IBKR price client ready")
+    except Exception as e:
+        logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
 
 
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config: dict = {}, rules_instance=None, llm_client=None) -> FastAPI:
+def create_app(
+    *,
+    stats_db=None,
+    redis_client=None,
+    temporal_client=None,
+    config: dict | None = None,
+    rules_instance=None,
+    llm_client=None,
+) -> FastAPI:
     set_globals(
         stats_db=stats_db,
         redis_client=redis_client,
@@ -111,7 +134,7 @@ def create_app(*, stats_db=None, redis_client=None, temporal_client=None, config
 
 
 # ---------------------------------------------------------------------------
-# Lifespan  (background Redis subscriber)
+# Lifespan (background Redis subscriber + self-init)
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
@@ -120,64 +143,79 @@ async def lifespan(application: FastAPI):
 
     When the dashboard is started standalone via ``uvicorn src.dashboard.server:app``
     (e.g. inside the Docker container), ``set_globals()`` is never called by
-    ``main.py``, so _stats_db / _redis_client are ``None``.  We self-initialise
-    them here so the API is functional.
+    ``main.py``, so deps.stats_db / deps.redis_client are ``None``.
+    We self-initialise them here so the API is functional.
     """
-    global _stats_db, _redis_client, _temporal_client
 
     # --- Self-initialise StatsDB when not injected by main.py ---------------
-    if _stats_db is None:
+    if deps.stats_db is None:
         try:
             from src.utils.stats import StatsDB
-            _stats_db = StatsDB()
-            logger.info("📊 Dashboard self-initialised StatsDB")
+            deps.stats_db = StatsDB()
+            logger.info("📊 Dashboard self-initialised StatsDB (PostgreSQL)")
         except Exception as e:
             logger.error(f"❌ Could not initialise StatsDB: {e}")
 
     # --- Self-initialise Redis when not injected -----------------------------
-    if _redis_client is None:
+    if deps.redis_client is None:
         try:
             import redis as _redis_mod
             redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-            _redis_client = _redis_mod.from_url(redis_url, decode_responses=True)
-            _redis_client.ping()
+            deps.redis_client = _redis_mod.from_url(redis_url, decode_responses=True)
+            deps.redis_client.ping()
             logger.info(f"📡 Dashboard self-initialised Redis ({redis_url})")
         except Exception as e:
             logger.warning(f"⚠️ Redis not available: {e} — live feed disabled")
-            _redis_client = None
+            deps.redis_client = None
 
     task = None
-    if _redis_client:
-        task = asyncio.create_task(_redis_subscriber())
+    if deps.redis_client:
+        task = asyncio.create_task(redis_subscriber())
         logger.info("📡 Dashboard Redis subscriber started")
 
     # Connect Temporal here so we use uvicorn's own event loop
-    if _temporal_client is None:
+    if deps.temporal_client is None:
         try:
             import temporalio.client as _tc
-            _temporal_client = await _tc.Client.connect(
-                _temporal_host, namespace=_temporal_namespace
+            deps.temporal_client = await _tc.Client.connect(
+                deps.temporal_host, namespace=deps.temporal_namespace,
             )
-            logger.info(f"✅ Dashboard Temporal client connected ({_temporal_host})")
+            logger.info(f"✅ Dashboard Temporal client connected ({deps.temporal_host})")
         except Exception as e:
             logger.warning(f"⚠️ Temporal not available: {e} — replay/rerun disabled")
 
-    # --- Initialise Coinbase price client if not already set -----------------
-    if _coinbase_client is None:
+    if deps.exchange_client is None:
         try:
             from src.core.coinbase_client import CoinbaseClient
             key_file = os.environ.get("COINBASE_KEY_FILE", "")
             api_key = os.environ.get("COINBASE_API_KEY", "")
             api_secret = os.environ.get("COINBASE_API_SECRET", "")
-            globals()["_coinbase_client"] = CoinbaseClient(
+            deps.exchange_client = CoinbaseClient(
                 api_key=api_key or None,
                 api_secret=api_secret or None,
                 key_file=key_file or None,
-                paper_mode=True,
+                paper_mode=False,  # real API for balance/price reads; dashboard never places orders
             )
-            logger.info("✅ Dashboard Coinbase price client ready")
+            logger.info("✅ Dashboard exchange price client ready")
         except Exception as e:
-            logger.warning(f"⚠️ Dashboard Coinbase client not available: {e}")
+            logger.warning(f"⚠️ Dashboard exchange client not available: {e}")
+
+    # Try to initialise IBKR client for equity price lookups (IB Gateway on host)
+    if deps.ibkr_exchange_client is None:
+        try:
+            ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+            ib_port = int(os.environ.get("IBKR_PORT", "4001"))
+            ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+            from src.core.ib_client import IBClient
+            deps.ibkr_exchange_client = IBClient(
+                paper_mode=False,
+                ib_host=ib_host,
+                ib_port=ib_port,
+                ib_client_id=ib_client_id + 10,
+            )
+            logger.info("✅ Dashboard IBKR price client ready")
+        except Exception as e:
+            logger.info(f"ℹ️ Dashboard IBKR client not available: {e}")
 
     yield
     if task:
@@ -188,1027 +226,205 @@ async def lifespan(application: FastAPI):
 # Application
 # ---------------------------------------------------------------------------
 
+# Auth configuration check
+_AUTH_CONFIGURED: bool = auth.is_auth_configured()
+
 app = FastAPI(
-    title="Auto-Traitor Dashboard API",
+    title="OpenTraitor Dashboard API",
     description="LLM traceability and playback for the autonomous trading agent",
     version="1.0.0",
     lifespan=lifespan,
+    # Disable OpenAPI docs when auth is configured (production mode)
+    docs_url=None if _AUTH_CONFIGURED else "/docs",
+    redoc_url=None if _AUTH_CONFIGURED else "/redoc",
+    openapi_url=None if _AUTH_CONFIGURED else "/openapi.json",
 )
 
+# --- CORS ---------------------------------------------------------------
+
 _cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
-_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or ["*"]
+_cors_origins = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    or ["http://localhost:5173", "http://localhost:8090"]
+)
+
+if not _AUTH_CONFIGURED:
+    logger.warning(
+        "⚠️  No authentication configured — the dashboard API is open to all network "
+        "clients. Set DASHBOARD_PASSWORD_HASH or DASHBOARD_API_KEY to enable auth."
+    )
+
+# CORS hardening: never allow wildcard origin (prevents credential leakage)
+if "*" in _cors_origins:
+    logger.error(
+        "⚠️ CORS wildcard '*' is not allowed — restricting to localhost origins. "
+        "Set DASHBOARD_CORS_ORIGINS to specific origins instead."
+    )
+    _cors_origins = ["http://localhost:5173", "http://localhost:8090"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=False,       # must be False when allow_origins contains "*"
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,  # Required for httpOnly session cookies
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "X-CSRF-Token", "Authorization"],
 )
 
+# --- API key middleware ---------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# API Key Authentication (active only when DASHBOARD_API_KEY env var is set)
-# ---------------------------------------------------------------------------
 
-_DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
-if not _DASHBOARD_API_KEY:
-    logger.warning(
-        "⚠️  DASHBOARD_API_KEY not set — the dashboard API is open to all network "
-        "clients. Set this env var to require X-API-Key header authentication."
-    )
+# Mutating methods that require CSRF validation
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+# Endpoints that are always public (login flow, health)
+_PUBLIC_ENDPOINTS = frozenset({
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/set-password",
+    "/api/auth/2fa/verify",  # Needed during login flow
+    "/api/system/status",
+    "/api/setup",
+    "/health",
+})
 
 
 @app.middleware("http")
-async def _api_key_middleware(request: Request, call_next):
-    """Require X-API-Key on /api/* and /ws/* when DASHBOARD_API_KEY is configured.
+async def _security_headers_middleware(request: Request, call_next):
+    """Add comprehensive security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Cache-Control"] = "no-store"
+    # Content Security Policy — restrict script/style sources
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    # HSTS — instruct browsers to always use HTTPS (1 year)
+    if os.environ.get("DASHBOARD_HTTPS", "").lower() in ("1", "true", "yes"):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
-    WebSocket upgrade requests are also HTTP requests, but browsers cannot set
-    custom headers on ``new WebSocket(url)``.  We therefore accept the key as a
-    ``?api_key=`` query parameter as a secondary credential path, **only** for
-    WebSocket paths where the header mechanism is unavailable.
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """Session-based auth middleware for /api/ endpoints.
+
+    - Public endpoints (login, status, health) always pass through.
+    - When auth is configured: all other /api/ endpoints require valid session.
+    - When auth is NOT configured: read-only (GET/HEAD/OPTIONS) are open,
+      mutating methods are blocked.
+    - Mutating requests from session-authenticated users require CSRF token.
     """
-    if _DASHBOARD_API_KEY and (
-        request.url.path.startswith("/api/")
-        or request.url.path.startswith("/ws/")
-    ):
-        # Browsers set Sec-Fetch-Site automatically; same-origin means the
-        # request comes from the SPA served by this very server — safe to
-        # allow without an explicit API key.
-        sec_fetch_site = request.headers.get("Sec-Fetch-Site", "")
-        if sec_fetch_site != "same-origin":
-            # Primary: X-API-Key header (server-side / curl / fetch clients)
-            api_key = request.headers.get("X-API-Key", "")
-            if not api_key and request.url.path.startswith("/ws/"):
-                # Fallback for browser WebSocket: ?api_key=... query parameter
-                api_key = request.query_params.get("api_key", "")
-            # Constant-time comparison prevents timing-oracle attacks
-            if not hmac.compare_digest(api_key, _DASHBOARD_API_KEY):
-                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    path = request.url.path
+
+    if path.startswith("/api/"):
+        # Always allow public endpoints
+        if path in _PUBLIC_ENDPOINTS:
+            return await call_next(request)
+
+        if _AUTH_CONFIGURED:
+            # Check session-based auth or legacy API key
+            if not auth.is_authenticated(request):
+                return JSONResponse({"detail": "Authentication required"}, status_code=401)
+
+            # CSRF protection for mutating requests (skip for legacy API key auth)
+            if request.method in _MUTATING_METHODS:
+                session_token = auth.get_session_from_request(request)
+                if session_token and session_token != "__legacy_api_key__":
+                    csrf_token = request.headers.get("X-CSRF-Token", "")
+                    if not csrf_token or not auth.validate_csrf_token(session_token, csrf_token):
+                        return JSONResponse({"detail": "Invalid or missing CSRF token"}, status_code=403)
+        else:
+            # No auth configured — block mutating methods
+            if request.method in _MUTATING_METHODS:
+                return JSONResponse(
+                    {"detail": "Authentication must be configured to use mutating endpoints. "
+                     "Set a password via POST /api/auth/set-password."},
+                    status_code=403,
+                )
+
     return await call_next(request)
 
 
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
-
-def _require_db():
-    if _stats_db is None:
-        raise HTTPException(status_code=503, detail="Stats DB not initialised")
-    return _stats_db
-
-
-def _sanitize_floats(obj):
-    """Recursively replace inf/nan floats with None so JSON serialisation succeeds."""
-    if isinstance(obj, dict):
-        return {k: _sanitize_floats(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_floats(v) for v in obj]
-    if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
-        return None
-    return obj
-
-
-def _fresh_conn() -> sqlite3.Connection:
-    """Open a fresh SQLite connection for this request.
-
-    Avoids relying on the thread-local connection inside StatsDB, which is
-    not safe to share across FastAPI's async threadpool workers.
-    """
-    _require_db()
-    conn = sqlite3.connect(_stats_db._db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-# ---------------------------------------------------------------------------
-# REST — Cycles
-# ---------------------------------------------------------------------------
-
-@app.get("/api/cycles", summary="List trading cycles (Cycle Explorer)")
-def list_cycles(
-    pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    """
-    Returns a paginated list of trading cycles with outcome summary.
-    Each item represents one unique `cycle_id` across all agent spans.
-    """
-    db = _require_db()
-    cycles = db.get_cycles(pair=pair, limit=limit, offset=offset)
-    for c in cycles:
-        c["langfuse_url"] = _langfuse_url(c.get("langfuse_trace_id"))
-        # Compute wall-clock duration from first→last agent span timestamps
-        try:
-            if c.get("started_at") and c.get("finished_at"):
-                from datetime import datetime
-                _s = datetime.fromisoformat(c["started_at"])
-                _f = datetime.fromisoformat(c["finished_at"])
-                c["cycle_duration_ms"] = round((_f - _s).total_seconds() * 1000, 1)
-            else:
-                c["cycle_duration_ms"] = None
-        except Exception:
-            c["cycle_duration_ms"] = None
-    return {"cycles": cycles, "limit": limit, "offset": offset, "count": len(cycles)}
-
-
-@app.get("/api/cycles/{cycle_id}", summary="Full span chain for one cycle (Playback)")
-def get_cycle(cycle_id: str):
-    """
-    Returns the complete trace: all agent spans with token counts, latency,
-    LLM prompt/output, plus the resulting trade (if any).
-    Powers the animated Waterfall timeline on the Playback page.
-    """
-    db = _require_db()
-    cycle = db.get_cycle_full(cycle_id)
-    if not cycle:
-        raise HTTPException(status_code=404, detail=f"Cycle {cycle_id!r} not found")
-    cycle["langfuse_url"] = _langfuse_url(cycle.get("langfuse_trace_id"))
-    return cycle
-
-
-# ---------------------------------------------------------------------------
-# REST — Trades & Events
-# ---------------------------------------------------------------------------
-
-@app.get("/api/trades", summary="List raw trades log")
-def list_trades(
-    pair: Optional[str] = Query(None, description="Filter by pair e.g. BTC-USD"),
-    hours: int = Query(24 * 7, ge=1, description="Hours of history to fetch"),
-    limit: int = Query(500, ge=1, le=5000)
-):
-    """Returns a list of raw trades from the database, newest first."""
-    db = _require_db()
-    trades = db.get_trades(hours=hours, pair=pair, limit=limit)
-    return {"trades": trades, "count": len(trades)}
-
-@app.get("/api/trades/export", summary="Export trades to CSV")
-def export_trades(hours: int = Query(24 * 30, ge=1)):
-    """Exports raw trades to a downloadable CSV file."""
-    db = _require_db()
-    trades = db.get_trades(hours=hours, limit=100000)
-    
-    if not trades:
-        return Response(
-            content="id,ts,pair,action,quantity,price,quote_amount,pnl,confidence,signal_type\n",
-            media_type="text/csv"
-        )
-    
-    import pandas as pd
-    df = pd.DataFrame(trades)
-    columns = [
-        "id", "ts", "pair", "action", "quantity", "price", "quote_amount", 
-        "fee_quote", "pnl", "confidence", "signal_type", "stop_loss", 
-        "take_profit", "reasoning", "is_rotation", "approved_by"
-    ]
-    existing_cols = [c for c in columns if c in df.columns]
-    df = df[existing_cols]
-    
-    csv_data = df.to_csv(index=False)
-    headers = {
-        "Content-Disposition": "attachment; filename=auto_traitor_trades.csv"
-    }
-    return Response(content=csv_data, media_type="text/csv", headers=headers)
-
-@app.get("/api/events", summary="List system events")
-def list_events(
-    event_type: Optional[str] = Query(None),
-    hours: int = Query(24 * 7, ge=1),
-    limit: int = Query(500, ge=1, le=5000)
-):
-    """Returns a list of system events/logs from the database."""
-    db = _require_db()
-    events = db.get_events(hours=hours, event_type=event_type, limit=limit)
-    # Parse event data json if possible
-    for e in events:
-        if isinstance(e.get("data"), str):
-            try:
-                e["data"] = json.loads(e["data"])
-            except Exception:
-                pass
-    return _sanitize_floats({"events": events, "count": len(events)})
-
-
-
-# ---------------------------------------------------------------------------
-# REST — Stats summary
-# ---------------------------------------------------------------------------
-
-@app.get("/api/stats/summary", summary="Portfolio and trade stats overview")
-def get_stats_summary():
-    """High-level stats: win-rate, PnL, active pairs, recent activity."""
-    _require_db()
-    conn = _fresh_conn()
-    try:
-        # Overall trade stats
-        trade_row = conn.execute(
-            """SELECT
-                COUNT(*) as total_trades,
-                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
-                ROUND(SUM(pnl), 2) as total_pnl,
-                ROUND(AVG(pnl), 2) as avg_pnl,
-                ROUND(MAX(pnl), 2) as best_trade,
-                ROUND(MIN(pnl), 2) as worst_trade
-               FROM trades
-               WHERE pnl IS NOT NULL"""
-        ).fetchone()
-
-        # Last 24h
-        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        recent_row = conn.execute(
-            """SELECT
-                COUNT(*) as trades_24h,
-                ROUND(SUM(pnl), 2) as pnl_24h
-               FROM trades
-               WHERE ts >= ? AND pnl IS NOT NULL""",
-            (cutoff_24h,),
-        ).fetchone()
-
-        # Active pairs
-        pairs_row = conn.execute(
-            "SELECT COUNT(DISTINCT pair) as active_pairs FROM agent_reasoning WHERE ts >= ?",
-            (cutoff_24h,),
-        ).fetchone()
-
-        # Cycle count last 24h
-        cycle_row = conn.execute(
-            "SELECT COUNT(DISTINCT cycle_id) as cycles_24h FROM agent_reasoning WHERE ts >= ?",
-            (cutoff_24h,),
-        ).fetchone()
-
-        # Latest portfolio snapshot
-        snapshot = conn.execute(
-            """SELECT portfolio_value, total_pnl, ts
-               FROM portfolio_snapshots ORDER BY ts DESC LIMIT 1"""
-        ).fetchone()
-
-        stats = dict(trade_row) if trade_row else {}
-        stats.update(dict(recent_row) if recent_row else {})
-        stats.update(dict(pairs_row) if pairs_row else {})
-        stats.update(dict(cycle_row) if cycle_row else {})
-        if stats.get("total_trades", 0) and stats.get("wins") is not None:
-            t = stats["total_trades"] or 1
-            stats["win_rate"] = round(stats["wins"] / t * 100, 1)
-        else:
-            stats["win_rate"] = None
-        if snapshot:
-            stats["portfolio"] = dict(snapshot)
-        stats["currency"] = _config.get("trading", {}).get("quote_currency", "EUR")
-        return stats
-    except Exception as exc:
-        logger.exception("stats/summary error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# REST — Simulated Trades
-# ---------------------------------------------------------------------------
-
-def _get_live_price(pair: str) -> float:
-    """Fetch the current price for a pair via CoinbaseClient (or return 0 on failure)."""
-    if _coinbase_client:
-        try:
-            return _coinbase_client.get_current_price(pair)
-        except Exception:
-            pass
-    return 0.0
-
-
-@app.get("/api/products", summary="List tradable Coinbase products")
-def list_products():
-    """Return all online, tradable products from Coinbase Advanced Trade.
-
-    Response: ``{"products": [{"id": "BTC-EUR", "base": "BTC", "quote": "EUR"}, ...]}``
-    Each entry is a product that is *online* and not disabled on the exchange.
-    """
-    if not _coinbase_client or not _coinbase_client._rest_client:
-        return {"products": []}
-
-    try:
-        resp = _coinbase_client._rest_client.get_products()
-        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
-        items = raw.get("products", [])
-        products = []
-        for p in items:
-            if (
-                not p.get("trading_disabled", True)
-                and not p.get("is_disabled", False)
-                and str(p.get("status", "")).lower() == "online"
-            ):
-                products.append({
-                    "id": p.get("product_id", ""),
-                    "base": p.get("base_currency_id", ""),
-                    "quote": p.get("quote_currency_id", ""),
-                })
-        products.sort(key=lambda x: x["id"])
-        return {"products": products}
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to list products: {e}")
-        return {"products": []}
-
-
-@app.get("/api/market/price", summary="Live price for a trading pair")
-def get_market_price(pair: str = Query(..., description="e.g. BTC-EUR")):
-    """Returns the current best-estimate price for the given pair."""
-    price = _get_live_price(pair)
-    return {"pair": pair, "price": price, "ts": _utcnow()}
-
-
-from pydantic import BaseModel as _BaseModel
-
-class SimulatedTradeCreate(_BaseModel):
-    pair: str
-    from_currency: str
-    from_amount: float
-    notes: str = ""
-
-
-@app.post("/api/simulated-trades", summary="Open a new simulated trade")
-def create_simulated_trade(body: SimulatedTradeCreate):
-    """
-    Opens a new paper simulation. The server fetches the live entry price,
-    computes the implied quantity, and persists the record.
-
-    For EUR→Crypto: `from_currency=EUR`, `pair=BTC-EUR`
-    For Crypto→Crypto: `from_currency=BTC`, `pair=ETH-BTC` (or similar)
-    """
-    db = _require_db()
-    pair = body.pair.upper().strip()
-    from_currency = body.from_currency.upper().strip()
-
-    # Derive to_currency from pair (e.g. BTC-EUR → BTC when buying with EUR)
-    parts = pair.split("-")
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail=f"Invalid pair format: {pair!r}")
-    base, quote = parts
-    # If from_currency matches the quote, we're buying the base
-    if from_currency == quote:
-        to_currency = base
-    elif from_currency == base:
-        # Selling base for quote (e.g. BTC→EUR)
-        to_currency = quote
-    else:
-        to_currency = base  # Best guess
-
-    entry_price = _get_live_price(pair)
-    if entry_price <= 0:
-        raise HTTPException(status_code=503, detail=f"Cannot fetch live price for {pair}")
-
-    # Quantity = how much of to_currency we'd get
-    if from_currency == quote:
-        quantity = body.from_amount / entry_price
-    else:
-        quantity = body.from_amount * entry_price  # selling crypto → getting quote
-
-    sim_id = db.record_simulated_trade(
-        pair=pair,
-        from_currency=from_currency,
-        from_amount=body.from_amount,
-        entry_price=entry_price,
-        quantity=quantity,
-        to_currency=to_currency,
-        notes=body.notes,
-    )
-    return {
-        "id": sim_id,
-        "pair": pair,
-        "from_currency": from_currency,
-        "to_currency": to_currency,
-        "from_amount": body.from_amount,
-        "entry_price": entry_price,
-        "quantity": quantity,
-        "notes": body.notes,
-        "status": "open",
-        "ts": _utcnow(),
-    }
-
-
-@app.get("/api/simulated-trades", summary="List simulated trades with live PnL")
-def list_simulated_trades(
-    include_closed: bool = Query(False, description="Include closed simulations"),
-):
-    """
-    Returns all simulated trades. For open ones, the current price is fetched
-    live and PnL (absolute + %) is computed on the fly.
-    """
-    db = _require_db()
-    rows = db.get_simulated_trades(include_closed=include_closed)
-
-    # Enrich open rows with live PnL
-    for row in rows:
-        if row["status"] == "open":
-            current_price = _get_live_price(row["pair"])
-            if current_price > 0:
-                pnl_abs = (current_price - row["entry_price"]) * row["quantity"]
-                pnl_pct = ((current_price / row["entry_price"]) - 1) * 100 if row["entry_price"] > 0 else 0.0
-            else:
-                current_price = row["entry_price"]
-                pnl_abs = 0.0
-                pnl_pct = 0.0
-            row["current_price"] = current_price
-            row["pnl_abs"] = round(pnl_abs, 6)
-            row["pnl_pct"] = round(pnl_pct, 4)
-        else:
-            # Closed: use stored values
-            row["current_price"] = row.get("close_price") or row["entry_price"]
-            row["pnl_abs"] = row.get("close_pnl_abs") or 0.0
-            row["pnl_pct"] = row.get("close_pnl_pct") or 0.0
-
-    return {"simulations": rows, "count": len(rows)}
-
-
-@app.delete("/api/simulated-trades/{sim_id}", summary="Close a simulated trade")
-def close_simulated_trade_route(sim_id: int):
-    """
-    Closes an open simulation by recording the current live price as the
-    close price and computing the final PnL.
-    """
-    db = _require_db()
-
-    # First, look up the sim to get the pair
-    rows = db.get_simulated_trades(include_closed=False)
-    target = next((r for r in rows if r["id"] == sim_id), None)
-    if not target:
-        raise HTTPException(status_code=404, detail=f"Open simulation {sim_id} not found")
-
-    close_price = _get_live_price(target["pair"])
-    if close_price <= 0:
-        close_price = target["entry_price"]  # Fallback to entry price
-
-    result = db.close_simulated_trade(sim_id=sim_id, close_price=close_price)
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found or already closed")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# REST — Strategic context (planning)
-# ---------------------------------------------------------------------------
-
-@app.get("/api/strategic", summary="Recent strategic plans from Temporal workflows")
-def get_strategic(
-    horizon: Optional[str] = Query(None, description="daily | weekly | monthly"),
-    limit: int = Query(20, ge=1, le=100),
-):
-    """Returns the most recent planning workflow outputs with Temporal + Langfuse IDs."""
-    _require_db()
-    conn = _fresh_conn()
-    try:
-        if horizon:
-            rows = conn.execute(
-                """SELECT id, horizon, plan_json, summary_text, ts,
-                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                   FROM strategic_context
-                   WHERE horizon = ?
-                   ORDER BY ts DESC LIMIT ?""",
-                (horizon, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT id, horizon, plan_json, summary_text, ts,
-                          langfuse_trace_id, temporal_workflow_id, temporal_run_id
-                   FROM strategic_context
-                   ORDER BY ts DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
-
-        result = []
-        for r in rows:
-            row = dict(r)
-            try:
-                row["plan_json"] = json.loads(row["plan_json"] or "{}")
-            except Exception:
-                pass
-            row["langfuse_url"] = _langfuse_url(row.get("langfuse_trace_id"))
-            result.append(row)
-        return {"plans": result, "count": len(result)}
-    except Exception as exc:
-        logger.exception("strategic error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# REST — Temporal workflow replay
-# ---------------------------------------------------------------------------
-
-@app.get("/api/temporal/runs", summary="List recent Temporal planning workflow runs")
-async def list_temporal_runs(
-    limit: int = Query(50, ge=1, le=200),
-    workflow_type: Optional[str] = Query(None, description="DailyPlanWorkflow | WeeklyReviewWorkflow | MonthlyReviewWorkflow"),
-):
-    """Returns recent workflow executions from Temporal with their status."""
-    if _temporal_client is None:
-        return {"runs": [], "error": "Temporal client not available"}
-    try:
-        query = " OR ".join(
-            f"WorkflowType = '{wt}'"
-            for wt in ("DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow")
-        )
-        _ALLOWED_WORKFLOW_TYPES = {"DailyPlanWorkflow", "WeeklyReviewWorkflow", "MonthlyReviewWorkflow"}
-        if workflow_type:
-            if workflow_type not in _ALLOWED_WORKFLOW_TYPES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid workflow_type. Allowed: {sorted(_ALLOWED_WORKFLOW_TYPES)}",
-                )
-            query = f"WorkflowType = '{workflow_type}'"
-
-        runs = []
-        async for wf in _temporal_client.list_workflows(query=query):
-            runs.append({
-                "workflow_id": wf.id,
-                "run_id": wf.run_id,
-                "workflow_type": wf.workflow_type,
-                "status": str(wf.status),
-                "start_time": wf.start_time.isoformat() if wf.start_time else None,
-                "close_time": wf.close_time.isoformat() if wf.close_time else None,
-            })
-            if len(runs) >= limit:
-                break
-        return {"runs": runs, "count": len(runs)}
-    except Exception as exc:
-        logger.exception("temporal/runs error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/api/temporal/replay/{workflow_id}/{run_id}", summary="Full Temporal workflow event history")
-async def get_temporal_replay(workflow_id: str, run_id: str):
-    """
-    Fetches the complete event history for a Temporal workflow run.
-    Each event records input, LLM call, output, timing — enabling full step-by-step replay.
-    """
-    if _temporal_client is None:
-        raise HTTPException(status_code=503, detail="Temporal client not available")
-    try:
-        handle = _temporal_client.get_workflow_handle(workflow_id, run_id=run_id)
-        history = await handle.fetch_history()
-        events = []
-        for event in history.events:
-            events.append({
-                "event_id": event.event_id,
-                "event_type": str(event.event_type),
-                "event_time": event.event_time.isoformat() if event.event_time else None,
-                "attributes": _serialize_event_attrs(event),
-            })
-
-        # Cross-link with Langfuse trace ID from StatsDB
-        langfuse_trace_id = None
-        if _stats_db:
-            conn = _fresh_conn()
-            try:
-                row = conn.execute(
-                    """SELECT langfuse_trace_id FROM strategic_context
-                       WHERE temporal_workflow_id = ? AND temporal_run_id = ?
-                       LIMIT 1""",
-                    (workflow_id, run_id),
-                ).fetchone()
-                if row:
-                    langfuse_trace_id = row[0]
-            finally:
-                conn.close()
-
-        return {
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-            "event_count": len(events),
-            "langfuse_trace_id": langfuse_trace_id,
-            "langfuse_url": _langfuse_url(langfuse_trace_id),
-            "events": events,
-        }
-    except Exception as exc:
-        logger.exception("temporal/replay error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/temporal/rerun/{workflow_id}/{run_id}", summary="Trigger a fresh planning workflow run")
-async def rerun_temporal_workflow(workflow_id: str, run_id: str):
-    """
-    Starts a new execution of the same workflow type with a fresh run ID.
-    Useful for debugging or forcing an out-of-schedule planning run.
-    """
-    if _temporal_client is None:
-        raise HTTPException(status_code=503, detail="Temporal client not available")
-
-    # Determine workflow class from the original run
-    try:
-        handle = _temporal_client.get_workflow_handle(workflow_id, run_id=run_id)
-        desc = await handle.describe()
-        workflow_type = desc.workflow_type
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"Cannot find workflow: {exc}")
-
-    from src.planning.workflows import DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow
-    _wf_map = {
-        "DailyPlanWorkflow": DailyPlanWorkflow,
-        "WeeklyReviewWorkflow": WeeklyReviewWorkflow,
-        "MonthlyReviewWorkflow": MonthlyReviewWorkflow,
-    }
-    wf_cls = _wf_map.get(workflow_type)
-    if not wf_cls:
-        raise HTTPException(status_code=400, detail=f"Unknown workflow type: {workflow_type!r}")
-
-    import uuid
-    new_wf_id = f"manual-rerun-{workflow_type}-{uuid.uuid4().hex[:8]}"
-    try:
-        new_handle = await _temporal_client.start_workflow(
-            wf_cls.run,
-            id=new_wf_id,
-            task_queue="planning",
-        )
-        return {
-            "status": "started",
-            "new_workflow_id": new_wf_id,
-            "new_run_id": new_handle.first_execution_run_id,
-            "original_workflow_id": workflow_id,
-            "original_run_id": run_id,
-        }
-    except Exception as exc:
-        logger.exception("temporal/rerun error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ---------------------------------------------------------------------------
-# WebSocket — Live LLM event stream
-# ---------------------------------------------------------------------------
-
-@app.websocket("/ws/live")
-async def ws_live(websocket: WebSocket):
-    """
-    Streams real-time LLM span events from Redis pub/sub channel `llm:events`.
-    Clients receive JSON-encoded SpanEvent objects as they happen.
-
-    Message format:
-        {
-            "type": "span_complete",
-            "cycle_id": "...",
-            "pair": "BTC-USD",
-            "agent_name": "market_analyst",
-            "model": "llama3.1:8b",
-            "latency_ms": 1234.5,
-            "prompt_tokens": 512,
-            "completion_tokens": 256,
-            "langfuse_trace_id": "...",
-            "ts": "2025-01-01T00:00:00Z"
-        }
-    """
-    await websocket.accept()
-    _ws_connections.append(websocket)
-    logger.info(f"WS client connected ({len(_ws_connections)} total)")
-    try:
-        while True:
-            # Keep connection alive; events are pushed by _redis_subscriber
-            await asyncio.sleep(30)
-            await websocket.send_json({"type": "ping", "ts": _utcnow()})
-    except WebSocketDisconnect:
-        pass
-    finally:
-        # Guard: the Redis subscriber may have already removed this socket
-        if websocket in _ws_connections:
-            _ws_connections.remove(websocket)
-        logger.info(f"WS client disconnected ({len(_ws_connections)} remaining)")
-
-
-async def _redis_subscriber():
-    """
-    Background task: subscribes to Redis `llm:events` channel and
-    broadcasts each message to all connected WebSocket clients.
-    """
-    if _redis_client is None:
-        return
-
-    import redis.asyncio as aioredis
-
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    # Use a separate async connection so we don't block the sync Redis client
-    async_redis = aioredis.from_url(redis_url)
-    pubsub = async_redis.pubsub()
-    await pubsub.subscribe("llm:events")
-    logger.info("Subscribed to Redis llm:events")
-
-    try:
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
-            try:
-                payload = json.loads(message["data"])
-            except Exception:
-                continue
-
-            dead = []
-            for ws in list(_ws_connections):
-                try:
-                    await ws.send_json(payload)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                if ws in _ws_connections:
-                    _ws_connections.remove(ws)
-    except asyncio.CancelledError:
-        await pubsub.unsubscribe("llm:events")
-        await async_redis.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Health check
-# ---------------------------------------------------------------------------
-
-@app.get("/health", include_in_schema=False)
-def health(request: Request):
-    # Return minimal info when unauthenticated to avoid leaking service topology.
-    # When the API key is configured and presented correctly, expose full detail.
-    authenticated = (
-        not _DASHBOARD_API_KEY
-        or hmac.compare_digest(
-            request.headers.get("X-API-Key", ""), _DASHBOARD_API_KEY
-        )
-    )
-    base = {"status": "ok", "ts": _utcnow()}
-    if authenticated:
-        base.update({
-            "db": _stats_db is not None,
-            "redis": _redis_client is not None,
-            "temporal": _temporal_client is not None,
-            "ws_clients": len(_ws_connections),
-        })
-    return base
-
-
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _langfuse_url(trace_id: Optional[str]) -> Optional[str]:
-    if not trace_id:
-        return None
-    # Use the Langfuse SDK to build the correct URL (includes project ID)
-    from src.utils.tracer import get_llm_tracer
-    tracer = get_llm_tracer()
-    if tracer:
-        url = tracer.get_trace_url(trace_id)
-        if url:
-            return url
-    # Fallback: best-effort URL (may not work if project ID is needed)
-    host = _config.get("dashboard", {}).get("langfuse_host", "http://localhost:3000")
-    return f"{host}/trace/{trace_id}"
-
-
-def _serialize_event_attrs(event) -> dict:
-    """Best-effort serialization of a Temporal history event attributes."""
-    try:
-        attrs = event.attributes
-        if hasattr(attrs, "__dict__"):
-            raw = {k: str(v) for k, v in attrs.__dict__.items() if not k.startswith("_")}
-        elif hasattr(attrs, "DESCRIPTOR"):
-            # protobuf message
-            raw = {}
-            for field in attrs.DESCRIPTOR.fields:
-                val = getattr(attrs, field.name, None)
-                if val is not None:
-                    raw[field.name] = str(val)
-        else:
-            raw = {"raw": str(attrs)}
-        return raw
-    except Exception:
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# REST — Settings (read, update, presets)
-# ---------------------------------------------------------------------------
-
-from src.utils.settings_manager import (
-    get_full_settings as _sm_get_full,
-    get_schema_metadata as _sm_get_schema,
-    update_section as _sm_update_section,
-    apply_preset as _sm_apply_preset,
-    push_to_runtime as _sm_push_runtime,
-    push_section_to_runtime as _sm_push_section,
-    PRESETS as _SM_PRESETS,
-    get_preset_summary as _sm_preset_summary,
-    is_trading_enabled as _sm_is_trading_enabled,
-    is_telegram_allowed as _sm_tg_allowed,
-    TELEGRAM_SAFETY_TIERS as _SM_TG_TIERS,
-    get_llm_providers as _sm_get_providers,
-    update_llm_providers as _sm_update_providers,
-)
-
-
-@app.get("/api/settings", summary="Get all settings with metadata")
-def get_settings():
-    """Returns the full settings.yaml content, schema metadata, and presets info."""
-    try:
-        full = _sm_get_full()
-        full["schema"] = _sm_get_schema()
-        return full
-    except Exception as exc:
-        logger.exception("settings GET error")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-class _SettingsUpdateBody(_BaseModel):
-    section: Optional[str] = None
-    updates: Optional[dict] = None
-    preset: Optional[str] = None
-
-
-@app.put("/api/settings", summary="Update settings section or apply preset")
-def update_settings(body: _SettingsUpdateBody):
-    """
-    Two modes:
-      1. ``{ "preset": "moderate" }`` — apply a named preset
-      2. ``{ "section": "risk", "updates": {"stop_loss_pct": 0.05} }`` — update individual fields
-
-    Changes are validated, persisted to settings.yaml, and pushed to the
-    live runtime immediately (no restart needed).
-    """
-    try:
-        # Mode 1: Apply preset
-        if body.preset:
-            ok, err, changes = _sm_apply_preset(body.preset)
-            if not ok:
-                raise HTTPException(status_code=400, detail=err)
-            _sm_push_runtime(_rules_instance, _config, changes)
-            return {
-                "ok": True,
-                "preset": body.preset,
-                "changes": changes,
-                "trading_enabled": _sm_is_trading_enabled(),
-            }
-
-        # Mode 2: Section update
-        if not body.section or not body.updates:
-            raise HTTPException(
-                status_code=400,
-                detail="Provide either {preset} or {section, updates}",
-            )
-
-        ok, err, changes = _sm_update_section(body.section, body.updates)
-        if not ok:
-            raise HTTPException(status_code=400, detail=err)
-
-        _sm_push_section(body.section, changes, _rules_instance, _config)
-        return {
-            "ok": True,
-            "section": body.section,
-            "changes": changes,
-            "trading_enabled": _sm_is_trading_enabled(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("settings PUT error")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/api/settings/presets", summary="List available presets")
-def get_presets():
-    """Returns all available presets with their values and human descriptions."""
-    result = {}
-    for name in _SM_PRESETS:
-        result[name] = {
-            "values": _SM_PRESETS[name],
-            "summary": _sm_preset_summary(name),
-        }
-    return {"presets": result, "current_enabled": _sm_is_trading_enabled()}
-
-
-@app.get("/api/settings/telegram-tiers", summary="Telegram safety tier plan")
-def get_telegram_tiers():
-    """Returns which settings sections are safe/semi-safe/blocked for Telegram."""
-    return _SM_TG_TIERS
-
-
-# ---------------------------------------------------------------------------
-# REST — LLM Provider management
-# ---------------------------------------------------------------------------
-
-@app.get("/api/settings/llm-providers", summary="Get LLM provider chain with live status")
-def get_llm_providers():
-    """
-    Returns the configured LLM providers with their live status
-    (daily tokens used, cooldown state, API key availability).
-    """
-    try:
-        providers_config = _sm_get_providers()
-
-        # Enrich with live status from LLMClient if available
-        live_status = {}
-        if _llm_client:
-            for ps in _llm_client.provider_status():
-                live_status[ps["name"]] = ps
-
-        result = []
-        for pc in providers_config:
-            name = pc.get("name", "")
-            entry = {**pc}
-            # Add live status if available
-            if name in live_status:
-                entry["live_status"] = live_status[name]
-            # Indicate whether the API key is set (don't expose the key itself)
-            api_key_env = pc.get("api_key_env", "")
-            if api_key_env:
-                entry["api_key_set"] = bool(os.environ.get(api_key_env, ""))
-            else:
-                entry["api_key_set"] = pc.get("is_local", False)
-            result.append(entry)
-
-        return {"providers": result}
-    except Exception as exc:
-        logger.exception("llm-providers GET error")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-class _ProvidersUpdateBody(_BaseModel):
-    providers: list[dict]
-
-
-@app.put("/api/settings/llm-providers", summary="Update LLM provider chain")
-def update_llm_providers(body: _ProvidersUpdateBody):
-    """
-    Accepts a full ordered providers list. Validates, persists to settings.yaml,
-    and hot-reloads the LLMClient's provider chain.
-    """
-    try:
-        ok, err, saved = _sm_update_providers(body.providers)
-        if not ok:
-            raise HTTPException(status_code=400, detail=err)
-
-        # Hot-reload the LLMClient if available
-        if _llm_client:
-            from src.core.llm_client import build_providers
-            llm_config = _config.get("llm", {})
-            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            fallback_model = os.environ.get("OLLAMA_MODEL", llm_config.get("model", "llama3.1:8b"))
-            new_providers = build_providers(
-                saved,
-                fallback_base_url=ollama_url,
-                fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
-                fallback_max_retries=llm_config.get("max_retries", 3),
-            )
-            _llm_client.reload_providers(new_providers)
-
-        return {"ok": True, "providers": saved}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("llm-providers PUT error")
-        raise HTTPException(status_code=500, detail=str(exc))
+# --- Register routers ----------------------------------------------------
+
+app.include_router(auth_router)
+app.include_router(cycles_router)
+app.include_router(trades_router)
+app.include_router(stats_router)
+app.include_router(market_router)
+app.include_router(planning_router)
+app.include_router(ws_router)
+app.include_router(settings_router)
+app.include_router(news_router)
+app.include_router(watchlist_router)
+app.include_router(commands_router)
+app.include_router(llm_analytics_router)
+app.include_router(learning_router)
 
 
 # ---------------------------------------------------------------------------
 # Static frontend (React/Vite build)
-# The Dockerfile copies the built frontend into src/dashboard/static/.
-# In local dev the directory won't exist — fall back to API-only mode.
 # ---------------------------------------------------------------------------
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
 if _STATIC_DIR.is_dir():
-    # Serve hashed JS/CSS bundles at /assets (Vite default output dir)
     app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR / "assets")), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
         """Catch-all: return index.html so React Router handles client-side paths."""
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))
         raise HTTPException(status_code=404, detail="Frontend not built")
 
+
+# ---------------------------------------------------------------------------
+# Standalone mode
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     import uvicorn
     import yaml
-    import os
     from src.utils.stats import StatsDB
-    
+
     config_path = os.path.join("config", "settings.yaml")
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
     else:
         config = {}
-        
-    db = StatsDB(config.get("database", {}).get("stats_db", "data/stats.db"))
-    
+
+    db = StatsDB()
+
     redis_url = os.environ.get("REDIS_URL")
     redis_client = None
     if redis_url:
         import redis
         redis_client = redis.Redis.from_url(redis_url)
 
-    app = create_app(stats_db=db, redis_client=redis_client, temporal_client=None, config=config)
-    
+    app = create_app(
+        stats_db=db,
+        redis_client=redis_client,
+        temporal_client=None,
+        config=config,
+    )
+
     port = int(config.get("dashboard", {}).get("port", 8090))
     print(f"🚀 Starting Dashboard Server on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

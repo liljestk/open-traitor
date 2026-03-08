@@ -1,7 +1,7 @@
 # =============================================================
 # Stage 1 — Build the React/Vite frontend
 # =============================================================
-FROM node:24-slim AS frontend-builder
+FROM node:22-slim AS frontend-builder
 
 WORKDIR /frontend
 COPY dashboard/frontend/package.json dashboard/frontend/package-lock.json ./
@@ -36,6 +36,10 @@ COPY config/ config/
 # Copy built frontend into the image so FastAPI can serve it
 COPY --from=frontend-builder /frontend/dist src/dashboard/static/
 
+# Copy entrypoint script
+COPY scripts/docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Expect data mounting
 RUN mkdir -p data logs && \
     chown -R trader:trader /app
@@ -50,5 +54,5 @@ EXPOSE 8090
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8090/health || exit 1
 
-# Start the dashboard server
-CMD ["uvicorn", "src.dashboard.server:app", "--host", "0.0.0.0", "--port", "8090", "--log-level", "warning"]
+# Start via entrypoint (generates setup password on first run)
+ENTRYPOINT ["/entrypoint.sh"]

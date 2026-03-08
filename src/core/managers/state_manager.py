@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 from src.utils.logger import get_logger
@@ -11,6 +12,10 @@ class StateManager:
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
 
+    def _get_redis_key(self, base_key: str) -> str:
+        profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+        return f"{profile}:{base_key}" if profile else base_key
+
     def sync_to_redis(self):
         """Sync current state to Redis for the dashboard / other services."""
         orch = self.orchestrator
@@ -18,21 +23,40 @@ class StateManager:
             return
         try:
             orch.redis.set(
-                "agent:state",
+                self._get_redis_key("agent:state"),
                 json.dumps(orch.state.to_summary(), default=str),
                 ex=300,
             )
             orch.redis.set(
-                "agent:rules_status",
+                self._get_redis_key("agent:rules_status"),
                 json.dumps(orch.rules.get_status(), default=str),
                 ex=300,
             )
+            # Publish watched tickers for news worker's dynamic ticker matching
+            try:
+                watched = set()
+                for pair in (orch.pairs + getattr(orch, "watchlist_pairs", [])
+                             + getattr(orch, "_screener_active_pairs", [])):
+                    base = pair.split("-")[0] if "-" in pair else pair
+                    base_short = base.split(".")[0]
+                    for t in (base.upper(), base_short.upper()):
+                        if 2 <= len(t) <= 6 and t.isalpha():
+                            watched.add(t)
+                if watched:
+                    orch.redis.set(
+                        self._get_redis_key("news:watched_tickers"),
+                        json.dumps(sorted(watched)),
+                        ex=600,
+                    )
+            except Exception:
+                pass  # non-critical
+
             # Persist pending approvals so they survive restarts
             with orch._pending_approvals_lock:
                 pending_snapshot = dict(orch._pending_approvals) if orch._pending_approvals else None
             if pending_snapshot:
                 orch.redis.set(
-                    "agent:pending_approvals",
+                    self._get_redis_key("agent:pending_approvals"),
                     json.dumps(pending_snapshot, default=str),
                     ex=86400,  # 24h TTL
                 )
@@ -44,7 +68,7 @@ class StateManager:
         if not orch.redis:
             return
         try:
-            data = orch.redis.get("agent:pending_approvals")
+            data = orch.redis.get(self._get_redis_key("agent:pending_approvals"))
             if not data:
                 return
             loaded: dict = json.loads(data)
@@ -52,6 +76,26 @@ class StateManager:
             for trade_id, approval in loaded.items():
                 is_swap = approval.get("_is_swap", False)
                 if is_swap:
+                    # Cycle-3 fix: validate swap approvals too (pair format + amount bounds)
+                    from src.utils.security import validate_trading_pair
+                    sell_pair = approval.get("sell_pair", "")
+                    buy_pair = approval.get("buy_pair", "")
+                    try:
+                        swap_amount = float(approval.get("quote_amount") or 0)
+                    except (TypeError, ValueError):
+                        swap_amount = 0.0
+                    if (
+                        not validate_trading_pair(sell_pair)
+                        or not validate_trading_pair(buy_pair)
+                        or swap_amount <= 0
+                        or swap_amount > orch.rules.max_single_trade * 2
+                    ):
+                        logger.warning(
+                            f"Discarding invalid swap approval from Redis: "
+                            f"id={trade_id!r} sell={sell_pair!r} buy={buy_pair!r} "
+                            f"amount={swap_amount}"
+                        )
+                        continue
                     validated[trade_id] = approval
                     continue
                 pair = approval.get("pair", "")
@@ -75,7 +119,9 @@ class StateManager:
                     continue
                 validated[trade_id] = approval
             discarded = len(loaded) - len(validated)
-            orch._pending_approvals = validated
+            # M3: assign under lock to avoid race with approve/reject/prune
+            with orch._pending_approvals_lock:
+                orch._pending_approvals = validated
             logger.info(
                 f"Loaded {len(validated)} pending approvals from Redis "
                 f"(discarded {discarded} invalid)"

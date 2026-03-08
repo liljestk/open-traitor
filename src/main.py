@@ -1,5 +1,4 @@
-"""
-Auto-Traitor Main Entry Point — Autonomous LLM Crypto Trading Agent.
+"""Auto-Traitor Main Entry Point - Autonomous LLM Trading Agent.
 
 Usage:
     python -m src.main --mode daemon     # Run as background daemon
@@ -21,6 +20,7 @@ import yaml
 from dotenv import load_dotenv
 
 from src.core.coinbase_client import CoinbaseClient
+from src.core.exchange_client import ExchangeClient
 from src.core.llm_client import LLMClient, build_providers
 from src.core.orchestrator import Orchestrator
 from src.core.rules import AbsoluteRules
@@ -33,18 +33,24 @@ from src.utils.tracer import LLMTracer, get_llm_tracer
 
 def load_config() -> dict:
     """Load configuration from settings.yaml."""
-    config_path = os.path.join("config", "settings.yaml")
+    config_path = os.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
     if not os.path.exists(config_path):
         print(f"❌ Config file not found: {config_path}")
         sys.exit(1)
 
     with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
-def print_banner(mode: str) -> None:
+def print_banner(mode: str, exchange_type: str = "") -> None:
     """Print a beautiful startup banner."""
-    banner = """
+    # Determine agent label based on exchange type
+    exchange_labels = {
+        "coinbase": "Crypto",
+        "ibkr": "Equities",
+    }
+    agent_label = exchange_labels.get(exchange_type.lower(), "Trading")
+    banner = f"""
     ╔═══════════════════════════════════════════════════════╗
     ║                                                       ║
     ║   █████╗ ██╗   ██╗████████╗ ██████╗                   ║
@@ -61,7 +67,7 @@ def print_banner(mode: str) -> None:
     ║     ██║   ██║  ██║██║  ██║██║   ██║   ╚██████╔╝██║  ██║║
     ║     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝║
     ║                                                       ║
-    ║   🤖 Autonomous LLM Crypto Trading Agent              ║
+    ║   🤖 Autonomous LLM {agent_label} Trading Agent{' ' * (14 - len(agent_label))}║
     ║   📡 Powered by Ollama (Local LLM)                    ║
     ║                                                       ║
     ╚═══════════════════════════════════════════════════════╝
@@ -81,7 +87,18 @@ def main():
         default="paper",
         help="Trading mode",
     )
+    parser.add_argument(
+        "--config",
+        default="config/settings.yaml",
+        help="Path to the configuration file (determines profile)",
+    )
     args = parser.parse_args()
+
+    # Determine profile name and set env vars
+    config_name = os.path.splitext(os.path.basename(args.config))[0]
+    profile = config_name.replace("settings_", "") if config_name.startswith("settings_") else config_name
+    os.environ["AUTO_TRAITOR_PROFILE"] = profile
+    os.environ["AUTO_TRAITOR_CONFIG"] = args.config
 
     # Load environment
     load_dotenv(os.path.join("config", ".env"))
@@ -105,7 +122,8 @@ def main():
     )
 
     logger = get_logger("main")
-    print_banner(mode)
+    exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
+    print_banner(mode, exchange_type=exchange_type)
 
     # Safety confirmation for live mode
     if not paper_mode:
@@ -190,6 +208,16 @@ def main():
         providers=providers,
     )
 
+    # Store providers config for recovery polling / rescan
+    if providers_config:
+        llm.update_providers_config(
+            providers_config,
+            fallback_base_url=ollama_url,
+            fallback_model=fallback_model,
+            fallback_timeout=llm_config.get("timeout", 60),
+            fallback_max_retries=llm_config.get("max_retries", 3),
+        )
+
     # Wait for at least one LLM provider to be ready
     has_cloud = any(not p.is_local for p in llm._providers)
     if has_cloud:
@@ -218,20 +246,44 @@ def main():
         else:
             logger.warning("⚠️ Ollama not responding — will retry during operation")
 
-    # Coinbase Client
-    coinbase = CoinbaseClient(
-        api_key=os.environ.get("COINBASE_API_KEY"),
-        api_secret=os.environ.get("COINBASE_API_SECRET"),
-        paper_mode=paper_mode,
-        paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
-    )
+    # Exchange Client Selection
+    exchange_type = config.get("trading", {}).get("exchange", "coinbase").lower()
+    
+    if exchange_type == "ibkr":
+        # C5 fix: Import IBClient BEFORE try block to ensure it's available in except handler
+        from src.core.ib_client import IBClient
+
+        try:
+            exchange: ExchangeClient = IBClient(
+                paper_mode=paper_mode,
+                paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0003),
+                ib_host=os.environ.get("IBKR_HOST", "127.0.0.1"),
+                ib_port=int(os.environ.get("IBKR_PORT", "4002")),
+                ib_client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            )
+        except Exception as e:
+            if not paper_mode:
+                logger.critical(
+                    f"❌ IBKR client init failed in LIVE mode: {e}. "
+                    "Refusing to silently fall back to paper. Fix the connection or switch config to paper mode."
+                )
+                sys.exit(1)
+            logger.warning(f"⚠️ Could not initialise IBKR client in paper mode: {e}")
+            raise
+    else:
+        exchange: ExchangeClient = CoinbaseClient(
+            api_key=os.environ.get("COINBASE_API_KEY"),
+            api_secret=os.environ.get("COINBASE_API_SECRET"),
+            paper_mode=paper_mode,
+            paper_slippage_pct=config.get("trading", {}).get("paper_slippage_pct", 0.0005),
+        )
 
     # -------------------------------------------------------------------------
-    # Coinbase API health-check & dynamic currency / pair adaption
+    # API health-check & dynamic currency / pair adaption
     # -------------------------------------------------------------------------
-    conn = coinbase.check_connection()
+    conn = exchange.check_connection()
     if conn["ok"]:
-        logger.info(f"✅ Coinbase API: {conn['message']}")
+        logger.info(f"✅ Exchange API ({exchange.__class__.__name__}): {conn['message']}")
         if conn.get("non_zero_accounts") is not None:
             logger.info(
                 f"   Accounts with balance: {conn['non_zero_accounts']} / "
@@ -239,11 +291,11 @@ def main():
             )
     else:
         err = conn.get("error", "unknown error")
-        logger.error(f"❌ Coinbase API connection failed: {err}")
+        logger.error(f"❌ Exchange API connection failed: {err}")
         if not paper_mode:
-            logger.error(
-                "Cannot run in LIVE mode without Coinbase API access. "
-                "Check COINBASE_API_KEY / COINBASE_API_SECRET."
+            logger.critical(
+                "Cannot run in LIVE mode without Exchange API access. "
+                "Refusing to silently fall back to paper — fix the connection or switch config to paper mode."
             )
             sys.exit(1)
         else:
@@ -257,8 +309,8 @@ def main():
     
     if quote_currency_setting != "AUTO":
         native_currency = quote_currency_setting
-    elif coinbase._rest_client:
-        native_currency = coinbase.detect_native_currency()
+    elif hasattr(exchange, "detect_native_currency"):
+        native_currency = exchange.detect_native_currency()
 
     # Pair discovery: "all" = discover every tradable pair on Coinbase for the
     # configured quote currencies; "configured" = use only settings.yaml pairs
@@ -267,13 +319,13 @@ def main():
         "quote_currencies", [native_currency]
     )
 
-    if coinbase._rest_client:
+    if hasattr(exchange, "discover_all_pairs"):
         if pair_discovery == "all":
-            # Discover ALL tradable pairs on Coinbase for our quote currencies
+            # Discover ALL tradable pairs on Exchange for our quote currencies
             abs_rules_cfg = config.get("absolute_rules", {})
             never_trade = set(abs_rules_cfg.get("never_trade_pairs", []))
             only_trade = set(abs_rules_cfg.get("only_trade_pairs", []))
-            discovered = coinbase.discover_all_pairs(
+            discovered = exchange.discover_all_pairs(
                 quote_currencies=quote_currencies,
                 never_trade=never_trade if never_trade else None,
                 only_trade=only_trade if only_trade else None,
@@ -291,7 +343,7 @@ def main():
         else:
             # Legacy mode: expand configured pairs via asset-based discovery
             raw_pairs: list[str] = list(config.get("trading", {}).get("pairs", ["BTC-USD"]))
-            adapted_pairs = coinbase.adapt_pairs_to_account(raw_pairs, native_currency)
+            adapted_pairs = exchange.adapt_pairs_to_account(raw_pairs, native_currency) if hasattr(exchange, "adapt_pairs_to_account") else raw_pairs
             if set(adapted_pairs) != set(raw_pairs):
                 logger.info(
                     f"🌍 Trading pairs dynamically expanded: "
@@ -301,15 +353,29 @@ def main():
             else:
                 logger.info(f"✓ Trading pairs unchanged: {adapted_pairs}")
 
+    # Seed known pairs so live-mode discover_all_pairs_detailed() has a
+    # baseline universe even when the IB Scanner is unavailable.
+    resolved_pairs = config.get("trading", {}).get("pairs", [])
+    if hasattr(exchange, "seed_known_pairs") and resolved_pairs:
+        exchange.seed_known_pairs(list(resolved_pairs))
+
     # Paper mode: initialise paper balance in the account's native currency
     # so P&L figures are denominated correctly (e.g. EUR not USD).
-    if paper_mode and native_currency != "USD":
-        initial_paper = coinbase._paper_balance.pop("USD", 10_000.0)
-        coinbase._paper_balance[native_currency] = initial_paper
+    if getattr(exchange, "paper_mode", False) and native_currency != "USD" and hasattr(exchange, "_paper_balance"):
+        # M6 fix: acquire the paper balance lock for thread safety
+        _balance_lock = getattr(exchange, "_paper_balance_lock", None)
+        if _balance_lock:
+            with _balance_lock:
+                initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
+                exchange._paper_balance[native_currency] = initial_paper
+        else:
+            initial_paper = exchange._paper_balance.pop("USD", 10_000.0)
+            exchange._paper_balance[native_currency] = initial_paper
         logger.info(f"📝 Paper balance: {initial_paper:,.2f} {native_currency}")
 
-    # Absolute Rules
-    rules = AbsoluteRules(config.get("absolute_rules", {}))
+    # Absolute Rules — scoped to this profile's exchange to prevent cross-domain counter bleed
+    _exchange_id = config.get("trading", {}).get("exchange", "coinbase").lower()
+    rules = AbsoluteRules(config.get("absolute_rules", {}), exchange=_exchange_id)
     rules.seed_daily_counters()  # Seed today's counters from DB (survives restarts)
 
     # News Aggregator
@@ -320,6 +386,8 @@ def main():
         reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
         reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
         reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+        profile=profile,
+        exchange_client=exchange,
     )
 
     # Validate credentials
@@ -328,39 +396,78 @@ def main():
 
     # Telegram Bot
     telegram_bot = None
-    telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_config = config.get("telegram", {})
+
+    # Resolve token and chat_id from config-specified env var names
+    # (allows per-exchange Telegram bots: TELEGRAM_BOT_TOKEN_COINBASE, etc.)
+    _token_env = telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")
+    _chat_env = telegram_config.get("chat_id_env", "TELEGRAM_CHAT_ID")
+    _auth_env = telegram_config.get("authorized_users_env", "TELEGRAM_AUTHORIZED_USERS")
+
+    telegram_token = telegram_config.get("bot_token") or os.environ.get(_token_env) or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = telegram_config.get("chat_id") or os.environ.get(_chat_env) or os.environ.get("TELEGRAM_CHAT_ID")
+    
     if telegram_token and telegram_chat_id:
         from src.telegram_bot.bot import TelegramBot
 
         # SECURITY: TELEGRAM_AUTHORIZED_USERS is REQUIRED.
-        # We do NOT fall back to chat_id because chat_id could be a group,
-        # which would let ANY group member control the bot.
-        authorized_raw = os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
-        if not authorized_raw.strip():
+        authorized_raw = telegram_config.get("authorized_users") or os.environ.get(_auth_env) or os.environ.get("TELEGRAM_AUTHORIZED_USERS", "")
+        if not authorized_raw:
             logger.error(
-                "❌ TELEGRAM_AUTHORIZED_USERS is not set! "
-                "This is REQUIRED for security. "
-                "Set it to your numeric Telegram user ID. "
-                "Message @userinfobot on Telegram to get your ID."
+                "❌ Telegram authorized_users is not set! "
+                "This is REQUIRED for security. Set it in settings.yaml or env vars."
             )
             sys.exit(1)
 
-        authorized_list = [u.strip() for u in authorized_raw.split(",") if u.strip()]
+        if isinstance(authorized_raw, list):
+            authorized_list = [str(u).strip() for u in authorized_raw if str(u).strip()]
+        else:
+            authorized_list = [u.strip() for u in str(authorized_raw).split(",") if u.strip()]
+            
         logger.info(f"🔒 Telegram authorized users: {authorized_list}")
+
+        # Detect if another agent is already polling with this token (via Redis)
+        _bot_mode = telegram_config.get("mode", "controller")
+        if _bot_mode == "controller" and redis_client:
+            import hashlib as _hashlib
+            _token_hash = _hashlib.sha256(telegram_token.encode()).hexdigest()[:16]
+            _lock_key = f"telegram:poller:{_token_hash}"
+            try:
+                # Try to acquire the poller lock (60s TTL, renewed by the polling thread)
+                _acquired = redis_client.set(_lock_key, profile, nx=True, ex=120)
+                if not _acquired:
+                    _holder = redis_client.get(_lock_key)
+                    _holder_str = _holder.decode() if isinstance(_holder, bytes) else str(_holder)
+                    logger.warning(
+                        f"⚠️ Telegram bot token already polled by '{_holder_str}' — "
+                        f"switching to REPORTING mode (outbound only) for '{profile}'"
+                    )
+                    _bot_mode = "reporting"
+                else:
+                    logger.info(f"🔒 Acquired Telegram poller lock for profile '{profile}'")
+            except Exception as e:
+                logger.warning(f"Redis Telegram lock check failed: {e} — proceeding as controller")
+
+        # Determine exchange display name for Telegram messages
+        _exchange_name = config.get("trading", {}).get("exchange", profile or "auto-traitor").upper()
+        _currency = config.get("trading", {}).get("quote_currency", "EUR")
 
         telegram_bot = TelegramBot(
             bot_token=telegram_token,
             chat_id=telegram_chat_id,
             authorized_users=authorized_list,
+            mode=_bot_mode,
+            exchange_name=_exchange_name,
         )
         telegram_bot.start()
-        logger.info("📱 Telegram bot started")
+        logger.info(f"📱 Telegram bot started (mode={_bot_mode}, exchange={_exchange_name})")
         # Give the polling thread a moment to connect, then send startup ping
         time.sleep(2)
         telegram_bot.send_message(
-            f"👋 *Auto-Traitor is online!*\n\n"
-            f"Mode: `{mode.upper()}`\n"
+            f"👋 *Auto-Traitor [{_exchange_name}] is online!*\n\n"
+            f"Mode: `{mode.upper()}` | Currency: `{_currency}`\n"
+            f"Profile: `{profile}`\n"
+            f"Telegram mode: `{_bot_mode}`\n"
             f"Ready and listening. 🚀"
         )
     else:
@@ -369,10 +476,12 @@ def main():
     # WebSocket Feed (real-time prices)
     ws_feed = None
     pairs = config.get("trading", {}).get("pairs", ["BTC-USD"])
+    watchlist_pairs = config.get("trading", {}).get("watchlist_pairs", [])
+    all_pairs_to_track = list(set(list(pairs) + list(watchlist_pairs)))
     if not paper_mode or os.environ.get("COINBASE_API_KEY"):
         try:
             ws_feed = CoinbaseWebSocketFeed(
-                product_ids=pairs,
+                product_ids=all_pairs_to_track,
                 api_key=os.environ.get("COINBASE_API_KEY"),
                 api_secret=os.environ.get("COINBASE_API_SECRET"),
             )
@@ -389,7 +498,7 @@ def main():
 
     orchestrator = Orchestrator(
         config=config,
-        coinbase=coinbase,
+        exchange=exchange,
         llm=llm,
         rules=rules,
         news_aggregator=news_aggregator,

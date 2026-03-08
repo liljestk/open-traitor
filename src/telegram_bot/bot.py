@@ -44,14 +44,20 @@ class TelegramBot:
         authorized_users: list[str],
         chat_handler=None,
         on_command: Optional[Callable] = None,
+        mode: str = "controller",
+        exchange_name: str = "",
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.chat_handler = chat_handler  # TelegramChatHandler
         self.on_command = on_command  # Legacy fallback
+        self.mode = mode
+        self.exchange_name = exchange_name  # e.g. "COINBASE", "IBKR"
         self._app = None
         self._thread: Optional[threading.Thread] = None
-        self._running = False
+        self._running_event = threading.Event()
+        self._outbound_bot = None  # H8: reuse Bot instance for outbound messages
+        self._outbound_bot_lock = threading.Lock()
 
         # =====================================================================
         # AUTHORIZATION — STRICT USER ID ALLOWLIST
@@ -75,6 +81,7 @@ class TelegramBot:
 
         self._unauthorized_attempts: dict[str, int] = {}
         self._unauthorized_log_times: dict[str, float] = {}  # last log timestamp per user
+        self._MAX_TRACKED_UNAUTHORIZED = 1000  # Cap to prevent unbounded memory growth
 
         logger.info(
             f"🔒 Telegram bot initialized | Chat: {self.chat_id} | "
@@ -88,6 +95,10 @@ class TelegramBot:
 
     async def _start_bot(self) -> None:
         """Start the Telegram bot with polling."""
+        if self.mode == "reporting":
+            logger.info("🤖 Telegram bot in REPORTING mode (no polling, outbound only).")
+            return
+
         from telegram import Update
         from telegram.ext import (
             Application,
@@ -120,7 +131,7 @@ class TelegramBot:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
 
-        logger.info("🤖 Telegram bot starting polling...")
+        logger.info(f"🤖 Telegram bot starting polling (mode={self.mode})...")
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
@@ -128,14 +139,18 @@ class TelegramBot:
     def start(self) -> None:
         """Start the bot in a background thread."""
         def _run():
+            # C1 fix: Use thread-local event loop without calling set_event_loop.
+            # This avoids conflicting with the orchestrator's main loop and
+            # Temporal emergency replans that spin up their own loops.
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(self._start_bot())
-                self._running = True
+                self._running_event.set()
                 loop.run_forever()
             except Exception as e:
                 logger.error(f"Telegram bot error: {e}")
+            finally:
+                loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -147,7 +162,7 @@ class TelegramBot:
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
-        self._running = False
+        self._running_event.clear()
 
     # =========================================================================
     # Authorization
@@ -160,7 +175,12 @@ class TelegramBot:
         if uid_str in self.authorized_users:
             return True
 
-        # UNAUTHORIZED
+        # UNAUTHORIZED — evict oldest entries if dict is at cap
+        if len(self._unauthorized_attempts) >= self._MAX_TRACKED_UNAUTHORIZED and uid_str not in self._unauthorized_attempts:
+            oldest = min(self._unauthorized_log_times, key=self._unauthorized_log_times.get, default=None)
+            if oldest:
+                self._unauthorized_attempts.pop(oldest, None)
+                self._unauthorized_log_times.pop(oldest, None)
         self._unauthorized_attempts[uid_str] = self._unauthorized_attempts.get(uid_str, 0) + 1
         count = self._unauthorized_attempts[uid_str]
 
@@ -247,7 +267,11 @@ class TelegramBot:
             message = f"Button pressed: {data}"
 
         response = await self._get_response(message, user)
-        await query.edit_message_text(response, parse_mode="Markdown")
+        # M9: Markdown fallback for callback responses
+        try:
+            await query.edit_message_text(response, parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(response)
 
     # =========================================================================
     # Core Response Logic
@@ -315,6 +339,28 @@ class TelegramBot:
     # Outbound Messaging (thread-safe, called from orchestrator)
     # =========================================================================
 
+    def _get_outbound_bot(self):
+        """Return a reusable Bot instance for outbound messages (H8)."""
+        if self._outbound_bot is None:
+            with self._outbound_bot_lock:
+                if self._outbound_bot is None:
+                    from telegram import Bot
+                    self._outbound_bot = Bot(token=self.bot_token)
+        return self._outbound_bot
+
+    def _get_send_loop(self):
+        """Return a dedicated event loop for outbound messages (M3 fix).
+
+        Lazily creates a background thread running an event loop, reused for
+        all send_message() calls from threads without their own loop.
+        """
+        if not hasattr(self, '_send_loop') or self._send_loop is None:
+            import asyncio
+            self._send_loop = asyncio.new_event_loop()
+            t = threading.Thread(target=self._send_loop.run_forever, daemon=True)
+            t.start()
+        return self._send_loop
+
     def send_message(self, text: str) -> None:
         """Send a message to the configured chat (thread-safe, uses library)."""
         try:
@@ -330,29 +376,41 @@ class TelegramBot:
                     except Exception:
                         await bot.send_message(chat_id=chat_id, text=chunk)
 
-            bot = Bot(token=self.bot_token)
+            bot = self._get_outbound_bot()
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _send(bot, self.chat_id, text), loop
                 )
+                future.add_done_callback(
+                    lambda f: f.exception() and logger.error(f"Telegram send_message failed: {f.exception()}")
+                )
             except RuntimeError:
-                asyncio.run(_send(bot, self.chat_id, text))
+                # M3 fix: reuse a dedicated outbound event loop instead of
+                # creating/destroying one per message via asyncio.run()
+                loop = self._get_send_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    _send(bot, self.chat_id, text), loop
+                )
+                future.result(timeout=30)  # block until sent
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
 
     def send_trade_notification(self, trade_summary: str) -> None:
         """Send a trade notification."""
-        self.send_message(f"📊 *Trade Executed*\n\n{trade_summary}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"📊 *{tag}Trade Executed*\n\n{trade_summary}")
 
     def send_signal_notification(self, signal_summary: str) -> None:
         """Send a signal notification."""
-        self.send_message(f"📡 *Signal Detected*\n\n{signal_summary}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"📡 *{tag}Signal Detected*\n\n{signal_summary}")
 
     def send_alert(self, alert: str) -> None:
         """Send an important alert (always sent, even in silent mode)."""
-        self.send_message(f"🚨 *ALERT*\n\n{alert}")
+        tag = f"[{self.exchange_name}] " if self.exchange_name else ""
+        self.send_message(f"🚨 *{tag}ALERT*\n\n{alert}")
 
     def send_daily_summary(self, summary: str) -> None:
         """Send a daily summary."""
@@ -381,11 +439,14 @@ class TelegramBot:
                     reply_markup=keyboard,
                 )
 
-            bot = Bot(token=self.bot_token)
+            bot = self._get_outbound_bot()
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
-                asyncio.run_coroutine_threadsafe(_send_approval(bot), loop)
+                future = asyncio.run_coroutine_threadsafe(_send_approval(bot), loop)
+                future.add_done_callback(
+                    lambda f: f.exception() and logger.error(f"Telegram approval request failed: {f.exception()}")
+                )
             except RuntimeError:
                 asyncio.run(_send_approval(bot))
 

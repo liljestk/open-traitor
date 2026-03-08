@@ -56,7 +56,7 @@ services:
     env_file:
       - config/.env
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis_data:/data
     # Secure Redis: password, disable dangerous commands
@@ -69,13 +69,34 @@ services:
       retries: 5
 
   # =========================================================================
-  # Trading Agent - Main Application (Daemon)
+  # Trading Stats DB — PostgreSQL backend for all trading data
   # =========================================================================
-  agent:
+  traitor-db:
+    image: postgres:16-alpine
+    container_name: auto-traitor-traitor-db
+    restart: unless-stopped
+    env_file:
+      - config/.env
+    environment:
+      POSTGRES_USER: traitor
+      POSTGRES_PASSWORD: ${TRAITOR_DB_PASSWORD}
+      POSTGRES_DB: autotraitor
+    volumes:
+      - traitor_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U traitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Trading Agent — Coinbase (Crypto)
+  # =========================================================================
+  agent-coinbase:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-traitor-agent
+    container_name: auto-traitor-agent-coinbase
     restart: unless-stopped
     depends_on:
       ollama:
@@ -84,9 +105,12 @@ services:
         condition: service_healthy
       langfuse-web:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -95,25 +119,90 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
     volumes:
       - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs
     ports:
-      - "8080:8080" # Health check + Prometheus metrics
+      - "127.0.0.1:8080:8080" # Health check + Prometheus metrics
     # Security: read-only filesystem, drop capabilities
     read_only: true
     tmpfs:
       - /tmp
     security_opt:
       - no-new-privileges:true
-    command: python -m src.main --mode daemon
+    command: python -m src.main --config config/coinbase.yaml --mode daemon
     # Limit resource usage (leave room for Ollama + system)
     deploy:
       resources:
         limits:
           memory: 4G
           cpus: "2.0"
+
+  # =========================================================================
+  # Trading Agent — Interactive Brokers (US/EU Equities)
+  # Only starts with: docker compose --profile ibkr up
+  # =========================================================================
+  agent-ibkr:
+    profiles: ["ibkr"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auto-traitor-agent-ibkr
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+      traitor-db:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      # Override IBKR_HOST: inside Docker, 127.0.0.1 = container itself.
+      # host.docker.internal resolves to the Windows host where IB Gateway runs.
+      - IBKR_HOST=host.docker.internal
+      - TZ=Europe/Helsinki
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "127.0.0.1:8082:8082" # Health check (IBKR port)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.main --config config/ibkr.yaml --mode daemon
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
 
   # =========================================================================
   # Dashboard - Web UI and API Backend
@@ -129,17 +218,27 @@ services:
         condition: service_healthy
       temporal:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
+      - DASHBOARD_SESSION_SECRET=ada8753f087f3f04a6018234cc4d36465a202ef44c5924f58e8e68f6f03f5094
+      # Allow dashboard to reach IB Gateway for IBKR price/news lookups
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs
     ports:
-      - "8090:8090" # Web Dashboard
+      - "8090:8090" # Web Dashboard (LAN accessible)
     # Security: read-only filesystem, drop capabilities
     read_only: true
     tmpfs:
@@ -170,6 +269,11 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      # Allow IBKR news fetching from within Docker
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
@@ -261,6 +365,23 @@ services:
       retries: 10
       start_period: 10s
 
+  # MinIO bucket init — creates 'langfuse' bucket on first start
+  minio-init:
+    image: minio/minio:latest
+    container_name: auto-traitor-minio-init
+    restart: "no"
+    entrypoint: /bin/sh
+    command: >
+      -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+          mc mb local/langfuse --ignore-existing &&
+          echo 'Bucket langfuse ready'"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_healthy
+
   # =========================================================================
   # Langfuse Web — self-hosted LLM observability UI (v3)
   # Dashboard: http://localhost:3000
@@ -276,6 +397,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     ports:
@@ -339,6 +462,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
@@ -383,9 +508,9 @@ services:
     container_name: auto-traitor-temporal-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: temporal
-      POSTGRES_PASSWORD: temporal
-      POSTGRES_DB: temporal
+      POSTGRES_USER: ${TEMPORAL_DB_USER:-temporal}
+      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD:-temporal}
+      POSTGRES_DB: ${TEMPORAL_DB_NAME:-temporal}
     volumes:
       - temporal_db_data:/var/lib/postgresql/data
     healthcheck:
@@ -407,8 +532,8 @@ services:
     environment:
       - DB=postgres12
       - DB_PORT=5432
-      - POSTGRES_USER=temporal
-      - POSTGRES_PWD=temporal
+      - POSTGRES_USER=${TEMPORAL_DB_USER:-temporal}
+      - POSTGRES_PWD=${TEMPORAL_DB_PASSWORD:-temporal}
       - POSTGRES_SEEDS=temporal-db
       - BIND_ON_IP=0.0.0.0
     healthcheck:
@@ -433,9 +558,12 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - OLLAMA_BASE_URL=http://ollama:11434
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
@@ -467,6 +595,7 @@ services:
 volumes:
   ollama_data:
   redis_data:
+  traitor_db_data:
   temporal_db_data:
   langfuse_db_data:
   clickhouse_data:

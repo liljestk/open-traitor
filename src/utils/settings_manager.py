@@ -25,7 +25,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger("utils.settings_manager")
 
-_SETTINGS_PATH = os.path.join("config", "settings.yaml")
+def get_settings_path() -> str:
+    """Return the active settings path, overridden by AUTO_TRAITOR_CONFIG env var if set."""
+    return os.environ.get("AUTO_TRAITOR_CONFIG", os.path.join("config", "settings.yaml"))
 _lock = threading.RLock()
 
 
@@ -33,24 +35,26 @@ _lock = threading.RLock()
 # Validation schemas — per-section, per-field
 # ═══════════════════════════════════════════════════════════════════════════
 
+# H1 fix: Add minimum bounds to prevent LLM from lowering safety limits to near-zero
 _RULE_SCHEMA: dict[str, dict[str, Any]] = {
-    "max_single_trade":           {"type": float, "min": 0, "max": 1_000_000},
-    "max_daily_spend":            {"type": float, "min": 0, "max": 10_000_000},
-    "max_daily_loss":             {"type": float, "min": 0, "max": 1_000_000},
-    "max_portfolio_risk_pct":     {"type": float, "min": 0.0, "max": 1.0},
-    "require_approval_above":     {"type": float, "min": 0, "max": 1_000_000},
+    "max_single_trade":           {"type": float, "min": 1.0, "max": 1_000_000},      # H1: min $1 per trade
+    "max_daily_spend":            {"type": float, "min": 10.0, "max": 10_000_000},    # H1: min $10/day
+    "max_daily_loss":             {"type": float, "min": 10.0, "max": 1_000_000},     # H1: min $10 loss limit
+    "max_portfolio_risk_pct":     {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
+    "require_approval_above":     {"type": float, "min": 0, "max": 1_000_000},        # 0 is valid (approve all)
     "never_trade_pairs":          {"type": list},
     "only_trade_pairs":           {"type": list},
-    "min_trade_interval_seconds": {"type": int,   "min": 0, "max": 86_400},
-    "max_trades_per_day":         {"type": int,   "min": 0, "max": 10_000},
-    "max_cash_per_trade_pct":     {"type": float, "min": 0.0, "max": 1.0},
-    "emergency_stop_portfolio":   {"type": float, "min": 0, "max": 100_000_000},
+    "min_trade_interval_seconds": {"type": int,   "min": 0, "max": 86_400},           # 0 is valid
+    "max_trades_per_day":         {"type": int,   "min": 1, "max": 10_000},           # H1: at least 1 trade
+    "max_cash_per_trade_pct":     {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
+    "emergency_stop_portfolio":   {"type": float, "min": 0, "max": 100_000_000},      # 0 is valid (disabled)
     "always_use_stop_loss":       {"type": bool},
-    "max_stop_loss_pct":          {"type": float, "min": 0.0, "max": 1.0},
+    "max_stop_loss_pct":          {"type": float, "min": 0.005, "max": 1.0},          # H1: min 0.5%
 }
 
 _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "mode":                         {"type": str, "enum": ["paper", "live"]},
+    "exchange":                     {"type": str, "enum": ["coinbase", "ibkr"]},
     "pairs":                        {"type": list},
     "pair_discovery":               {"type": str, "enum": ["all", "configured"]},
     "quote_currency":               {"type": str},
@@ -64,24 +68,25 @@ _TRADING_SCHEMA: dict[str, dict[str, Any]] = {
     "holdings_refresh_seconds":     {"type": int,   "min": 5, "max": 3600},
     "holdings_dust_threshold":      {"type": float, "min": 0.0, "max": 100.0},
     "invalidate_strategic_context": {"type": bool},
-    "watchlist":                     {"type": list},
+    "watchlist_pairs":               {"type": list},
     "pair_universe_refresh_seconds": {"type": int,   "min": 300, "max": 86400},
-    "max_active_pairs":              {"type": int,   "min": 1, "max": 50},
+    "max_active_pairs":              {"type": int,   "min": 1, "max": 30},
     "include_crypto_quotes":         {"type": bool},
     "scan_volume_threshold":         {"type": float, "min": 0, "max": 1_000_000_000},
     "scan_movement_threshold_pct":   {"type": float, "min": 0.0, "max": 100.0},
     "screener_interval_cycles":      {"type": int,   "min": 1, "max": 100},
+    "style_modifiers":               {"type": list},
 }
 
 _RISK_SCHEMA: dict[str, dict[str, Any]] = {
-    "max_position_pct":        {"type": float, "min": 0.0, "max": 1.0},
-    "max_total_exposure_pct":  {"type": float, "min": 0.0, "max": 1.0},
-    "max_drawdown_pct":        {"type": float, "min": 0.0, "max": 1.0},
-    "stop_loss_pct":           {"type": float, "min": 0.0, "max": 1.0},
-    "take_profit_pct":         {"type": float, "min": 0.0, "max": 1.0},
-    "trailing_stop_pct":       {"type": float, "min": 0.0, "max": 1.0},
-    "max_trades_per_hour":     {"type": int,   "min": 0, "max": 1000},
-    "loss_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},
+    "max_position_pct":        {"type": float, "min": 0.01, "max": 1.0},   # H1: min 1%
+    "max_total_exposure_pct":  {"type": float, "min": 0.05, "max": 1.0},   # H1: min 5%
+    "max_drawdown_pct":        {"type": float, "min": 0.01, "max": 1.0},   # H1: min 1%
+    "stop_loss_pct":           {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "take_profit_pct":         {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "trailing_stop_pct":       {"type": float, "min": 0.005, "max": 1.0},  # H1: min 0.5%
+    "max_trades_per_hour":     {"type": int,   "min": 1, "max": 1000},     # H1: at least 1
+    "loss_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},   # 0 is valid (disabled)
 }
 
 _ROTATION_SCHEMA: dict[str, dict[str, Any]] = {
@@ -100,6 +105,7 @@ _FEES_SCHEMA: dict[str, dict[str, Any]] = {
     "safety_margin":           {"type": float, "min": 1.0, "max": 10.0},
     "min_gain_after_fees_pct": {"type": float, "min": 0.0, "max": 1.0},
     "min_trade_quote":         {"type": float, "min": 0, "max": 100_000},
+    "min_trade_pct":           {"type": float, "min": 0.0, "max": 1.0},
     "swap_cooldown_seconds":   {"type": int,   "min": 0, "max": 86_400},
 }
 
@@ -112,9 +118,28 @@ _HIGH_STAKES_SCHEMA: dict[str, dict[str, Any]] = {
 }
 
 _TELEGRAM_SCHEMA: dict[str, dict[str, Any]] = {
-    "status_update_interval":      {"type": int,   "min": 0, "max": 86_400},
+    "mode":                        {"type": str, "enum": ["controller", "reporting"]},
+    "bot_token":                   {"type": str},
+    "chat_id":                     {"type": str},
+    "authorized_users":            {"type": list},
+    # Trade & Signal Alerts
     "notify_on_trade":             {"type": bool},
+    "notify_on_signal":            {"type": bool},
     "notify_on_signal_confidence": {"type": float, "min": 0.0, "max": 1.0},
+    # Win / Loss Highlights
+    "notify_on_big_win":           {"type": bool},
+    "big_win_threshold":           {"type": float, "min": 0, "max": 1_000_000},
+    "notify_on_big_loss":          {"type": bool},
+    "big_loss_threshold":          {"type": float, "min": 0, "max": 1_000_000},
+    # Price Movement Alerts
+    "notify_on_price_move":        {"type": bool},
+    "price_move_threshold_pct":    {"type": float, "min": 0.5, "max": 50.0},
+    "price_move_cooldown_minutes": {"type": int,   "min": 1, "max": 1440},
+    # Scheduled Messages
+    "notify_morning_plan":         {"type": bool},
+    "notify_evening_summary":      {"type": bool},
+    "notify_periodic_update":      {"type": bool},
+    "status_update_interval":      {"type": int,   "min": 0, "max": 86_400},
     "daily_summary":               {"type": bool},
     "daily_summary_hour":          {"type": int,   "min": 0, "max": 23},
 }
@@ -314,12 +339,12 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_portfolio_risk_pct":     {"min": 0.01},   # can't zero out
         "max_trades_per_day":         {"min": 1},      # at least 1 trade/day
         "max_cash_per_trade_pct":     {"min": 0.01},   # can't zero out
-        "require_approval_above":     {},              # free to adjust
+        "require_approval_above":     {"max": 50000},  # C5: LLM cannot set absurdly high
         "never_trade_pairs":          {},              # LLM can manage exclusion list
         "only_trade_pairs":           {},              # LLM can manage inclusion list
         "min_trade_interval_seconds": {"max": 7200},   # can't slow to >2h
-        "emergency_stop_portfolio":   {},              # free to adjust
-        "always_use_stop_loss":       {},              # free to adjust
+        "emergency_stop_portfolio":   {"min": 0.01},   # C5: LLM cannot disable emergency stop
+        "always_use_stop_loss":       {},              # C5: guarded in AUTONOMOUS_BLOCKED_FIELDS
         "max_stop_loss_pct":          {},              # free to adjust
     },
     "trading": {
@@ -330,7 +355,6 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "pairs":                       {},                            # LLM can add/remove pairs
         "pair_discovery":              {},                            # LLM can switch discovery mode
         "quote_currencies":            {},                            # LLM can adjust quote currencies
-        "max_active_pairs":            {"min": 3, "max": 30},
         "include_crypto_quotes":       {},
         "scan_volume_threshold":       {},
         "scan_movement_threshold_pct": {},
@@ -359,6 +383,7 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "safety_margin":           {},
         "min_gain_after_fees_pct": {},
         "min_trade_quote":         {},
+        "min_trade_pct":           {},
     },
     "high_stakes": {
         "trade_size_multiplier":      {"max": 5.0},
@@ -368,6 +393,13 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "auto_approve_up_to":         {},
     },
 }
+
+# List-type fields where the autonomous LLM can only ADD items, never remove.
+# This prevents the LLM from clearing safety-critical blacklists/whitelists.
+_AUTONOMOUS_APPEND_ONLY_LISTS = frozenset({
+    "never_trade_pairs",
+    "only_trade_pairs",
+})
 
 # Fields the autonomous LLM may NOT touch even within allowed sections
 AUTONOMOUS_BLOCKED_FIELDS = frozenset({
@@ -379,6 +411,8 @@ AUTONOMOUS_BLOCKED_FIELDS = frozenset({
     ("trading", "reconcile_every_cycles"),
     ("trading", "invalidate_strategic_context"),
     ("trading", "pair_universe_refresh_seconds"),
+    ("trading", "max_active_pairs"),          # human-only: RPM guardrail enforces upper bound
+    ("absolute_rules", "always_use_stop_loss"),  # C5: LLM must NOT disable stop losses
     ("fees", "trade_fee_pct"),
     ("fees", "maker_fee_pct"),
     ("fees", "swap_cooldown_seconds"),
@@ -433,6 +467,23 @@ def validate_autonomous_update(
             if guard_max is not None and cast_val > guard_max:
                 cast_val = type(cast_val)(guard_max)
                 logger.info(f"  ↳ Autonomous guard: clamped {section}.{field} to ceiling {guard_max}")
+
+        # List-field guardrails: LLM can add items but cannot clear/shrink
+        # safety-critical lists (never_trade_pairs, only_trade_pairs).
+        if isinstance(cast_val, list) and field in _AUTONOMOUS_APPEND_ONLY_LISTS:
+            current_settings = load_settings()
+            current_list = current_settings.get(section, {}).get(field, [])
+            if isinstance(current_list, list):
+                current_set = set(current_list)
+                new_set = set(cast_val)
+                removed = current_set - new_set
+                if removed:
+                    # LLM tried to remove items — re-add them
+                    cast_val = list(new_set | current_set)
+                    logger.warning(
+                        f"  ↳ Autonomous guard: blocked removal of {removed} from "
+                        f"{section}.{field} — LLM can only add, not remove"
+                    )
 
         clamped[field] = cast_val
 
@@ -550,20 +601,51 @@ PRESETS = {
     "aggressive":   PRESET_AGGRESSIVE,
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Style Modifiers — orthogonal add-ons to presets
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Valid modifier keys (used for validation).
+VALID_STYLE_MODIFIERS = frozenset({"prefer_maker", "high_conviction_only", "wider_targets"})
+
+# Metadata for UI and help text.
+STYLE_MODIFIER_META: dict[str, dict[str, Any]] = {
+    "prefer_maker": {
+        "label": "Prefer Limit Orders",
+        "desc": "Force limit (maker) orders for all buys — lower fees on crypto exchanges.",
+        "exchanges": ["crypto"],  # No-op on equity (flat per-share fees)
+        "icon": "timer",
+    },
+    "high_conviction_only": {
+        "label": "High Conviction Only",
+        "desc": "Only trade strong_buy / strong_sell signals — skip weak and moderate signals.",
+        "exchanges": ["crypto", "equity"],
+        "icon": "target",
+    },
+    "wider_targets": {
+        "label": "Wider Targets",
+        "desc": "Take-profit ×2, stop-loss ×1.33 — let winners run on high-accuracy pairs.",
+        "exchanges": ["crypto", "equity"],
+        "icon": "expand",
+    },
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Core I/O
 # ═══════════════════════════════════════════════════════════════════════════
 
-def load_settings(path: str = _SETTINGS_PATH) -> dict:
+def load_settings(path: str = None) -> dict:
     """Load the full settings.yaml as a dict."""
+    path = path or get_settings_path()
     with _lock:
         with open(path, "r") as f:
             return yaml.safe_load(f) or {}
 
 
-def save_settings(settings: dict, path: str = _SETTINGS_PATH) -> None:
+def save_settings(settings: dict, path: str = None) -> None:
     """Atomically write settings to YAML (write to temp, then rename)."""
+    path = path or get_settings_path()
     with _lock:
         dir_path = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(suffix=".yaml", dir=dir_path)
@@ -588,8 +670,9 @@ def save_settings(settings: dict, path: str = _SETTINGS_PATH) -> None:
             raise
 
 
-def get_full_settings(path: str = _SETTINGS_PATH) -> dict:
+def get_full_settings(path: str = None) -> dict:
     """Return the full settings dict plus metadata for the API."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     return {
         "settings": cfg,
@@ -600,8 +683,9 @@ def get_full_settings(path: str = _SETTINGS_PATH) -> dict:
     }
 
 
-def get_section(section: str, path: str = _SETTINGS_PATH) -> dict:
+def get_section(section: str, path: str = None) -> dict:
     """Return a single section from settings.yaml."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     if "." in section:
         parts = section.split(".", 1)
@@ -627,6 +711,15 @@ def validate_field(section: str, key: str, value: Any) -> tuple[bool, str, Any]:
 
     field_schema = schema_dict.get(key)
     if field_schema is None:
+        # M4 fix: warn on unknown fields so typos are visible in logs
+        _logger = None
+        try:
+            from src.utils.logger import get_logger
+            _logger = get_logger("settings")
+        except Exception:
+            pass
+        if _logger:
+            _logger.warning(f"Unknown settings field '{section}.{key}' — passing through without validation")
         return True, "", value  # unknown fields pass through
 
     expected_type = field_schema["type"]
@@ -690,7 +783,7 @@ def validate_section(section: str, updates: dict[str, Any]) -> tuple[bool, list[
 def update_section(
     section: str,
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     """
     Update one or more fields in any settings section.
@@ -701,6 +794,7 @@ def update_section(
 
     Returns (ok, error_message, applied_changes).
     """
+    path = path or get_settings_path()
     ok, errors, cast_updates = validate_section(section, updates)
     if not ok:
         return False, "; ".join(errors), {}
@@ -708,19 +802,20 @@ def update_section(
     if not cast_updates:
         return True, "No changes", {}
 
-    cfg = load_settings(path)
+    with _lock:
+        cfg = load_settings(path)
 
-    if "." in section:
-        parts = section.split(".", 1)
-        parent = cfg.setdefault(parts[0], {})
-        target = parent.setdefault(parts[1], {})
-    else:
-        target = cfg.setdefault(section, {})
+        if "." in section:
+            parts = section.split(".", 1)
+            parent = cfg.setdefault(parts[0], {})
+            target = parent.setdefault(parts[1], {})
+        else:
+            target = cfg.setdefault(section, {})
 
-    for key, new_val in cast_updates.items():
-        target[key] = new_val
+        for key, new_val in cast_updates.items():
+            target[key] = new_val
 
-    save_settings(cfg, path)
+        save_settings(cfg, path)
     logger.warning(f"🔧 [{section}] updated (persisted): {cast_updates}")
     return True, "", cast_updates
 
@@ -729,11 +824,11 @@ def update_section(
 # Convenience wrappers (backwards-compatible)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_absolute_rules(path: str = _SETTINGS_PATH) -> dict:
+def get_absolute_rules(path: str = None) -> dict:
     return get_section("absolute_rules", path)
 
 
-def get_trading_section(path: str = _SETTINGS_PATH) -> dict:
+def get_trading_section(path: str = None) -> dict:
     return get_section("trading", path)
 
 
@@ -744,14 +839,14 @@ def validate_rule(key: str, value: Any) -> tuple[bool, str]:
 
 def update_absolute_rules(
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     return update_section("absolute_rules", updates, path)
 
 
 def update_trading_params(
     updates: dict[str, Any],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     return update_section("trading", updates, path)
 
@@ -762,12 +857,13 @@ def update_trading_params(
 
 def apply_preset(
     preset_name: str,
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, dict]:
     """
     Apply a named preset (disabled, conservative, moderate, aggressive).
     Returns (ok, error, applied_changes).
     """
+    path = path or get_settings_path()
     preset = PRESETS.get(preset_name)
     if preset is None:
         return (
@@ -776,16 +872,18 @@ def apply_preset(
             {},
         )
 
-    cfg = load_settings(path)
-    changes: dict[str, Any] = {}
+    # M26 fix: hold _lock for the entire load→modify→save to prevent TOCTOU
+    with _lock:
+        cfg = load_settings(path)
+        changes: dict[str, Any] = {}
 
-    for section_name, section_updates in preset.items():
-        target = cfg.setdefault(section_name, {})
-        for k, v in section_updates.items():
-            target[k] = v
-            changes[f"{section_name}.{k}"] = v
+        for section_name, section_updates in preset.items():
+            target = cfg.setdefault(section_name, {})
+            for k, v in section_updates.items():
+                target[k] = v
+                changes[f"{section_name}.{k}"] = v
 
-    save_settings(cfg, path)
+        save_settings(cfg, path)
     logger.warning(f"🔧 Preset '{preset_name}' applied (persisted): {changes}")
     return True, "", changes
 
@@ -793,6 +891,18 @@ def apply_preset(
 # ═══════════════════════════════════════════════════════════════════════════
 # Runtime push — hot-reload without restart
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Allowlist of rule attributes that may be hot-reloaded via setattr.
+# Prevents YAML field names from setting arbitrary attributes.
+_RULES_SETTABLE_ATTRS = frozenset({
+    "max_single_trade", "max_daily_spend", "max_daily_loss",
+    "max_portfolio_risk_pct", "require_approval_above",
+    "never_trade_pairs", "only_trade_pairs",
+    "min_trade_interval_seconds", "max_trades_per_day",
+    "max_cash_per_trade_pct", "emergency_stop_portfolio",
+    "always_use_stop_loss", "max_stop_loss_pct",
+})
+
 
 def push_to_runtime(
     rules_instance,
@@ -813,10 +923,12 @@ def push_to_runtime(
             section, attr = "absolute_rules", key
 
         if section == "absolute_rules":
-            if rules_instance and hasattr(rules_instance, attr):
+            if rules_instance and attr in _RULES_SETTABLE_ATTRS and hasattr(rules_instance, attr):
                 with rules_instance._lock:
                     setattr(rules_instance, attr, value)
                 logger.info(f"  ↳ Runtime rule {attr} → {value!r}")
+            elif rules_instance and attr not in _RULES_SETTABLE_ATTRS:
+                logger.warning(f"  ↳ Blocked setattr for disallowed rule attribute: {attr}")
         else:
             section_cfg = config.setdefault(section, {})
             section_cfg[attr] = value
@@ -838,8 +950,9 @@ def push_section_to_runtime(
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-def is_trading_enabled(path: str = _SETTINGS_PATH) -> bool:
+def is_trading_enabled(path: str = None) -> bool:
     """Quick check: is trading effectively enabled (non-zero limits)?"""
+    path = path or get_settings_path()
     rules = get_absolute_rules(path)
     return (
         rules.get("max_single_trade", 0) > 0
@@ -883,6 +996,22 @@ def get_preset_summary(preset_name: str) -> str:
     if "max_open_positions" in trading:
         lines.append(f"• Max open positions: {trading['max_open_positions']}")
 
+    return "\n".join(lines)
+
+
+def get_style_modifiers_summary(modifiers: list[str] | None = None, path: str | None = None) -> str:
+    """Return human-readable summary of active style modifiers."""
+    if modifiers is None:
+        cfg = load_settings(path)
+        modifiers = cfg.get("trading", {}).get("style_modifiers", [])
+    if not modifiers:
+        return ""
+    lines = ["\n🎛 *Active Style Modifiers:*"]
+    for mod in modifiers:
+        meta = STYLE_MODIFIER_META.get(mod)
+        if meta:
+            exchanges = ", ".join(meta["exchanges"])
+            lines.append(f"• {meta['label']} ({exchanges})")
     return "\n".join(lines)
 
 
@@ -945,6 +1074,7 @@ _LLM_PROVIDER_SCHEMA: dict[str, dict[str, Any]] = {
     "daily_token_limit": {"type": int,  "min": 0,  "max": 100_000_000},
     "cooldown_seconds":  {"type": int,  "min": 5,  "max": 3600},
     "is_local":          {"type": bool},
+    "tier":              {"type": str},   # "free" or "paid"
 }
 
 
@@ -1010,26 +1140,30 @@ def validate_providers_list(providers: list[dict]) -> tuple[bool, str]:
 
 def update_llm_providers(
     providers: list[dict],
-    path: str = _SETTINGS_PATH,
+    path: str = None,
 ) -> tuple[bool, str, list[dict]]:
     """
     Validate and persist a new LLM providers list.
     Returns (ok, error_message, saved_providers).
     """
+    path = path or get_settings_path()
     ok, err = validate_providers_list(providers)
     if not ok:
         return False, err, []
 
-    cfg = load_settings(path)
-    llm_section = cfg.setdefault("llm", {})
-    llm_section["providers"] = providers
-    save_settings(cfg, path)
+    # H6 fix: single lock scope for load→modify→save to prevent TOCTOU
+    with _lock:
+        cfg = load_settings(path)
+        llm_section = cfg.setdefault("llm", {})
+        llm_section["providers"] = providers
+        save_settings(cfg, path)
 
     logger.warning(f"🔧 LLM providers updated: {[p.get('name') for p in providers]}")
     return True, "", providers
 
 
-def get_llm_providers(path: str = _SETTINGS_PATH) -> list[dict]:
+def get_llm_providers(path: str = None) -> list[dict]:
     """Return the current providers list from settings."""
+    path = path or get_settings_path()
     cfg = load_settings(path)
     return cfg.get("llm", {}).get("providers", [])

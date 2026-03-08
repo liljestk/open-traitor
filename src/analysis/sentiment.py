@@ -197,19 +197,24 @@ class SentimentAnalyzer:
         bear_matches = []
 
         # Check multi-word phrases first (longer matches take priority)
+        # Cycle-3 fix: remove matched text to prevent sub-phrase double-counting
+        bull_text = text_lower
         for keyword, weight in sorted(
             self.bullish_keywords.items(), key=lambda x: -len(x[0])
         ):
-            if keyword in text_lower:
+            if keyword in bull_text:
                 bullish_score += weight
                 bull_matches.append(keyword)
+                bull_text = bull_text.replace(keyword, "", 1)
 
+        bear_text = text_lower
         for keyword, weight in sorted(
             self.bearish_keywords.items(), key=lambda x: -len(x[0])
         ):
-            if keyword in text_lower:
+            if keyword in bear_text:
                 bearish_score += weight
                 bear_matches.append(keyword)
+                bear_text = bear_text.replace(keyword, "", 1)
 
         total_matches = len(bull_matches) + len(bear_matches)
 
@@ -281,17 +286,19 @@ class SentimentAnalyzer:
             results.append(self.analyze_text(text, source))
 
         scores = [r.score for r in results]
+
+        # Recency-weighted: more recent items get higher weight
+        # (items are ordered newest-first from input)
+        weights = [1.0 / (i + 1) for i in range(len(scores))]
+        weight_sum = sum(weights)
+        weighted_score = sum(s * w for s, w in zip(scores, weights)) / weight_sum if weight_sum > 0 else 0.0
+
+        # Sort scores for median calculation (after weighted score is computed)
         scores.sort()
 
         # Median
         n = len(scores)
         median = scores[n // 2] if n % 2 else (scores[n // 2 - 1] + scores[n // 2]) / 2
-
-        # Recency-weighted: more recent items get higher weight
-        # (assumes items are ordered newest-first)
-        weights = [1.0 / (i + 1) for i in range(len(scores))]
-        weight_sum = sum(weights)
-        weighted_score = sum(s * w for s, w in zip(scores, weights)) / weight_sum if weight_sum > 0 else 0.0
 
         # Counts
         bullish = sum(1 for r in results if r.label in ("bullish", "very_bullish"))

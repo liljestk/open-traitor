@@ -29,8 +29,9 @@ class RateLimiter:
 
     # Default rate limits per service
     DEFAULT_LIMITS = {
-        "coinbase_rest": {"calls": 8, "period": 1.0},        # 8/s (buffer from 10)
+        "coinbase_rest": {"calls": 5, "period": 1.0},        # 5/s (safe buffer from 10)
         "coinbase_ws": {"calls": 500, "period": 1.0},        # 500/s (buffer from 750)
+        "yahoo_finance": {"calls": 2, "period": 1.0},        # ~2/s conservative (unofficial API)
         "telegram": {"calls": 25, "period": 1.0},            # 25/s (buffer from 30)
         "telegram_chat": {"calls": 1, "period": 1.1},        # 1/s per chat (strict)
         "reddit": {"calls": 50, "period": 60.0},             # 50/min (buffer from 60)
@@ -89,9 +90,49 @@ class RateLimiter:
             wait = period / max_calls
             time.sleep(min(wait, 0.1))
 
+    async def async_acquire(self, service: str, timeout: float = 30.0) -> bool:
+        """
+        Acquire a token asynchronously without blocking the event loop.
+        """
+        import asyncio
+        if service not in self._limits:
+            return True
+
+        limit = self._limits[service]
+        max_calls = limit["calls"]
+        period = limit["period"]
+        deadline = time.monotonic() + timeout
+
+        while True:
+            with self._lock:
+                now = time.monotonic()
+
+                # Remove old entries outside the window
+                self._calls[service] = [
+                    t for t in self._calls[service]
+                    if now - t < period
+                ]
+
+                if len(self._calls[service]) < max_calls:
+                    self._calls[service].append(now)
+                    return True
+
+            if time.monotonic() >= deadline:
+                logger.warning(f"Rate limit timeout for {service}")
+                return False
+
+            # Wait a bit before retrying
+            wait = period / max_calls
+            await asyncio.sleep(min(wait, 0.1))
+
     def wait(self, service: str, timeout: float = 30.0) -> None:
         """Blocking acquire — raises if timed out."""
         if not self.acquire(service, block=True, timeout=timeout):
+            raise RuntimeError(f"Rate limit timeout for {service} after {timeout}s")
+
+    async def async_wait(self, service: str, timeout: float = 30.0) -> None:
+        """Non-blocking wait for rate limit token."""
+        if not await self.async_acquire(service, timeout=timeout):
             raise RuntimeError(f"Rate limit timeout for {service} after {timeout}s")
 
     def get_status(self) -> dict:
@@ -115,11 +156,14 @@ class RateLimiter:
 
 # Global rate limiter instance
 _global_limiter: Optional[RateLimiter] = None
+_global_limiter_lock = threading.Lock()  # M11: prevent TOCTOU race
 
 
 def get_rate_limiter() -> RateLimiter:
     """Get or create the global rate limiter."""
     global _global_limiter
     if _global_limiter is None:
-        _global_limiter = RateLimiter()
+        with _global_limiter_lock:
+            if _global_limiter is None:
+                _global_limiter = RateLimiter()
     return _global_limiter

@@ -45,7 +45,7 @@ class MultiTimeframeAnalyzer:
 
     def __init__(self, config: dict, coinbase_client=None):
         self.config = config
-        self.coinbase = coinbase_client
+        self.exchange = coinbase_client  # may be CoinbaseClient or IBClient
         self.technical = TechnicalAnalyzer(config.get("analysis", {}).get("technical", {}))
         self.rate_limiter = get_rate_limiter()
         self._candle_cache: dict[str, tuple[float, list[dict]]] = {}  # key -> (timestamp, candles)
@@ -63,7 +63,8 @@ class MultiTimeframeAnalyzer:
         ``"aggregate": 2``), the raw candles are merged in groups of N to
         synthesise a higher timeframe (e.g. 2×TWO_HOUR → 4h candles).
         """
-        self.rate_limiter.wait("coinbase_rest")
+        _rl_key = self.exchange.rate_limit_key if self.exchange else "coinbase_rest"
+        self.rate_limiter.wait(_rl_key)
         cache_key = f"{pair}:{tf['granularity']}"
         ttl = self._CACHE_TTL.get(tf["granularity"], 300)
         now = time.time()
@@ -74,7 +75,7 @@ class MultiTimeframeAnalyzer:
         if cached and (now - cached[0]) < ttl:
             candles = cached[1]
         else:
-            candles = self.coinbase.get_candles(
+            candles = self.exchange.get_candles(
                 product_id=pair,
                 granularity=tf["granularity"],
                 limit=tf["candles"],
@@ -121,8 +122,8 @@ class MultiTimeframeAnalyzer:
                 "summary": str,
             }
         """
-        if not self.coinbase:
-            return {"error": "Coinbase client not available", "confluence_score": 0}
+        if not self.exchange:
+            return {"error": "Exchange client not available", "confluence_score": 0}
 
         tf_results = {}
         weighted_score = 0.0
@@ -130,18 +131,38 @@ class MultiTimeframeAnalyzer:
         # Fetch and analyse all timeframes concurrently.
         # Each worker rate-limits itself so Coinbase quotas are respected,
         # but the *wait* times overlap instead of stacking sequentially.
-        with ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf") as pool:
+        # Timeout per-future: prevents indefinite hangs when upstream
+        # data sources (e.g. IB Gateway) stop responding.
+        _FUTURE_TIMEOUT = 45  # seconds per timeframe fetch
+
+        # IMPORTANT: Do NOT use `with ThreadPoolExecutor(...)` here.
+        # If as_completed() raises TimeoutError, __exit__ calls shutdown(wait=True)
+        # which blocks forever if workers are stuck on blocking I/O (e.g. IB Gateway).
+        pool = ThreadPoolExecutor(max_workers=len(TIMEFRAMES), thread_name_prefix="mtf")
+        try:
             futures = {pool.submit(self._fetch_timeframe, pair, tf): tf for tf in TIMEFRAMES}
-            for future in as_completed(futures):
-                tf_def = futures[future]
-                try:
-                    name, result, score_contrib = future.result()
-                    tf_results[name] = result
-                    weighted_score += score_contrib
-                except Exception as e:
-                    name = tf_def["name"]
-                    logger.warning(f"Multi-TF analysis failed for {name}: {e}")
-                    tf_results[name] = {"error": str(e)}
+            try:
+                for future in as_completed(futures, timeout=_FUTURE_TIMEOUT * len(TIMEFRAMES)):
+                    tf_def = futures[future]
+                    try:
+                        name, result, score_contrib = future.result(timeout=_FUTURE_TIMEOUT)
+                        tf_results[name] = result
+                        weighted_score += score_contrib
+                    except TimeoutError:
+                        name = tf_def["name"]
+                        logger.warning(f"Multi-TF {name} timed out after {_FUTURE_TIMEOUT}s")
+                        tf_results[name] = {"error": "timeout"}
+                    except Exception as e:
+                        name = tf_def["name"]
+                        logger.warning(f"Multi-TF analysis failed for {name}: {e}")
+                        tf_results[name] = {"error": str(e)}
+            except TimeoutError:
+                logger.warning(f"Multi-TF as_completed timed out for {pair} — skipping remaining timeframes")
+                for future, tf_def in futures.items():
+                    if tf_def["name"] not in tf_results:
+                        tf_results[tf_def["name"]] = {"error": "timeout"}
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         # Determine confluence
         valid_scores = [
@@ -211,7 +232,7 @@ class MultiTimeframeAnalyzer:
                     "open": group[0].get("open", "0"),
                     "close": group[-1].get("close", "0"),
                     "high": str(max(float(c.get("high", 0)) for c in group)),
-                    "low": str(min(float(c.get("low", 0)) for c in group if float(c.get("low", 0)) > 0) or 0),
+                    "low": str(min((float(c.get("low", 0)) for c in group if float(c.get("low", 0)) > 0), default=0)),
                     "volume": str(sum(float(c.get("volume", 0)) for c in group)),
                 }
                 aggregated.append(agg)
@@ -300,8 +321,10 @@ class MultiTimeframeAnalyzer:
         ]
         for tf_name, tf_data in result["timeframes"].items():
             if "score" in tf_data:
+                rsi_val = tf_data.get('rsi')
+                rsi_str = f"{rsi_val:.0f}" if rsi_val is not None else "N/A"
                 lines.append(
-                    f"  {tf_name}: {tf_data['signal']} | RSI: {tf_data.get('rsi', 'N/A'):.0f} | "
+                    f"  {tf_name}: {tf_data['signal']} | RSI: {rsi_str} | "
                     f"MACD: {tf_data.get('macd_signal', 'N/A')} | EMA: {tf_data.get('ema_signal', 'N/A')}"
                 )
         return "\n".join(lines)

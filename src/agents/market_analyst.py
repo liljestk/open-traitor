@@ -18,33 +18,39 @@ from src.models.signal import (
     SentimentSignals,
 )
 from src.utils.logger import get_logger
+from src.utils import llm_optimizer
 
 logger = get_logger("agent.market_analyst")
 
 
-MARKET_ANALYSIS_SYSTEM_PROMPT = """You are an expert cryptocurrency market analyst.
-Your job is to analyze technical indicators and news sentiment to produce a clear market assessment.
+MARKET_ANALYSIS_SYSTEM_PROMPT = """You are a market analyst. Analyze indicators and news, return JSON:
 
-Given the technical indicators and recent crypto news, provide your analysis as JSON:
-
-{
-    "signal_type": "strong_buy" | "buy" | "weak_buy" | "neutral" | "weak_sell" | "sell" | "strong_sell",
+{{
+    "signal_type": "strong_buy"|"buy"|"weak_buy"|"neutral"|"weak_sell"|"sell"|"strong_sell",
     "confidence": 0.0-1.0,
-    "market_condition": "strongly_bullish" | "bullish" | "slightly_bullish" | "neutral" | "slightly_bearish" | "bearish" | "strongly_bearish" | "volatile",
-    "sentiment_overall": "bullish" | "bearish" | "neutral",
-    "sentiment_score": -1.0 to 1.0,
-    "key_factors": ["factor1", "factor2", ...],
-    "reasoning": "Detailed explanation of your analysis",
-    "suggested_entry": price or null,
-    "suggested_stop_loss": price or null,
-    "suggested_take_profit": price or null
-}
+    "market_condition": "strongly_bullish"|"bullish"|"slightly_bullish"|"neutral"|"slightly_bearish"|"bearish"|"strongly_bearish"|"volatile",
+    "sentiment_overall": "bullish"|"bearish"|"neutral",
+    "sentiment_score": -1.0-1.0,
+    "key_factors": ["factor1","factor2"],
+    "reasoning": "concise explanation",
+    "suggested_entry": price_or_null,
+    "suggested_stop_loss": price_or_null,
+    "suggested_take_profit": price_or_null
+}}
 
-Be conservative. When uncertain, lean towards "neutral".
-Never recommend a confidence above 0.85 unless the signal is extremely strong across ALL indicators.
-Always consider risk-reward ratios. Capital preservation is priority #1.
-If a strategic context (daily/weekly/monthly plan) is provided, treat it as background regime information —
-use it to calibrate your confidence but do not override clear technical evidence."""
+{asset_class_notes}
+Strategic context = regime background; don't override clear technical signals.
+Calibrate SL/TP to account size (tighter for small accounts).
+Respond ONLY with valid JSON."""
+
+_CRYPTO_NOTES = "Don't artificially lower confidence when indicators clearly align. Find actionable trades even in choppy markets."
+_EQUITY_NOTES = "Consider earnings, macro, sector rotation. Equities are less volatile — wider stop distances. Fractional shares ok for small accounts."
+
+
+def _get_system_prompt(exchange: str) -> str:
+    """Return the appropriate system prompt based on exchange/asset class."""
+    notes = _EQUITY_NOTES if exchange == "ibkr" else _CRYPTO_NOTES
+    return MARKET_ANALYSIS_SYSTEM_PROMPT.format(asset_class_notes=notes)
 
 
 class MarketAnalystAgent(BaseAgent):
@@ -78,9 +84,13 @@ class MarketAnalystAgent(BaseAgent):
         strategy_signals = context.get("strategy_signals", {})
         strategic_context = context.get("strategic_context", "")
         currency_symbol = context.get("currency_symbol", "$")
+        native_currency = context.get("native_currency", "USD")
+        portfolio_value = context.get("portfolio_value", 0)
+        cash_balance = context.get("cash_balance", 0)
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
+        exchange = context.get("exchange", "coinbase")
 
         # Step 1: Technical analysis (no LLM needed)
         tech_analysis = self.technical.analyze(candles)
@@ -101,20 +111,26 @@ class MarketAnalystAgent(BaseAgent):
             strategy_signals=strategy_signals,
             strategic_context=strategic_context,
             currency_symbol=currency_symbol,
+            native_currency=native_currency,
+            portfolio_value=portfolio_value,
+            cash_balance=cash_balance,
+            exchange=exchange,
         )
 
         # Create a tracing span for this LLM call
         span = None
+        system_prompt = _get_system_prompt(exchange)
         if trace_ctx is not None:
             span = trace_ctx.start_span(
                 self.name,
-                input_data={"system": MARKET_ANALYSIS_SYSTEM_PROMPT[:500], "user": user_message[:500]},
+                input_data={"system": system_prompt[:500], "user": user_message[:500]},
                 model=self.llm.model,
             )
 
         llm_response = await self.llm.chat_json(
-            system_prompt=MARKET_ANALYSIS_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_message=user_message,
+            max_tokens=800,
             span=span,
             agent_name=self.name,
         )
@@ -140,6 +156,7 @@ class MarketAnalystAgent(BaseAgent):
                     completion_tokens=span.completion_tokens if span else 0,
                     latency_ms=span.latency_ms if span else 0.0,
                     raw_prompt=user_message[:1000],
+                    exchange=exchange,
                 )
             except Exception as e:
                 self.logger.debug(f"Failed to save reasoning trace: {e}")
@@ -169,9 +186,22 @@ class MarketAnalystAgent(BaseAgent):
         strategy_signals: dict | None = None,
         strategic_context: str = "",
         currency_symbol: str = "$",
+        native_currency: str = "USD",
+        portfolio_value: float = 0,
+        cash_balance: float = 0,
+        exchange: str = "coinbase",
     ) -> str:
         """Build the analysis prompt for the LLM."""
         sym = currency_symbol
+        # Cap news — reads optimizer setting hot (30s cache)
+        news_max = llm_optimizer.get("news_max_chars", 1500)
+        if len(news) > news_max:
+            news = news[:news_max].rsplit("\n", 1)[0] + "\n[...truncated]"
+
+        # Cap strategic context
+        ctx_max = llm_optimizer.get("strategic_context_max_chars", 800)
+        if strategic_context and len(strategic_context) > ctx_max:
+            strategic_context = strategic_context[:ctx_max].rstrip() + " [...]"
         fg_section = f"\nFEAR & GREED INDEX:\n{fear_greed}\n" if fear_greed else ""
         mtf_section = f"\nMULTI-TIMEFRAME CONFLUENCE:\n{multi_timeframe}\n" if multi_timeframe else ""
         sentiment_section = f"\nSENTIMENT ANALYSIS:\n{sentiment}\n" if sentiment else ""
@@ -197,25 +227,78 @@ class MarketAnalystAgent(BaseAgent):
             if strategic_context else ""
         )
 
+        # Account context — lightweight, helps calibrate entry/SL/TP
+        acct_section = ""
+        pv = portfolio_value or 0
+        if pv > 0:
+            if pv < 50:
+                bracket = "MICRO (< €50)"
+            elif pv < 500:
+                bracket = "SMALL (€50–€500)"
+            elif pv < 5000:
+                bracket = "MEDIUM (€500–€5K)"
+            else:
+                bracket = "LARGE (> €5K)"
+            acct_section = (
+                f"\nACCOUNT CONTEXT:\n"
+                f"- Portfolio Value: {sym}{pv:,.2f} {native_currency}\n"
+                f"- Available Cash: {sym}{cash_balance:,.2f} {native_currency}\n"
+                f"- Account Bracket: {bracket}\n"
+                f"- Calibrate entry sizes, stop-loss, and take-profit to this account size.\n"
+            )
+
+        # M32 fix: safe formatting for potentially missing numeric indicators
+        _rsi = indicators.get('rsi')
+        _rsi_str = f"{_rsi:.1f}" if isinstance(_rsi, (int, float)) else "N/A"
+        _macd_hist = indicators.get('macd_histogram')
+        _macd_hist_str = f"{_macd_hist:.4f}" if isinstance(_macd_hist, (int, float)) else "N/A"
+
+        # None-safe formatting for BB, EMA, support/resistance, ATR
+        _bb_upper = indicators.get('bb_upper')
+        _bb_upper_str = f"{sym}{_bb_upper:,.2f}" if isinstance(_bb_upper, (int, float)) else "N/A"
+        _bb_lower = indicators.get('bb_lower')
+        _bb_lower_str = f"{sym}{_bb_lower:,.2f}" if isinstance(_bb_lower, (int, float)) else "N/A"
+        _ema_9 = indicators.get('ema_9')
+        _ema_9_str = f"{sym}{_ema_9:,.2f}" if isinstance(_ema_9, (int, float)) else "N/A"
+        _ema_21 = indicators.get('ema_21')
+        _ema_21_str = f"{sym}{_ema_21:,.2f}" if isinstance(_ema_21, (int, float)) else "N/A"
+        _ema_50 = indicators.get('ema_50')
+        _ema_50_str = f"{sym}{_ema_50:,.2f}" if isinstance(_ema_50, (int, float)) else "N/A"
+        _support = indicators.get('support')
+        _support_str = f"{sym}{_support:,.2f}" if isinstance(_support, (int, float)) else "N/A"
+        _resistance = indicators.get('resistance')
+        _resistance_str = f"{sym}{_resistance:,.2f}" if isinstance(_resistance, (int, float)) else "N/A"
+        _atr = indicators.get('atr')
+        _atr_str = f"{sym}{_atr:,.2f}" if isinstance(_atr, (int, float)) else "N/A"
+        _vol_ratio = indicators.get('volume_ratio')
+        _vol_ratio_str = f"{_vol_ratio:.2f}" if isinstance(_vol_ratio, (int, float)) else "N/A"
+
+        _1h = price_changes.get('1h')
+        _1h_str = f"{_1h:+.2%}" if isinstance(_1h, (int, float)) else "N/A"
+        _24h = price_changes.get('24h')
+        _24h_str = f"{_24h:+.2%}" if isinstance(_24h, (int, float)) else "N/A"
+
         return f"""Analyze {pair} at current price {sym}{price:,.2f}
 
 TECHNICAL INDICATORS:
-- RSI: {indicators.get('rsi', 'N/A'):.1f} ({indicators.get('rsi_signal', 'unknown')})
-- MACD: {indicators.get('macd_signal', 'unknown')} (hist: {indicators.get('macd_histogram', 'N/A')})
-- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {sym}{indicators.get('bb_upper', 0):,.2f}, lower: {sym}{indicators.get('bb_lower', 0):,.2f})
+- RSI: {_rsi_str} ({indicators.get('rsi_signal', 'unknown')})
+- MACD: {indicators.get('macd_signal', 'unknown')} (hist: {_macd_hist_str})
+- Bollinger Bands: {indicators.get('bb_signal', 'unknown')} (upper: {_bb_upper_str}, lower: {_bb_lower_str})
 - EMA Signal: {indicators.get('ema_signal', 'unknown')}
-- EMA 9: {sym}{indicators.get('ema_9', 0):,.2f} | EMA 21: {sym}{indicators.get('ema_21', 0):,.2f} | EMA 50: {sym}{indicators.get('ema_50', 0):,.2f}
-- Volume: {indicators.get('volume_signal', 'unknown')} (ratio: {indicators.get('volume_ratio', 1):.2f}x average)
-- Support: {sym}{indicators.get('support', 0):,.2f} | Resistance: {sym}{indicators.get('resistance', 0):,.2f}
-- ATR: {sym}{indicators.get('atr', 0):,.2f}
+- EMA 9: {_ema_9_str} | EMA 21: {_ema_21_str} | EMA 50: {_ema_50_str}
+- Volume: {indicators.get('volume_signal', 'unknown')} (ratio: {_vol_ratio_str}x average)
+- Support: {_support_str} | Resistance: {_resistance_str}
+- ATR: {_atr_str}
 
 PRICE CHANGES:
-- 1 hour: {price_changes.get('1h', 0):+.2%}
-- 24 hours: {price_changes.get('24h', 0):+.2%}
+- 1 hour: {_1h_str}
+- 24 hours: {_24h_str}
 {fg_section}{mtf_section}{sentiment_section}{strat_section}
-RECENT CRYPTO NEWS:
+RECENT {"EQUITY" if exchange == "ibkr" else "CRYPTO"} NEWS:
+<external_data source="news_feed" type="untrusted">
 {news}
-{strategy_section}
+</external_data>
+{strategy_section}{acct_section}
 Provide your analysis as JSON."""
 
     def _build_signal(
@@ -240,7 +323,7 @@ Provide your analysis as JSON."""
             pair=pair,
             current_price=price,
             signal_type=signal_type,
-            confidence=float(llm_analysis.get("confidence", 0)),
+            confidence=max(0.0, min(1.0, float(llm_analysis.get("confidence", 0)))),  # H5: clamp to [0,1]
             market_condition=market_condition,
             technical=TechnicalSignals(
                 rsi=indicators.get("rsi"),
@@ -277,38 +360,100 @@ Provide your analysis as JSON."""
     def _technical_only_signal(
         self, pair: str, price: float, indicators: dict
     ) -> dict:
-        """Fallback signal based on technicals only (no LLM)."""
-        # Simple scoring system
+        """Fallback signal based on technicals only (no LLM).
+        
+        Uses all available indicators for a comprehensive score:
+        RSI, MACD, Bollinger Bands, EMA, Volume, ADX.
+        """
         score = 0
+        factors = []
+
+        # RSI signal (weight: 2)
         rsi_signal = indicators.get("rsi_signal", "neutral")
         if rsi_signal == "oversold":
             score += 2
-        elif rsi_signal == "bearish":
-            score += 1
+            factors.append("RSI oversold")
         elif rsi_signal == "overbought":
             score -= 2
+            factors.append("RSI overbought")
         elif rsi_signal == "bullish":
-            score -= 1  # wait for pullback
+            score += 1
+            factors.append("RSI bullish")
+        elif rsi_signal == "bearish":
+            score -= 1
+            factors.append("RSI bearish")
 
+        # MACD signal (weight: 1)
         macd_signal = indicators.get("macd_signal", "neutral")
         if "bullish" in macd_signal:
             score += 1
+            factors.append("MACD bullish")
         elif "bearish" in macd_signal:
             score -= 1
+            factors.append("MACD bearish")
 
-        if score >= 2:
+        # Bollinger Bands (weight: 1)
+        bb_signal = indicators.get("bb_signal", "neutral")
+        if bb_signal in ("oversold", "lower_band"):
+            score += 1
+            factors.append("BB lower band")
+        elif bb_signal in ("overbought", "upper_band"):
+            score -= 1
+            factors.append("BB upper band")
+
+        # EMA alignment (weight: 1)
+        ema_signal = indicators.get("ema_signal", "neutral")
+        if "bullish" in str(ema_signal):
+            score += 1
+            factors.append("EMA bullish")
+        elif "bearish" in str(ema_signal):
+            score -= 1
+            factors.append("EMA bearish")
+
+        # Volume confirmation (weight: 1)
+        vol_signal = indicators.get("volume_signal", "normal")
+        vol_ratio = indicators.get("volume_ratio", 1.0)
+        if isinstance(vol_ratio, (int, float)) and vol_ratio > 1.5:
+            # High volume confirms the direction
+            if score > 0:
+                score += 1
+                factors.append("High volume confirms bullish")
+            elif score < 0:
+                score -= 1
+                factors.append("High volume confirms bearish")
+
+        # ADX trend strength (weight: modifier)
+        adx = indicators.get("adx")
+        if isinstance(adx, (int, float)) and adx > 25:
+            factors.append(f"Strong trend (ADX={adx:.0f})")
+            # Amplify directional signals in trending markets
+            if abs(score) >= 2:
+                score = int(score * 1.2)
+
+        # Score → signal type mapping
+        if score >= 4:
+            signal_type = SignalType.STRONG_BUY
+        elif score >= 2:
             signal_type = SignalType.BUY
+        elif score >= 1:
+            signal_type = SignalType.WEAK_BUY
+        elif score <= -4:
+            signal_type = SignalType.STRONG_SELL
         elif score <= -2:
             signal_type = SignalType.SELL
+        elif score <= -1:
+            signal_type = SignalType.WEAK_SELL
         else:
             signal_type = SignalType.NEUTRAL
+
+        confidence = min(abs(score) * 0.15, 0.75)
 
         signal = Signal(
             pair=pair,
             current_price=price,
             signal_type=signal_type,
-            confidence=min(abs(score) * 0.2, 0.6),  # Low confidence for fallback
-            reasoning="Technical-only analysis (LLM unavailable)",
+            confidence=confidence,
+            reasoning=f"Technical-only fallback (LLM unavailable). Score={score}. Factors: {', '.join(factors) or 'none'}",
         )
         self.state.add_signal(signal)
         return {"signal": signal.model_dump(mode="json"), "fallback": True}

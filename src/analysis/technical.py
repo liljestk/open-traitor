@@ -62,6 +62,8 @@ class TechnicalAnalyzer:
 
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
+        # When avg_loss is 0 (no down moves), RSI = 100; when avg_gain is 0, RSI = 0
+        rsi = rsi.where(avg_loss != 0, other=np.where(avg_gain > 0, 100.0, 50.0))
         return rsi
 
     def compute_macd(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -327,7 +329,7 @@ class TechnicalAnalyzer:
 
         logger.debug(
             f"Technical analysis complete | Price: ${current_price:,.2f} | "
-            f"RSI: {current_rsi:.1f} ({rsi_signal}) | "
+            f"RSI: {current_rsi if current_rsi is not None else 0:.1f} ({rsi_signal}) | "
             f"MACD: {macd_signal_text} | BB: {bb_signal}"
         )
 
@@ -396,12 +398,12 @@ class TechnicalAnalyzer:
 
         if above_count == total:
             return "strongly_bullish"
+        if above_count == 0:
+            return "strongly_bearish"
         if above_count >= total * 0.75:
             return "bullish"
         if above_count <= total * 0.25:
             return "bearish"
-        if above_count == 0:
-            return "strongly_bearish"
         return "neutral"
 
     def _interpret_volume(self, volume_ratio: float) -> str:
@@ -430,13 +432,13 @@ class TechnicalAnalyzer:
         if adx is None:
             return "unknown"
         if adx >= 40:
-            if plus_di and minus_di and plus_di > minus_di:
-                return "strong_uptrend"
-            return "strong_downtrend"
+            if plus_di is not None and minus_di is not None:
+                return "strong_uptrend" if plus_di > minus_di else "strong_downtrend"
+            return "strong_trend"
         if adx >= 25:
-            if plus_di and minus_di and plus_di > minus_di:
-                return "uptrend"
-            return "downtrend"
+            if plus_di is not None and minus_di is not None:
+                return "uptrend" if plus_di > minus_di else "downtrend"
+            return "trending"
         if adx >= 20:
             return "weak_trend"
         return "no_trend"

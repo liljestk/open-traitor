@@ -7,8 +7,12 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { ChevronLeft, ExternalLink, CheckCircle2, XCircle, PauseCircle, Clock, AlertTriangle } from 'lucide-react'
-import { fetchCycleFull, type AgentSpan, type CycleFull } from '../api'
+import { fetchCycleFull, fetchCandles, type AgentSpan, type CycleFull } from '../api'
+import CandlestickChart from '../components/CandlestickChart'
 import SpanWaterfall from '../components/SpanWaterfall'
+import PageTransition from '../components/PageTransition'
+import { SkeletonBlock } from '../components/Skeleton'
+import { useLiveStore } from '../store'
 
 const OUTCOME_CONFIG = {
   executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
@@ -101,10 +105,65 @@ function SpanDetail({ span, langfuseUrl }: { span: AgentSpan; langfuseUrl?: stri
   )
 }
 
+/* ────── Price chart context with entry/exit markers ────── */
+function TradeChartContext({
+  pair,
+  trade,
+  startedAt,
+}: {
+  pair: string
+  trade?: CycleFull['trade']
+  startedAt: string
+}) {
+  const profile = useLiveStore((s) => s.profile)
+  const { data: candleData, isLoading } = useQuery({
+    queryKey: ['candles-context', pair, startedAt, profile],
+    queryFn: () => fetchCandles(pair, 'FIVE_MINUTE', 200),
+    staleTime: 300_000,
+  })
+
+  const candles = candleData?.candles ?? []
+  if (!candles.length && !isLoading) return null
+
+  // Build markers for entry/exit
+  const markers: Array<{ time: number; position: 'aboveBar' | 'belowBar'; color: string; shape: 'arrowDown' | 'arrowUp'; text: string }> = []
+  if (trade?.price && trade?.action) {
+    const tradeTime = dayjs(startedAt).unix()
+    if (trade.action === 'buy') {
+      markers.push({ time: tradeTime, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: 'BUY' })
+    } else if (trade.action === 'sell') {
+      markers.push({ time: tradeTime, position: 'aboveBar', color: '#ef4444', shape: 'arrowDown', text: 'SELL' })
+    }
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-gray-300 mb-3">Price Context (5m candles)</h3>
+      {isLoading ? (
+        <SkeletonBlock className="h-[300px]" />
+      ) : (
+        <CandlestickChart
+          candles={candles.map((c) => ({
+            time: c.start,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }))}
+          height={300}
+          pair={pair}
+          markers={markers}
+        />
+      )}
+    </div>
+  )
+}
+
 export default function CyclePlayback() {
   const { cycleId } = useParams<{ cycleId: string }>()
+  const profile = useLiveStore((s) => s.profile)
   const { data: cycle, isLoading, error } = useQuery({
-    queryKey: ['cycle', cycleId],
+    queryKey: ['cycle', cycleId, profile],
     queryFn: () => fetchCycleFull(cycleId!),
     enabled: !!cycleId,
   })
@@ -115,6 +174,7 @@ export default function CyclePlayback() {
   const cycleStartMs = dayjs(cycle.started_at).valueOf()
 
   return (
+    <PageTransition>
     <div className="p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center gap-4">
@@ -202,6 +262,10 @@ export default function CyclePlayback() {
           </div>
         </div>
       )}
+
+      {/* Price chart context around trade */}
+      <TradeChartContext pair={cycle.pair} trade={cycle.trade} startedAt={cycle.started_at} />
     </div>
+    </PageTransition>
   )
 }

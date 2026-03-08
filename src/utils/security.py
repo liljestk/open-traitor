@@ -16,6 +16,21 @@ from src.utils.logger import get_logger
 
 logger = get_logger("utils.security")
 
+# Module-level constant: homoglyph translation table (computed once at import)
+_HOMOGLYPH_TRANS = str.maketrans({
+    '\u0430': 'a', '\u0435': 'e', '\u043e': 'o', '\u0440': 'p',
+    '\u0441': 'c', '\u0443': 'y', '\u0445': 'x', '\u0456': 'i',
+    '\u0458': 'j', '\u04bb': 'h', '\u0455': 's', '\u0457': 'i',
+    '\u0410': 'A', '\u0412': 'B', '\u0415': 'E', '\u041a': 'K',
+    '\u041c': 'M', '\u041d': 'H', '\u041e': 'O', '\u0420': 'P',
+    '\u0421': 'C', '\u0422': 'T', '\u0425': 'X',
+    # Greek
+    '\u03b1': 'a', '\u03bf': 'o', '\u03b5': 'e', '\u03c1': 'p',
+    '\u0391': 'A', '\u0392': 'B', '\u0395': 'E', '\u0397': 'H',
+    '\u039a': 'K', '\u039c': 'M', '\u039d': 'N', '\u039f': 'O',
+    '\u03a1': 'P', '\u03a4': 'T', '\u03a7': 'X', '\u0396': 'Z',
+})
+
 
 def sanitize_input(text: str, max_length: int = 500) -> str:
     """
@@ -28,9 +43,16 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
     # Truncate
     text = text[:max_length]
 
-    # Normalize Unicode to prevent homoglyph/confusable attacks
+    # Normalize Unicode FIRST (NFKC maps confusable glyphs to ASCII),
+    # THEN strip invisible chars, so that homoglyph bypass is blocked before
+    # the injection regex runs.
     import unicodedata
     text = unicodedata.normalize("NFKC", text)
+
+    # M22 fix: Map Cyrillic / Greek visual homoglyphs to Latin *before*
+    # injection regex runs.  NFKC does NOT handle cross-script lookalikes
+    # (e.g. Cyrillic 'а' U+0430 looks like Latin 'a' but is distinct).
+    text = text.translate(_HOMOGLYPH_TRANS)
 
     # Remove control characters (except newlines and tabs)
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
@@ -38,7 +60,16 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
     # Remove zero-width and invisible Unicode characters
     text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]', '', text)
 
-    # Remove potential prompt injection markers
+    # Second normalization pass: catch any remaining confusables exposed
+    # after invisible char removal (e.g. combining marks that were hidden
+    # between zero-width chars).
+    text = unicodedata.normalize("NFKC", text)
+
+    # Remove potential prompt injection markers.
+    # NOTE: This is a blocklist approach which is inherently bypassable —
+    # creative rephrasing, typos, or novel attack vectors can evade it.
+    # Defence-in-depth (output validation, least-privilege LLM scoping,
+    # response-filtering) is required alongside this input sanitiser.
     injection_patterns = [
         r'(?i)ignore\s+(all\s+)?previous\s+instructions',
         r'(?i)forget\s+(all\s+)?previous',
@@ -59,6 +90,11 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
         r'(?i)jailbreak',
         r'(?i)do\s+anything\s+now',
         r'(?i)DAN\s+mode',
+        # M7: Additional common injection / role-hijacking patterns
+        r'(?i)\byou\s+are\s+now\b',
+        r'(?i)\bdisregard\b',
+        r'(?i)\bpretend\s+you\b',
+        r'(?i)\bact\s+as\b',
     ]
 
     for pattern in injection_patterns:
@@ -70,8 +106,26 @@ def sanitize_input(text: str, max_length: int = 500) -> str:
 
 
 def validate_trading_pair(pair: str) -> bool:
-    """Validate a trading pair format (e.g., BTC-USD)."""
-    return bool(re.match(r'^[A-Z0-9]{2,10}-[A-Z]{3,4}$', pair.upper()))
+    """Validate a trading pair format.
+    
+    Accepts:
+      - Crypto pairs: BTC-USD, ETH-EUR, DOGE-USDT
+      - IBKR stock tickers: AAPL, SPY, MSFT
+      - IBKR with exchange: AAPL@SMART, SPY@ARCA
+      
+    M2 fix: Updated regex to accept IBKR ticker formats.
+    """
+    upper_pair = pair.upper()
+    # Crypto pair format: XXX-YYY
+    if re.match(r'^[A-Z0-9]{2,10}-[A-Z]{3,4}$', upper_pair):
+        return True
+    # IBKR simple ticker: AAPL, SPY (1-6 uppercase letters)
+    if re.match(r'^[A-Z]{1,6}$', upper_pair):
+        return True
+    # IBKR with exchange: AAPL@SMART, SPY@ARCA
+    if re.match(r'^[A-Z]{1,6}@[A-Z]{3,8}$', upper_pair):
+        return True
+    return False
 
 
 def validate_amount(amount: float, min_val: float = 0.01, max_val: float = 100000) -> bool:
@@ -128,19 +182,29 @@ def validate_env_credentials() -> dict[str, bool]:
 
     status = {}
 
+    # L21: Expanded placeholder detection — catch common dummy values
+    _PLACEHOLDER_PATTERNS = (
+        "your-key-here", "your-api-key", "changeme", "todo", "fixme",
+        "xxxxxxxx", "00000000", "replace-me", "insert-key",
+    )
+
     for name, value in required.items():
-        is_set = bool(value) and value not in ("your-key-here", "")
+        is_set = bool(value) and value not in ("",) and not any(
+            p in value.lower() for p in _PLACEHOLDER_PATTERNS
+        )
         status[name] = is_set
         if is_set:
-            logger.info(f"  ✅ {name}: {mask_secret(value)}")
+            logger.debug(f"  ✅ {name}: {mask_secret(value)}")
         else:
             logger.warning(f"  ❌ {name}: NOT SET (required)")
 
     for name, value in optional.items():
-        is_set = bool(value) and not value.startswith("your-")
+        is_set = bool(value) and not value.startswith("your-") and not any(
+            p in value.lower() for p in _PLACEHOLDER_PATTERNS
+        )
         status[name] = is_set
         if is_set:
-            logger.info(f"  ✅ {name}: {mask_secret(value)}")
+            logger.debug(f"  ✅ {name}: {mask_secret(value)}")
         else:
             logger.debug(f"  ⚠️ {name}: not set (optional)")
 

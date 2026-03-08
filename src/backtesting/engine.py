@@ -38,6 +38,7 @@ class BacktestPosition:
     exit_reason: str = ""
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    entry_fee: float = 0.0
 
 
 @dataclass
@@ -183,7 +184,7 @@ class BacktestEngine:
                     # Apply slippage to exit (selling slightly lower)
                     exit_price *= (1 - self.slippage_pct)
                     fee = exit_price * pos.quantity * self.fee_pct
-                    pnl = (exit_price - pos.entry_price) * pos.quantity - fee
+                    pnl = (exit_price - pos.entry_price) * pos.quantity - pos.entry_fee - fee
                     pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
 
                     pos.closed = True
@@ -234,6 +235,7 @@ class BacktestEngine:
                         take_profit=take_profit,
                         trailing_pct=self.trailing_stop_pct,
                         highest_price=current_price,
+                        entry_fee=fee,
                     )
                     positions.append(pos)
 
@@ -262,7 +264,7 @@ class BacktestEngine:
         for pos in positions:
             if not pos.closed:
                 fee = last_price * pos.quantity * self.fee_pct
-                pnl = (last_price - pos.entry_price) * pos.quantity - fee
+                pnl = (last_price - pos.entry_price) * pos.quantity - pos.entry_fee - fee
                 pos.closed = True
                 pos.exit_price = last_price
                 pos.exit_time = candles[-1].get("start", "")
@@ -338,9 +340,9 @@ class BacktestEngine:
                 down_var = sum(r ** 2 for r in downside) / len(returns) if downside else 0
                 down_std = math.sqrt(down_var) if down_var > 0 else 0
 
-                # Annualize: assume ~8760 candle-periods per year for hourly data
+                # Annualize: ~8760 candle-periods per year for hourly data
                 # (365 × 24). Adjust by sqrt for volatility.
-                annualization = math.sqrt(len(returns))  # simple: total periods
+                annualization = math.sqrt(8760)  # hourly candles
                 sharpe = (mean_ret / std_ret * annualization) if std_ret > 0 else 0
                 sortino = (mean_ret / down_std * annualization) if down_std > 0 else 0
 

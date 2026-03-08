@@ -117,7 +117,7 @@ class TrailingStop:
                     tier.trigger_price = current_price
                     tier.trigger_time = datetime.now(timezone.utc)
                     exit_qty = self.remaining_quantity * tier.exit_fraction
-                    self.remaining_quantity -= exit_qty
+                    self.remaining_quantity = max(0.0, self.remaining_quantity - exit_qty)
 
                     self.pending_tier_exits.append({
                         "pair": self.pair,
@@ -141,7 +141,7 @@ class TrailingStop:
                     tier.trigger_price = current_price
                     tier.trigger_time = datetime.now(timezone.utc)
                     exit_qty = self.remaining_quantity * tier.exit_fraction
-                    self.remaining_quantity -= exit_qty
+                    self.remaining_quantity = max(0.0, self.remaining_quantity - exit_qty)
                     self.pending_tier_exits.append({
                         "pair": self.pair,
                         "tier_pct": tier.trigger_pct,
@@ -318,10 +318,27 @@ class TrailingStopManager:
                 exits.extend(stop.get_pending_tier_exits())
         return exits
 
-    def get_stop(self, pair: str) -> Optional[TrailingStop]:
-        """Get the trailing stop for a pair."""
+    def get_stop(self, pair: str) -> Optional[dict]:
+        """Get a snapshot of the trailing stop for a pair.
+
+        Returns a dict (via to_dict) to prevent unsynchronised mutation
+        of the underlying TrailingStop object from outside the manager lock.
+        """
         with self._lock:
-            return self.stops.get(pair)
+            stop = self.stops.get(pair)
+            return stop.to_dict() if stop else None
+
+    def tighten_to_breakeven(self, pair: str) -> Optional[dict]:
+        """Move an existing trailing stop to entry price under manager lock.
+
+        Returns a snapshot dict of the modified stop.
+        """
+        with self._lock:
+            stop = self.stops.get(pair)
+            if not stop:
+                return None
+            stop.stop_price = stop.entry_price
+            return stop.to_dict()
 
     def get_all_stops(self) -> dict:
         """Get all trailing stops as a dict."""

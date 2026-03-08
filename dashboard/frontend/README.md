@@ -1,73 +1,49 @@
-# React + TypeScript + Vite
+# Auto-Traitor Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Real-time trading dashboard for the Auto-Traitor system. Built with **Vue 3**, **TypeScript**, and **Vite**. Served by the FastAPI backend at port 8090.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Profile-Isolated Views** — Crypto (Coinbase) and Equities (IBKR) are fully separated; no combined views
+- **Real-Time Updates** — WebSocket streaming for live trade events, signals, and alerts
+- **Trade Management** — View open/closed positions, P&L, trade history with CSV export
+- **Portfolio Analytics** — Daily/monthly performance, drawdown charts, win rate tracking
+- **Strategy Monitor** — Prediction accuracy, strategy ensemble weights, learning curves
+- **Planning Dashboard** — Daily/weekly/monthly strategic plans from Temporal workflows
+- **LLM Analytics** — Token usage, provider routing, cost tracking via Langfuse
+- **News Feed** — Ticker-specific news with sentiment indicators
+- **Settings Control** — Runtime parameter adjustment with signed request verification
+- **Manual Commands** — Execute trades and parameter updates with HMAC request signing
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Framework:** Vue 3 (Composition API)
+- **Language:** TypeScript
+- **Build:** Vite
+- **State:** Pinia store with profile context
+- **Styling:** TailwindCSS + PostCSS
+- **API Client:** Axios with request signing + CSRF protection
+- **Query Cache:** TanStack Query (all queryKeys include `profile` — enforced by CI)
 
-## Expanding the ESLint configuration
+## Domain Separation
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Every `useQuery` call **must** include `profile` in its `queryKey` array. This is enforced by `test_domain_separation.py` and blocks commits via pre-commit hook.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+```typescript
+// ✅ Correct
+useQuery({ queryKey: ['trades', profile], ... })
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+// ❌ Blocked by CI
+useQuery({ queryKey: ['trades'], ... })
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev          # Dev server with HMR
+npm run build        # Production build
+npm run lint         # ESLint check
 ```
+
+The dev server proxies API requests to the FastAPI backend at `localhost:8090`.

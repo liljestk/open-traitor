@@ -27,51 +27,25 @@ MAX_CHANGES_PER_REVIEW = 8    # limit fields the LLM can touch per review
 MIN_CONFIDENCE_TO_ACT = 0.5   # below this, proposals are logged but skipped
 
 
-SETTINGS_ADVISOR_SYSTEM_PROMPT = """You are an autonomous trading parameter advisor.
-Your job is to review current market conditions, recent trading performance, and the
-current configuration — then recommend parameter adjustments to improve performance.
+SETTINGS_ADVISOR_SYSTEM_PROMPT = """You are a trading parameter advisor. Review market conditions and performance, then recommend parameter adjustments.
 
-You are part of an automated crypto trading system. You may adjust trading parameters
-to adapt to changing market conditions (higher volatility, trending vs ranging markets,
-improving or worsening performance).
+CONSTRAINTS:
+- Cannot enable/disable trading or change mode (paper/live) or fee rates.
+- Only propose changes when there is a clear reason. No changes = empty array.
+- Be conservative — small incremental adjustments. Capital preservation first.
+- Do not chase losses by loosening risk params.
 
-CRITICAL CONSTRAINTS:
-- You CANNOT enable or disable trading. The on/off decision belongs to the human operator only.
-- You CANNOT change the trading mode (paper/live) or fee rates.
-- All numeric values will be clamped to safe ranges automatically. You don't need to worry about breaking things.
-- ONLY propose changes when there is a clear reason. If things are working well, respond with NO changes.
-- Be conservative. Small, incremental adjustments are better than large swings.
-- Capital preservation is always the top priority.
-- Do NOT chase losses by dramatically loosening risk parameters.
+PAIR MANAGEMENT (multi-stage screener):
+- "trading.pairs" = seed fallback only; screener overrides when active.
+- "trading.max_active_pairs" = LOCKED (do not change).
+- Tunable: scan_volume_threshold, scan_movement_threshold_pct, screener_interval_cycles, include_crypto_quotes.
+- "absolute_rules.never_trade_pairs" = permanent blacklist; "only_trade_pairs" = whitelist.
+- If scan quality is low, tighten thresholds rather than adding pairs manually.
 
-PAIR MANAGEMENT:
-The system autonomously discovers and screens ALL tradeable pairs on Coinbase
-using a multi-stage funnel:
-  Stage 1 — Universe Discovery: fetches every product (refreshed every 30min).
-  Stage 2 — Technical Screen: pure-math scoring (RSI, ADX, MACD, EMA, BB, volume).
-  Stage 3 — LLM Screener: single LLM call picks top-N pairs from scan results.
-  Stage 4 — Active Pipeline: only the selected pairs run full 4-agent analysis.
-
-YOUR ROLE with pairs:
-- The seed pair list ("trading.pairs") is a fallback ONLY if the screener hasn't run yet.
-- You may still add/remove seed pairs, but the screener will override them once active.
-- "trading.max_active_pairs" — how many pairs the screener picks (3-30). Increase
-  if you see many strong opportunities; decrease to concentrate capital.
-- "trading.scan_volume_threshold" — minimum 24h volume for a pair to enter the technical screen.
-- "trading.scan_movement_threshold_pct" — minimum absolute 24h % move to enter the screen.
-- "trading.screener_interval_cycles" — how often the LLM screener re-picks (2-50 cycles).
-- "trading.include_crypto_quotes" — whether to include crypto-to-crypto pairs (e.g. ETH-BTC).
-- "absolute_rules.never_trade_pairs" — Blacklist specific pairs permanently.
-- "absolute_rules.only_trade_pairs" — If non-empty, ONLY these pairs can be traded.
-
-SCAN DATA (latest universe scan results):
+SCAN DATA:
 {scan_summary}
 
-When adjusting pair-related settings, consider the scan data above. If many strong
-candidates appear, you might increase max_active_pairs. If scan quality is low,
-tighten volume/movement thresholds instead of adding pairs manually.
-
-AVAILABLE PARAMETERS (with allowed ranges):
+AVAILABLE PARAMETERS:
 {schema_summary}
 
 CURRENT SETTINGS:
@@ -80,23 +54,14 @@ CURRENT SETTINGS:
 Respond with JSON:
 {{
     "changes": [
-        {{
-            "section": "risk",
-            "field": "stop_loss_pct",
-            "value": 0.04,
-            "reason": "Increased volatility warrants wider stops"
-        }}
+        {{"section": "risk", "field": "stop_loss_pct", "value": 0.04, "reason": "wider stops for volatility"}}
     ],
-    "overall_reasoning": "Brief explanation of the market regime and why these changes help",
+    "overall_reasoning": "brief regime summary and rationale",
     "confidence": 0.0-1.0
 }}
 
-Rules:
-- "changes" should be an array of 0-{max_changes} items. Empty array = no changes needed.
-- Only propose changes you are confident about.
-- If recent performance is good and market conditions are stable, return an empty changes array.
-- Consider risk/reward: tighten stops in choppy markets, loosen in strong trends, etc.
-"""
+- 0-{max_changes} changes. Propose only high-confidence changes. Empty array if things are working well.
+Respond ONLY with valid JSON."""
 
 
 class SettingsAdvisorAgent(BaseAgent):
@@ -119,6 +84,8 @@ class SettingsAdvisorAgent(BaseAgent):
         self._cycles_since_review = 0
         self._total_adjustments = 0
         self._schema_summary: Optional[str] = None
+        self._schema_summary_ts: float = 0.0
+        self._SCHEMA_CACHE_TTL: float = 300.0  # L21 fix: refresh every 5 min
 
     def should_run(self) -> bool:
         """Check if enough cycles have passed for a review."""
@@ -132,7 +99,8 @@ class SettingsAdvisorAgent(BaseAgent):
 
     def _get_schema_summary(self) -> str:
         """Formatted summary of what the LLM is allowed to change."""
-        if self._schema_summary is None:
+        import time as _time
+        if self._schema_summary is None or (_time.monotonic() - self._schema_summary_ts) > self._SCHEMA_CACHE_TTL:
             schema = sm.get_autonomous_schema_summary()
             lines: list[str] = []
             for section, fields in schema.items():
@@ -148,6 +116,7 @@ class SettingsAdvisorAgent(BaseAgent):
                         range_str = f" (options: {info['enum']})"
                     lines.append(f"  {field}: {info['type']}{range_str}")
             self._schema_summary = "\n".join(lines)
+            self._schema_summary_ts = _time.monotonic()
         return self._schema_summary
 
     def _get_current_settings_summary(self) -> str:
@@ -169,7 +138,7 @@ class SettingsAdvisorAgent(BaseAgent):
 
     # ── Main execution ───────────────────────────────────────────────────
 
-    def _compute_confidence_recommendation(self, stats_db) -> str:
+    def _compute_confidence_recommendation(self, stats_db, exchange: str | None = None) -> str:
         """Pre-compute a min_confidence adjustment suggestion based on win rate.
 
         Returns a string to inject into the LLM prompt.  The LLM is free
@@ -178,7 +147,7 @@ class SettingsAdvisorAgent(BaseAgent):
         if stats_db is None:
             return ""
         try:
-            wl = stats_db.get_win_loss_stats()
+            wl = stats_db.get_win_loss_stats(exchange=exchange)
             sample = wl.get("sample_size", 0)
             if sample < 10:
                 return (
@@ -234,6 +203,7 @@ class SettingsAdvisorAgent(BaseAgent):
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
+        exchange = context.get("exchange", "coinbase")
 
         scan_summary = context.get("scan_results_summary", "No scan data available yet.")
 
@@ -251,8 +221,7 @@ class SettingsAdvisorAgent(BaseAgent):
             f"- Market Volatility: {market_vol}\n"
             f"- Current Prices: {json.dumps(context.get('current_prices', {}), default=str)}\n"
             f"- Universe Size: {context.get('universe_size', 'unknown')}\n"
-            f"{self._compute_confidence_recommendation(stats_db)}\n\n"
-            f"LATEST SCAN RESULTS:\n{scan_summary}\n\n"
+            f"{self._compute_confidence_recommendation(stats_db, exchange=exchange)}\n\n"
             f"Based on these conditions, should we adjust any trading parameters?\n"
             f"If everything is working well, return an empty changes array.\n"
             f"Respond with JSON only."
@@ -380,6 +349,7 @@ class SettingsAdvisorAgent(BaseAgent):
                     completion_tokens=span.completion_tokens if span else 0,
                     latency_ms=span.latency_ms if span else 0.0,
                     raw_prompt=user_message[:1000],
+                    exchange=exchange,
                 )
             except Exception as e:
                 self.logger.debug(f"Failed to save settings_advisor trace: {e}")

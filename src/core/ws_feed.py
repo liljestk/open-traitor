@@ -69,12 +69,15 @@ class CoinbaseWebSocketFeed:
 
         logger.info(f"📡 WebSocket feed initialized | Products: {product_ids}")
 
-    def _generate_signature(self, timestamp: str, channel: str) -> Optional[str]:
-        """Generate HMAC signature for authenticated channels."""
+    def _generate_signature(self, timestamp: str, channel: str, product_ids: list[str]) -> Optional[str]:
+        """Generate HMAC signature for authenticated channels.
+        
+        H8 fix: product_ids passed as parameter to avoid race with update_subscriptions.
+        """
         if not self.api_key or not self.api_secret:
             return None
 
-        products_str = ",".join(self.product_ids)
+        products_str = ",".join(product_ids)
         message = f"{timestamp}{channel}{products_str}"
 
         try:
@@ -88,19 +91,22 @@ class CoinbaseWebSocketFeed:
             logger.error(f"Signature generation failed: {e}")
             return None
 
-    def _build_subscribe_message(self, channel: str) -> dict:
-        """Build a subscription message."""
+    def _build_subscribe_message(self, channel: str, product_ids: list[str]) -> dict:
+        """Build a subscription message.
+        
+        H8 fix: product_ids passed as parameter to avoid race with update_subscriptions.
+        """
         timestamp = str(int(time.time()))
 
         msg = {
             "type": "subscribe",
-            "product_ids": self.product_ids,
+            "product_ids": product_ids,
             "channel": channel,
         }
 
         # Add auth if available
         if self.api_key:
-            signature = self._generate_signature(timestamp, channel)
+            signature = self._generate_signature(timestamp, channel, product_ids)
             if signature:
                 msg["api_key"] = self.api_key
                 msg["timestamp"] = timestamp
@@ -209,13 +215,17 @@ class CoinbaseWebSocketFeed:
         logger.info("📡 WebSocket connected!")
         self._reconnect_delay = 1.0  # Reset backoff
 
+        # H8 fix: Capture product_ids under lock to avoid race with update_subscriptions
+        with self._lock:
+            current_products = list(self.product_ids)
+
         # Subscribe to ticker (real-time prices)
-        ws.send(json.dumps(self._build_subscribe_message("ticker")))
+        ws.send(json.dumps(self._build_subscribe_message("ticker", current_products)))
 
         # Subscribe to market trades
-        ws.send(json.dumps(self._build_subscribe_message("market_trades")))
+        ws.send(json.dumps(self._build_subscribe_message("market_trades", current_products)))
 
-        logger.info(f"📡 Subscribed to ticker + market_trades for {self.product_ids}")
+        logger.info(f"📡 Subscribed to ticker + market_trades for {current_products}")
 
     def _run_loop(self) -> None:
         """Connection loop with automatic reconnection and backoff."""
@@ -284,11 +294,14 @@ class CoinbaseWebSocketFeed:
 
     def get_stats(self) -> dict:
         """Get feed statistics."""
+        # H8 fix: Read product_ids under lock to avoid race with update_subscriptions
+        with self._lock:
+            products = list(self.product_ids)
         return {
             "connected": self._running and self._ws is not None,
             "messages_received": self.messages_received,
             "last_message": self.last_message_time.isoformat() if self.last_message_time else None,
-            "products": self.product_ids,
+            "products": products,
             "current_prices": self.get_all_prices(),
         }
 
@@ -298,63 +311,82 @@ class CoinbaseWebSocketFeed:
         Sends unsubscribe for removed products and subscribe for new ones.
         Thread-safe — can be called from any thread.
         """
-        old_set = set(self.product_ids)
-        new_set = set(new_product_ids)
+        with self._lock:
+            old_set = set(self.product_ids)
+            new_set = set(new_product_ids)
 
-        to_remove = old_set - new_set
-        to_add = new_set - old_set
+            to_remove = old_set - new_set
+            to_add = new_set - old_set
 
-        if not to_remove and not to_add:
-            return
+            if not to_remove and not to_add:
+                return
 
-        self.product_ids = list(new_set)
+            self.product_ids = list(new_set)
+            ws = self._ws
+            is_running = self._running
 
-        ws = self._ws
-        if not ws or not self._running:
+        if not ws or not is_running:
             logger.debug("WS not connected — subscriptions updated for next reconnect")
             return
 
         try:
-            if to_remove:
-                timestamp = str(int(time.time()))
-                unsub = {
-                    "type": "unsubscribe",
-                    "product_ids": list(to_remove),
-                    "channel": "ticker",
-                }
-                if self.api_key:
-                    products_str = ",".join(sorted(to_remove))
-                    message = f"{timestamp}ticker{products_str}"
-                    signature = hmac.new(
-                        self.api_secret.encode("utf-8"),
-                        message.encode("utf-8"),
-                        hashlib.sha256,
-                    ).hexdigest()
-                    unsub["api_key"] = self.api_key
-                    unsub["timestamp"] = timestamp
-                    unsub["signature"] = signature
-                ws.send(json.dumps(unsub))
-                logger.info(f"📡 WS unsubscribed from {sorted(to_remove)}")
+            # M25 fix: manage both ticker and market_trades channels
+            for channel in ("ticker", "market_trades"):
+                if to_remove:
+                    timestamp = str(int(time.time()))
+                    # H11: use sorted product_ids to match signature computation
+                    sorted_remove = sorted(to_remove)
+                    unsub = {
+                        "type": "unsubscribe",
+                        "product_ids": sorted_remove,
+                        "channel": channel,
+                    }
+                    if self.api_key:
+                        products_str = ",".join(sorted(to_remove))
+                        message = f"{timestamp}{channel}{products_str}"
+                        signature = hmac.new(
+                            self.api_secret.encode("utf-8"),
+                            message.encode("utf-8"),
+                            hashlib.sha256,
+                        ).hexdigest()
+                        unsub["api_key"] = self.api_key
+                        unsub["timestamp"] = timestamp
+                        unsub["signature"] = signature
+                    try:
+                        ws.send(json.dumps(unsub))
+                    except Exception:
+                        logger.debug("WS closed during unsubscribe — will apply on reconnect")
+                        return
 
+                if to_add:
+                    timestamp = str(int(time.time()))
+                    # H11: use sorted product_ids to match signature computation
+                    sorted_add = sorted(to_add)
+                    sub = {
+                        "type": "subscribe",
+                        "product_ids": sorted_add,
+                        "channel": channel,
+                    }
+                    if self.api_key:
+                        products_str = ",".join(sorted(to_add))
+                        message = f"{timestamp}{channel}{products_str}"
+                        signature = hmac.new(
+                            self.api_secret.encode("utf-8"),
+                            message.encode("utf-8"),
+                            hashlib.sha256,
+                        ).hexdigest()
+                        sub["api_key"] = self.api_key
+                        sub["timestamp"] = timestamp
+                        sub["signature"] = signature
+                    try:
+                        ws.send(json.dumps(sub))
+                    except Exception:
+                        logger.debug("WS closed during subscribe — will apply on reconnect")
+                        return
+
+            if to_remove:
+                logger.info(f"📡 WS unsubscribed from {sorted(to_remove)}")
             if to_add:
-                timestamp = str(int(time.time()))
-                sub = {
-                    "type": "subscribe",
-                    "product_ids": list(to_add),
-                    "channel": "ticker",
-                }
-                if self.api_key:
-                    products_str = ",".join(sorted(to_add))
-                    message = f"{timestamp}ticker{products_str}"
-                    signature = hmac.new(
-                        self.api_secret.encode("utf-8"),
-                        message.encode("utf-8"),
-                        hashlib.sha256,
-                    ).hexdigest()
-                    sub["api_key"] = self.api_key
-                    sub["timestamp"] = timestamp
-                    sub["signature"] = signature
-                ws.send(json.dumps(sub))
                 logger.info(f"📡 WS subscribed to {sorted(to_add)}")
 
         except Exception as e:

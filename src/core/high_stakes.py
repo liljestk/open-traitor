@@ -206,58 +206,72 @@ class HighStakesManager:
         """
         Get the effective trading limits, adjusted for high-stakes if active.
 
+        Holds the internal lock for the entire read to prevent TOCTOU races.
+
         Args:
             base_limits: Normal trading limits dict
 
         Returns:
             Adjusted limits dict
         """
-        if not self.is_active:
-            return base_limits
+        with self._lock:
+            if not self._active:
+                return base_limits
+            # Check expiration within the held lock
+            if self._expires_at and datetime.now(timezone.utc) >= self._expires_at:
+                self._deactivate("expired")
+                return base_limits
 
-        adjusted = dict(base_limits)
+            adjusted = dict(base_limits)
 
-        # Scale up trade sizes
-        if "max_single_trade" in adjusted:
-            adjusted["max_single_trade"] = (
-                adjusted["max_single_trade"] * self.hs_config.trade_size_multiplier
-            )
+            # Scale up trade sizes
+            if "max_single_trade" in adjusted:
+                adjusted["max_single_trade"] = (
+                    adjusted["max_single_trade"] * self.hs_config.trade_size_multiplier
+                )
 
-        # Scale up swap allocation
-        if "swap_allocation_pct" in adjusted:
-            adjusted["swap_allocation_pct"] = min(
-                adjusted["swap_allocation_pct"] * self.hs_config.swap_allocation_multiplier,
-                0.50,  # Never more than 50% even in high-stakes
-            )
+            # Scale up swap allocation
+            if "swap_allocation_pct" in adjusted:
+                adjusted["swap_allocation_pct"] = min(
+                    adjusted["swap_allocation_pct"] * self.hs_config.swap_allocation_multiplier,
+                    0.50,  # Never more than 50% even in high-stakes
+                )
 
-        # Lower confidence threshold
-        if "min_confidence" in adjusted:
-            adjusted["min_confidence"] = self.hs_config.min_confidence
+            # Lower confidence threshold
+            if "min_confidence" in adjusted:
+                adjusted["min_confidence"] = self.hs_config.min_confidence
 
-        # Raise auto-approve threshold
-        if "require_approval_above" in adjusted:
-            adjusted["require_approval_above"] = self.hs_config.auto_approve_up_to
+            # Raise auto-approve threshold (M29 fix: never lower the base ceiling)
+            if "require_approval_above" in adjusted:
+                adjusted["require_approval_above"] = max(
+                    adjusted["require_approval_above"],
+                    self.hs_config.auto_approve_up_to,
+                )
 
-        return adjusted
+            return adjusted
 
     def get_status(self) -> str:
         """Get formatted status string."""
-        if not self.is_active:
-            return "⚡ High-stakes mode: INACTIVE\nSend /highstakes <duration> to activate."
+        with self._lock:
+            if not self._active:
+                return "⚡ High-stakes mode: INACTIVE\nSend /highstakes <duration> to activate."
+            if self._expires_at and datetime.now(timezone.utc) >= self._expires_at:
+                self._deactivate("expired")
+                return "⚡ High-stakes mode: INACTIVE\nSend /highstakes <duration> to activate."
 
-        remaining = self.time_remaining
-        remaining_str = self._format_duration(remaining) if remaining else "expired"
+            remaining = self._expires_at - datetime.now(timezone.utc) if self._expires_at else None
+            remaining_str = self._format_duration(remaining) if remaining else "expired"
 
-        return (
-            f"⚡ HIGH-STAKES MODE: ACTIVE\n\n"
-            f"⏰ Time remaining: {remaining_str}\n"
-            f"📅 Expires: {self._expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            f"👤 Activated by: {self._activated_by}\n\n"
-            f"📊 Active overrides:\n"
-            f"  Trade size: {self.hs_config.trade_size_multiplier}x\n"
-            f"  Swap allocation: {self.hs_config.swap_allocation_multiplier}x\n"
-            f"  Min confidence: {self.hs_config.min_confidence}\n"
-            f"  Auto-approve: up to ${self.hs_config.auto_approve_up_to_usd:.0f}"
+            return (
+                f"⚡ HIGH-STAKES MODE: ACTIVE\n\n"
+                f"⏰ Time remaining: {remaining_str}\n"
+                f"📅 Expires: {self._expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                f"👤 Activated by: {self._activated_by}\n\n"
+                f"📊 Active overrides:\n"
+                f"  Trade size: {self.hs_config.trade_size_multiplier}x\n"
+                f"  Swap allocation: {self.hs_config.swap_allocation_multiplier}x\n"
+                f"  Min confidence: {self.hs_config.min_confidence}\n"
+            f"  Auto-approve: up to ${self.hs_config.auto_approve_up_to:.0f}"
         )
 
     def _parse_duration(self, s: str) -> Optional[timedelta]:
