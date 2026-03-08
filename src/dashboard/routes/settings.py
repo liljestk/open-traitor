@@ -401,6 +401,13 @@ def setup_config(body: _SetupConfigBody, request: Request):
 
     Also updates YAML config files with selected trading pairs if provided.
     """
+    # SECURITY: After initial setup, require authentication to re-configure.
+    # This prevents unauthenticated overwrite of API keys and credentials.
+    if _is_setup_complete() and not auth.is_authenticated(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Setup already complete. Authentication required to reconfigure.",
+        )
     try:
         source_ip = request.client.host if request.client else "unknown"
 
