@@ -269,6 +269,17 @@ class HoldingsManager:
             orch.state.cash_balance = cash
             orch.state.live_cash_balances = {orch.state.native_currency: cash}
             orch.state._live_snapshot_ts = time.time()
+            # Correct initial_balance on first successful refresh (mirrors Coinbase logic)
+            if not orch.state._initial_balance_synced and pv > 0:
+                orch.state.initial_balance = pv
+                orch.state.peak_portfolio_value = pv
+                orch.state._initial_balance_synced = True
+                orch.state.max_drawdown = 0.0
+                orch.state.circuit_breaker_triggered = False
+                logger.info(
+                    f"📊 Initial balance corrected to live IBKR portfolio: "
+                    f"{orch.state.currency_symbol}{pv:,.2f} (drawdown reset)"
+                )
             logger.debug(
                 f"📡 IBKR refresh: portfolio {orch.state.currency_symbol}{pv:,.2f}, "
                 f"cash {orch.state.currency_symbol}{cash:,.2f}"

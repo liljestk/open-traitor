@@ -546,11 +546,13 @@ class TradingState:
 
     # ── Live-snapshot staleness threshold (seconds) ──
     _LIVE_STALENESS_THRESHOLD: float = 300.0  # 5 minutes
+    _STALE_WARNING_INTERVAL: float = 300.0    # Log stale warning at most once per 5 min
+    _last_stale_warning_ts: float = 0.0
 
     def _get_portfolio_value_unlocked(self) -> float:
         """Return best-available portfolio value (caller must hold _lock).
 
-        Prefers the authoritative Coinbase `live_portfolio_value` when it is
+        Prefers the authoritative live `live_portfolio_value` when it is
         fresh (updated within `_LIVE_STALENESS_THRESHOLD` seconds).
 
         When live data is stale, still prefers the last-known live value over
@@ -560,18 +562,21 @@ class TradingState:
         far better than a fresh-but-wrong local estimate.
 
         The local computation is ONLY used in paper mode (where there is no
-        live Coinbase data at all).
+        live exchange data at all).
         """
         # Always prefer live value when available (even if slightly stale)
         if self.live_portfolio_value > 0 and self._live_snapshot_ts > 0:
             stale_secs = time.time() - self._live_snapshot_ts
             if stale_secs >= self._LIVE_STALENESS_THRESHOLD:
-                logger.warning(
-                    f"⚠️ Live portfolio data is {stale_secs:.0f}s stale "
-                    f"(threshold {self._LIVE_STALENESS_THRESHOLD:.0f}s) — "
-                    f"using last-known live value {self.currency_symbol}"
-                    f"{self.live_portfolio_value:,.2f} instead of local computation"
-                )
+                now = time.time()
+                if now - self._last_stale_warning_ts >= self._STALE_WARNING_INTERVAL:
+                    self._last_stale_warning_ts = now
+                    logger.warning(
+                        f"⚠️ Live portfolio data is {stale_secs:.0f}s stale "
+                        f"(threshold {self._LIVE_STALENESS_THRESHOLD:.0f}s) — "
+                        f"using last-known live value {self.currency_symbol}"
+                        f"{self.live_portfolio_value:,.2f} instead of local computation"
+                    )
             return self.live_portfolio_value
 
         # Fallback: local computation (paper mode only — no live data ever received)

@@ -96,7 +96,7 @@ async def ws_live(websocket: WebSocket):
             # Keep connection alive; events are pushed by redis_subscriber
             await asyncio.sleep(30)
             await websocket.send_json({"type": "ping", "ts": deps.utcnow()})
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
         # Guard: the Redis subscriber may have already removed this socket

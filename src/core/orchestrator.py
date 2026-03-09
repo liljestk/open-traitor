@@ -309,6 +309,17 @@ class Orchestrator:
                 self.state.cash_balance = cash
                 self.state.live_cash_balances = {self.state.native_currency: cash}
                 self.state._live_snapshot_ts = time.time()
+                # Correct initial_balance from live data (same as Coinbase sync_live_holdings)
+                if not self.state._initial_balance_synced and pv > 0:
+                    self.state.initial_balance = pv
+                    self.state.peak_portfolio_value = pv
+                    self.state._initial_balance_synced = True
+                    self.state.max_drawdown = 0.0
+                    self.state.circuit_breaker_triggered = False
+                    logger.info(
+                        f"📊 Initial balance corrected to live IBKR portfolio: "
+                        f"{self.state.currency_symbol}{pv:,.2f} (drawdown reset)"
+                    )
                 logger.info(
                     f"📡 IBKR live sync: portfolio {self.state.currency_symbol}{pv:,.2f}, "
                     f"cash {self.state.currency_symbol}{cash:,.2f}"
@@ -551,24 +562,40 @@ class Orchestrator:
         logger.info(f"  Mode: {'📝 PAPER' if getattr(exchange, 'paper_mode', False) else '💰 LIVE'}")
         logger.info("═══════════════════════════════════════════")
 
+    # Severely stale data threshold: skip drawdown circuit breaker when
+    # live data hasn't refreshed in over an hour (market closed / gateway down).
+    _STALE_DRAWDOWN_SKIP_SECS: float = 3600.0
+
     def _check_circuit_breakers(self) -> None:
         """Trip circuit breaker on max drawdown OR daily loss limit breach."""
         if self.state.circuit_breaker_triggered:
             return
-        # Drawdown check
+
+        reason = value = msg = None  # type: ignore[assignment]
+
+        # Drawdown check — skip when live data is severely stale to prevent
+        # false triggers from stale/wrong portfolio values (e.g. market closed).
         max_dd_pct = self.config.get("risk", {}).get("max_drawdown_pct", 0.10)
+        stale_secs = time.time() - self.state._live_snapshot_ts if self.state._live_snapshot_ts > 0 else 0
         if self.state.max_drawdown >= max_dd_pct:
-            reason, value = "max_drawdown", self.state.max_drawdown
-            msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(value)} reached!"
+            if stale_secs > self._STALE_DRAWDOWN_SKIP_SECS:
+                logger.debug(
+                    f"Skipping drawdown circuit breaker — live data is {stale_secs:.0f}s stale"
+                )
+            else:
+                reason, value = "max_drawdown", self.state.max_drawdown
+                msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(value)} reached!"
+
         # Daily loss check (M4 fix: use thread-safe accessor)
-        elif self.rules.daily_loss >= self.rules.max_daily_loss:
+        if reason is None and self.rules.daily_loss >= self.rules.max_daily_loss:
             reason, value = "daily_loss", self.rules.daily_loss
             _sym = self.state.currency_symbol
             msg = (
                 f"🛑 CIRCUIT BREAKER: Daily loss {format_currency(value, _sym)} "
                 f"reached limit {format_currency(self.rules.max_daily_loss, _sym)}!"
             )
-        else:
+
+        if reason is None:
             return
 
         self.state.circuit_breaker_triggered = True

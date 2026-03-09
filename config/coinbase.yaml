@@ -168,7 +168,7 @@ news:
   - https://www.investing.com/rss/news_301.rss
 risk:
   loss_cooldown_seconds: 300
-  max_drawdown_pct: 0.1
+  max_drawdown_pct: 0.05
   max_position_pct: 0.4
   max_total_exposure_pct: 0.2
   max_trades_per_hour: 10
@@ -227,7 +227,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.95
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 1800

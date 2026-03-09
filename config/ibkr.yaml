@@ -202,7 +202,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.95
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
