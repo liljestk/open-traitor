@@ -25,6 +25,7 @@ import {
 import {
   Toast, SectionCard, RpmBudgetCard,
   TelegramSetupGuide, DensityToggle, TelegramNotificationsCard,
+  SecurityCard,
 } from './settings/SettingsComponents'
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -878,6 +879,9 @@ export default function Settings() {
 
           {/* Appearance tab */}
           {!searchQuery && activeTab === 'appearance' && <DensityToggle />}
+
+          {/* Security Card (2FA) */}
+          {!searchQuery && activeTab === 'infra' && <SecurityCard />}
 
           {/* Telegram Setup Guide */}
           {!searchQuery && activeTab === 'infra' && <TelegramSetupGuide />}

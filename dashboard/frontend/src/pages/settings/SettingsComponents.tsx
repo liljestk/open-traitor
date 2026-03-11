@@ -1186,3 +1186,347 @@ export function TelegramNotificationsCard({ values, onSave, searchQuery }: {
     </div>
   )
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Security Card — 2FA management
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+type SecurityStep = 'idle' | 'setup' | 'confirm' | 'disable' | 'regen'
+
+export function SecurityCard() {
+  const [status, setStatus] = useState<TwoFAStatus | null>(null)
+  const [step, setStep] = useState<SecurityStep>('idle')
+  const [setupData, setSetupData] = useState<TwoFASetupResult | null>(null)
+  const [code, setCode] = useState('')
+  const [backupCodes, setBackupCodes] = useState<string[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const s = await fetch2FAStatus()
+      setStatus(s)
+    } catch { /* ignore if not authed */ }
+  }, [])
+
+  useEffect(() => { loadStatus() }, [loadStatus])
+
+  const handleSetup = async () => {
+    setLoading(true); setError('')
+    try {
+      const data = await setup2FA()
+      setSetupData(data)
+      setStep('setup')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Setup failed')
+    } finally { setLoading(false) }
+  }
+
+  const handleEnable = async () => {
+    if (!code.trim()) return
+    setLoading(true); setError('')
+    try {
+      await enable2FA(code.trim())
+      setSuccess('2FA enabled successfully')
+      setStep('idle'); setCode(''); setSetupData(null)
+      await loadStatus()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Invalid code')
+    } finally { setLoading(false) }
+  }
+
+  const handleDisable = async () => {
+    if (!code.trim()) return
+    setLoading(true); setError('')
+    try {
+      await disable2FA(code.trim())
+      setSuccess('2FA disabled. You will need to log in again.')
+      setStep('idle'); setCode('')
+      await loadStatus()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Invalid code')
+    } finally { setLoading(false) }
+  }
+
+  const handleRegenerate = async () => {
+    if (!code.trim()) return
+    setLoading(true); setError('')
+    try {
+      const result = await regenerateBackupCodes(code.trim())
+      setBackupCodes(result.backup_codes)
+      setStep('idle'); setCode('')
+      setSuccess('Backup codes regenerated — save them now!')
+      await loadStatus()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Invalid code')
+    } finally { setLoading(false) }
+  }
+
+  const copyBackupCodes = (codes: string[]) => {
+    navigator.clipboard.writeText(codes.join('\n')).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  useEffect(() => {
+    if (success) { const t = setTimeout(() => setSuccess(''), 4000); return () => clearTimeout(t) }
+  }, [success])
+
+  const cardStyle: React.CSSProperties = {
+    background: '#0d1117', border: '1px solid #21262d', borderRadius: 12,
+    padding: '20px 24px', marginBottom: 16,
+  }
+
+  const inputStyle: React.CSSProperties = {
+    ...inputBase, fontSize: 20, fontFamily: 'monospace', letterSpacing: 6,
+    textAlign: 'center' as const, width: '100%', boxSizing: 'border-box' as const,
+  }
+
+  return (
+    <div style={cardStyle}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+        {status?.enabled
+          ? <ShieldCheck size={16} style={{ color: '#22c55e' }} />
+          : <ShieldOff size={16} style={{ color: '#6e7681' }} />}
+        <span style={{ fontSize: 15, fontWeight: 700, color: '#e6edf3' }}>Two-Factor Authentication</span>
+        {status?.enabled && (
+          <span style={{
+            fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+            background: '#22c55e18', color: '#22c55e', marginLeft: 'auto',
+          }}>ENABLED</span>
+        )}
+      </div>
+
+      {/* Success banner */}
+      {success && (
+        <div style={{
+          padding: '8px 12px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)',
+          borderRadius: 8, fontSize: 12, color: '#4ade80', marginBottom: 14,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <Check size={12} /> {success}
+        </div>
+      )}
+
+      {/* Error banner */}
+      {error && (
+        <div style={{
+          padding: '8px 12px', background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)',
+          borderRadius: 8, fontSize: 12, color: '#f85149', marginBottom: 14,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <AlertTriangle size={12} /> {error}
+          <button onClick={() => setError('')} style={{
+            background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', marginLeft: 'auto', padding: 0,
+          }}><X size={12} /></button>
+        </div>
+      )}
+
+      {/* ── Idle view ── */}
+      {step === 'idle' && (
+        <>
+          <p style={{ fontSize: 13, color: '#8b949e', margin: '0 0 16px', lineHeight: 1.5 }}>
+            {status?.enabled
+              ? `2FA is active. You have ${status.backup_codes_remaining} backup code${status.backup_codes_remaining !== 1 ? 's' : ''} remaining.`
+              : 'Add an extra layer of security by requiring a code from your authenticator app on every login.'}
+          </p>
+
+          {/* Backup codes display (after regen) */}
+          {backupCodes && (
+            <div style={{
+              background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+              padding: 16, marginBottom: 16,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#f59e0b' }}>
+                  <KeyRound size={12} style={{ marginRight: 4, verticalAlign: -2 }} />
+                  Save these backup codes
+                </span>
+                <button onClick={() => copyBackupCodes(backupCodes)} style={{
+                  ...btnStyle('#21262d'), padding: '4px 10px', fontSize: 11,
+                }}>
+                  {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
+                </button>
+              </div>
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4,
+                fontFamily: 'monospace', fontSize: 13, color: '#e6edf3',
+              }}>
+                {backupCodes.map((c, i) => (
+                  <span key={i} style={{ padding: '4px 8px', background: '#0d1117', borderRadius: 4 }}>{c}</span>
+                ))}
+              </div>
+              <button onClick={() => setBackupCodes(null)} style={{
+                ...btnStyle('#21262d'), width: '100%', marginTop: 12, fontSize: 12,
+              }}>
+                I&apos;ve saved my codes
+              </button>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {status?.enabled ? (
+              <>
+                <button onClick={() => { setStep('disable'); setCode(''); setError('') }}
+                  style={{ ...btnStyle('#21262d'), fontSize: 12 }}>
+                  <ShieldOff size={12} /> Disable 2FA
+                </button>
+                <button onClick={() => { setStep('regen'); setCode(''); setError('') }}
+                  style={{ ...btnStyle('#21262d'), fontSize: 12 }}>
+                  <RefreshCw size={12} /> Regenerate Backup Codes
+                </button>
+              </>
+            ) : (
+              <button onClick={handleSetup} disabled={loading}
+                style={{ ...btnStyle('#238636'), fontSize: 12, opacity: loading ? 0.6 : 1 }}>
+                <ShieldCheck size={12} /> {loading ? 'Setting up…' : 'Enable 2FA'}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── Setup view — show QR code ── */}
+      {step === 'setup' && setupData && (
+        <>
+          <div style={{ fontSize: 13, color: '#8b949e', marginBottom: 14, lineHeight: 1.5 }}>
+            Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.):
+          </div>
+
+          <div style={{ textAlign: 'center', marginBottom: 16 }}>
+            <img src={setupData.qr_code} alt="2FA QR Code" style={{
+              width: 200, height: 200, borderRadius: 8,
+              background: '#fff', padding: 8,
+            }} />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <span style={{ fontSize: 11, color: '#6e7681', display: 'block', marginBottom: 4 }}>
+              Or enter this key manually:
+            </span>
+            <code style={{
+              ...codeStyle, display: 'block', padding: '8px 12px',
+              fontSize: 13, letterSpacing: 2, wordBreak: 'break-all',
+              userSelect: 'all',
+            }}>
+              {setupData.secret}
+            </code>
+          </div>
+
+          {/* Backup codes */}
+          <div style={{
+            background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+            padding: 14, marginBottom: 16,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#f59e0b' }}>
+                <KeyRound size={12} style={{ marginRight: 4, verticalAlign: -2 }} />
+                Backup codes — save these now!
+              </span>
+              <button onClick={() => copyBackupCodes(setupData.backup_codes)} style={{
+                ...btnStyle('#21262d'), padding: '4px 10px', fontSize: 11,
+              }}>
+                {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
+              </button>
+            </div>
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4,
+              fontFamily: 'monospace', fontSize: 13, color: '#e6edf3',
+            }}>
+              {setupData.backup_codes.map((c, i) => (
+                <span key={i} style={{ padding: '4px 8px', background: '#0d1117', borderRadius: 4 }}>{c}</span>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 10 }}>
+            Enter the 6-digit code from your authenticator to confirm:
+          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
+            placeholder="000000"
+            autoFocus
+            style={{ ...inputStyle, marginBottom: 14 }}
+          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setStep('idle'); setSetupData(null); setCode(''); setError('') }}
+              style={btnStyle('#21262d')}>
+              <X size={12} /> Cancel
+            </button>
+            <button onClick={handleEnable} disabled={loading || code.length < 6}
+              style={{ ...btnStyle('#238636'), opacity: code.length < 6 ? 0.5 : 1 }}>
+              <Check size={12} /> {loading ? 'Verifying…' : 'Confirm & Enable'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Disable view ── */}
+      {step === 'disable' && (
+        <>
+          <div style={{ fontSize: 13, color: '#f59e0b', marginBottom: 14, lineHeight: 1.5 }}>
+            <AlertTriangle size={13} style={{ verticalAlign: -2, marginRight: 4 }} />
+            Enter your current 2FA code to disable two-factor authentication. All sessions will be revoked.
+          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
+            placeholder="000000"
+            autoFocus
+            style={{ ...inputStyle, marginBottom: 14 }}
+          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setStep('idle'); setCode(''); setError('') }}
+              style={btnStyle('#21262d')}>
+              <X size={12} /> Cancel
+            </button>
+            <button onClick={handleDisable} disabled={loading || code.length < 6}
+              style={{ ...btnStyle('#da3633'), opacity: code.length < 6 ? 0.5 : 1 }}>
+              <ShieldOff size={12} /> {loading ? 'Disabling…' : 'Disable 2FA'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Regenerate backup codes view ── */}
+      {step === 'regen' && (
+        <>
+          <div style={{ fontSize: 13, color: '#8b949e', marginBottom: 14, lineHeight: 1.5 }}>
+            Enter your current 2FA code to generate new backup codes. Old codes will be invalidated.
+          </div>
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
+            placeholder="000000"
+            autoFocus
+            style={{ ...inputStyle, marginBottom: 14 }}
+          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setStep('idle'); setCode(''); setError('') }}
+              style={btnStyle('#21262d')}>
+              <X size={12} /> Cancel
+            </button>
+            <button onClick={handleRegenerate} disabled={loading || code.length < 6}
+              style={{ ...btnStyle('#238636'), opacity: code.length < 6 ? 0.5 : 1 }}>
+              <RefreshCw size={12} /> {loading ? 'Generating…' : 'Regenerate'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
