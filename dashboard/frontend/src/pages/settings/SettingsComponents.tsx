@@ -1,11 +1,13 @@
-import { useState, useMemo, useEffect, type ReactNode } from 'react'
+import { useState, useMemo, useEffect, useCallback, type ReactNode } from 'react'
 import {
   ToggleLeft, ToggleRight, ChevronDown, Save, X,
   AlertTriangle, Check, Zap, Settings2,
   Gauge, Bot, ExternalLink, Lock,
   Maximize2, Minimize2, Bell, TrendingUp, DollarSign, Clock, Calendar,
+  ShieldCheck, ShieldOff, Copy, RefreshCw, KeyRound,
 } from 'lucide-react'
-import type { SectionSchema, FieldSchema, RpmBudget } from '../../api'
+import type { SectionSchema, FieldSchema, RpmBudget, TwoFAStatus, TwoFASetupResult } from '../../api'
+import { fetch2FAStatus, setup2FA, enable2FA, disable2FA, regenerateBackupCodes } from '../../api'
 import { useLiveStore, type Density } from '../../store'
 import {
   SECTION_ICONS, TIER_COLORS, TIER_LABELS, SECTION_SUMMARY,

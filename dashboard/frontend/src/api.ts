@@ -1083,12 +1083,25 @@ export interface AuthStatus {
   has_password: boolean
   session_ttl: number
   csrf_token?: string
+  twofa_enabled?: boolean
 }
 
 export interface LoginResult {
   status: string
   csrf_token?: string
   error?: string
+  pending_token?: string
+}
+
+export interface TwoFAStatus {
+  enabled: boolean
+  backup_codes_remaining: number
+}
+
+export interface TwoFASetupResult {
+  secret: string
+  qr_code: string
+  backup_codes: string[]
 }
 
 export const fetchAuthStatus = async (): Promise<AuthStatus> => {
@@ -1129,6 +1142,58 @@ export const setPassword = async (password: string): Promise<{ ok: boolean; erro
     credentials: 'include',
   })
   return res.json()
+}
+
+// ─── 2FA / TOTP ────────────────────────────────────────────────────────────
+
+export const fetch2FAStatus = async (): Promise<TwoFAStatus> => {
+  return apiFetch<TwoFAStatus>('/auth/2fa/status')
+}
+
+export const setup2FA = async (): Promise<TwoFASetupResult> => {
+  return apiFetch<TwoFASetupResult>('/auth/2fa/setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+export const enable2FA = async (code: string): Promise<{ status: string; message: string }> => {
+  return apiFetch<{ status: string; message: string }>('/auth/2fa/enable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+}
+
+export const disable2FA = async (code: string, useBackupCode = false): Promise<{ status: string; message: string }> => {
+  return apiFetch<{ status: string; message: string }>('/auth/2fa/disable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, use_backup_code: useBackupCode }),
+  })
+}
+
+export const verify2FA = async (code: string, pendingToken: string, useBackupCode = false): Promise<LoginResult> => {
+  const res = await fetch(`${BASE}/auth/2fa/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, pending_token: pendingToken, use_backup_code: useBackupCode }),
+    credentials: 'include',
+  })
+  const data = await res.json()
+  if (data.status === 'ok' && data.csrf_token) {
+    setCsrfToken(data.csrf_token)
+  }
+  if (!res.ok) throw new Error(data.detail || 'Verification failed')
+  return data
+}
+
+export const regenerateBackupCodes = async (code: string): Promise<{ backup_codes: string[] }> => {
+  return apiFetch<{ backup_codes: string[] }>('/auth/2fa/regenerate-backup-codes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
 }
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────
