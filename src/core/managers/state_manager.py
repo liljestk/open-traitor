@@ -35,8 +35,9 @@ class StateManager:
             # Publish watched tickers for news worker's dynamic ticker matching
             try:
                 watched = set()
-                for pair in (orch.pairs + getattr(orch, "watchlist_pairs", [])
-                             + getattr(orch, "_screener_active_pairs", [])):
+                all_pairs = (orch.pairs + getattr(orch, "watchlist_pairs", [])
+                             + getattr(orch, "_screener_active_pairs", []))
+                for pair in all_pairs:
                     base = pair.split("-")[0] if "-" in pair else pair
                     base_short = base.split(".")[0]
                     for t in (base.upper(), base_short.upper()):
@@ -46,6 +47,13 @@ class StateManager:
                     orch.redis.set(
                         self._get_redis_key("news:watched_tickers"),
                         json.dumps(sorted(watched)),
+                        ex=600,
+                    )
+                # Also publish full pairs so news worker can build per-ticker RSS URLs
+                if all_pairs:
+                    orch.redis.set(
+                        self._get_redis_key("news:watched_pairs"),
+                        json.dumps(sorted(set(all_pairs))),
                         ex=600,
                     )
             except Exception:

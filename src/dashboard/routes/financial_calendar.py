@@ -16,9 +16,25 @@ router = APIRouter(tags=["Financial Calendar"])
 
 
 def _get_tickers_for_profile(profile: str) -> list[str]:
-    """Extract Yahoo Finance tickers from a profile's trading pairs."""
+    """Extract Yahoo Finance tickers from a profile's trading pairs.
+
+    Falls back to Redis-published watched pairs when config pairs list is
+    empty (dynamic pair discovery mode).
+    """
     cfg = deps.get_config_for_profile(profile)
     pairs = cfg.get("trading", {}).get("pairs", [])
+
+    # Fallback: read dynamically discovered pairs from Redis
+    if not pairs and deps.redis_client:
+        try:
+            raw = deps.redis_client.get(f"{profile}:news:watched_pairs")
+            if raw:
+                parsed = json.loads(raw if isinstance(raw, str) else raw.decode())
+                if isinstance(parsed, list):
+                    pairs = parsed
+        except Exception:
+            pass
+
     try:
         from src.core.equity_feed import pair_to_yahoo
         return [pair_to_yahoo(p) for p in pairs if p]

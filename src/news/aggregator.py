@@ -273,6 +273,7 @@ class NewsAggregator:
         # Dynamic ticker set: generic base + config pairs + Redis-published watchlist
         self._known_tickers: set[str] = set(_GENERIC_TICKERS)
         self._known_tickers |= build_ticker_set_from_config(config)
+        self._watched_pairs: set[str] = set()
         self._refresh_tickers_from_redis()
 
         # Stats
@@ -286,7 +287,7 @@ class NewsAggregator:
         )
 
     def _refresh_tickers_from_redis(self) -> None:
-        """Read watched tickers published by orchestrator instances."""
+        """Read watched tickers and pairs published by orchestrator instances."""
         if not self.redis:
             return
         try:
@@ -298,6 +299,18 @@ class NewsAggregator:
                         self._known_tickers.update(t for t in tickers if isinstance(t, str))
         except Exception as e:
             logger.debug(f"Could not read watched tickers from Redis: {e}")
+        # Also read full pairs for per-ticker RSS
+        try:
+            pairs: set[str] = set()
+            for key in self.redis.keys("*:news:watched_pairs") + [b"news:watched_pairs"]:
+                raw = self.redis.get(key)
+                if raw:
+                    plist = json.loads(raw if isinstance(raw, str) else raw.decode())
+                    if isinstance(plist, list):
+                        pairs.update(p for p in plist if isinstance(p, str))
+            self._watched_pairs = pairs
+        except Exception as e:
+            logger.debug(f"Could not read watched pairs from Redis: {e}")
 
     def _init_reddit(self) -> None:
         """Initialize the Reddit client (praw)."""
@@ -478,6 +491,62 @@ class NewsAggregator:
 
         return articles
 
+    def fetch_ticker_rss(self) -> list[NewsArticle]:
+        """Fetch per-ticker Yahoo Finance RSS for equity tickers.
+
+        Uses dynamically discovered pairs from Redis (published by the
+        orchestrator) to build Yahoo Finance headline RSS URLs.  This
+        ensures pair-specific news appears even when the generic RSS
+        feeds don't cover a given stock.
+        """
+        articles: list[NewsArticle] = []
+        pairs = getattr(self, "_watched_pairs", set())
+        if not pairs:
+            return articles
+
+        # Only fetch for equity tickers (those with an exchange suffix like .HE, .ST)
+        yahoo_tickers: list[str] = []
+        for pair in pairs:
+            base = pair.split("-")[0] if "-" in pair else pair
+            if "." in base:  # exchange-suffixed equity ticker
+                yahoo_tickers.append(base.upper())
+        if not yahoo_tickers:
+            return articles
+
+        # Cap to avoid hammering Yahoo — top 15 tickers
+        for ticker in yahoo_tickers[:15]:
+            feed_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
+            try:
+                resp = requests.get(
+                    feed_url,
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; auto-traitor-bot/0.1)"},
+                )
+                if resp.status_code != 200:
+                    continue
+                feed = feedparser.parse(resp.content)
+                short_ticker = ticker.split(".")[0]  # NOKIA.HE → NOKIA
+                for entry in feed.entries[:5]:
+                    published = None
+                    if hasattr(entry, "published_parsed") and entry.published_parsed:
+                        published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                    summary = entry.get("summary", "")
+                    summary = re.sub(r"<[^>]+>", "", summary)[:500]
+                    articles.append(NewsArticle(
+                        title=sanitize_input(entry.get("title", ""), max_length=300),
+                        summary=sanitize_input(summary, max_length=500),
+                        source="Yahoo Finance",
+                        url=entry.get("link", ""),
+                        published=published,
+                        tags=["rss", "finance_yahoo_com", short_ticker.lower(), ticker.lower()],
+                    ))
+            except Exception as e:
+                logger.debug(f"Ticker RSS failed for {ticker}: {e}")
+
+        if articles:
+            logger.info(f"📰 Fetched {len(articles)} per-ticker RSS articles")
+        return articles
+
     def fetch_ibkr_news(self) -> list[NewsArticle]:
         """Fetch news from IBKR if available and configured."""
         articles = []
@@ -535,6 +604,7 @@ class NewsAggregator:
 
         all_articles.extend(self.fetch_reddit())
         all_articles.extend(self.fetch_rss())
+        all_articles.extend(self.fetch_ticker_rss())
         all_articles.extend(self.fetch_coingecko_trending())
         all_articles.extend(self.fetch_ibkr_news())
 
