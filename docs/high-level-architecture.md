@@ -2,7 +2,7 @@
 
 ## Overview
 
-Auto-Traitor is an autonomous, multi-asset trading system powered by LLM-driven decision-making. It operates as a Docker Compose stack of 12+ services, trading both cryptocurrency (via Coinbase) and US/EU equities (via Interactive Brokers) through domain-isolated agent instances.
+OpenTraitor is an autonomous, multi-asset trading system powered by LLM-driven decision-making. It operates as a Docker Compose stack of 12+ services, trading both cryptocurrency (via Coinbase) and US/EU equities (via Interactive Brokers) through domain-isolated agent instances.
 
 The system follows four core design principles:
 

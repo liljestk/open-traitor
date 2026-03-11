@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory contains Architecture Decision Records (ADRs) for the Auto-Traitor system.
+This directory contains Architecture Decision Records (ADRs) for the OpenTraitor system.
 
 ## Index
 

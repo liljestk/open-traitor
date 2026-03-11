@@ -111,7 +111,7 @@ def main():
     reddit_creds = {
         "reddit_client_id": os.environ.get("REDDIT_CLIENT_ID", ""),
         "reddit_client_secret": os.environ.get("REDDIT_CLIENT_SECRET", ""),
-        "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+        "reddit_user_agent": os.environ.get("REDDIT_USER_AGENT", "opentraitor-bot/0.1"),
     }
 
     # Try to create an IBKR client for fetching exchange-native news

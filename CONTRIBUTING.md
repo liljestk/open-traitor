@@ -1,4 +1,4 @@
-# Contributing to Auto-Traitor
+# Contributing to OpenTraitor
 
 Thank you for your interest in contributing! This is an automated trading system, so code quality, test discipline, and security are paramount.
 
@@ -16,8 +16,8 @@ Thank you for your interest in contributing! This is an automated trading system
 
 ```bash
 # Clone the repository
-git clone https://github.com/<owner>/auto-traitor.git
-cd auto-traitor
+git clone https://github.com/<owner>/opentraitor.git
+cd opentraitor
 
 # Create a virtual environment
 python -m venv venv

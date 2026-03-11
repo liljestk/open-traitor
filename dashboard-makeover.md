@@ -1,5 +1,5 @@
 Dashboard UX & UI Review
-This document provides a comprehensive review of the Auto-Traitor Dashboard's User Experience (UX) and User Interface (UI). The goal is to evaluate the current design and outline concrete recommendations for a "Professional Dashboard Redesign" to make the interface feel more premium, modern, and suitable for a high-performance trading assistant.
+This document provides a comprehensive review of the OpenTraitor Dashboard's User Experience (UX) and User Interface (UI). The goal is to evaluate the current design and outline concrete recommendations for a "Professional Dashboard Redesign" to make the interface feel more premium, modern, and suitable for a high-performance trading assistant.
 
 Overview and Session Recording
 A complete walkthrough of the dashboard was conducted. You can view the session recording below:

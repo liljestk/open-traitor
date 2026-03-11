@@ -512,8 +512,8 @@ export function TelegramSetupGuide() {
               </p>
               <p style={{ margin: '0 0 6px' }}>Send <code style={codeStyle}>/newbot</code> and follow the prompts:</p>
               <ul style={{ margin: '0 0 6px', paddingLeft: 20 }}>
-                <li>Choose a display name (e.g. &quot;Auto Traitor Bot&quot;)</li>
-                <li>Choose a username ending in &quot;bot&quot; (e.g. &quot;auto_traitor_bot&quot;)</li>
+                <li>Choose a display name (e.g. &quot;OpenTraitor Bot&quot;)</li>
+                <li>Choose a username ending in &quot;bot&quot; (e.g. &quot;opentraitor_bot&quot;)</li>
               </ul>
               <p style={{ margin: 0 }}>
                 BotFather will give you a <strong style={{ color: '#c9d1d9' }}>Bot Token</strong> like{' '}

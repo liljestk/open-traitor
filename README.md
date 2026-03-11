@@ -1,4 +1,4 @@
-# 🤖 Auto-Traitor: Autonomous Multi-Asset LLM Trading System
+# 🤖 OpenTraitor: Autonomous Multi-Asset LLM Trading System
 
 An autonomous, LLM-powered trading system supporting **cryptocurrency** (Coinbase) and **equities** (Interactive Brokers). Uses a multi-provider LLM fallback chain (OpenRouter → Groq → Ollama) with GPU-accelerated local inference. Features a multi-agent pipeline, **strict domain separation** between asset classes, **Temporal-orchestrated planning**, a **real-time dashboard**, and **conversational Telegram control**.
 
@@ -274,7 +274,7 @@ Bot: ⚡ HIGH-STAKES MODE ACTIVATED
 
 ## 📊 Project Structure
 ```
-auto-traitor/
+opentraitor/
 ├── config/
 │   ├── .env                # Environment secrets (created by setup.ps1)
 │   ├── coinbase.yaml       # Crypto profile config

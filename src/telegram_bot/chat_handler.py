@@ -1,5 +1,5 @@
 """
-LLM-powered conversational handler for Auto-Traitor's Telegram interface.
+LLM-powered conversational handler for OpenTraitor's Telegram interface.
 
 DESIGN PHILOSOPHY:
   This bot should feel like talking to a SHARP PRO TRADER — fast, opinionated,

@@ -30,7 +30,7 @@ trace_ctx = tracer.start_trace(
     cycle_id="cx_abc123",
     pair="BTC-USD",
     metadata={"exchange": "coinbase", "mode": "live"},
-    session_id="auto-traitor-2026-03-08"  # daily grouping
+    session_id="opentraitor-2026-03-08"  # daily grouping
 )
 ```
 
@@ -84,7 +84,7 @@ The dashboard WebSocket server subscribes to this channel for live LLM activity 
 
 ### Session Grouping
 
-`session_id` defaults to `auto-traitor-{today}` for daily trace aggregation in the Langfuse UI, enabling day-by-day analysis of agent behavior and token consumption.
+`session_id` defaults to `opentraitor-{today}` for daily trace aggregation in the Langfuse UI, enabling day-by-day analysis of agent behavior and token consumption.
 
 ### Initialization
 

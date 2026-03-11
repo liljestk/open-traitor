@@ -452,15 +452,11 @@ export default function SetupWizard() {
         fontFamily: "'Inter', system-ui, sans-serif", color: '#e6edf3',
       }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
-          <div style={{
-            width: 56, height: 56, borderRadius: 14,
-            background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            margin: '0 auto 16px',
-          }}>
-            <Sparkles size={28} color="#fff" />
-          </div>
-          <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.5, marginBottom: 4 }}>AUTO-TRAITOR</div>
+          <img src="/logo.png" alt="OpenTraitor" style={{
+            width: 64, height: 64, borderRadius: 14,
+            margin: '0 auto 16px', display: 'block',
+          }} />
+          <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.5, marginBottom: 4 }}>OPENTRAITOR</div>
           <div style={{ fontSize: 13, color: '#8b949e' }}>Enter your setup password to continue</div>
         </div>
 
@@ -480,7 +476,7 @@ export default function SetupWizard() {
             padding: '8px 12px', background: '#161b22', borderRadius: 7,
             fontSize: 11, color: '#6e7681', fontFamily: 'monospace', marginBottom: 20,
           }}>
-            docker logs auto-traitor-dashboard
+            docker logs opentraitor-dashboard
           </div>
 
           <div style={{ position: 'relative', marginBottom: loginError ? 10 : 20 }}>
@@ -593,7 +589,7 @@ export default function SetupWizard() {
             </h3>
             {[
               { name: 'Dashboard', url: 'http://localhost:8090', info: '' },
-              { name: 'Langfuse', url: 'http://localhost:3000', info: langfusePassword ? `admin@auto-traitor.local / ${langfusePassword}` : '' },
+              { name: 'Langfuse', url: 'http://localhost:3000', info: langfusePassword ? `admin@opentraitor.local / ${langfusePassword}` : '' },
               { name: 'Temporal UI', url: 'http://localhost:8233', info: '' },
             ].map(u => (
               <div key={u.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, padding: '6px 0' }}>
@@ -673,15 +669,11 @@ export default function SetupWizard() {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{
+          <img src="/logo.png" alt="OpenTraitor" style={{
             width: 34, height: 34, borderRadius: 8,
-            background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <Sparkles size={18} color="#fff" />
-          </div>
+          }} />
           <div>
-            <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: 0.5 }}>AUTO-TRAITOR</div>
+            <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: 0.5 }}>OPENTRAITOR</div>
             <div style={{ fontSize: 10, color: '#484f58', textTransform: 'uppercase', letterSpacing: 1 }}>Setup Wizard</div>
           </div>
         </div>

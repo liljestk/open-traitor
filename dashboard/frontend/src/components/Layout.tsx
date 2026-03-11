@@ -384,16 +384,11 @@ export default function Layout() {
         {/* Logo + domain badge */}
         <div style={{ padding: '20px 16px 16px', borderBottom: `2px solid ${domain.accent}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: 8,
-              background: `linear-gradient(135deg, ${domain.accent}, ${domain.accent}aa)`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-            }}>
-              <Zap size={16} color="white" />
-            </div>
+            <img src="/logo.png" alt="OpenTraitor" style={{
+              width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+            }} />
             <div>
-              <div style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3', letterSpacing: '-0.01em' }}>Auto-Traitor</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: '#e6edf3', letterSpacing: '-0.01em' }}>OpenTraitor</div>
               <div style={{ fontSize: 11, color: '#8b949e', marginTop: 1 }}>LLM Trading Ops</div>
             </div>
           </div>

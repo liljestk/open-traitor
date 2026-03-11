@@ -84,8 +84,8 @@ def _resolve_env(var_name: str, default: str = "") -> str:
 
 # Default headers OpenRouter recommends for attribution/ranking
 _OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/auto-traitor",
-    "X-Title": "auto-traitor",
+    "HTTP-Referer": "https://github.com/opentraitor",
+    "X-Title": "opentraitor",
 }
 
 # Fallback list used when the OpenRouter API is unreachable.

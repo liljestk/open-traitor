@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Automated data migration tool for Auto-Traitor.
+Automated data migration tool for OpenTraitor.
 
 Supports:
   1) on-prem → cloud (full export / import)
@@ -441,7 +441,7 @@ def cmd_redis_migrate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Auto-Traitor data migration tool",
+        description="OpenTraitor data migration tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

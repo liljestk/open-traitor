@@ -1,5 +1,5 @@
 """
-Logging configuration for Auto-Traitor.
+Logging configuration for OpenTraitor.
 """
 
 import logging

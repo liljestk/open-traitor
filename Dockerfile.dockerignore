@@ -14,6 +14,8 @@ __pycache__
 tests/
 .env
 config/.env
+config/root.env
+config/*.env.backup*
 
 # ── Agent does NOT need the dashboard frontend at all ──
 dashboard/

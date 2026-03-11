@@ -241,7 +241,7 @@ class NewsAggregator:
         redis_client=None,
         reddit_client_id: str = "",
         reddit_client_secret: str = "",
-        reddit_user_agent: str = "auto-traitor-bot/0.1",
+        reddit_user_agent: str = "opentraitor-bot/0.1",
         profile: str = "",
         exchange_client=None,
     ):
@@ -418,7 +418,7 @@ class NewsAggregator:
                 resp = requests.get(
                     feed_url,
                     timeout=15,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; auto-traitor-bot/0.1)"},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; opentraitor-bot/0.1)"},
                 )
                 if resp.status_code != 200:
                     logger.warning(f"RSS HTTP {resp.status_code} for {feed_url}")
@@ -520,7 +520,7 @@ class NewsAggregator:
                 resp = requests.get(
                     feed_url,
                     timeout=10,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; auto-traitor-bot/0.1)"},
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; opentraitor-bot/0.1)"},
                 )
                 if resp.status_code != 200:
                     continue

@@ -26,18 +26,15 @@ import {
 export function StepWelcome({ onStart }: { onStart: () => void }) {
   return (
     <div style={{ textAlign: 'center', maxWidth: 600, margin: '0 auto', paddingTop: 20 }}>
-      <div style={{
+      <img src="/logo.png" alt="OpenTraitor" style={{
         width: 88, height: 88, borderRadius: 22, margin: '0 auto 28px',
-        background: 'linear-gradient(135deg, #22c55e, #16a34a, #15803d)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        display: 'block',
         animation: 'at-pulse-ring 2s ease-out infinite',
         boxShadow: '0 8px 32px rgba(34,197,94,0.25)',
-      }}>
-        <Sparkles size={40} color="#fff" />
-      </div>
+      }} />
 
       <h1 style={{ margin: '0 0 8px 0', fontSize: 32, fontWeight: 800, color: '#e6edf3', letterSpacing: -0.5 }}>
-        Welcome to Auto-Traitor
+        Welcome to OpenTraitor
       </h1>
       <p style={{ margin: '0 0 36px 0', fontSize: 16, color: '#8b949e', lineHeight: 1.7 }}>
         Autonomous LLM-powered multi-asset trading agent.<br />
@@ -704,7 +701,7 @@ export function StepTelegram({ state, update, onSkip }: { state: WizardState; up
               <HowTo title="How to create a bot via @BotFather" steps={[
                 'Open Telegram and search for @BotFather',
                 'Send /newbot',
-                'Choose a name (e.g. "Auto-Traitor Crypto")',
+                'Choose a name (e.g. "OpenTraitor Crypto")',
                 'Choose a username (e.g. "my_at_crypto_bot")',
                 'BotFather gives you a token like: 1234567890:ABCdefGHIjklMNO...',
               ]} />

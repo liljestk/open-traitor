@@ -4,7 +4,7 @@
 
 ## Context
 
-Auto-Traitor supports two fundamentally different asset classes — crypto (Coinbase) and equities (IBKR). These domains have different pricing models, fee structures, market hours, and regulatory considerations. Mixing data between them would corrupt ML models, produce nonsensical portfolio metrics, and violate trading logic assumptions.
+OpenTraitor supports two fundamentally different asset classes — crypto (Coinbase) and equities (IBKR). These domains have different pricing models, fee structures, market hours, and regulatory considerations. Mixing data between them would corrupt ML models, produce nonsensical portfolio metrics, and violate trading logic assumptions.
 
 ## Decision
 

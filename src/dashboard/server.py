@@ -1,5 +1,5 @@
 """
-Auto-Traitor Dashboard API Server (slim core).
+OpenTraitor Dashboard API Server (slim core).
 
 FastAPI app running on port 8090 (configurable).  All REST endpoints live in
 ``src.dashboard.routes.*`` sub-modules — this file contains only:
@@ -387,9 +387,13 @@ if _STATIC_DIR.is_dir():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        """Catch-all: return index.html so React Router handles client-side paths."""
+        """Catch-all: serve static files first, then fall back to index.html for SPA routing."""
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
+        # Serve actual static files (logo.png, favicon.ico, etc.)
+        static_file = _STATIC_DIR / full_path
+        if full_path and static_file.is_file() and _STATIC_DIR in static_file.resolve().parents:
+            return FileResponse(str(static_file))
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))

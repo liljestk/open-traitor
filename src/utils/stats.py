@@ -1,5 +1,5 @@
 ﻿"""
-Persistent statistics database for Auto-Traitor.
+Persistent statistics database for OpenTraitor.
 
 PostgreSQL-backed store for all trading statistics, portfolio snapshots,
 events, and scheduled reports. Designed for fast reads and time-series

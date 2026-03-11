@@ -1,4 +1,4 @@
-"""Auto-Traitor Main Entry Point - Autonomous LLM Trading Agent.
+"""OpenTraitor Main Entry Point - Autonomous LLM Trading Agent.
 
 Usage:
     python -m src.main --mode daemon     # Run as background daemon
@@ -80,7 +80,7 @@ def print_banner(mode: str, exchange_type: str = "") -> None:
 
 def main():
     # Parse arguments
-    parser = argparse.ArgumentParser(description="Auto-Traitor Trading Agent")
+    parser = argparse.ArgumentParser(description="OpenTraitor Trading Agent")
     parser.add_argument(
         "--mode",
         choices=["paper", "live", "daemon"],
@@ -385,7 +385,7 @@ def main():
         redis_client=redis_client,
         reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
         reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
-        reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "auto-traitor-bot/0.1"),
+        reddit_user_agent=os.environ.get("REDDIT_USER_AGENT", "opentraitor-bot/0.1"),
         profile=profile,
         exchange_client=exchange,
     )
@@ -449,7 +449,7 @@ def main():
                 logger.warning(f"Redis Telegram lock check failed: {e} — proceeding as controller")
 
         # Determine exchange display name for Telegram messages
-        _exchange_name = config.get("trading", {}).get("exchange", profile or "auto-traitor").upper()
+        _exchange_name = config.get("trading", {}).get("exchange", profile or "opentraitor").upper()
         _currency = config.get("trading", {}).get("quote_currency", "EUR")
 
         telegram_bot = TelegramBot(
@@ -464,7 +464,7 @@ def main():
         # Give the polling thread a moment to connect, then send startup ping
         time.sleep(2)
         telegram_bot.send_message(
-            f"👋 *Auto-Traitor [{_exchange_name}] is online!*\n\n"
+            f"👋 *OpenTraitor [{_exchange_name}] is online!*\n\n"
             f"Mode: `{mode.upper()}` | Currency: `{_currency}`\n"
             f"Profile: `{profile}`\n"
             f"Telegram mode: `{_bot_mode}`\n"
@@ -517,7 +517,7 @@ def main():
         if _tracer:
             _tracer.flush()
         if telegram_bot:
-            telegram_bot.send_message("🛑 *Auto-Traitor shutting down...*")
+            telegram_bot.send_message("🛑 *OpenTraitor shutting down...*")
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -537,7 +537,7 @@ def main():
     orchestrator.state.save_state()
     if ws_feed:
         ws_feed.stop()
-    logger.info("👋 Auto-Traitor shut down cleanly.")
+    logger.info("👋 OpenTraitor shut down cleanly.")
 
 
 if __name__ == "__main__":

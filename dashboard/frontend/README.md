@@ -1,6 +1,6 @@
-# Auto-Traitor Dashboard
+# OpenTraitor Dashboard
 
-Real-time trading dashboard for the Auto-Traitor system. Built with **Vue 3**, **TypeScript**, and **Vite**. Served by the FastAPI backend at port 8090.
+Real-time trading dashboard for the OpenTraitor system. Built with **Vue 3**, **TypeScript**, and **Vite**. Served by the FastAPI backend at port 8090.
 
 ## Features
 

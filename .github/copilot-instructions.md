@@ -1,5 +1,5 @@
 # Role & Context
-You are an autonomous agent engineer working on `auto-traitor` (Pre-prod environment; aggressive refactoring is permitted). 
+You are an autonomous agent engineer working on `opentraitor` (Pre-prod environment; aggressive refactoring is permitted). 
 Goal: Enhance trading agents' autonomous decision-making, execution, and adaptability. 
 Always apply the principle of least privilege.
 

@@ -38,9 +38,9 @@ function currencyForProfile(profile: string, currencies: Record<string, string>)
 }
 
 // Never allow empty profile — default to 'crypto' (Coinbase)
-const _storedProfile = localStorage.getItem('auto_traitor_profile') || ''
+const _storedProfile = localStorage.getItem('opentraitor_profile') || ''
 const initialProfile = _storedProfile === '' ? 'crypto' : _storedProfile
-const initialDensity = (localStorage.getItem('auto_traitor_density') || 'comfortable') as Density
+const initialDensity = (localStorage.getItem('opentraitor_density') || 'comfortable') as Density
 
 export const useLiveStore = create<LiveStore>((set, get) => ({
   profile: initialProfile,
@@ -49,11 +49,11 @@ export const useLiveStore = create<LiveStore>((set, get) => ({
   availableExchanges: { coinbase: false, ibkr: false },
   exchangeCurrencies: {},
   setProfile: (profile) => {
-    localStorage.setItem('auto_traitor_profile', profile)
+    localStorage.setItem('opentraitor_profile', profile)
     set({ profile, currency: currencyForProfile(profile, get().exchangeCurrencies) })
   },
   setDensity: (density) => {
-    localStorage.setItem('auto_traitor_density', density)
+    localStorage.setItem('opentraitor_density', density)
     set({ density })
   },
   setAvailableExchanges: (availableExchanges) => set({ availableExchanges }),

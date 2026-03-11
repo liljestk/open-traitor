@@ -14,7 +14,7 @@ const BASE = '/api'
 let _csrfToken = ''
 
 // Legacy API key support (backward compat — will be removed)
-const API_KEY_STORAGE_KEY = 'auto_traitor_api_key'
+const API_KEY_STORAGE_KEY = 'opentraitor_api_key'
 
 export function getApiKey(): string {
   return localStorage.getItem(API_KEY_STORAGE_KEY) || ''

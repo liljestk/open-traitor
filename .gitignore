@@ -4,6 +4,7 @@
 config/.env
 config/root.env
 config/*.env
+config/*.env.backup*
 
 # Python
 __pycache__/

@@ -65,8 +65,8 @@ _LEGACY_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
 # 2FA configuration
 _2FA_ENABLED: bool = os.environ.get("DASHBOARD_2FA_ENABLED", "").lower() in ("1", "true", "yes")
 _2FA_SECRET: str = os.environ.get("DASHBOARD_2FA_SECRET", "")
-_2FA_ISSUER: str = os.environ.get("DASHBOARD_2FA_ISSUER", "Auto-Traitor")
-_2FA_ACCOUNT: str = os.environ.get("DASHBOARD_2FA_ACCOUNT", "dashboard@auto-traitor")
+_2FA_ISSUER: str = os.environ.get("DASHBOARD_2FA_ISSUER", "OpenTraitor")
+_2FA_ACCOUNT: str = os.environ.get("DASHBOARD_2FA_ACCOUNT", "dashboard@opentraitor")
 
 # Backup codes (in-memory storage; persisted via env or config file in production)
 _backup_codes: set[str] = set()

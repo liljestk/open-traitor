@@ -4,7 +4,7 @@ services:
   # =========================================================================
   ollama:
     image: ollama/ollama:latest
-    container_name: auto-traitor-ollama
+    container_name: opentraitor-ollama
     restart: unless-stopped
     ports:
       - "127.0.0.1:11434:11434" # local only — LLM has no auth
@@ -37,7 +37,7 @@ services:
   # =========================================================================
   ollama-pull:
     image: ollama/ollama:latest
-    container_name: auto-traitor-ollama-pull
+    container_name: opentraitor-ollama-pull
     depends_on:
       ollama:
         condition: service_healthy
@@ -51,7 +51,7 @@ services:
   # =========================================================================
   redis:
     image: redis:7-alpine
-    container_name: auto-traitor-redis
+    container_name: opentraitor-redis
     restart: unless-stopped
     env_file:
       - config/.env
@@ -73,7 +73,7 @@ services:
   # =========================================================================
   traitor-db:
     image: postgres:16-alpine
-    container_name: auto-traitor-traitor-db
+    container_name: opentraitor-traitor-db
     restart: unless-stopped
     env_file:
       - config/.env
@@ -96,7 +96,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-traitor-agent-coinbase
+    container_name: opentraitor-agent-coinbase
     restart: unless-stopped
     depends_on:
       ollama:
@@ -149,7 +149,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-traitor-agent-ibkr
+    container_name: opentraitor-agent-ibkr
     restart: unless-stopped
     depends_on:
       ollama:
@@ -211,7 +211,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dashboard
-    container_name: auto-traitor-dashboard
+    container_name: opentraitor-dashboard
     restart: unless-stopped
     depends_on:
       redis:
@@ -227,7 +227,6 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
-      - DASHBOARD_SESSION_SECRET=ada8753f087f3f04a6018234cc4d36465a202ef44c5924f58e8e68f6f03f5094
       # Allow dashboard to reach IB Gateway for IBKR price/news lookups
       - IBKR_HOST=host.docker.internal
     # Allow container to reach IB Gateway on the host machine
@@ -238,7 +237,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     ports:
-      - "8090:8090" # Web Dashboard (LAN accessible)
+      - "127.0.0.1:8090:8090" # Web Dashboard (localhost only; remove 127.0.0.1: prefix to expose to LAN)
     # Security: read-only filesystem, drop capabilities
     read_only: true
     tmpfs:
@@ -258,7 +257,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-traitor-news
+    container_name: opentraitor-news
     restart: unless-stopped
     depends_on:
       redis:
@@ -303,7 +302,7 @@ services:
   # =========================================================================
   langfuse-db:
     image: postgres:16-alpine
-    container_name: auto-traitor-langfuse-db
+    container_name: opentraitor-langfuse-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: langfuse
@@ -322,7 +321,7 @@ services:
   # =========================================================================
   clickhouse:
     image: clickhouse/clickhouse-server:latest
-    container_name: auto-traitor-clickhouse
+    container_name: opentraitor-clickhouse
     restart: unless-stopped
     user: "101:101"
     environment:
@@ -347,7 +346,7 @@ services:
   # =========================================================================
   minio:
     image: minio/minio:latest
-    container_name: auto-traitor-minio
+    container_name: opentraitor-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -368,7 +367,7 @@ services:
   # MinIO bucket init — creates 'langfuse' bucket on first start
   minio-init:
     image: minio/minio:latest
-    container_name: auto-traitor-minio-init
+    container_name: opentraitor-minio-init
     restart: "no"
     entrypoint: /bin/sh
     command: >
@@ -388,7 +387,7 @@ services:
   # =========================================================================
   langfuse-web:
     image: langfuse/langfuse:3
-    container_name: auto-traitor-langfuse
+    container_name: opentraitor-langfuse
     restart: unless-stopped
     depends_on:
       langfuse-db:
@@ -431,13 +430,13 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_AUTH: ${REDIS_PASSWORD}
-      LANGFUSE_INIT_ORG_ID: auto-traitor
-      LANGFUSE_INIT_ORG_NAME: Auto-Traitor
+      LANGFUSE_INIT_ORG_ID: opentraitor
+      LANGFUSE_INIT_ORG_NAME: OpenTraitor
       LANGFUSE_INIT_PROJECT_ID: trading-agent
       LANGFUSE_INIT_PROJECT_NAME: Trading Agent
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-at-public-key}
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-at-secret-key}
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@auto-traitor.local}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@opentraitor.local}
       LANGFUSE_INIT_USER_NAME: ${LANGFUSE_ADMIN_NAME:-admin}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD}
       HOSTNAME: "0.0.0.0"
@@ -453,7 +452,7 @@ services:
   # =========================================================================
   langfuse-worker:
     image: langfuse/langfuse-worker:3
-    container_name: auto-traitor-langfuse-worker
+    container_name: opentraitor-langfuse-worker
     restart: unless-stopped
     depends_on:
       langfuse-db:
@@ -505,7 +504,7 @@ services:
   # =========================================================================
   temporal-db:
     image: postgres:16-alpine
-    container_name: auto-traitor-temporal-db
+    container_name: opentraitor-temporal-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${TEMPORAL_DB_USER:-temporal}
@@ -521,7 +520,7 @@ services:
 
   temporal:
     image: temporalio/auto-setup:latest
-    container_name: auto-traitor-temporal
+    container_name: opentraitor-temporal
     restart: unless-stopped
     depends_on:
       temporal-db:
@@ -551,7 +550,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-traitor-planning
+    container_name: opentraitor-planning
     restart: unless-stopped
     depends_on:
       temporal:

@@ -25,9 +25,41 @@ except Exception as e:
     print(f"Error opening image: {e}")
     sys.exit(1)
 
-# Ensure the image has an alpha channel if it's not a transparent PNG already
-if img.mode != 'RGBA':
-    img = img.convert('RGBA')
+# Ensure the image has an alpha channel
+img = img.convert('RGBA')
+
+# Process image to make white pixels transparent
+data = img.getdata()
+new_data = []
+# Assuming white background with some tolerance for anti-aliasing
+for item in data:
+    # item is (R, G, B, A)
+    # Check if pixel is white or very close to white (tolerance can be adjusted)
+    if item[0] > 240 and item[1] > 240 and item[2] > 240:
+        # Change white pixels to completely transparent
+        new_data.append((255, 255, 255, 0))
+    else:
+        new_data.append(item)
+        
+img.putdata(new_data)
+
+# Crop the image to its bounding box (removes empty transparent space)
+bbox = img.getbbox()
+if bbox:
+    img = img.crop(bbox)
+
+# Make the image perfectly square again by padding with transparency 
+# to ensure it's not distorted when resized for icons
+width, height = img.size
+new_size = max(width, height)
+# Add a very small 2% padding so it doesn't touch the absolute edges
+padding = int(new_size * 0.02)
+new_size += padding * 2
+
+square_img = Image.new('RGBA', (new_size, new_size), (0, 0, 0, 0))
+offset = ((new_size - width) // 2, (new_size - height) // 2)
+square_img.paste(img, offset)
+img = square_img
 
 # 1. Generate multi-size favicon.ico
 ico_path = os.path.join(output_dir, "favicon.ico")
@@ -48,13 +80,11 @@ for filename, size in sizes.items():
     
     # Use LANCZOS for high-quality downsampling
     if hasattr(Image, 'Resampling'):
-        # Pillow >= 9.1.0
         resized_img = img.resize(size, Image.Resampling.LANCZOS)
     else:
-        # Pillow < 9.1.0
         resized_img = img.resize(size, Image.ANTIALIAS)
         
     resized_img.save(output_path, format="PNG")
     print(f"Generated: {output_path}")
 
-print("All icons successfully generated in the public directory!")
+print("All transparent icons successfully generated in the public directory!")

@@ -99,7 +99,7 @@ export default function SystemLogs() {
                     <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#d29922', opacity: 0.8 }} />
                     <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e', opacity: 0.8 }} />
                     <span style={{ marginLeft: 8, fontSize: 11, color: '#6e7681', fontFamily: 'JetBrains Mono, monospace', letterSpacing: '0.05em' }}>
-                        auto-traitor :: event log
+                        opentraitor :: event log
                     </span>
                     <div style={{ flex: 1 }} />
                     <span style={{ fontSize: 11, color: '#6e7681' }}>{events.length} events</span>

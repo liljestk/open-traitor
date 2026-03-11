@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { Lock, Sparkles, Eye, EyeOff } from 'lucide-react'
+import { Lock, Eye, EyeOff } from 'lucide-react'
 import { login, setCsrfToken } from '../api'
 
 interface LoginProps {
@@ -39,15 +39,11 @@ export default function Login({ onSuccess }: LoginProps) {
       fontFamily: "'Inter', system-ui, sans-serif", color: '#e6edf3',
     }}>
       <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{
-          width: 56, height: 56, borderRadius: 14,
-          background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          margin: '0 auto 16px',
-        }}>
-          <Sparkles size={28} color="#fff" />
-        </div>
-        <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.5, marginBottom: 4 }}>AUTO-TRAITOR</div>
+        <img src="/logo.png" alt="OpenTraitor" style={{
+          width: 64, height: 64, borderRadius: 14,
+          margin: '0 auto 16px', display: 'block',
+        }} />
+        <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.5, marginBottom: 4 }}>OPENTRAITOR</div>
         <div style={{ fontSize: 13, color: '#8b949e' }}>Sign in to your dashboard</div>
       </div>
 

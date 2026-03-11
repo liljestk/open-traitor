@@ -1,5 +1,5 @@
 """
-Signal data models for the Auto-Traitor trading agent.
+Signal data models for the OpenTraitor trading agent.
 """
 
 from __future__ import annotations

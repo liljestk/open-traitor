@@ -1,4 +1,4 @@
-"""Utility helper functions for Auto-Traitor."""
+"""Utility helper functions for OpenTraitor."""
 
 import os
 from datetime import datetime, timezone

@@ -658,7 +658,7 @@ class Orchestrator:
             else:
                 _mode_line = "💰 Live"
             self.telegram.send_message(
-                "🤖 *Auto-Traitor Online*\n\n"
+                "🤖 *OpenTraitor Online*\n\n"
                 f"Mode: {_mode_line}\n"
                 f"Pairs: {', '.join(self.pairs)}\n"
                 f"Cycle: every {self.interval}s\n\n"
@@ -1220,7 +1220,7 @@ class Orchestrator:
                 logger.error(f"Pipeline error: {type(e).__name__}\n{sanitized_tb}")
                 if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
                     alert_msg = (
-                        f"🚨 *Auto-Traitor alert*: {consecutive_errors} consecutive pipeline "
+                        f"🚨 *OpenTraitor alert*: {consecutive_errors} consecutive pipeline "
                         f"errors — last type: `{type(e).__name__}` (see server logs for details)"
                     )
                     logger.error(alert_msg)

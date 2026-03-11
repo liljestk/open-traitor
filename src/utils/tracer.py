@@ -363,12 +363,12 @@ class LLMTracer:
         Returns a TraceContext used to create per-agent spans.
 
         session_id groups related traces in Langfuse (e.g. all cycles for a day).
-        Defaults to ``auto-traitor-{today}`` so every daily run is one session.
+        Defaults to ``opentraitor-{today}`` so every daily run is one session.
         """
         if not self._enabled:
             return _NullTraceContext()  # type: ignore[return-value]
 
-        resolved_session_id = session_id or f"auto-traitor-{date.today().isoformat()}"
+        resolved_session_id = session_id or f"opentraitor-{date.today().isoformat()}"
 
         langfuse_span = None
         if self._langfuse is not None:

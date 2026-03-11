@@ -1,5 +1,5 @@
 """
-Telegram Bot for Auto-Traitor — LLM-Powered Conversational Interface.
+Telegram Bot for OpenTraitor — LLM-Powered Conversational Interface.
 
 This is NOT a traditional command-based bot. It's an LLM agent that uses
 Telegram as its communication channel. Every message — commands, free text,
@@ -28,7 +28,7 @@ logger = get_logger("telegram")
 
 class TelegramBot:
     """
-    LLM-powered Telegram bot for the Auto-Traitor trading agent.
+    LLM-powered Telegram bot for the OpenTraitor trading agent.
 
     All messages route through the LLM chat handler. Slash commands are
     supported as shortcuts but are still interpreted by the LLM for
