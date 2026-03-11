@@ -2,7 +2,7 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 5
   max_cash_per_trade_pct: 0.25
-  max_daily_loss: 500
+  max_daily_loss: 300.0
   max_daily_spend: 2000
   max_portfolio_risk_pct: 0.2
   max_single_trade: 500
@@ -165,7 +165,7 @@ risk:
   max_position_pct: 0.5
   max_total_exposure_pct: 0.8
   max_trades_per_hour: 4
-  stop_loss_pct: 0.05
+  stop_loss_pct: 0.02
   take_profit_pct: 0.1
   trailing_stop_pct: 0.05
 rotation:
@@ -202,7 +202,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.60
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600

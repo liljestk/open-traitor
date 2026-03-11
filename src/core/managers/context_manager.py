@@ -283,6 +283,8 @@ class ContextManager:
                 parts.append(f"win rate: {win_rate:.0f}%")
                 parts.append(f"PnL: {sym}{total_pnl:+.2f}")
                 parts.append(f"avg confidence: {avg_confidence:.0%}")
+            else:
+                parts.append("no trades executed yet — no performance data")
 
             # Current portfolio state
             n_positions = len(orch.state.open_positions)
@@ -312,6 +314,8 @@ class ContextManager:
             logger.debug(f"Performance summary fallback: {e}")
             # Minimal fallback from TradingState only
             try:
+                if orch.state.total_trades == 0:
+                    return "No trades executed yet — no performance data available."
                 return (
                     f"trades: {orch.state.total_trades}, "
                     f"win rate: {orch.state.win_rate:.0%}, "

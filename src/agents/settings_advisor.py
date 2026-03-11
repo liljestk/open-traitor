@@ -145,14 +145,18 @@ class SettingsAdvisorAgent(BaseAgent):
         to override this recommendation — it's guidance, not a hard rule.
         """
         if stats_db is None:
-            return ""
+            return (
+                "\nCONFIDENCE THRESHOLD NOTE: No trade database available. "
+                "DO NOT recommend any changes to min_confidence."
+            )
         try:
             wl = stats_db.get_win_loss_stats(exchange=exchange)
             sample = wl.get("sample_size", 0)
             if sample < 10:
                 return (
                     f"\nCONFIDENCE THRESHOLD NOTE: Only {sample} trades recorded "
-                    f"— not enough data to recommend min_confidence changes yet."
+                    f"— not enough data to recommend min_confidence changes yet. "
+                    f"DO NOT propose changes to trading.min_confidence."
                 )
             win_rate = wl.get("win_rate", 0)
             current_conf = self.config.get("trading", {}).get("min_confidence", 0.7)
@@ -273,6 +277,26 @@ class SettingsAdvisorAgent(BaseAgent):
 
         # Cap number of changes per review
         changes = changes[:MAX_CHANGES_PER_REVIEW]
+
+        # Hard gate: block min_confidence changes when insufficient trade data
+        trade_sample = 0
+        if stats_db:
+            try:
+                wl = stats_db.get_win_loss_stats(exchange=exchange)
+                trade_sample = wl.get("sample_size", 0)
+            except Exception:
+                pass
+        if trade_sample < 10:
+            before = len(changes)
+            changes = [
+                ch for ch in changes
+                if not (ch.get("section") == "trading" and ch.get("field") == "min_confidence")
+            ]
+            if len(changes) < before:
+                logger.info(
+                    f"📋 Settings Advisor: blocked min_confidence change — "
+                    f"only {trade_sample} trades (need ≥10)"
+                )
 
         # ── Apply changes section by section ─────────────────────────────
         applied: list[dict] = []
