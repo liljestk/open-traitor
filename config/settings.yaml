@@ -1,0 +1,249 @@
+trading:
+  mode: live
+  pair_discovery: all
+  quote_currencies:
+  - EUR
+  - EURC
+  pairs: []
+  quote_currency: EUR
+  interval: 120
+  min_confidence: 0.55
+  min_signal_confidence: 0.65
+  max_open_positions: 8
+  reconcile_every_cycles: 10
+  paper_slippage_pct: 0.0005
+  live_holdings_sync: true
+  holdings_refresh_seconds: 60
+  holdings_dust_threshold: 0.01
+  invalidate_strategic_context: false
+  include_crypto_quotes: true
+  pair_universe_refresh_seconds: 1800
+  max_active_pairs: 5
+  scan_volume_threshold: 1000
+  scan_movement_threshold_pct: 1.0
+  screener_interval_cycles: 5
+  style_modifiers: []
+absolute_rules:
+  max_single_trade: 500
+  max_daily_spend: 2000
+  max_daily_loss: 500
+  max_portfolio_risk_pct: 0.2
+  require_approval_above: 200
+  never_trade_pairs: []
+  only_trade_pairs: []
+  min_trade_interval_seconds: 60
+  max_trades_per_day: 50
+  max_cash_per_trade_pct: 0.25
+  emergency_stop_portfolio: 8000
+  always_use_stop_loss: true
+  max_stop_loss_pct: 0.05
+risk:
+  max_position_pct: 0.05
+  max_total_exposure_pct: 0.2
+  max_drawdown_pct: 0.1
+  stop_loss_pct: 0.04
+  take_profit_pct: 0.06
+  trailing_stop_pct: 0.03
+  max_trades_per_hour: 10
+  loss_cooldown_seconds: 300
+llm:
+  model: llama3.1:8b
+  temperature: 0.2
+  max_tokens: 2000
+  max_retries: 3
+  timeout: 60
+  recovery_check_interval: 120
+  providers:
+  - name: openrouter
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: meta-llama/llama-3.3-70b-instruct:free
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: groq
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.3-70b-versatile
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 100000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: groq-fallback
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: meta-llama/llama-4-maverick-17b-128e-instruct
+    timeout: 30
+    rpm_limit: 30
+    daily_token_limit: 500000
+    daily_request_limit: 1000
+    cooldown_seconds: 60
+    tier: free
+  - name: gemini
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash-lite
+    timeout: 30
+    rpm_limit: 8
+    daily_token_limit: 200000
+    daily_request_limit: 18
+    cooldown_seconds: 180
+    tier: free
+    reserve_for_priority: high
+  - name: openrouter-paid
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: meta-llama/llama-3.3-70b-instruct
+    timeout: 45
+    rpm_limit: 20
+    daily_token_limit: 0
+    daily_request_limit: 0
+    cooldown_seconds: 30
+    tier: paid
+  - name: openai
+    enabled: false
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+    timeout: 45
+    rpm_limit: 450
+    daily_token_limit: 0
+    cooldown_seconds: 30
+    tier: free
+  - name: ollama
+    enabled: true
+    base_url_env: OLLAMA_BASE_URL
+    model_env: OLLAMA_MODEL
+    model: llama3.1:8b
+    timeout: 60
+    is_local: true
+analysis:
+  technical:
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2
+    ema_periods:
+    - 9
+    - 21
+    - 50
+    - 200
+    candle_count: 200
+    candle_granularity: ONE_HOUR
+  sentiment:
+    enabled: true
+    sample_size: 20
+news:
+  fetch_interval: 300
+  reddit_subreddits:
+  - cryptocurrency
+  - bitcoin
+  - ethereum
+  - CryptoMarkets
+  - CryptoMoonShots
+  rss_feeds:
+  - https://cointelegraph.com/rss
+  - https://cryptonews.com/news/feed/
+  - https://decrypt.co/feed
+  - https://www.coindesk.com/arc/outboundfeeds/rss/
+  max_articles: 100
+  articles_for_analysis: 15
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID
+  authorized_users_env: TELEGRAM_AUTHORIZED_USERS
+  notify_on_trade: true
+  notify_on_signal: false
+  notify_on_signal_confidence: 0.9
+  notify_on_big_win: true
+  big_win_threshold: 50
+  notify_on_big_loss: true
+  big_loss_threshold: 50
+  notify_on_price_move: false
+  price_move_threshold_pct: 5
+  price_move_cooldown_minutes: 20
+  notify_morning_plan: true
+  notify_evening_summary: true
+  notify_periodic_update: true
+  status_update_interval: 3600
+  daily_summary: true
+  daily_summary_hour: 8
+logging:
+  level: INFO
+  file_enabled: true
+  directory: logs
+  max_file_size: 50
+  backup_count: 5
+health:
+  port: 8080
+dashboard:
+  enabled: true
+  port: 8090
+  langfuse_host: http://localhost:3000
+  langfuse_enabled: true
+fear_greed:
+  enabled: true
+  cache_ttl: 600
+multi_timeframe:
+  enabled: true
+  min_alignment: 3
+journal:
+  enabled: true
+  data_dir: data
+audit:
+  enabled: true
+  data_dir: data
+rotation:
+  enabled: true
+  autonomous_allocation_pct: 0.1
+  min_score_delta: 0.3
+  min_confidence: 0.65
+  high_impact_confidence: 0.8
+  approval_threshold: 200
+  swap_cooldown_seconds: 3600
+  full_autonomy: true
+  llm_validation: true
+  llm_validation_temperature: 0.3
+fees:
+  model_type: crypto_percentage
+  trade_fee_pct: 0.006
+  maker_fee_pct: 0.004
+  safety_margin: 1.5
+  min_gain_after_fees_pct: 0.02
+  min_trade_quote: 0.0
+  swap_cooldown_seconds: 3600
+high_stakes:
+  trade_size_multiplier: 2.5
+  swap_allocation_multiplier: 2.0
+  min_confidence: 0.5
+  min_swap_gain_pct: 0.01
+  auto_approve_up_to: 500
+routing:
+  enabled: true
+  bridge_currencies:
+  - EUR
+  - EURC
+  - USDC
+  - BTC
+  min_bridge_volume_24h: 10000
+  slippage_factor: 0.001
+training_data:
+  enabled: true
+  include_raw_candles: false
+  include_prompts: true
+  max_candles_per_snapshot: 50
+  buffer_size: 0

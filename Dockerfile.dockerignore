@@ -1,0 +1,23 @@
+# Agent-specific .dockerignore — excludes dashboard/frontend to prevent
+# agent containers from rebuilding when only frontend code changes.
+# BuildKit uses <Dockerfile>.dockerignore automatically.
+
+.git
+.gitignore
+.vscode
+.idea
+data/
+logs/
+__pycache__
+*.pyc
+*.md
+tests/
+.env
+config/.env
+config/root.env
+config/*.env.backup*
+
+# ── Agent does NOT need the dashboard frontend at all ──
+dashboard/
+scripts/
+coinbase_pairs_report.html

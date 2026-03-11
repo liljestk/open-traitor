@@ -1,0 +1,20 @@
+.git
+.gitignore
+.vscode
+.idea
+data/
+logs/
+__pycache__
+*.pyc
+*.md
+tests/
+.env
+config/.env
+config/root.env
+config/*.env.backup*
+
+# Frontend — exclude local node_modules and dist from build context;
+# the multi-stage Docker build installs and builds these fresh.
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+dashboard/frontend/.vite/

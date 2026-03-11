@@ -1,0 +1,602 @@
+services:
+  # =========================================================================
+  # Ollama - Local LLM Server (GPU Accelerated)
+  # =========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: opentraitor-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434" # local only — LLM has no auth
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      # Use most of 16GB VRAM, leave ~1GB for system
+      - OLLAMA_GPU_MEMORY=15GiB
+      # Allow parallel requests for speed
+      - OLLAMA_NUM_PARALLEL=2
+      # Keep model loaded in memory for fast inference
+      - OLLAMA_KEEP_ALIVE=24h
+    # NVIDIA GPU support for RTX 5080 16GB
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD-SHELL", "ollama list > /dev/null 2>&1" ]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 30s
+
+  # =========================================================================
+  # Ollama Model Puller - Ensures the model is downloaded on first run
+  # =========================================================================
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: opentraitor-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: [ "ollama", "pull", "${OLLAMA_MODEL:-llama3.1:8b}" ]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+
+  # =========================================================================
+  # Redis - State, Message Broker & Cache
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: opentraitor-redis
+    restart: unless-stopped
+    env_file:
+      - config/.env
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis_data:/data
+    # Secure Redis: password, disable dangerous commands
+    command: >
+      sh -c 'redis-server --save 60 1 --loglevel warning --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "$REDIS_PASSWORD" --rename-command FLUSHDB "" --rename-command FLUSHALL "" --rename-command DEBUG ""'
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Trading Stats DB — PostgreSQL backend for all trading data
+  # =========================================================================
+  traitor-db:
+    image: postgres:16-alpine
+    container_name: opentraitor-traitor-db
+    restart: unless-stopped
+    env_file:
+      - config/.env
+    environment:
+      POSTGRES_USER: traitor
+      POSTGRES_PASSWORD: ${TRAITOR_DB_PASSWORD}
+      POSTGRES_DB: autotraitor
+    volumes:
+      - traitor_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U traitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Trading Agent — Coinbase (Crypto)
+  # =========================================================================
+  agent-coinbase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opentraitor-agent-coinbase
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+      traitor-db:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "127.0.0.1:8080:8080" # Health check + Prometheus metrics
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.main --config config/coinbase.yaml --mode daemon
+    # Limit resource usage (leave room for Ollama + system)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+
+  # =========================================================================
+  # Trading Agent — Interactive Brokers (US/EU Equities)
+  # Only starts with: docker compose --profile ibkr up
+  # =========================================================================
+  agent-ibkr:
+    profiles: ["ibkr"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opentraitor-agent-ibkr
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+      traitor-db:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      # Override IBKR_HOST: inside Docker, 127.0.0.1 = container itself.
+      # host.docker.internal resolves to the Windows host where IB Gateway runs.
+      - IBKR_HOST=host.docker.internal
+      - TZ=Europe/Helsinki
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "127.0.0.1:8082:8082" # Health check (IBKR port)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.main --config config/ibkr.yaml --mode daemon
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
+
+  # =========================================================================
+  # Dashboard - Web UI and API Backend
+  # =========================================================================
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: opentraitor-dashboard
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      traitor-db:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - TZ=Europe/Helsinki
+      # Allow dashboard to reach IB Gateway for IBKR price/news lookups
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8090:8090" # Web Dashboard (LAN accessible — ensure DASHBOARD_PASSWORD_HASH is set)
+    # Security: read-only filesystem, drop capabilities
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # =========================================================================
+  # News Worker - Background News Aggregation
+  # =========================================================================
+  news-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opentraitor-news
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      # Allow IBKR news fetching from within Docker
+      - IBKR_HOST=host.docker.internal
+    # Allow container to reach IB Gateway on the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.news.worker
+    # Override the image-level HEALTHCHECK — news-worker has no HTTP server
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "0.5"
+
+  # =========================================================================
+  # Temporal - Durable Workflow Engine (dev server, all-in-one)
+  # Hosts the daily/weekly/monthly planning workflows.
+  # Web UI: http://localhost:8233
+  # =========================================================================
+  # =========================================================================
+  # Langfuse Postgres — persistent store for LLM traces
+  # =========================================================================
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: opentraitor-langfuse-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U langfuse" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # ClickHouse — OLAP database for Langfuse v3 traces/observations/scores
+  # =========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: opentraitor-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # =========================================================================
+  # MinIO — S3-compatible blob store for Langfuse v3 event/media storage
+  # =========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: opentraitor-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # MinIO bucket init — creates 'langfuse' bucket on first start
+  minio-init:
+    image: minio/minio:latest
+    container_name: opentraitor-minio-init
+    restart: "no"
+    entrypoint: /bin/sh
+    command: >
+      -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+          mc mb local/langfuse --ignore-existing &&
+          echo 'Bucket langfuse ready'"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # =========================================================================
+  # Langfuse Web — self-hosted LLM observability UI (v3)
+  # Dashboard: http://localhost:3000
+  # =========================================================================
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: opentraitor-langfuse
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000" # Langfuse Web UI — local only
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      NEXTAUTH_URL: http://localhost:3000
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD}
+      LANGFUSE_INIT_ORG_ID: opentraitor
+      LANGFUSE_INIT_ORG_NAME: OpenTraitor
+      LANGFUSE_INIT_PROJECT_ID: trading-agent
+      LANGFUSE_INIT_PROJECT_NAME: Trading Agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-at-secret-key}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL:-admin@opentraitor.local}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_ADMIN_NAME:-admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD}
+      HOSTNAME: "0.0.0.0"
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/public/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # =========================================================================
+  # Langfuse Worker — async event processing worker (v3)
+  # =========================================================================
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: opentraitor-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD}
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # =========================================================================
+  # Temporal DB — PostgreSQL backend for Temporal workflow engine
+  # =========================================================================
+  temporal-db:
+    image: postgres:16-alpine
+    container_name: opentraitor-temporal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TEMPORAL_DB_USER:-temporal}
+      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD:-temporal}
+      POSTGRES_DB: ${TEMPORAL_DB_NAME:-temporal}
+    volumes:
+      - temporal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U temporal" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: opentraitor-temporal
+    restart: unless-stopped
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:7233:7233" # gRPC endpoint — local only
+      - "127.0.0.1:8233:8233" # Web UI — local only
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${TEMPORAL_DB_USER:-temporal}
+      - POSTGRES_PWD=${TEMPORAL_DB_PASSWORD:-temporal}
+      - POSTGRES_SEEDS=temporal-db
+      - BIND_ON_IP=0.0.0.0
+    healthcheck:
+      test: [ "CMD-SHELL", "temporal --address 127.0.0.1:7233 operator cluster list >/dev/null 2>&1" ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # =========================================================================
+  # Planning Worker - Temporal workflow worker for multi-horizon planning
+  # Runs DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow
+  # =========================================================================
+  planning-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opentraitor-planning
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      traitor-db:
+        condition: service_healthy
+    env_file:
+      - config/.env
+    environment:
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - TEMPORAL_HOST=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - PLANNING_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    command: python -m src.planning.worker
+    # Override the image-level HEALTHCHECK — planning-worker has no HTTP server
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+volumes:
+  ollama_data:
+  redis_data:
+  traitor_db_data:
+  temporal_db_data:
+  langfuse_db_data:
+  clickhouse_data:
+  clickhouse_logs:
+  minio_data:

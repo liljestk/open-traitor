@@ -1,0 +1,224 @@
+/**
+ * CycleExplorer — paginated list of trading cycles with quick stats.
+ * Clicking a row navigates to the Cycle Playback page.
+ */
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import dayjs from 'dayjs'
+import { fetchCycles, fetchStatsSummary, fetchWatchlist, type CycleSummary } from '../api'
+import StatCard from '../components/StatCard'
+import { SkeletonTable, SkeletonStatCards } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
+import PageTransition from '../components/PageTransition'
+import { useCurrencyFormatter, useIsMobile, useLiveStore } from '../store'
+
+const PAGE_SIZE = 50
+
+function pnlColor(pnl: number | null): string {
+  if (pnl == null) return 'text-gray-400'
+  return pnl >= 0 ? 'text-green-400' : 'text-red-400'
+}
+
+export default function CycleExplorer() {
+  const [pair, setPair] = useState('')
+  const [offset, setOffset] = useState(0)
+  const profile = useLiveStore((s) => s.profile)
+  const navigate = useNavigate()
+  const fmtCurrency = useCurrencyFormatter()
+  const isMobile = useIsMobile()
+
+  const fmtPnl = (pnl: number | null): string => {
+    if (pnl == null) return '—'
+    const sign = pnl >= 0 ? '+' : ''
+    return `${sign}${fmtCurrency(pnl)}`
+  }
+
+  // Dynamic pair filter from watchlist (profile-aware via apiFetch)
+  const { data: watchlistData } = useQuery({
+    queryKey: ['watchlist-pairs-filter', profile],
+    queryFn: fetchWatchlist,
+    staleTime: 60_000,
+  })
+  const pairs = ['', ...(watchlistData?.active_pairs ?? [])]
+
+  const { data: cyclesData, isLoading: cyclesLoading } = useQuery({
+    queryKey: ['cycles', pair, offset, profile],
+    queryFn: () => fetchCycles(pair || undefined, PAGE_SIZE, offset),
+    staleTime: 10_000,
+  })
+
+  const { data: stats } = useQuery({
+    queryKey: ['stats-summary', profile],
+    queryFn: fetchStatsSummary,
+    staleTime: 30_000,
+  })
+
+  const cycles = cyclesData?.cycles ?? []
+
+  return (
+    <PageTransition>
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold text-gray-100">Cycle Explorer</h2>
+        <select
+          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200"
+          value={pair}
+          onChange={(e) => { setPair(e.target.value); setOffset(0) }}
+        >
+          {pairs.map((p) => (
+            <option key={p} value={p}>{p || 'All pairs'}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4">
+        {!stats ? (
+          <SkeletonStatCards count={6} />
+        ) : (
+          <>
+            <StatCard label="Win rate" value={stats.win_rate != null ? `${stats.win_rate}%` : '—'} accent="green" />
+            <StatCard label="Total PnL" value={fmtPnl(stats.total_pnl)} accent={stats.total_pnl != null && stats.total_pnl >= 0 ? 'green' : 'red'} />
+            <StatCard label="24h trades" value={stats.trades_24h} accent="blue" />
+            <StatCard label="24h cycles" value={stats.cycles_24h} accent="blue" />
+            <StatCard label="Active pairs" value={stats.active_pairs} />
+            {stats.portfolio && (
+              <StatCard label="Portfolio" value={fmtCurrency(stats.portfolio.portfolio_value)} accent="blue" />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Table (desktop) / Card list (mobile) */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        {isMobile ? (
+          /* ── Mobile card list ── */
+          <div>
+            {cyclesLoading && (
+              <div className="p-4 space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-20 bg-gray-800 rounded-xl animate-pulse" />
+                ))}
+              </div>
+            )}
+            {!cyclesLoading && cycles.length === 0 && (
+              <EmptyState
+                icon="chart"
+                title="No cycles found"
+                description="Cycles will appear here once the trading bot starts analyzing pairs."
+              />
+            )}
+            {cycles.map((c: CycleSummary) => (
+              <button
+                key={c.cycle_id}
+                onClick={() => navigate(`/cycle/${encodeURIComponent(c.cycle_id)}`)}
+                className="w-full text-left border-b border-gray-800/50 px-4 py-3 active:bg-gray-800/60 transition-colors"
+                style={{ WebkitTapHighlightColor: 'transparent' }}
+              >
+                {/* Row 1: pair + action badge */}
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-brand-400 font-semibold text-sm">{c.pair}</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                    c.action === 'BUY' ? 'bg-green-900/60 text-green-400' :
+                    c.action === 'SELL' ? 'bg-red-900/60 text-red-400' :
+                    'bg-gray-800 text-gray-400'
+                  }`}>{c.action ?? 'HOLD'}</span>
+                </div>
+                {/* Row 2: signal + confidence */}
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-gray-400">{c.signal_type ?? '—'}</span>
+                  <span className="text-xs text-gray-400">{c.confidence != null ? `${(c.confidence * 100).toFixed(0)}% conf` : '—'}</span>
+                </div>
+                {/* Row 3: PnL + timestamp */}
+                <div className="flex items-center justify-between">
+                  <span className={`text-sm font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</span>
+                  <span className="text-xs text-gray-500">{dayjs(c.started_at).format('MM-DD HH:mm')}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          /* ── Desktop table ── */
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase">
+                {['Time', 'Pair', 'Signal', 'Action', 'Confidence', 'PnL', 'Tokens', 'LLM Time', 'Wall Clock', 'Trace'].map((h) => (
+                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cyclesLoading && <SkeletonTable rows={10} cols={10} />}
+              {!cyclesLoading && cycles.length === 0 && (
+                <tr><td colSpan={10}>
+                  <EmptyState
+                    icon="chart"
+                    title="No cycles found"
+                    description="Cycles will appear here once the trading bot starts analyzing pairs."
+                  />
+                </td></tr>
+              )}
+              {cycles.map((c: CycleSummary) => (
+                <tr
+                  key={c.cycle_id}
+                  className="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors"
+                  onClick={() => navigate(`/cycle/${encodeURIComponent(c.cycle_id)}`)}
+                >
+                  <td className="px-4 py-2.5 text-gray-400 whitespace-nowrap">{dayjs(c.started_at).format('MM-DD HH:mm:ss')}</td>
+                  <td className="px-4 py-2.5 font-mono text-brand-400">{c.pair}</td>
+                  <td className="px-4 py-2.5 text-gray-300">{c.signal_type ?? '—'}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                      c.action === 'BUY' ? 'bg-green-900/60 text-green-400' :
+                      c.action === 'SELL' ? 'bg-red-900/60 text-red-400' :
+                      'bg-gray-800 text-gray-400'
+                    }`}>{c.action ?? 'HOLD'}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-300">{c.confidence != null ? `${(c.confidence * 100).toFixed(0)}%` : '—'}</td>
+                  <td className={`px-4 py-2.5 font-medium ${pnlColor(c.pnl)}`}>{fmtPnl(c.pnl)}</td>
+                  <td className="px-4 py-2.5 text-gray-400">{c.total_prompt_tokens != null ? (c.total_prompt_tokens + (c.total_completion_tokens ?? 0)) : '—'}</td>
+                  <td className="px-4 py-2.5 text-gray-400">{c.total_latency_ms != null ? `${c.total_latency_ms.toFixed(0)} ms` : '—'}</td>
+                  <td className={`px-4 py-2.5 ${c.cycle_duration_ms != null && c.cycle_duration_ms > 120000 ? 'text-yellow-400 font-medium' : 'text-gray-400'}`}>{c.cycle_duration_ms != null ? `${(c.cycle_duration_ms / 1000).toFixed(1)}s` : '—'}</td>
+                  <td className="px-4 py-2.5">
+                    {c.langfuse_url ? (
+                      <a
+                        href={c.langfuse_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-brand-400 hover:underline text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Open ↗
+                      </a>
+                    ) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {/* Pagination */}
+        <div className="px-4 py-3 border-t border-gray-800 flex items-center gap-4 text-sm">
+          <button
+            disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            className="px-3 py-1 bg-gray-800 rounded disabled:opacity-40 hover:bg-gray-700"
+          >
+            ← Prev
+          </button>
+          <span className="text-gray-500">Offset {offset}</span>
+          <button
+            disabled={cycles.length < PAGE_SIZE}
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+            className="px-3 py-1 bg-gray-800 rounded disabled:opacity-40 hover:bg-gray-700"
+          >
+            Next →
+          </button>
+        </div>
+      </div>
+    </div>
+    </PageTransition>
+  )
+}
