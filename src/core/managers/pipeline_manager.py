@@ -267,6 +267,7 @@ class PipelineManager:
             cycle_id=cycle_id,
             pair=pair,
             metadata={"strategic_context_preview": strategic_context[:200]},
+            exchange=exchange_name,
         ) if tracer else None
 
         # Data fetching (synchronous -> use asyncio.to_thread if we want true non-blocking,

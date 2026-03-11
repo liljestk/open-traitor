@@ -2,7 +2,7 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 0
   max_cash_per_trade_pct: 0.25
-  max_daily_loss: 500
+  max_daily_loss: 300.0
   max_daily_spend: 2000
   max_portfolio_risk_pct: 0.2
   max_single_trade: 500
@@ -168,16 +168,16 @@ news:
   - https://www.investing.com/rss/news_301.rss
 risk:
   loss_cooldown_seconds: 300
-  max_drawdown_pct: 0.05
+  max_drawdown_pct: 0.15
   max_position_pct: 0.4
-  max_total_exposure_pct: 0.2
+  max_total_exposure_pct: 0.15
   max_trades_per_hour: 10
-  stop_loss_pct: 0.04
+  stop_loss_pct: 0.05
   take_profit_pct: 0.08
-  trailing_stop_pct: 0.03
+  trailing_stop_pct: 0.04
 rotation:
   approval_threshold: 200
-  autonomous_allocation_pct: 0.1
+  autonomous_allocation_pct: 0.15
   enabled: true
   full_autonomy: true
   high_impact_confidence: 0.8

@@ -349,6 +349,11 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             logger.debug(
                 f"get_candles({product_id}) — yfinance returned no data"
             )
+            return candles
+        # Normalise key 'time' → 'start' to match Coinbase candle format
+        for c in candles:
+            if "start" not in c and "time" in c:
+                c["start"] = c["time"]
         return candles
 
     def _ib_req_historical_with_timeout(

@@ -62,27 +62,23 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
   // Auto-refresh CSRF token on 403 and retry once
   if (res.status === 403 && isMutating) {
-    try {
-      const statusRes = await fetch(`${BASE}/auth/status`, { credentials: 'include' })
-      const status = await statusRes.json()
-      if (status.csrf_token) {
-        setCsrfToken(status.csrf_token)
-        const retryHeaders = new Headers(options?.headers)
-        if (apiKey) retryHeaders.set('X-API-Key', apiKey)
-        retryHeaders.set('X-CSRF-Token', status.csrf_token)
-        const retry = await fetch(`${BASE}${finalPath}`, {
-          ...options,
-          headers: retryHeaders,
-          credentials: 'include',
-        })
-        if (!retry.ok) {
-          const text = await retry.text()
-          throw new Error(`HTTP ${retry.status}: ${text}`)
-        }
-        return retry.json() as Promise<T>
+    const statusRes = await fetch(`${BASE}/auth/status`, { credentials: 'include' })
+    const status = await statusRes.json()
+    if (status.csrf_token) {
+      setCsrfToken(status.csrf_token)
+      const retryHeaders = new Headers(options?.headers)
+      if (apiKey) retryHeaders.set('X-API-Key', apiKey)
+      retryHeaders.set('X-CSRF-Token', status.csrf_token)
+      const retry = await fetch(`${BASE}${finalPath}`, {
+        ...options,
+        headers: retryHeaders,
+        credentials: 'include',
+      })
+      if (!retry.ok) {
+        const text = await retry.text()
+        throw new Error(`HTTP ${retry.status}: ${text}`)
       }
-    } catch {
-      // If refresh fails, fall through to original error
+      return retry.json() as Promise<T>
     }
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
@@ -249,6 +245,7 @@ export interface LiveEvent {
   type: string
   cycle_id?: string
   pair?: string
+  exchange?: string
   agent_name?: string
   model?: string
   latency_ms?: number
@@ -907,6 +904,52 @@ export const fetchNews = (count = 30, profile = '') =>
     `/news?count=${count}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`
   )
 
+// ─── Financial Calendar ────────────────────────────────────────────────────
+
+export interface FinancialEvent {
+  type: 'earnings' | 'dividend' | 'macro'
+  ticker: string
+  date: string
+  days_away: number
+  details: Record<string, unknown>
+  importance: 'high' | 'medium' | 'low'
+}
+
+export interface EarningsSeason {
+  in_season: boolean
+  season_label: string | null
+  notes: string | null
+  days_to_peak: number | null
+  phase: string
+}
+
+export interface FinancialCalendarData {
+  domain: 'equity' | 'crypto'
+  events: FinancialEvent[]
+  earnings: Record<string, Record<string, unknown>>
+  dividends: Record<string, Record<string, unknown>>
+  macro: Array<Record<string, unknown>>
+  earnings_season: EarningsSeason
+}
+
+export interface FinancialSummaryData {
+  ticker: string
+  company: string
+  summary: string
+  metrics: Record<string, unknown>
+  generated_at: string
+}
+
+export const fetchFinancialCalendar = (profile = '', daysAhead = 90) =>
+  apiFetch<FinancialCalendarData>(
+    `/financial-calendar?days_ahead=${daysAhead}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`
+  )
+
+export const fetchFinancialSummary = (ticker: string, profile = '') =>
+  apiFetch<FinancialSummaryData>(
+    `/financial-calendar/summary?ticker=${encodeURIComponent(ticker)}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`
+  )
+
 // ─── Watchlist ─────────────────────────────────────────────────────────────
 
 export interface ScanResult {
@@ -984,6 +1027,7 @@ export const searchProducts = (q: string) =>
 
 export interface CandleData {
   start: string
+  time?: string
   low: number
   high: number
   open: number
@@ -1038,6 +1082,7 @@ export interface AuthStatus {
   auth_configured: boolean
   has_password: boolean
   session_ttl: number
+  csrf_token?: string
 }
 
 export interface LoginResult {
@@ -1048,7 +1093,9 @@ export interface LoginResult {
 
 export const fetchAuthStatus = async (): Promise<AuthStatus> => {
   const res = await fetch(`${BASE}/auth/status`, { credentials: 'include' })
-  return res.json()
+  const data: AuthStatus = await res.json()
+  if (data.csrf_token) setCsrfToken(data.csrf_token)
+  return data
 }
 
 export const login = async (password: string): Promise<LoginResult> => {

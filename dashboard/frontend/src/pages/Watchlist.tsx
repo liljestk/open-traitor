@@ -311,9 +311,11 @@ export default function Watchlist() {
     refetchInterval: 30_000,
   })
 
+  const isEquityProfile = profile?.startsWith('ibkr')
+  const candleGranularity = isEquityProfile ? 'FIFTEEN_MINUTE' : 'ONE_HOUR'
   const { data: candleData, isLoading: candleLoading } = useQuery({
-    queryKey: ['candles', selectedPair, profile],
-    queryFn: () => fetchCandles(selectedPair!, 'ONE_HOUR', 200),
+    queryKey: ['candles', selectedPair, candleGranularity, profile],
+    queryFn: () => fetchCandles(selectedPair!, candleGranularity, 300),
     enabled: !!selectedPair,
     staleTime: 60_000,
   })
@@ -485,7 +487,7 @@ export default function Watchlist() {
                 ) : candleData?.candles?.length ? (
                   <CandlestickChart
                     candles={candleData.candles.map((c) => ({
-                      time: c.start,
+                      time: c.start ?? c.time,
                       open: c.open,
                       high: c.high,
                       low: c.low,

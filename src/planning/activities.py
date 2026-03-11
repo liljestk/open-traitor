@@ -637,6 +637,7 @@ Respond ONLY with JSON:
                 cycle_id=trace_id,
                 pair="planning",
                 metadata={"horizon": horizon, "domain": domain},
+                exchange="ibkr" if domain == "equity" else "coinbase",
             )
         if trace_ctx is not None:
             span = trace_ctx.start_span(

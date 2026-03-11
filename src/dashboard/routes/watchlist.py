@@ -195,6 +195,17 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
     resolved = deps.resolve_profile(profile)
     exchange = body.exchange or resolved or "coinbase"
 
+    # Validate pair quote currency matchesProfile
+    qc = deps.quote_currency_for(profile)
+    if qc:
+        pair_quote = pair.rsplit("-", 1)[-1].upper()
+        if pair_quote not in [c.upper() for c in qc]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Pair {pair!r} uses quote currency {pair_quote}, "
+                       f"but this profile only supports {', '.join(qc)}.",
+            )
+
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
     _notify_orchestrator("add_watchlist_pair", pair, profile=profile)
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}

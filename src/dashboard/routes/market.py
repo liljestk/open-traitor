@@ -153,6 +153,12 @@ def search_products(
                 merged.append(lr)
                 config_ids.add(lr["id"].upper())
 
+        # 4) Filter by profile quote currencies so users can't follow incompatible pairs
+        qc = deps.quote_currency_for(profile)
+        if qc:
+            allowed = {c.upper() for c in qc}
+            merged = [m for m in merged if m.get("quote", "").upper() in allowed]
+
         return {"results": merged[:25], "query": q}
 
     # Coinbase search

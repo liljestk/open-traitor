@@ -403,6 +403,11 @@ class PredictionsMixin:
                     else:
                         _stale_count = 0
                     _prev_price = price
+                    # Drop consecutive stale entries (keep only the 1st to
+                    # mark the gap).  This eliminates the flat after-hours /
+                    # weekend sections that compress the real price action.
+                    if is_stale and _stale_count > _STALE_THRESHOLD:
+                        continue
                     entry = {"ts": snap["ts"], "price": round(price, 8)}
                     if is_stale:
                         entry["stale"] = True

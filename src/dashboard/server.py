@@ -53,6 +53,7 @@ from src.dashboard.routes.commands import router as commands_router
 from src.dashboard.routes.llm_analytics import router as llm_analytics_router
 from src.dashboard.routes.learning import router as learning_router
 from src.dashboard.routes.auth_routes import router as auth_router
+from src.dashboard.routes.financial_calendar import router as financial_calendar_router
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +334,7 @@ async def _auth_middleware(request: Request, call_next):
         if path in _PUBLIC_ENDPOINTS:
             return await call_next(request)
 
-        if _AUTH_CONFIGURED:
+        if auth.is_auth_configured():
             # Check session-based auth or legacy API key
             if not auth.is_authenticated(request):
                 return JSONResponse({"detail": "Authentication required"}, status_code=401)
@@ -372,6 +373,7 @@ app.include_router(watchlist_router)
 app.include_router(commands_router)
 app.include_router(llm_analytics_router)
 app.include_router(learning_router)
+app.include_router(financial_calendar_router)
 
 
 # ---------------------------------------------------------------------------

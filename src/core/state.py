@@ -81,6 +81,7 @@ class TradingState:
         self.is_running: bool = False
         self.is_paused: bool = False
         self.circuit_breaker_triggered: bool = False
+        self._circuit_breaker_ts: float = 0.0  # epoch when circuit breaker fired
         self.last_analysis_time: Optional[datetime] = None
         self.last_trade_time: Optional[datetime] = None
 
@@ -616,6 +617,15 @@ class TradingState:
                 self.portfolio_history = self.portfolio_history[-5000:]
 
             return snapshot
+
+    @property
+    def current_drawdown(self) -> float:
+        """Current drawdown from peak (can recover, unlike max_drawdown)."""
+        with self._lock:
+            total_value = self._get_portfolio_value_unlocked()
+            if self.peak_portfolio_value <= 0:
+                return 0.0
+            return max(0.0, (self.peak_portfolio_value - total_value) / self.peak_portfolio_value)
 
     @property
     def portfolio_value(self) -> float:

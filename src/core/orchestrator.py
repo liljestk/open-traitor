@@ -565,26 +565,31 @@ class Orchestrator:
     # Severely stale data threshold: skip drawdown circuit breaker when
     # live data hasn't refreshed in over an hour (market closed / gateway down).
     _STALE_DRAWDOWN_SKIP_SECS: float = 3600.0
+    # Minimum cooldown before auto-recovery can kick in (seconds).
+    _CIRCUIT_BREAKER_COOLDOWN_SECS: float = 1800.0  # 30 minutes
 
     def _check_circuit_breakers(self) -> None:
-        """Trip circuit breaker on max drawdown OR daily loss limit breach."""
+        """Trip circuit breaker on current drawdown OR daily loss limit breach."""
         if self.state.circuit_breaker_triggered:
             return
 
         reason = value = msg = None  # type: ignore[assignment]
 
-        # Drawdown check — skip when live data is severely stale to prevent
-        # false triggers from stale/wrong portfolio values (e.g. market closed).
+        # Drawdown check — use *current* drawdown (recoverable) instead of the
+        # all-time max (which ratchets up and can never come back down, causing
+        # permanent false triggers after any past dip).
+        # Skip when live data is severely stale to prevent false triggers.
         max_dd_pct = self.config.get("risk", {}).get("max_drawdown_pct", 0.10)
         stale_secs = time.time() - self.state._live_snapshot_ts if self.state._live_snapshot_ts > 0 else 0
-        if self.state.max_drawdown >= max_dd_pct:
+        current_dd = self.state.current_drawdown
+        if current_dd >= max_dd_pct:
             if stale_secs > self._STALE_DRAWDOWN_SKIP_SECS:
                 logger.debug(
                     f"Skipping drawdown circuit breaker — live data is {stale_secs:.0f}s stale"
                 )
             else:
-                reason, value = "max_drawdown", self.state.max_drawdown
-                msg = f"🛑 CIRCUIT BREAKER: Max drawdown {format_percentage(value)} reached!"
+                reason, value = "max_drawdown", current_dd
+                msg = f"🛑 CIRCUIT BREAKER: Current drawdown {format_percentage(value)} reached!"
 
         # Daily loss check (M4 fix: use thread-safe accessor)
         if reason is None and self.rules.daily_loss >= self.rules.max_daily_loss:
@@ -599,11 +604,47 @@ class Orchestrator:
             return
 
         self.state.circuit_breaker_triggered = True
+        self.state._circuit_breaker_ts = time.time()
         logger.warning(msg)
         self.audit.log_circuit_breaker(reason, value)
         # queue_event("CRITICAL: ...") already sends 🚨 ALERT immediately via ProactiveEngine
         self.chat_handler.queue_event(f"CRITICAL: {msg}", severity="critical")
         self.event_manager.trigger_emergency_replan(f"Circuit breaker: {reason} {value}")
+
+    def _try_circuit_breaker_recovery(self) -> None:
+        """Auto-recover from circuit breaker if conditions have improved.
+
+        Requires:
+        - Cooldown period elapsed (30 min default)
+        - Fresh live data (not stale)
+        - Current drawdown below threshold
+        - Daily loss below limit
+        """
+        elapsed = time.time() - self.state._circuit_breaker_ts
+        if elapsed < self._CIRCUIT_BREAKER_COOLDOWN_SECS:
+            return
+
+        # Need fresh data to make a recovery decision
+        stale_secs = time.time() - self.state._live_snapshot_ts if self.state._live_snapshot_ts > 0 else float("inf")
+        if stale_secs > self._STALE_DRAWDOWN_SKIP_SECS:
+            return  # can't evaluate without recent data
+
+        max_dd_pct = self.config.get("risk", {}).get("max_drawdown_pct", 0.10)
+        current_dd = self.state.current_drawdown
+        daily_loss_ok = self.rules.daily_loss < self.rules.max_daily_loss
+
+        # Recover only when drawdown has subsided meaningfully (below 80% of threshold)
+        # to prevent rapid re-trigger oscillation.
+        if current_dd < max_dd_pct * 0.8 and daily_loss_ok:
+            self.state.circuit_breaker_triggered = False
+            self.state._circuit_breaker_ts = 0.0
+            msg = (
+                f"✅ Circuit breaker auto-recovered — "
+                f"current drawdown {format_percentage(current_dd)} "
+                f"is below threshold {format_percentage(max_dd_pct)}"
+            )
+            logger.info(msg)
+            self.chat_handler.queue_event(msg, severity="info")
 
     def run_forever(self) -> None:
         """Main loop — runs continuously until stopped."""
@@ -643,6 +684,7 @@ class Orchestrator:
 
             if self.state.circuit_breaker_triggered:
                 logger.warning("🛑 Circuit breaker active — trading halted")
+                self._try_circuit_breaker_recovery()
                 time.sleep(60)
                 continue
 

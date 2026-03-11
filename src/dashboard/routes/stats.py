@@ -478,10 +478,55 @@ def get_pair_prediction_history(
     """Return actual price time-series with prediction markers overlaid for a single pair.
 
     Used by the Prediction Overlay chart to show predicted vs actual prices.
+    For equity (IBKR) pairs, supplements sparse snapshot-based price data with
+    hourly candles from Yahoo Finance for a much denser price curve.
     """
     try:
         resolved = deps.resolve_profile(profile) or None
         result = db.get_pair_prediction_history(pair=pair.upper(), days=days, exchange=resolved)
+
+        # Enrich equity pairs with Yahoo Finance candle data for denser price curves.
+        # Snapshot-based price history is only recorded every ~30 min during IBKR cycles,
+        # resulting in very sparse / flat-looking prediction charts.
+        is_equity = resolved and resolved.startswith("ibkr")
+        if is_equity and days <= 90:
+            try:
+                from src.core.equity_feed import get_candles as yf_candles
+                from datetime import datetime as _dt, timezone as _tz
+
+                granularity = "ONE_HOUR" if days <= 30 else "ONE_DAY"
+                limit = min(days * 24 if granularity == "ONE_HOUR" else days, 1000)
+                candles = yf_candles(pair.upper(), granularity=granularity, limit=limit)
+                if candles:
+                    # Merge candle close prices into price_history, using 'time' key
+                    existing_hours: set[str] = set()
+                    for ph in result.get("price_history", []):
+                        existing_hours.add(ph["ts"][:13])  # YYYY-MM-DDTHH
+
+                    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+                    added = 0
+                    for c in candles:
+                        ts_epoch = c.get("time") or c.get("start")
+                        if not ts_epoch:
+                            continue
+                        iso = _dt.fromtimestamp(int(ts_epoch), tz=_tz.utc).isoformat()
+                        if iso < cutoff:
+                            continue
+                        hour_key = iso[:13]
+                        if hour_key not in existing_hours:
+                            existing_hours.add(hour_key)
+                            result["price_history"].append({
+                                "ts": iso,
+                                "price": round(float(c["close"]), 8),
+                            })
+                            added += 1
+
+                    if added:
+                        result["price_history"].sort(key=lambda p: p["ts"])
+                        logger.debug(f"Enriched {pair} price history with {added} Yahoo candle points")
+            except Exception as _enrich_err:
+                logger.debug(f"Yahoo candle enrichment skipped for {pair}: {_enrich_err}")
+
         return deps.sanitize_floats(result)
     except Exception as exc:
         logger.exception("pair prediction history error")

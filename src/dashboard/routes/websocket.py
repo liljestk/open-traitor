@@ -87,10 +87,10 @@ async def ws_live(websocket: WebSocket):
     # Extract profile from query params for event filtering
     _qs = parse_qs(urlparse(str(websocket.url)).query)
     _ws_profile = (_qs.get("profile", [""])[0] or "").strip()
-    _ws_qc = deps.quote_currency_for(_ws_profile)
+    _ws_exchange = deps.resolve_profile(_ws_profile)
 
-    deps.ws_connections.append((websocket, _ws_qc))
-    logger.info(f"WS client connected (profile={_ws_profile!r}, qc={_ws_qc}) ({len(deps.ws_connections)} total)")
+    deps.ws_connections.append((websocket, _ws_exchange))
+    logger.info(f"WS client connected (profile={_ws_profile!r}, exchange={_ws_exchange}) ({len(deps.ws_connections)} total)")
     try:
         while True:
             # Keep connection alive; events are pushed by redis_subscriber
@@ -100,7 +100,7 @@ async def ws_live(websocket: WebSocket):
         pass
     finally:
         # Guard: the Redis subscriber may have already removed this socket
-        deps.ws_connections[:] = [(ws, qc) for ws, qc in deps.ws_connections if ws is not websocket]
+        deps.ws_connections[:] = [(ws, ex) for ws, ex in deps.ws_connections if ws is not websocket]
         logger.info(f"WS client disconnected ({len(deps.ws_connections)} remaining)")
 
 
@@ -140,23 +140,22 @@ async def redis_subscriber():
                 except Exception:
                     continue
 
-                # Extract pair from event for profile filtering
-                event_pair = (payload.get("pair") or "").upper()
+                # Extract exchange from event for profile filtering
+                event_exchange = (payload.get("exchange") or "").lower()
 
                 dead = []
-                for ws, ws_qc in list(deps.ws_connections):
-                    # Filter: if this WS connection has a quote currency filter,
-                    # only send events that match (or have no pair info)
-                    if ws_qc and event_pair:
-                        suffixes = [f"-{c.upper()}" for c in (ws_qc if isinstance(ws_qc, list) else [ws_qc])]
-                        if not any(event_pair.endswith(s) for s in suffixes):
+                for ws, ws_exchange in list(deps.ws_connections):
+                    # Filter: if this WS connection has an exchange filter,
+                    # only send events that match (or have no exchange info)
+                    if ws_exchange and event_exchange:
+                        if event_exchange != ws_exchange and not event_exchange.startswith(ws_exchange + "_"):
                             continue
                     try:
                         await ws.send_json(payload)
                     except Exception:
                         dead.append(ws)
                 for ws in dead:
-                    deps.ws_connections[:] = [(w, q) for w, q in deps.ws_connections if w is not ws]
+                    deps.ws_connections[:] = [(w, e) for w, e in deps.ws_connections if w is not ws]
 
         except asyncio.CancelledError:
             # Graceful shutdown

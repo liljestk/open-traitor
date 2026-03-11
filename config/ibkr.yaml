@@ -202,7 +202,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.95
+  min_confidence: 0.55
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
@@ -216,3 +216,5 @@ trading:
   scan_movement_threshold_pct: 0.5
   scan_volume_threshold: 500000000.0
   screener_interval_cycles: 3
+  style_modifiers:
+  - wider_targets

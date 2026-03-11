@@ -125,9 +125,21 @@ def _classify_sentiment(text: str) -> str:
 def _extract_tickers(text: str, known_tickers: frozenset[str] | set[str] = _GENERIC_TICKERS) -> list[str]:
     """Extract likely stock/crypto ticker symbols from text."""
     found: list[str] = []
+    # 1. Regex: match $TICKER or standalone uppercase tickers
     for m in _TICKER_RE.finditer(text):
         ticker = m.group(1) or m.group(2)
         if ticker and ticker in known_tickers:
+            found.append(ticker)
+    # 2. Case-insensitive whole-word search for known tickers (catches
+    #    mixed-case mentions like "Nokia" → NOKIA, "Asml" → ASML)
+    text_upper = text.upper()
+    for ticker in known_tickers:
+        if ticker in found:
+            continue
+        if len(ticker) < 2:
+            continue
+        # Use word-boundary search on uppercased text
+        if re.search(rf'(?<![A-Z]){re.escape(ticker)}(?![A-Z])', text_upper):
             found.append(ticker)
     return list(dict.fromkeys(found))  # dedup, preserve order
 

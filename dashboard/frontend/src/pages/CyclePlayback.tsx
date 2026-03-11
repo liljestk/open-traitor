@@ -144,7 +144,7 @@ function TradeChartContext({
       ) : (
         <CandlestickChart
           candles={candles.map((c) => ({
-            time: c.start,
+            time: c.start ?? c.time,
             open: c.open,
             high: c.high,
             low: c.low,

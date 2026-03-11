@@ -36,7 +36,7 @@ config: dict = {}
 exchange_client = None    # ExchangeClient instance (optional, for price lookups)
 ibkr_exchange_client = None  # IBClient instance (optional, for IBKR price/news)
 
-ws_connections: list = []  # (WebSocket, quote_currency_filter)
+ws_connections: list = []  # (WebSocket, exchange_filter)
 
 rules_instance = None     # AbsoluteRules instance (optional, for runtime push)
 llm_client = None         # LLMClient instance (optional, for provider status)

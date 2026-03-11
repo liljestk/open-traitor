@@ -21,7 +21,7 @@ import {
 import {
   fetchPredictionAccuracy, fetchTrackedPairs, fetchPairPredictionHistory,
   fetchCycles, fetchCycleFull, fetchTrades, fetchNews, fetchPortfolioExposure,
-  fetchMarketPrice,
+  fetchMarketPrice, fetchFinancialCalendar, fetchFinancialSummary,
   type PredictionAccuracyData, type TrackedPairsData, type NewsArticle,
   type CycleFull,
 } from '../api'
@@ -1493,6 +1493,191 @@ function PairTradeHistory({ pair }: { pair: string }) {
   )
 }
 
+// ── Financial Calendar & AI Overview ────────────────────────────────────────
+
+function FinancialCalendarPanel({ pair }: { pair: string }) {
+  const profile = useLiveStore((s) => s.profile)
+  const isEquity = classifyPair(pair) === 'equity'
+  const fullBase = pair.split('-')[0].toUpperCase()
+  const yahooTicker = fullBase // e.g. NOKIA.HE
+
+  const { data: calendarData, isLoading: calLoading } = useQuery({
+    queryKey: ['financial-calendar', profile],
+    queryFn: () => fetchFinancialCalendar(profile, 90),
+    enabled: isEquity,
+    refetchInterval: 300_000,
+    staleTime: 60_000,
+  })
+
+  const [showSummary, setShowSummary] = useState(false)
+  const { data: summaryData, isLoading: sumLoading, refetch: fetchSummary } = useQuery({
+    queryKey: ['financial-summary', yahooTicker, profile],
+    queryFn: () => fetchFinancialSummary(yahooTicker, profile),
+    enabled: false, // only fetch on demand
+  })
+
+  if (!isEquity) return null
+
+  // Filter events for this ticker
+  const pairEvents = useMemo(() => {
+    if (!calendarData?.events) return []
+    const shortBase = fullBase.split('.')[0]
+    return calendarData.events.filter(e =>
+      e.ticker === fullBase ||
+      e.ticker === shortBase ||
+      e.type === 'macro'
+    )
+  }, [calendarData, fullBase])
+
+  const earningsSeason = calendarData?.earnings_season
+
+  const importanceColor = (imp: string) => {
+    if (imp === 'high') return 'text-red-400 bg-red-900/20 border-red-800/40'
+    if (imp === 'medium') return 'text-amber-400 bg-amber-900/20 border-amber-800/40'
+    return 'text-gray-400 bg-gray-800/40 border-gray-700/40'
+  }
+
+  const typeIcon = (type: string) => {
+    if (type === 'earnings') return <BarChart2 size={12} className="text-violet-400" />
+    if (type === 'dividend') return <DollarSign size={12} className="text-green-400" />
+    return <Activity size={12} className="text-amber-400" />
+  }
+
+  const typeLabel = (type: string) => {
+    if (type === 'earnings') return 'Earnings'
+    if (type === 'dividend') return 'Ex-Dividend'
+    return 'Macro'
+  }
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+          <Calendar size={14} className="text-violet-400" />
+          Financial Calendar
+          <span className="text-[10px] text-gray-600 font-normal">{pairEvents.length} events</span>
+        </h4>
+        <button
+          onClick={() => { setShowSummary(!showSummary); if (!summaryData && !sumLoading) fetchSummary() }}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-violet-900/20 border border-violet-800/30 text-[10px] text-violet-300 hover:bg-violet-900/40 transition-colors"
+        >
+          <Brain size={10} />
+          AI Overview
+        </button>
+      </div>
+
+      {/* Earnings season banner */}
+      {earningsSeason?.season_label && (
+        <div className={`mb-3 px-3 py-2 rounded-lg border text-[10px] ${
+          earningsSeason.phase === 'active'
+            ? 'bg-violet-900/20 border-violet-800/30 text-violet-300'
+            : 'bg-gray-800/40 border-gray-700/30 text-gray-400'
+        }`}>
+          <span className="font-semibold">{earningsSeason.season_label}</span>
+          {earningsSeason.phase === 'active' && ' — Active'}
+          {earningsSeason.phase === 'pre_season' && earningsSeason.days_to_peak != null &&
+            ` — Starts in ${earningsSeason.days_to_peak}d`}
+          {earningsSeason.notes && <span className="ml-1 text-gray-500">· {earningsSeason.notes}</span>}
+        </div>
+      )}
+
+      {/* AI Summary */}
+      {showSummary && (
+        <div className="mb-3 bg-gray-800/40 border border-gray-700/30 rounded-lg p-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Brain size={12} className="text-violet-400" />
+            <span className="text-[11px] font-semibold text-gray-300">
+              AI Financial Overview — {summaryData?.company || yahooTicker}
+            </span>
+          </div>
+          {sumLoading ? (
+            <div className="flex items-center gap-2 py-3">
+              <div className="animate-spin h-3 w-3 border border-violet-400 border-t-transparent rounded-full" />
+              <span className="text-[10px] text-gray-500">Generating analysis...</span>
+            </div>
+          ) : summaryData?.summary ? (
+            <>
+              <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-line">{summaryData.summary}</p>
+              {summaryData.generated_at && (
+                <p className="text-[9px] text-gray-600 mt-2">Generated {dayjs(summaryData.generated_at).fromNow()}</p>
+              )}
+              {/* Key metrics row */}
+              {summaryData.metrics && (
+                <div className="flex flex-wrap gap-2 mt-2 pt-2 border-t border-gray-700/30">
+                  {summaryData.metrics.pe_ratio != null && (
+                    <span className="text-[10px] text-gray-400">P/E <span className="text-gray-200 font-mono">{Number(summaryData.metrics.pe_ratio).toFixed(1)}</span></span>
+                  )}
+                  {summaryData.metrics.dividend_yield != null && (
+                    <span className="text-[10px] text-gray-400">Yield <span className="text-green-400 font-mono">{(Number(summaryData.metrics.dividend_yield) * 100).toFixed(1)}%</span></span>
+                  )}
+                  {summaryData.metrics.revenue_growth != null && (
+                    <span className="text-[10px] text-gray-400">Rev Growth <span className={`font-mono ${Number(summaryData.metrics.revenue_growth) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{(Number(summaryData.metrics.revenue_growth) * 100).toFixed(1)}%</span></span>
+                  )}
+                  {summaryData.metrics.profit_margins != null && (
+                    <span className="text-[10px] text-gray-400">Margin <span className="text-gray-200 font-mono">{(Number(summaryData.metrics.profit_margins) * 100).toFixed(1)}%</span></span>
+                  )}
+                  {!!summaryData.metrics.recommendation && (
+                    <span className="text-[10px] text-gray-400">Consensus <span className="text-violet-300 font-semibold">{String(summaryData.metrics.recommendation).replace('_', ' ')}</span></span>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-gray-500">No financial data available.</p>
+          )}
+        </div>
+      )}
+
+      {/* Events timeline */}
+      {calLoading ? (
+        <SkeletonBlock className="h-[120px]" />
+      ) : pairEvents.length === 0 ? (
+        <p className="text-xs text-gray-500 py-4 text-center">No upcoming financial events within 90 days</p>
+      ) : (
+        <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-1 scrollbar-thin">
+          {pairEvents.map((ev, i) => (
+            <div key={`${ev.type}-${ev.ticker}-${ev.date}-${i}`}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${importanceColor(ev.importance)} transition-colors`}
+            >
+              <div className="flex-shrink-0">{typeIcon(ev.type)}</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-gray-200">
+                    {typeLabel(ev.type)}
+                    {ev.ticker && ` — ${ev.ticker}`}
+                  </span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                    ev.days_away <= 0 ? 'bg-red-900/30 text-red-400'
+                    : ev.days_away <= 7 ? 'bg-amber-900/30 text-amber-400'
+                    : 'bg-gray-800/50 text-gray-400'
+                  }`}>
+                    {ev.days_away <= 0 ? 'TODAY' : ev.days_away === 1 ? 'Tomorrow' : `${ev.days_away}d`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className="text-[10px] text-gray-500">{dayjs(ev.date).format('MMM DD, YYYY')}</span>
+                  {ev.type === 'earnings' && ev.details.eps_estimate != null && (
+                    <span className="text-[10px] text-gray-500">EPS Est: <span className="text-gray-300 font-mono">{Number(ev.details.eps_estimate).toFixed(2)}</span></span>
+                  )}
+                  {ev.type === 'dividend' && ev.details.yield_pct != null && (
+                    <span className="text-[10px] text-gray-500">Yield: <span className="text-green-400 font-mono">{Number(ev.details.yield_pct).toFixed(1)}%</span></span>
+                  )}
+                  {ev.type === 'dividend' && ev.details.annual_dividend != null && (
+                    <span className="text-[10px] text-gray-500">Div: <span className="text-gray-300 font-mono">{Number(ev.details.annual_dividend).toFixed(2)}</span></span>
+                  )}
+                  {ev.type === 'macro' && !!ev.details.event && (
+                    <span className="text-[10px] text-gray-500">{String(ev.details.event)}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Recent Predictions Table ───────────────────────────────────────────────
 
 function RecentPredictions({ data, selectedPair }: { data: PredictionAccuracyData; selectedPair?: string | null }) {
@@ -1835,7 +2020,12 @@ export default function Predictions() {
               <PredictionOverlayChart pair={selectedPair} expanded articles={newsData?.articles ?? []} />
             </ChartModal>
 
-            {/* Row 3: Trade History */}
+            {/* Row 3: Financial Calendar (equity only) */}
+            {classifyPair(selectedPair) === 'equity' && (
+              <FinancialCalendarPanel pair={selectedPair} />
+            )}
+
+            {/* Row 4: Trade History */}
             <PairTradeHistory pair={selectedPair} />
           </div>
         )}
