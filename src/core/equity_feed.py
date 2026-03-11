@@ -5,9 +5,9 @@ Provides real price data, OHLCV candles, and instrument discovery for
 IBClient paper mode so the analysis pipeline, universe scanner, and LLM
 screener actually have data to work with.
 
-Uses the Yahoo Finance v8 chart API directly via ``requests`` (no yfinance
-dependency needed).  This avoids the ``curl_cffi`` / ``fc.yahoo.com`` cookie
-issues that plague ``yfinance`` inside Docker containers.
+Uses the Yahoo Finance v8 chart API directly via ``requests`` for price/candle
+data, and ``yfinance``'s authenticated session for v10 quoteSummary (financial
+calendar, earnings, dividends) which requires crumb+cookie auth.
 
 This module is **only** used in paper mode.  Live IBKR uses ``ib_insync``.
 """
@@ -37,6 +37,28 @@ _HEADERS = {
     ),
 }
 _TIMEOUT = 15  # seconds
+
+# ── Authenticated Yahoo session (v10 quoteSummary requires crumb+cookie) ───
+
+_yfdata_lock = threading.Lock()
+_yfdata: Any = None
+
+
+def _get_yfdata():
+    """Lazy-init yfinance.data.YfData singleton for authenticated requests."""
+    global _yfdata
+    if _yfdata is not None:
+        return _yfdata
+    with _yfdata_lock:
+        if _yfdata is not None:
+            return _yfdata
+        try:
+            from yfinance.data import YfData
+            _yfdata = YfData(session=None)
+            return _yfdata
+        except Exception as e:
+            logger.debug(f"yfinance YfData init failed: {e}")
+            return None
 
 # ── Pair ↔ Ticker conversion helpers ─────────────────────────────────────
 
@@ -504,12 +526,15 @@ def _fetch_quote_summary(yahoo_ticker: str, modules: str) -> dict | None:
     if cached is not None:
         return cached
 
+    yd = _get_yfdata()
+    if not yd:
+        logger.debug("yfinance YfData unavailable — quoteSummary skipped")
+        return None
+
     try:
-        resp = _http.get(
-            f"{_SUMMARY_URL}/{yahoo_ticker}",
-            headers=_HEADERS,
+        resp = yd.get(
+            url=f"{_SUMMARY_URL}/{yahoo_ticker}",
             params={"modules": modules},
-            timeout=_TIMEOUT,
         )
         if resp.status_code != 200:
             logger.debug(f"Yahoo quoteSummary {resp.status_code} for {yahoo_ticker}")

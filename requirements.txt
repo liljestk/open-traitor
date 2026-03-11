@@ -62,6 +62,7 @@ websocket-client>=1.9.0
 
 # Utilities
 requests>=2.32.5
+yfinance>=0.2.50
 exchange_calendars>=4.5
 colorama>=0.4.6
 rich>=14.3.3
