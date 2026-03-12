@@ -179,8 +179,8 @@ async def check_openrouter_credits(api_key: str) -> dict[str, Any]:
                 "is_free_tier": is_free,
                 "label": data.get("label", ""),
             }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    except Exception:
+        return {"ok": False, "error": "Failed to check OpenRouter credits"}
 
 
 # ─── Provider dataclass ───────────────────────────────────────────────────────

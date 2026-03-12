@@ -164,7 +164,7 @@ def get_financial_calendar(
             "dividends": {},
             "macro": [],
             "earnings_season": {},
-            "error": str(e),
+            "error": "Failed to fetch financial calendar",
         }
 
 
