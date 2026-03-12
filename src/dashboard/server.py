@@ -243,25 +243,14 @@ app = FastAPI(
 
 # --- CORS ---------------------------------------------------------------
 
-_cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
-_cors_origins = (
-    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
-    or ["http://localhost:5173", "http://localhost:8090"]
-)
+# Allowed origins resolved in deps.py (shared with WebSocket origin validation)
+_cors_origins = deps.allowed_origins
 
 if not _AUTH_CONFIGURED:
     logger.warning(
         "⚠️  No authentication configured — the dashboard API is open to all network "
         "clients. Set DASHBOARD_PASSWORD_HASH or DASHBOARD_API_KEY to enable auth."
     )
-
-# CORS hardening: never allow wildcard origin (prevents credential leakage)
-if "*" in _cors_origins:
-    logger.error(
-        "⚠️ CORS wildcard '*' is not allowed — restricting to localhost origins. "
-        "Set DASHBOARD_CORS_ORIGINS to specific origins instead."
-    )
-    _cors_origins = ["http://localhost:5173", "http://localhost:8090"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -305,7 +294,7 @@ async def _security_headers_middleware(request: Request, call_next):
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "img-src 'self' data:; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self'; "
         "font-src 'self' https://fonts.gstatic.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "

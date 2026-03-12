@@ -947,3 +947,153 @@ class TestEnvFileInjection:
             assert "\n" not in reparsed.get("EXISTING_KEY", "")
         finally:
             os.unlink(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WebSocket security hardening
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWebSocketOriginValidation:
+    """Cross-Site WebSocket Hijacking (CSWSH) prevention."""
+
+    def test_ws_rejects_disallowed_origin(self, auth_client):
+        """WS from an evil origin should be closed with 1008."""
+        from starlette.websockets import WebSocketDisconnect as _WSD
+        with pytest.raises(_WSD):
+            with auth_client.websocket_connect(
+                "/ws/live",
+                headers={"Origin": "https://evil.example.com"},
+            ) as _ws:
+                pass
+
+    def test_ws_rejects_disallowed_origin_standalone(self):
+        """WS from a disallowed origin without auth configured."""
+        from fastapi.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect as _WSD
+        from src.dashboard.server import app
+        client = TestClient(app)
+        with pytest.raises(_WSD):
+            with client.websocket_connect(
+                "/ws/live",
+                headers={"Origin": "https://attacker.com"},
+            ) as _ws:
+                pass
+
+    def test_ws_allows_configured_origin(self):
+        """WS from a configured origin should connect."""
+        from fastapi.testclient import TestClient
+        from src.dashboard.server import app
+        client = TestClient(app)
+        with patch.object(deps, "allowed_origins", ["http://localhost:5173"]):
+            with client.websocket_connect(
+                "/ws/live",
+                headers={"Origin": "http://localhost:5173"},
+            ) as ws:
+                # Should connect; send a ping
+                data = ws.receive_json()
+                assert data["type"] == "ping"
+
+    def test_ws_allows_no_origin_header(self):
+        """Non-browser clients (no Origin header) should be allowed."""
+        from fastapi.testclient import TestClient
+        from src.dashboard.server import app
+        client = TestClient(app)
+        with client.websocket_connect("/ws/live") as ws:
+            data = ws.receive_json()
+            assert data["type"] == "ping"
+
+
+class TestWebSocketConnectionLimits:
+    """DoS prevention via connection rate limiting."""
+
+    def test_ws_enforces_max_per_ip(self):
+        """Exceeding MAX_WS_PER_IP from same IP should be rejected."""
+        from fastapi.testclient import TestClient
+        from src.dashboard.server import app
+        from src.dashboard.routes.websocket import _ws_ip_connections, _ws_ip_lock
+
+        client = TestClient(app)
+        with patch.object(deps, "MAX_WS_PER_IP", 2):
+            # Reset tracking
+            with _ws_ip_lock:
+                _ws_ip_connections.clear()
+            with client.websocket_connect("/ws/live") as ws1:
+                with client.websocket_connect("/ws/live") as ws2:
+                    # Third should be rejected
+                    with pytest.raises(Exception):
+                        with client.websocket_connect("/ws/live") as ws3:
+                            pass
+
+    def test_ws_enforces_global_cap(self):
+        """Exceeding MAX_WS_CONNECTIONS globally should be rejected."""
+        from fastapi.testclient import TestClient
+        from src.dashboard.server import app
+        from src.dashboard.routes.websocket import _ws_ip_connections, _ws_ip_lock
+
+        client = TestClient(app)
+        with patch.object(deps, "MAX_WS_CONNECTIONS", 1), \
+             patch.object(deps, "MAX_WS_PER_IP", 100):
+            with _ws_ip_lock:
+                _ws_ip_connections.clear()
+            deps.ws_connections.clear()
+            with client.websocket_connect("/ws/live") as ws1:
+                with pytest.raises(Exception):
+                    with client.websocket_connect("/ws/live") as ws2:
+                        pass
+
+
+class TestWebSocketAuthRateLimiting:
+    """Brute-force prevention on WS auth attempts."""
+
+    def test_ws_auth_failures_rate_limited(self):
+        """Rapid failed WS auth attempts should trigger rate limiting."""
+        from src.dashboard.routes.websocket import (
+            _check_ws_auth_rate, _record_ws_auth_failure,
+            _ws_auth_failures, _ws_auth_lock,
+        )
+        # Reset
+        with _ws_auth_lock:
+            _ws_auth_failures.clear()
+
+        test_ip = "192.168.1.99"
+        with patch.object(deps, "WS_AUTH_RATE_MAX", 3):
+            # First 3 should be allowed
+            for _ in range(3):
+                assert _check_ws_auth_rate(test_ip) is True
+                _record_ws_auth_failure(test_ip)
+            # 4th should be blocked
+            assert _check_ws_auth_rate(test_ip) is False
+
+    def test_ws_auth_rate_limit_resets_after_window(self):
+        """Rate limit should reset after the window expires."""
+        from src.dashboard.routes.websocket import (
+            _check_ws_auth_rate, _record_ws_auth_failure,
+            _ws_auth_failures, _ws_auth_lock,
+        )
+        with _ws_auth_lock:
+            _ws_auth_failures.clear()
+
+        test_ip = "192.168.1.100"
+        with patch.object(deps, "WS_AUTH_RATE_MAX", 2), \
+             patch.object(deps, "WS_AUTH_RATE_WINDOW", 1):
+            _record_ws_auth_failure(test_ip)
+            _record_ws_auth_failure(test_ip)
+            assert _check_ws_auth_rate(test_ip) is False
+            # Wait for window to expire
+            time.sleep(1.1)
+            assert _check_ws_auth_rate(test_ip) is True
+
+
+class TestCSPConnectSrc:
+    """CSP connect-src must not allow arbitrary WebSocket origins."""
+
+    def test_csp_does_not_allow_arbitrary_ws(self):
+        """CSP connect-src should be 'self' only, not 'ws: wss:'."""
+        from fastapi.testclient import TestClient
+        from src.dashboard.server import app
+        client = TestClient(app)
+        resp = client.get("/health")
+        csp = resp.headers.get("Content-Security-Policy", "")
+        assert "connect-src 'self'" in csp
+        assert "ws:" not in csp
+        assert "wss:" not in csp

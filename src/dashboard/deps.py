@@ -38,6 +38,21 @@ ibkr_exchange_client = None  # IBClient instance (optional, for IBKR price/news)
 
 ws_connections: list = []  # (WebSocket, exchange_filter)
 
+# WebSocket connection limits
+MAX_WS_CONNECTIONS: int = 50       # Global cap on concurrent WS connections
+MAX_WS_PER_IP: int = 10            # Max concurrent WS connections per IP
+WS_AUTH_RATE_WINDOW: int = 60      # Seconds for WS auth attempt rate limiting
+WS_AUTH_RATE_MAX: int = 10         # Max failed WS auth attempts per IP per window
+
+# Allowed origins (shared by CORS middleware + WebSocket origin validation)
+_cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
+allowed_origins: list[str] = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    or ["http://localhost:5173", "http://localhost:8090"]
+)
+if "*" in allowed_origins:
+    allowed_origins = ["http://localhost:5173", "http://localhost:8090"]
+
 rules_instance = None     # AbsoluteRules instance (optional, for runtime push)
 llm_client = None         # LLMClient instance (optional, for provider status)
 
