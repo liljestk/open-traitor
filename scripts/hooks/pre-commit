@@ -1,6 +1,9 @@
 #!/bin/sh
-# Pre-commit hook: run critical tests before allowing a commit.
+# Pre-commit hook: run critical tests + auto-bump semantic version.
 # Blocks the commit if any test fails — especially domain separation.
+#
+# Version auto-bumps patch on every commit. Use [minor] or [major] in
+# the commit message for bigger bumps (detected by commit-msg hook).
 #
 # To bypass in emergencies: git commit --no-verify
 #
@@ -31,4 +34,39 @@ if [ $SEC_EXIT -ne 0 ]; then
 fi
 
 echo "✅ Pre-commit checks passed."
+
+# --- Auto-bump semantic version -------------------------------------------
+# Determine bump level from the commit message (passed via -m flag).
+# We look for bump: markers on their own line (e.g. "bump: minor").
+# This avoids false positives from prose mentioning [minor] or [major].
+BUMP="patch"
+if [ -f .git/MERGE_MSG ]; then
+    # Merge commits — don't bump
+    exit 0
+fi
+
+# Check COMMIT_EDITMSG if it exists (interactive editor commits)
+if [ -f .git/COMMIT_EDITMSG ]; then
+    # Only match ^bump: major or ^bump: minor on its own line
+    if grep -qiE '^bump:\s*major' .git/COMMIT_EDITMSG 2>/dev/null; then
+        BUMP="major"
+    elif grep -qiE '^bump:\s*minor' .git/COMMIT_EDITMSG 2>/dev/null; then
+        BUMP="minor"
+    fi
+fi
+
+OLD_VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0")
+NEW_VERSION=$(python scripts/bump_version.py "$BUMP" 2>&1)
+BUMP_EXIT=$?
+
+if [ $BUMP_EXIT -ne 0 ]; then
+    echo "⚠️  Version bump failed: $NEW_VERSION"
+else
+    echo "📦 Version: $OLD_VERSION → $NEW_VERSION ($BUMP)"
+    git add VERSION
+    if [ -f dashboard/frontend/package.json ]; then
+        git add dashboard/frontend/package.json
+    fi
+fi
+
 exit 0

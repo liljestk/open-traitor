@@ -46,12 +46,42 @@ WS_AUTH_RATE_MAX: int = 10         # Max failed WS auth attempts per IP per wind
 
 # Allowed origins (shared by CORS middleware + WebSocket origin validation)
 _cors_origins_raw = os.environ.get("DASHBOARD_CORS_ORIGINS", "")
-allowed_origins: list[str] = (
-    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
-    or ["http://localhost:5173", "http://localhost:8090"]
-)
-if "*" in allowed_origins:
-    allowed_origins = ["http://localhost:5173", "http://localhost:8090"]
+_cors_origins_explicit = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
+
+def _build_allowed_origins() -> list[str]:
+    """Build the full allowed-origins list.
+
+    Starts with user-configured origins (or localhost defaults), then
+    auto-adds the machine's `<hostname>.local` and Tailscale MagicDNS
+    origins so LAN / tailnet dashboard access works without manual config.
+    """
+    import socket
+
+    base = _cors_origins_explicit or ["http://localhost:5173", "http://localhost:8090"]
+    if "*" in base:
+        base = ["http://localhost:5173", "http://localhost:8090"]
+
+    tailnet = os.environ.get("TAILSCALE_DOMAIN", "tailc4de35.ts.net")
+    dashboard_ports = ["5173", "8090"]
+
+    try:
+        hostname = socket.gethostname().lower()
+    except Exception:
+        return base
+
+    extra: list[str] = []
+    for suffix in [f"{hostname}.local", f"{hostname}.{tailnet}"]:
+        for port in dashboard_ports:
+            for scheme in ["http", "https"]:
+                origin = f"{scheme}://{suffix}:{port}"
+                if origin not in base:
+                    extra.append(origin)
+
+    return base + extra
+
+
+allowed_origins: list[str] = _build_allowed_origins()
 
 rules_instance = None     # AbsoluteRules instance (optional, for runtime push)
 llm_client = None         # LLMClient instance (optional, for provider status)
