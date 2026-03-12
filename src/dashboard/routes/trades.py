@@ -233,7 +233,7 @@ def _sync_ibkr_orders(client, db, exchange: str) -> dict:
         fills = ib.fills()
     except Exception as e:
         logger.warning(f"IBKR fills() failed: {e}")
-        return {"synced": 0, "total_exchange": 0, "error": str(e)}
+        return {"synced": 0, "total_exchange": 0, "error": "IBKR trade sync failed"}
 
     synced = 0
     for fill in fills:

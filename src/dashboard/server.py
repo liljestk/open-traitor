@@ -382,9 +382,10 @@ if _STATIC_DIR.is_dir():
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
         # Serve actual static files (logo.png, favicon.ico, etc.)
-        static_file = _STATIC_DIR / full_path
-        if full_path and static_file.is_file() and _STATIC_DIR in static_file.resolve().parents:
-            return FileResponse(str(static_file))
+        if full_path:
+            resolved = (_STATIC_DIR / full_path).resolve()
+            if resolved.is_file() and str(resolved).startswith(str(_STATIC_DIR.resolve())):
+                return FileResponse(str(resolved))
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))

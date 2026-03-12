@@ -69,7 +69,8 @@ def get_learning_status(db=Depends(deps.get_profile_db)):
             "total_errors": errors["cnt"] if errors else 0,
         }
     except Exception as e:
-        return {"enabled": False, "subsystems": {}, "error": str(e)}
+        logger.warning(f"Learning overview error: {e}")
+        return {"enabled": False, "subsystems": {}, "error": "Failed to load learning overview"}
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,8 @@ def get_accuracy_trends(
             ],
         }
     except Exception as e:
-        return {"days": days, "data": [], "error": str(e)}
+        logger.warning(f"Accuracy trends error: {e}")
+        return {"days": days, "data": [], "error": "Failed to load accuracy trends"}
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +156,8 @@ def get_ensemble_weights(db=Depends(deps.get_profile_db)):
             "history": [dict(r) for r in history],
         }
     except Exception as e:
-        return {"active": [], "history": [], "error": str(e)}
+        logger.warning(f"Ensemble weights error: {e}")
+        return {"active": [], "history": [], "error": "Failed to load ensemble weights"}
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +208,8 @@ def get_calibration_data(db=Depends(deps.get_profile_db)):
             "models": [dict(r) for r in models],
         }
     except Exception as e:
-        return {"curve": [], "models": [], "error": str(e)}
+        logger.warning(f"Calibration data error: {e}")
+        return {"curve": [], "models": [], "error": "Failed to load calibration data"}
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +248,8 @@ def get_lessons(db=Depends(deps.get_profile_db)):
             "deactivated": [dict(r) for r in deactivated],
         }
     except Exception as e:
-        return {"active": [], "deactivated": [], "error": str(e)}
+        logger.warning(f"Lessons error: {e}")
+        return {"active": [], "deactivated": [], "error": "Failed to load lessons"}
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +279,8 @@ def get_wfo_promotions(
 
         return {"promotions": [dict(r) for r in rows]}
     except Exception as e:
-        return {"promotions": [], "error": str(e)}
+        logger.warning(f"WFO promotions error: {e}")
+        return {"promotions": [], "error": "Failed to load WFO promotions"}
 
 
 # ---------------------------------------------------------------------------
@@ -303,4 +309,5 @@ def get_finetune_exports(
 
         return {"exports": [dict(r) for r in rows]}
     except Exception as e:
-        return {"exports": [], "error": str(e)}
+        logger.warning(f"Finetune exports error: {e}")
+        return {"exports": [], "error": "Failed to load finetune exports"}

@@ -20,7 +20,7 @@ _CRYPTO_QUOTES = frozenset({
 })
 
 # Regex: two alpha-numeric segments separated by one of - / :
-_PAIR_RE = re.compile(r"^([A-Z0-9]{2,10})\s*[-/: ]\s*([A-Z0-9]{2,10})$", re.IGNORECASE)
+_PAIR_RE = re.compile(r"^([A-Z0-9]{2,10})[-/: ]([A-Z0-9]{2,10})$", re.IGNORECASE)
 
 
 def parse_pair(pair: str) -> Tuple[str, str]:
