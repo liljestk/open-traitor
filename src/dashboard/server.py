@@ -230,10 +230,12 @@ async def lifespan(application: FastAPI):
 # Auth configuration check
 _AUTH_CONFIGURED: bool = auth.is_auth_configured()
 
+from src import __version__ as _app_version
+
 app = FastAPI(
     title="OpenTraitor Dashboard API",
     description="LLM traceability and playback for the autonomous trading agent",
-    version="1.0.0",
+    version=_app_version,
     lifespan=lifespan,
     # Disable OpenAPI docs when auth is configured (production mode)
     docs_url=None if _AUTH_CONFIGURED else "/docs",
