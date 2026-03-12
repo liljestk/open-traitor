@@ -375,19 +375,14 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 if _STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR / "assets")), name="assets")
+    # Serve top-level static files (logo.png, favicon.ico, etc.) via StaticFiles
+    app.mount("/static-root", StaticFiles(directory=str(_STATIC_DIR)), name="static-root")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        """Catch-all: serve static files first, then fall back to index.html for SPA routing."""
+        """Catch-all: fall back to index.html for SPA client-side routing."""
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
-        # Serve actual static files (logo.png, favicon.ico, etc.)
-        # Reject path traversal attempts before any filesystem access
-        if full_path and ".." not in full_path.split("/") and "\\" not in full_path:
-            safe_root = _STATIC_DIR.resolve()
-            candidate = (safe_root / full_path).resolve()
-            if str(candidate).startswith(str(safe_root) + os.sep) and candidate.is_file():
-                return FileResponse(str(candidate))
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))
