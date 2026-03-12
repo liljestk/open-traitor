@@ -37,8 +37,8 @@ echo "✅ Pre-commit checks passed."
 
 # --- Auto-bump semantic version -------------------------------------------
 # Determine bump level from the commit message (passed via -m flag).
-# The pre-commit hook doesn't have COMMIT_EDITMSG yet, so we parse the
-# the commit message from the process command line.
+# We look for bump: markers on their own line (e.g. "bump: minor").
+# This avoids false positives from prose mentioning [minor] or [major].
 BUMP="patch"
 if [ -f .git/MERGE_MSG ]; then
     # Merge commits — don't bump
@@ -47,11 +47,12 @@ fi
 
 # Check COMMIT_EDITMSG if it exists (interactive editor commits)
 if [ -f .git/COMMIT_EDITMSG ]; then
-    MSG=$(cat .git/COMMIT_EDITMSG)
-    case "$MSG" in
-        *\[major\]*) BUMP="major" ;;
-        *\[minor\]*) BUMP="minor" ;;
-    esac
+    # Only match ^bump: major or ^bump: minor on its own line
+    if grep -qiE '^bump:\s*major' .git/COMMIT_EDITMSG 2>/dev/null; then
+        BUMP="major"
+    elif grep -qiE '^bump:\s*minor' .git/COMMIT_EDITMSG 2>/dev/null; then
+        BUMP="minor"
+    fi
 fi
 
 OLD_VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0")
