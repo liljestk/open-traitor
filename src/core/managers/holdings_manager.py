@@ -8,6 +8,7 @@ in its constructor (same pattern as PipelineManager / StateManager).
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -26,10 +27,15 @@ logger = get_logger("core.holdings_manager")
 class HoldingsManager:
     """Live Coinbase account snapshot, holdings refresh, and position reconciliation."""
 
+    # Suppress repeated drift alerts for the same currency (1-hour cooldown)
+    _DRIFT_ALERT_COOLDOWN: float = 3600.0  # seconds
+
     def __init__(self, orchestrator: "Orchestrator"):
         self.orchestrator = orchestrator
         # H6 fix: Prevent concurrent maybe_refresh_holdings calls
         self._refresh_lock = threading.Lock()
+        # Track last drift alert time per currency to avoid Telegram spam
+        self._drift_alert_times: dict[str, float] = {}
 
     # =========================================================================
     # Live Coinbase Snapshot
@@ -337,6 +343,77 @@ class HoldingsManager:
                 logger.debug(f"Trailing stop for external {pair} failed: {e}")
 
     # =========================================================================
+    # Reconciliation Helpers
+    # =========================================================================
+
+    @staticmethod
+    def _sync_trade_filled_qty(orch: "Orchestrator", currency: str, actual_qty: float) -> None:
+        """Update open buy-trade filled_quantity values to match exchange reality.
+
+        Distributes the actual quantity proportionally across all open buy
+        trades for *currency* so subsequent reconciliation cycles won't
+        re-flag the same drift.
+        """
+        buy_trades = [
+            t for t in orch.state.get_open_trades()
+            if t.action.value == "buy"
+            and "-" in t.pair
+            and t.pair.split("-", 1)[0] == currency
+        ]
+        if not buy_trades:
+            return
+
+        total_expected = sum((t.filled_quantity or t.quantity) for t in buy_trades)
+        if total_expected <= 0:
+            return
+
+        for t in buy_trades:
+            share = (t.filled_quantity or t.quantity) / total_expected
+            t.filled_quantity = actual_qty * share
+
+    @staticmethod
+    def _auto_close_zero_balance_trades(
+        orch: "Orchestrator", currency: str, pair: str, d: dict
+    ) -> None:
+        """Close all open buy trades for a currency whose actual balance is zero.
+
+        The position was likely sold or transferred externally.
+        """
+        buy_trades = [
+            t for t in orch.state.get_open_trades()
+            if t.action.value == "buy"
+            and "-" in t.pair
+            and t.pair.split("-", 1)[0] == currency
+        ]
+        for t in buy_trades:
+            try:
+                orch.state.close_trade(t.id, close_price=0.0, fees=0.0)
+            except Exception:
+                pass
+
+        # Clean up position tracking
+        orch.state.reconcile_position(
+            pair=pair, actual_qty=0.0, current_price=0.0,
+            reason="zero_balance_auto_close",
+        )
+
+        msg = (
+            f"🔄 Auto-closed {currency}: balance is 0 on exchange "
+            f"(expected={d['expected']:.6f}). "
+            f"{len(buy_trades)} trade(s) closed."
+        )
+        logger.warning(msg)
+        orch.audit.log_rule_check(
+            "position_reconciliation", passed=False, details=msg,
+        )
+        orch.stats_db.record_event(
+            event_type="reconciliation", message=msg,
+            severity="warning", pair=pair, data=d,
+        )
+        if orch.telegram:
+            orch.telegram.send_alert(msg)
+
+    # =========================================================================
     # Position Reconciliation
     # =========================================================================
 
@@ -388,6 +465,13 @@ class HoldingsManager:
                     # Reconstruct the original pair using config quote currency
                     pair = base_to_pair.get(currency, f"{currency}-{default_quote}")
 
+                    # ── Auto-close trades when actual balance is zero ──
+                    if actual_qty < 1e-8:
+                        self._auto_close_zero_balance_trades(
+                            orch, currency, pair, d
+                        )
+                        continue
+
                     # C2 fix: Use state.reconcile_position() instead of direct _lock access
                     # to maintain atomic cash/position accounting
                     try:
@@ -400,6 +484,9 @@ class HoldingsManager:
                         current_price=current_price,
                         reason="position_drift",
                     )
+
+                    # ── Update trade filled_quantity so drift doesn't recur ──
+                    self._sync_trade_filled_qty(orch, currency, actual_qty)
 
                     msg = (
                         f"⚠️ Position drift corrected: {currency} "
@@ -421,8 +508,13 @@ class HoldingsManager:
                         pair=pair,
                         data=d,
                     )
+                    # ── Suppress repeated Telegram alerts (1h cooldown) ──
                     if orch.telegram:
-                        orch.telegram.send_alert(msg)
+                        now = time.monotonic()
+                        last = self._drift_alert_times.get(currency, 0.0)
+                        if now - last >= self._DRIFT_ALERT_COOLDOWN:
+                            self._drift_alert_times[currency] = now
+                            orch.telegram.send_alert(msg)
             else:
                 logger.debug("✅ Position reconciliation: no discrepancies")
 
