@@ -1,0 +1,44 @@
+#!/bin/sh
+# Commit-msg hook: re-bump version if [minor] or [major] was in the message.
+#
+# The pre-commit hook always does a patch bump. If the commit message
+# contains [minor] or [major], this hook corrects the version.
+#
+# Install: cp scripts/hooks/commit-msg .git/hooks/commit-msg
+
+MSG=$(cat "$1")
+BUMP=""
+
+case "$MSG" in
+    *\[major\]*) BUMP="major" ;;
+    *\[minor\]*) BUMP="minor" ;;
+esac
+
+# Only act if a non-patch bump is needed (pre-commit already did patch)
+if [ -n "$BUMP" ]; then
+    # Undo the patch bump, apply the correct one
+    # Read current version (already bumped by pre-commit)
+    CURRENT=$(cat VERSION 2>/dev/null || echo "1.0.1")
+    # Parse to undo the patch bump: decrement patch, then apply correct bump
+    MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+    MINOR=$(echo "$CURRENT" | cut -d. -f2)
+    PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+    # Undo the patch bump from pre-commit
+    if [ "$PATCH" -gt 0 ]; then
+        PATCH=$((PATCH - 1))
+    fi
+    printf "%d.%d.%d\n" "$MAJOR" "$MINOR" "$PATCH" > VERSION
+
+    # Now apply the correct bump
+    NEW_VERSION=$(python scripts/bump_version.py "$BUMP" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "📦 Version corrected to $NEW_VERSION ($BUMP)"
+        git add VERSION
+        if [ -f dashboard/frontend/package.json ]; then
+            git add dashboard/frontend/package.json
+        fi
+    fi
+fi
+
+exit 0

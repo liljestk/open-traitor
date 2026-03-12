@@ -2,10 +2,8 @@
 # Pre-commit hook: run critical tests + auto-bump semantic version.
 # Blocks the commit if any test fails — especially domain separation.
 #
-# Version bump logic:
-#   - Commit message contains [major] → major bump (1.2.3 → 2.0.0)
-#   - Commit message contains [minor] → minor bump (1.2.3 → 1.3.0)
-#   - Otherwise → patch bump (1.2.3 → 1.2.4)
+# Version auto-bumps patch on every commit. Use [minor] or [major] in
+# the commit message for bigger bumps (detected by commit-msg hook).
 #
 # To bypass in emergencies: git commit --no-verify
 #
@@ -38,9 +36,16 @@ fi
 echo "✅ Pre-commit checks passed."
 
 # --- Auto-bump semantic version -------------------------------------------
-# Determine bump level from the pending commit message.
-# git commit stores the message in .git/COMMIT_EDITMSG during the hook.
+# Determine bump level from the commit message (passed via -m flag).
+# The pre-commit hook doesn't have COMMIT_EDITMSG yet, so we parse the
+# the commit message from the process command line.
 BUMP="patch"
+if [ -f .git/MERGE_MSG ]; then
+    # Merge commits — don't bump
+    exit 0
+fi
+
+# Check COMMIT_EDITMSG if it exists (interactive editor commits)
 if [ -f .git/COMMIT_EDITMSG ]; then
     MSG=$(cat .git/COMMIT_EDITMSG)
     case "$MSG" in
@@ -55,10 +60,8 @@ BUMP_EXIT=$?
 
 if [ $BUMP_EXIT -ne 0 ]; then
     echo "⚠️  Version bump failed: $NEW_VERSION"
-    # Non-fatal — don't block the commit over a version bump issue
 else
     echo "📦 Version: $OLD_VERSION → $NEW_VERSION ($BUMP)"
-    # Stage the bumped files so they're included in this commit
     git add VERSION
     if [ -f dashboard/frontend/package.json ]; then
         git add dashboard/frontend/package.json
