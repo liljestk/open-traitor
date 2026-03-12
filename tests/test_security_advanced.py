@@ -139,7 +139,7 @@ class TestTOTP:
         secret = pyotp.random_base32()
         uri = generate_totp_qr_uri(secret=secret, account="test@example.com")
         assert uri.startswith("otpauth://totp/")
-        assert "test@example.com" in uri
+        assert "test@example.com" in uri or "test%40example.com" in uri
         assert secret in uri
 
     def test_totp_qr_uri_raises_without_secret(self):
