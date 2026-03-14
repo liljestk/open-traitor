@@ -460,6 +460,37 @@ class PipelineManager:
         except Exception as e:
             logger.debug(f"Kelly stats unavailable: {e}")
 
+        # Supplement with backtest data when live sample is too small
+        if kelly_stats.get("sample_size", 0) < 20:
+            try:
+                bt_stats = await asyncio.to_thread(
+                    orch.stats_db.get_backtest_kelly_stats, pair, exchange=exchange_name
+                )
+                if bt_stats.get("sample_size", 0) > 0 and bt_stats.get("win_rate", 0) > 0:
+                    live_n = kelly_stats.get("sample_size", 0)
+                    bt_n = bt_stats["sample_size"]
+                    if live_n == 0:
+                        # No live data — use backtest entirely
+                        kelly_stats = bt_stats
+                    else:
+                        # Blend: weight live data more heavily (2x weight per trade)
+                        live_w = live_n * 2
+                        bt_w = bt_n
+                        total_w = live_w + bt_w
+                        kelly_stats = {
+                            "win_rate": (kelly_stats["win_rate"] * live_w + bt_stats["win_rate"] * bt_w) / total_w,
+                            "avg_win": (kelly_stats["avg_win"] * live_w + bt_stats["avg_win"] * bt_w) / total_w,
+                            "avg_loss": (kelly_stats["avg_loss"] * live_w + bt_stats["avg_loss"] * bt_w) / total_w,
+                            "sample_size": live_n,
+                            "backtest_supplemented": True,
+                        }
+                    logger.info(
+                        f"Kelly supplemented with backtest data for {pair}: "
+                        f"live_n={live_n}, bt_n={bt_n}, blended_wr={kelly_stats['win_rate']:.2f}"
+                    )
+            except Exception as e:
+                logger.debug(f"Backtest Kelly supplement unavailable for {pair}: {e}")
+
         recent_outcomes = ""
         try:
             _outcomes_n = llm_optimizer.get("recent_outcomes_n", 10)
@@ -910,6 +941,12 @@ class PipelineManager:
                 # For sells the quote_amount is the actual proceeds
                 _quote_amount = float(_filled_price) * float(_filled_qty)
             try:
+                # Compute deterministic entry_score from ensemble for feedback loop
+                _entry_score = None
+                _ens = strategy_signals.get("_ensemble")
+                if _ens and isinstance(_ens, dict):
+                    _entry_score = _ens.get("confidence")
+
                 stats_trade_id = await asyncio.to_thread(
                     orch.stats_db.record_trade,
                     pair=risk_result.get('pair', pair),
@@ -924,6 +961,7 @@ class PipelineManager:
                     reasoning=risk_result.get('reasoning', ''),
                     fee_quote=float(_fee),
                     exchange=exchange_name,
+                    entry_score=_entry_score,
                 )
             except Exception as e:
                 logger.debug(f"Failed to record trade in StatsDB: {e}")

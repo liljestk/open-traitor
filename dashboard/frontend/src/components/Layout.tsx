@@ -29,6 +29,7 @@ const NAV = [
       { to: '/predictions', icon: <Crosshair size={16} />, label: 'Predictions' },
       { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
+      { to: '/backtesting', icon: <Zap size={16} />, label: 'Backtesting' },
     ]
   },
   {
@@ -67,6 +68,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/news': 'News Feed',
   '/planning': 'Planning Audit',
   '/settings': 'Settings',
+  '/backtesting': 'Backtesting',
 }
 
 export default function Layout() {

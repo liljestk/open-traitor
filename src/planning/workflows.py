@@ -32,6 +32,8 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.planning.activities import (
         evaluate_previous_plan,
+        fetch_backtest_summary,
+        fetch_score_divergence,
         fetch_trade_history,
         fetch_portfolio_history,
         call_planning_llm,
@@ -40,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_pair_universe,
         fetch_universe_scan_summary,
         fetch_equity_events,
+        run_nightly_backtests,
     )
 
 
@@ -102,6 +105,24 @@ class DailyPlanWorkflow:
         )
         portfolio_data["equity_events"] = equity_events
         portfolio_data["domain"] = equity_events.get("domain", "crypto")
+
+        # Backtest insights: recent simulation results per pair
+        backtest_summary = await workflow.execute_activity(
+            fetch_backtest_summary,
+            args=[profile],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        portfolio_data["backtest_summary"] = backtest_summary
+
+        # Score divergence: live entry_score vs backtest threshold
+        score_divergence = await workflow.execute_activity(
+            fetch_score_divergence,
+            args=[profile],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        portfolio_data["score_divergence"] = score_divergence
 
         plan = await workflow.execute_activity(
             call_planning_llm,
@@ -205,6 +226,15 @@ class WeeklyReviewWorkflow:
         review_data["equity_events"] = equity_events
         review_data["domain"] = equity_events.get("domain", "crypto")
 
+        # Backtest insights: recent simulation results per pair
+        backtest_summary = await workflow.execute_activity(
+            fetch_backtest_summary,
+            args=[profile],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        review_data["backtest_summary"] = backtest_summary
+
         plan = await workflow.execute_activity(
             call_planning_llm,
             args=["weekly", review_data],
@@ -274,6 +304,15 @@ class MonthlyReviewWorkflow:
         review_data["equity_events"] = equity_events
         review_data["domain"] = equity_events.get("domain", "crypto")
 
+        # Backtest insights: recent simulation results per pair
+        backtest_summary = await workflow.execute_activity(
+            fetch_backtest_summary,
+            args=[profile],
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_RETRY,
+        )
+        review_data["backtest_summary"] = backtest_summary
+
         plan = await workflow.execute_activity(
             call_planning_llm,
             args=["monthly", review_data],
@@ -292,3 +331,30 @@ class MonthlyReviewWorkflow:
 
         workflow.logger.info(f"MonthlyReviewWorkflow: complete --- {summary[:100]}")
         return plan
+
+
+@workflow.defn
+class NightlyBacktestWorkflow:
+    """
+    Nightly backtest runner: runs 30-day backtests on all followed pairs,
+    saves results to backtest_runs for the daily planning prompt.
+
+    Cron: '0 2 * * *' (2 AM UTC, every day)
+    """
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"NightlyBacktestWorkflow: starting (profile={profile!r})")
+
+        result = await workflow.execute_activity(
+            run_nightly_backtests,
+            args=[profile],
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=_RETRY,
+        )
+
+        workflow.logger.info(
+            f"NightlyBacktestWorkflow: complete — "
+            f"{result.get('saved', 0)}/{result.get('ran', 0)} pairs backtested"
+        )
+        return result

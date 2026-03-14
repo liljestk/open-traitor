@@ -26,6 +26,12 @@ DEFAULT_REVIEW_INTERVAL = 10   # every 10 pipeline cycles
 MAX_CHANGES_PER_REVIEW = 8    # limit fields the LLM can touch per review
 MIN_CONFIDENCE_TO_ACT = 0.5   # below this, proposals are logged but skipped
 
+# Backtest validation thresholds
+_BT_SHARPE_DEGRADE_LIMIT = 0.20   # reject if Sharpe drops >20%
+_BT_DRAWDOWN_INCREASE_LIMIT = 0.50  # reject if max_drawdown increases >50%
+_BT_VALIDATION_DAYS = 30             # use last 30 days of data
+_BT_RISK_FIELDS = {"stop_loss_pct", "trailing_stop_pct", "take_profit_pct", "entry_threshold"}
+
 
 SETTINGS_ADVISOR_SYSTEM_PROMPT = """You are a trading parameter advisor. Review market conditions and performance, then recommend parameter adjustments.
 
@@ -314,6 +320,17 @@ class SettingsAdvisorAgent(BaseAgent):
                 by_section.setdefault(sec, {})[field] = value
                 change_reasons[f"{sec}.{field}"] = reason
 
+        # ── Backtest validation for risk parameters ──────────────────
+        if "risk" in by_section:
+            surviving, bt_rejected = self._validate_risk_via_backtest(
+                by_section["risk"], exchange
+            )
+            rejected.extend(bt_rejected)
+            if surviving:
+                by_section["risk"] = surviving
+            else:
+                del by_section["risk"]
+
         for section, updates in by_section.items():
             ok, errors, clamped = sm.validate_autonomous_update(section, updates)
             if not ok:
@@ -379,6 +396,118 @@ class SettingsAdvisorAgent(BaseAgent):
                 self.logger.debug(f"Failed to save settings_advisor trace: {e}")
 
         return result
+
+    # ── Backtest validation ──────────────────────────────────────────────
+
+    def _validate_risk_via_backtest(
+        self,
+        risk_updates: dict[str, Any],
+        exchange: str,
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """Run a quick backtest with proposed risk params vs current params.
+
+        Returns (surviving_updates, rejected_list).
+        If the proposed params degrade Sharpe by >20% or increase max drawdown
+        by >50%, those specific fields are rejected.
+        """
+        if not risk_updates:
+            return risk_updates, []
+
+        # Only validate risk-related fields that affect backtest outcomes
+        bt_fields = {k: v for k, v in risk_updates.items() if k in _BT_RISK_FIELDS}
+        if not bt_fields:
+            return risk_updates, []
+
+        try:
+            from src.backtesting.engine import BacktestEngine
+            from src.backtesting.candle_fetch import fetch_candles, is_equity_pair
+
+            # Pick a representative pair to test on
+            pairs = self.config.get("trading", {}).get("pairs", [])
+            if not pairs:
+                return risk_updates, []
+
+            test_pair = pairs[0]
+            is_equity = is_equity_pair(test_pair)
+
+            candles = fetch_candles(test_pair, _BT_VALIDATION_DAYS, is_equity)
+            if len(candles) < 100:
+                logger.info("📋 Settings Advisor: not enough candles for backtest validation, skipping")
+                return risk_updates, []
+
+            # Baseline: run with current config
+            baseline_engine = BacktestEngine(self.config)
+            baseline_result = baseline_engine.run(candles, pair=test_pair)
+
+            if baseline_result.total_trades == 0:
+                logger.info("📋 Settings Advisor: baseline backtest had 0 trades, skipping validation")
+                return risk_updates, []
+
+            # Proposed: run with modified risk params
+            proposed_config = dict(self.config)
+            proposed_risk = dict(proposed_config.get("risk", {}))
+            proposed_risk.update(bt_fields)
+            proposed_config["risk"] = proposed_risk
+
+            proposed_engine = BacktestEngine(proposed_config)
+            proposed_result = proposed_engine.run(candles, pair=test_pair)
+
+            # Compare
+            rejected: list[dict] = []
+
+            base_sharpe = baseline_result.sharpe_ratio or 0
+            prop_sharpe = proposed_result.sharpe_ratio or 0
+            base_dd = baseline_result.max_drawdown_pct or 0
+            prop_dd = proposed_result.max_drawdown_pct or 0
+
+            sharpe_degraded = (
+                base_sharpe > 0
+                and prop_sharpe < base_sharpe * (1 - _BT_SHARPE_DEGRADE_LIMIT)
+            )
+            dd_increased = (
+                base_dd > 0
+                and prop_dd > base_dd * (1 + _BT_DRAWDOWN_INCREASE_LIMIT)
+            )
+
+            if sharpe_degraded or dd_increased:
+                reason_parts = []
+                if sharpe_degraded:
+                    reason_parts.append(
+                        f"Sharpe degraded {base_sharpe:.2f}→{prop_sharpe:.2f}"
+                    )
+                if dd_increased:
+                    reason_parts.append(
+                        f"MaxDD increased {base_dd:.1f}%→{prop_dd:.1f}%"
+                    )
+                reason = "; ".join(reason_parts)
+
+                for field in bt_fields:
+                    rejected.append({
+                        "section": "risk",
+                        "field": field,
+                        "value": bt_fields[field],
+                        "reason": f"Backtest validation failed: {reason}",
+                    })
+
+                logger.warning(
+                    f"🚫 Settings Advisor backtest gate: rejected risk changes "
+                    f"({reason}) on {test_pair}"
+                )
+
+                # Remove rejected fields from updates
+                surviving = {k: v for k, v in risk_updates.items() if k not in bt_fields}
+                return surviving, rejected
+
+            logger.info(
+                f"✅ Settings Advisor backtest validation passed on {test_pair}: "
+                f"Sharpe {base_sharpe:.2f}→{prop_sharpe:.2f}, "
+                f"MaxDD {base_dd:.1f}%→{prop_dd:.1f}%"
+            )
+            return risk_updates, []
+
+        except Exception as e:
+            logger.warning(f"Backtest validation error (allowing changes): {e}")
+            return risk_updates, []
 
 
 # ═══════════════════════════════════════════════════════════════════════════

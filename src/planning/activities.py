@@ -209,6 +209,67 @@ def _execute(conn, sql, params=None):
 # --- Activities ---------------------------------------------------------------
 
 @activity.defn
+async def fetch_backtest_summary(profile: str = "") -> dict:
+    """Fetch recent backtest results per pair for planning context.
+
+    Returns a dict with top-performing and worst-performing pairs based on
+    the most recent backtest run per pair, plus aggregate stats.
+    Only considers runs from the last 30 days with at least 1 trade.
+    """
+    _exch_frag = ""
+    _exch_params: tuple = ()
+    if profile:
+        _resolved = profile.lower()
+        if _resolved in ("crypto",):
+            _resolved = "coinbase"
+        _exch_frag = " AND (exchange = %s OR exchange = %s)"
+        _exch_params = (_resolved, f"{_resolved}_paper")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+    with _get_conn() as conn:
+        # Check if backtest_runs table exists
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'backtest_runs')"
+        )
+        if not cur.fetchone()[0]:
+            return {"available": False, "pairs": []}
+
+        # Get the most recent run per pair (with trades > 0)
+        rows = _execute(conn,
+            f"""SELECT DISTINCT ON (pair)
+                    pair, days, total_return_pct, sharpe_ratio, win_rate,
+                    total_trades, max_drawdown_pct, alpha, run_ts
+                FROM backtest_runs
+                WHERE run_ts >= %s AND total_trades > 0{_exch_frag}
+                ORDER BY pair, run_ts DESC""",
+            (cutoff, *_exch_params),
+        ).fetchall()
+
+        if not rows:
+            return {"available": True, "pairs": []}
+
+        pairs = [dict(r) for r in rows]
+        pairs.sort(key=lambda r: r.get("sharpe_ratio") or 0, reverse=True)
+
+        return {
+            "available": True,
+            "pairs": pairs,
+            "top_performers": [
+                p["pair"] for p in pairs[:5]
+                if (p.get("sharpe_ratio") or 0) > 0 and (p.get("total_return_pct") or 0) > 0
+            ],
+            "worst_performers": [
+                p["pair"] for p in pairs
+                if (p.get("sharpe_ratio") or 0) < 0 or (p.get("total_return_pct") or 0) < -1
+            ][:5],
+            "avg_sharpe": sum(p.get("sharpe_ratio") or 0 for p in pairs) / len(pairs),
+            "avg_win_rate": sum(p.get("win_rate") or 0 for p in pairs) / len(pairs),
+        }
+
+
+@activity.defn
 async def fetch_trade_history(days: int = 7, pair: str | None = None, profile: str = "") -> list[dict]:
     """Fetch closed trade history from StatsDB for the planning LLM."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -603,6 +664,56 @@ Respond ONLY with JSON:
         if lines:
             equity_events_block = "\nFORWARD-LOOKING EVENTS (next 60 days):\n" + "\n".join(lines) + "\n"
 
+    # ── Backtest insights block ────────────────────────────────────────────
+    backtest_block = ""
+    bt_data = review_data.get("backtest_summary", {})
+    if bt_data.get("available") and bt_data.get("pairs"):
+        bt_pairs = bt_data["pairs"]
+        bt_lines = []
+        for p in bt_pairs[:10]:
+            bt_lines.append(
+                f"  {p['pair']}: return={p.get('total_return_pct', 0):+.2f}% "
+                f"sharpe={p.get('sharpe_ratio', 0):.2f} "
+                f"win_rate={p.get('win_rate', 0):.0f}% "
+                f"trades={p.get('total_trades', 0)} "
+                f"max_dd={p.get('max_drawdown_pct', 0):.1f}% "
+                f"alpha={p.get('alpha', 0):+.2f}% "
+                f"({p.get('days', '?')}d test)"
+            )
+        bt_text = "\n".join(bt_lines)
+        top = bt_data.get("top_performers", [])
+        worst = bt_data.get("worst_performers", [])
+        backtest_block = (
+            f"\nBACKTEST INSIGHTS (recent simulations on historical data):\n"
+            f"  Avg Sharpe: {bt_data.get('avg_sharpe', 0):.2f} | "
+            f"Avg Win Rate: {bt_data.get('avg_win_rate', 0):.0f}%\n"
+            + (f"  Top performers: {', '.join(top)}\n" if top else "")
+            + (f"  Underperformers: {', '.join(worst)}\n" if worst else "")
+            + f"\n  Per-pair results:\n{bt_text}\n"
+            + "\nUse backtest data to validate pair selections and risk posture. "
+            "Pairs with negative alpha or low Sharpe may warrant avoidance or smaller sizing.\n"
+        )
+
+    # ── Score divergence block ─────────────────────────────────────────────
+    score_div_block = ""
+    sd_data = review_data.get("score_divergence", {})
+    if sd_data.get("available") and sd_data.get("sample_size", 0) >= 5:
+        div = sd_data.get("divergence", {})
+        score_div_block = (
+            f"\nENTRY SCORE DIVERGENCE (live trades vs backtest threshold):\n"
+            f"  Sample: {sd_data['sample_size']} buy trades (last 30 days)\n"
+            f"  Avg entry score: {sd_data.get('avg_entry_score', 0):.3f} | "
+            f"Backtest threshold: {sd_data.get('backtest_threshold', 0.4)}\n"
+            f"  Above threshold: {sd_data.get('above_threshold_count', 0)} trades "
+            f"(avg PnL: {div.get('above_threshold_avg_pnl', 0):+.4f})\n"
+            f"  Below threshold: {sd_data.get('below_threshold_count', 0)} trades "
+            f"({sd_data.get('below_threshold_pct', 0):.0f}%) "
+            f"(avg PnL: {div.get('below_threshold_avg_pnl', 0):+.4f})\n"
+            f"  LLM confidence vs score gap: {div.get('score_confidence_gap', 0):.3f}\n"
+            f"\nIf below-threshold trades have worse PnL, consider tightening "
+            "entry criteria or raising min_confidence.\n"
+        )
+
     user_message = (
         f"PERFORMANCE REVIEW ({horizon.upper()} | domain={domain.upper()})\n"
         f"{correction_note}{eval_block}\n"
@@ -623,6 +734,8 @@ Respond ONLY with JSON:
         f"  Avg: {sym}{port.get('avg') or 0:,.2f}\n"
         f"\nRECENT LOSS ANALYSIS (signal reasoning that led to losses):\n{loss_text}\n"
         f"{equity_events_block}"
+        f"{backtest_block}"
+        f"{score_div_block}"
         f"\nGenerate the {horizon} plan as JSON."
     )
 
@@ -1012,3 +1125,212 @@ async def fetch_equity_events(profile: str = "") -> dict:
     except Exception as e:
         logger.warning(f"fetch_equity_events failed: {e}")
         return {"domain": "equity", "earnings": {}, "dividends": {}, "macro": [], "earnings_season": {}}
+
+
+# ---------------------------------------------------------------------------
+# Nightly backtest activity
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def run_nightly_backtests(profile: str = "") -> dict:
+    """Run 30-day backtests on the top-N followed pairs and save results.
+
+    Called by NightlyBacktestWorkflow at 2 AM UTC.  Results are stored in
+    backtest_runs so that fetch_backtest_summary surfaces them to the daily
+    planning prompt the next morning.
+    """
+    import asyncio as _asyncio
+
+    domain = _detect_domain(profile)
+    is_equity = domain == "equity"
+    _resolved = (profile or "coinbase").lower()
+    if _resolved == "crypto":
+        _resolved = "coinbase"
+
+    # Load pairs from config
+    pairs: list[str] = []
+    try:
+        config_paths: list[str] = []
+        if profile:
+            safe_profile = "".join(c for c in profile if c.isalnum() or c in "-_")
+            if safe_profile:
+                config_paths.append(os.path.join("config", f"{safe_profile}.yaml"))
+        from src.utils.settings_manager import get_settings_path
+        config_paths.append(get_settings_path())
+        for cfg_path in config_paths:
+            if os.path.exists(cfg_path):
+                with open(cfg_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                pairs = cfg.get("trading", {}).get("pairs", [])
+                break
+    except Exception as e:
+        logger.warning(f"run_nightly_backtests: failed to load config pairs: {e}")
+
+    if not pairs:
+        logger.info("run_nightly_backtests: no pairs configured, skipping")
+        return {"ran": 0, "saved": 0, "pairs": []}
+
+    # Cap at 10 pairs to limit runtime
+    pairs = pairs[:10]
+
+    # Load full config for BacktestEngine
+    full_config: dict = {}
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        settings_path = os.path.normpath(
+            os.path.join(_here, "..", "..", "config", "settings.yaml")
+        )
+        with open(settings_path, "r", encoding="utf-8") as f:
+            full_config = yaml.safe_load(f) or {}
+    except Exception:
+        pass
+
+    from src.backtesting.engine import BacktestEngine
+    from src.backtesting.candle_fetch import fetch_candles
+
+    results_saved = 0
+    pair_results: list[dict] = []
+
+    for pair in pairs:
+        try:
+            candles = fetch_candles(pair, 30, is_equity)
+            if len(candles) < 100:
+                logger.info(f"Nightly BT: skipping {pair} — only {len(candles)} candles")
+                continue
+
+            engine = BacktestEngine(full_config)
+            result = engine.run(candles, pair=pair)
+
+            # Save to backtest_runs
+            params_dict = {"source": "nightly_auto", "days": 30}
+            result_dict = {
+                "total_return_pct": result.total_return_pct,
+                "sharpe_ratio": result.sharpe_ratio,
+                "win_rate": result.win_rate,
+                "total_trades": result.total_trades,
+                "max_drawdown_pct": result.max_drawdown_pct,
+                "alpha": result.alpha,
+                "sortino_ratio": result.sortino_ratio,
+            }
+
+            with _get_conn() as conn:
+                _execute(conn,
+                    """INSERT INTO backtest_runs
+                        (pair, exchange, days, params_json, result_json,
+                         total_return_pct, sharpe_ratio, win_rate,
+                         total_trades, max_drawdown_pct, alpha)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        pair, _resolved, 30,
+                        json.dumps(params_dict),
+                        json.dumps(result_dict, default=str),
+                        result.total_return_pct,
+                        result.sharpe_ratio,
+                        result.win_rate,
+                        result.total_trades,
+                        result.max_drawdown_pct,
+                        result.alpha,
+                    ),
+                )
+            results_saved += 1
+            pair_results.append({
+                "pair": pair,
+                "sharpe": round(result.sharpe_ratio, 3),
+                "return_pct": round(result.total_return_pct, 2),
+                "trades": result.total_trades,
+            })
+            logger.info(
+                f"📊 Nightly BT: {pair} — Sharpe={result.sharpe_ratio:.2f}, "
+                f"Return={result.total_return_pct:.1f}%, Trades={result.total_trades}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Nightly BT failed for {pair}: {e}")
+
+    logger.info(f"🌙 Nightly backtests complete: {results_saved}/{len(pairs)} saved")
+    return {"ran": len(pairs), "saved": results_saved, "pairs": pair_results}
+
+
+# ---------------------------------------------------------------------------
+# Score divergence activity
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def fetch_score_divergence(profile: str = "") -> dict:
+    """Compare live trade entry_scores vs backtest entry threshold.
+
+    Surfaces divergence between how the deterministic scoring engine rated
+    actual live entries vs what the backtest engine's threshold would accept.
+    High divergence suggests the LLM is overriding the scoring engine too
+    aggressively (taking low-quality entries or skipping high-quality ones).
+    """
+    _exch_frag = ""
+    _exch_params: tuple = ()
+    if profile:
+        _resolved = profile.lower()
+        if _resolved == "crypto":
+            _resolved = "coinbase"
+        _exch_frag = " AND (exchange = %s OR exchange = %s)"
+        _exch_params = (_resolved, f"{_resolved}_paper")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+    with _get_conn() as conn:
+        # Check if entry_score column exists
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'trades' AND column_name = 'entry_score'"""
+        )
+        if not cur.fetchone():
+            return {"available": False, "reason": "entry_score column not yet migrated"}
+
+        # Fetch trades with entry_score
+        rows = _execute(conn,
+            f"""SELECT pair, action, confidence, entry_score, pnl
+                FROM trades
+                WHERE ts >= %s AND entry_score IS NOT NULL
+                      AND action = 'buy'{_exch_frag}
+                ORDER BY ts DESC LIMIT 200""",
+            (cutoff, *_exch_params),
+        ).fetchall()
+
+        if not rows:
+            return {"available": True, "sample_size": 0, "divergence": {}}
+
+        trades = [dict(r) for r in rows]
+        scores = [t["entry_score"] for t in trades if t["entry_score"] is not None]
+        confidences = [t["confidence"] for t in trades if t["confidence"] is not None]
+
+        if not scores:
+            return {"available": True, "sample_size": 0, "divergence": {}}
+
+        avg_score = sum(scores) / len(scores)
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+
+        # Backtest threshold is typically 0.4 (from engine._entry_threshold)
+        bt_threshold = 0.4
+
+        # How many trades had entry_score below backtest threshold?
+        below_threshold = sum(1 for s in scores if s < bt_threshold)
+        above_threshold = sum(1 for s in scores if s >= bt_threshold)
+
+        # PnL split: trades above vs below threshold
+        above_pnl = [t["pnl"] for t in trades if (t.get("entry_score") or 0) >= bt_threshold and t.get("pnl") is not None]
+        below_pnl = [t["pnl"] for t in trades if (t.get("entry_score") or 0) < bt_threshold and t.get("pnl") is not None]
+
+        return {
+            "available": True,
+            "sample_size": len(scores),
+            "avg_entry_score": round(avg_score, 3),
+            "avg_llm_confidence": round(avg_confidence, 3),
+            "backtest_threshold": bt_threshold,
+            "below_threshold_count": below_threshold,
+            "above_threshold_count": above_threshold,
+            "below_threshold_pct": round(below_threshold / len(scores) * 100, 1),
+            "divergence": {
+                "score_confidence_gap": round(abs(avg_score - avg_confidence), 3),
+                "above_threshold_avg_pnl": round(sum(above_pnl) / len(above_pnl), 4) if above_pnl else 0,
+                "below_threshold_avg_pnl": round(sum(below_pnl) / len(below_pnl), 4) if below_pnl else 0,
+            },
+        }
