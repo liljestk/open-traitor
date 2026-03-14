@@ -11,7 +11,7 @@ absolute_rules:
   min_trade_interval_seconds: 60
   never_trade_pairs: []
   only_trade_pairs: []
-  require_approval_above: 200
+  require_approval_above: 300.0
 analysis:
   sentiment:
     enabled: true

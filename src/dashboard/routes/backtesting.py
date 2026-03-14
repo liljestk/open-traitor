@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
 import src.dashboard.deps as deps
@@ -85,8 +85,10 @@ def _ensure_schema(db) -> bool:
 # Request models
 # ---------------------------------------------------------------------------
 
-# Pair must be a valid crypto pair (XXX-YYY) or equity ticker (1-6 uppercase)
-_VALID_PAIR_RE = re.compile(r'^[A-Z0-9]{1,10}(-[A-Z]{1,6})?(@[A-Z]{3,8})?$')
+# Pair must be a valid crypto pair (XXX-YYY) or equity ticker (AAPL-USD,
+# ABB.ST-SEK, VOLV-B.ST-SEK, AAPL@SMART).  Requires leading alpha,
+# allows dot/dash-separated segments, and optional @routing suffix.
+_VALID_PAIR_RE = re.compile(r'^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,6})*(@[A-Z]{2,8})?$')
 
 
 def _validate_pair_format(pair: str) -> str:
@@ -697,6 +699,173 @@ _backtest_sessions: dict[str, dict] = {}
 _backtest_lock = threading.Lock()
 
 _MAX_BACKTEST_WS = 5  # max concurrent backtest WS connections
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtesting/run/{run_id}/interpretation — LLM analysis of results
+# ---------------------------------------------------------------------------
+
+# LRU cache for interpretation results (keyed by run_id + profile)
+_INTERP_CACHE: dict[tuple[int, str], dict] = {}
+_INTERP_CACHE_MAX = 64
+
+
+@router.get("/api/backtesting/run/{run_id}/interpretation", summary="AI interpretation of backtest results")
+async def get_backtest_interpretation(
+    run_id: int = Path(..., gt=0),
+    profile: str = Query(""),
+    db=Depends(deps.get_profile_db),
+):
+    """Generate an LLM-powered plain-language interpretation of a backtest run."""
+    try:
+        _ensure_schema(db)
+        resolved = deps.resolve_profile(profile) or None
+
+        # Check server-side cache first
+        cache_key = (run_id, resolved or "")
+        if cache_key in _INTERP_CACHE:
+            return _INTERP_CACHE[cache_key]
+
+        sql = """SELECT id, pair, days, params_json, result_json,
+                       total_return_pct, sharpe_ratio, win_rate,
+                       total_trades, max_drawdown_pct, alpha
+                FROM backtest_runs WHERE id = %s"""
+        params: list = [run_id]
+        if resolved:
+            sql += " AND exchange = %s"
+            params.append(resolved)
+
+        with db._get_conn() as conn:
+            row = conn.execute(sql, tuple(params)).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Backtest run not found")
+
+        result = dict(row)
+        for json_field in ("params_json", "result_json"):
+            if json_field in result and isinstance(result[json_field], str):
+                try:
+                    result[json_field] = json.loads(result[json_field])
+                except (json.JSONDecodeError, TypeError):
+                    result[json_field] = {}
+
+        r = result.get("result_json") if isinstance(result.get("result_json"), dict) else {}
+        p = result.get("params_json") if isinstance(result.get("params_json"), dict) else {}
+        trades = r.get("trades", [])
+
+        # Build a structured data block for the LLM
+        exit_reasons: dict[str, int] = {}
+        for t in trades:
+            reason = t.get("exit_reason", "unknown")
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+
+        cost_sens = r.get("cost_sensitivity", [])
+        profitable_configs = sum(1 for c in cost_sens if c.get("profitable"))
+        total_configs = len(cost_sens)
+
+        round_trip_cost = ((p.get("fee_pct", 0) * 2) + p.get("slippage_pct", 0)) * 100
+
+        data_block = f"""Backtest Results for {result['pair']} ({result['days']}-day period)
+
+PERFORMANCE:
+  Return: {r.get('total_return_pct', 0):.2f}%
+  P&L: ${r.get('final_balance', 10000) - r.get('initial_balance', 10000):.2f} (${r.get('initial_balance', 10000):.0f} → ${r.get('final_balance', 10000):.0f})
+  Buy & Hold Return: {r.get('benchmark_return_pct', 0):.2f}%
+  Alpha (strategy - benchmark): {r.get('alpha', 0):.2f}%
+
+RISK METRICS:
+  Sharpe Ratio: {r.get('sharpe_ratio', 0):.3f}
+  Sortino Ratio: {r.get('sortino_ratio', 0):.3f}
+  Calmar Ratio: {r.get('calmar_ratio', 0):.3f}
+  Max Drawdown: {r.get('max_drawdown_pct', 0):.2f}%
+  Profit Factor: {r.get('profit_factor', 0):.2f}
+
+TRADE STATISTICS:
+  Total Trades: {r.get('total_trades', 0)}
+  Win Rate: {r.get('win_rate', 0):.1f}%
+  Winners: {r.get('winning_trades', 0)} | Losers: {r.get('losing_trades', 0)}
+  Avg Win: ${r.get('avg_win', 0):.2f} | Avg Loss: ${r.get('avg_loss', 0):.2f}
+  Largest Win: ${r.get('largest_win', 0):.2f} | Largest Loss: ${r.get('largest_loss', 0):.2f}
+  Avg Hold Time: {r.get('avg_hold_time_hours', 0):.1f} hours
+  Exit Reasons: {', '.join(f'{k}: {v}' for k, v in exit_reasons.items())}
+
+PARAMETERS:
+  Position Size: {p.get('position_size_pct', 0) * 100:.0f}%
+  Trailing Stop: {p.get('trailing_stop_pct', 0) * 100:.1f}%
+  Entry Threshold: {p.get('entry_threshold', 0):.2f}
+  Fee: {p.get('fee_pct', 0) * 100:.2f}%
+  Slippage: {p.get('slippage_pct', 0) * 100:.2f}%
+  Estimated Round-Trip Cost: {round_trip_cost:.2f}%
+
+COST SENSITIVITY:
+  {profitable_configs}/{total_configs} fee/slippage combinations were profitable"""
+
+        interpretation = ""
+        try:
+            from src.core.llm_client import LLMClient, build_providers
+
+            providers_cfg = deps.get_config().get("llm_providers", [])
+            providers = build_providers(providers_cfg)
+
+            llm = LLMClient(
+                providers=providers,
+                temperature=0.3,
+                max_tokens=800,
+            )
+
+            system_prompt = (
+                "You are a quantitative trading analyst explaining backtest results to a retail trader. "
+                "Given the backtest metrics below, write a clear, actionable interpretation covering:\n"
+                "1) **Overall Verdict** — Was this strategy profitable? How did it compare to simply holding?\n"
+                "2) **Risk Assessment** — What do the Sharpe, Sortino, Calmar, and drawdown numbers tell us?\n"
+                "3) **Trade Quality** — Are the win rate, profit factor, and avg win/loss ratios healthy?\n"
+                "4) **Cost Impact** — How much are fees and slippage eating into returns?\n"
+                "5) **Actionable Suggestions** — 2-3 specific things the user could try to improve results.\n\n"
+                "Rules:\n"
+                "- Be concise (under 250 words)\n"
+                "- Use plain language, avoid jargon without explanation\n"
+                "- Be honest about poor results — don't sugarcoat\n"
+                "- Reference specific numbers from the data\n"
+                "- Use markdown formatting (bold, bullet points) for readability"
+            )
+
+            interpretation = await llm.chat(
+                system_prompt=system_prompt,
+                user_message=f"Interpret these backtest results:\n\n{data_block}",
+                agent_name="backtest_analyst",
+                priority="low",
+            )
+        except Exception as e:
+            logger.warning("LLM interpretation failed for run %d: %s", run_id, e)
+            # Deterministic fallback when LLM is unavailable
+            pnl = r.get("final_balance", 10000) - r.get("initial_balance", 10000)
+            verdict = "profitable" if pnl > 0 else "unprofitable"
+            vs_hold = "outperformed" if r.get("alpha", 0) > 0 else "underperformed"
+            interpretation = (
+                f"**{result['pair']}** was **{verdict}** over {result['days']} days "
+                f"with a return of {r.get('total_return_pct', 0):.2f}% "
+                f"(P&L: ${pnl:.2f}). "
+                f"The strategy **{vs_hold}** buy-and-hold by {abs(r.get('alpha', 0)):.2f}%. "
+                f"Sharpe ratio of {r.get('sharpe_ratio', 0):.3f} "
+                f"{'indicates acceptable risk-adjusted returns' if r.get('sharpe_ratio', 0) >= 1 else 'suggests poor risk-adjusted performance'}. "
+                f"Win rate: {r.get('win_rate', 0):.1f}% across {r.get('total_trades', 0)} trades. "
+                f"Round-trip costs of ~{round_trip_cost:.2f}% per trade may be impacting profitability."
+            )
+
+        response = {"interpretation": interpretation, "run_id": run_id}
+
+        # Store in server-side cache (evict oldest if full)
+        if len(_INTERP_CACHE) >= _INTERP_CACHE_MAX:
+            oldest = next(iter(_INTERP_CACHE))
+            del _INTERP_CACHE[oldest]
+        _INTERP_CACHE[cache_key] = response
+
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("backtest interpretation error: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def _ws_get_client_ip(websocket: WebSocket) -> str:

@@ -20,6 +20,7 @@ import {
 import {
   fetchBacktestHistory, fetchBacktestRun, fetchWFOHistory,
   fetchBacktestPairs, openBacktestSocket, deleteBacktestRun,
+  fetchBacktestInterpretation,
   type BacktestRunDetail, type BacktestPairInfo, type BacktestProgressEvent,
 } from '../api'
 import StatCard from '../components/StatCard'
@@ -436,6 +437,16 @@ function RunDetailView({ detail, isLoading, onBack, onDelete }: {
   onBack: () => void
   onDelete: () => void
 }) {
+  const profile = useLiveStore((s) => s.profile)
+  const [showInterpretation, setShowInterpretation] = useState(false)
+  const interpQ = useQuery({
+    queryKey: ['backtest-interpretation', detail?.id, profile],
+    queryFn: () => fetchBacktestInterpretation(detail!.id),
+    enabled: showInterpretation && detail != null,
+    staleTime: 5 * 60 * 1000, // cache for 5 minutes
+    retry: 1,
+  })
+
   if (isLoading) return <SkeletonBlock className="h-96" />
   if (!detail) return <EmptyState icon="chart" title="Run not found" />
 
@@ -582,6 +593,41 @@ function RunDetailView({ detail, isLoading, onBack, onDelete }: {
         </div>
       )}
 
+      {/* ── AI Analysis ─────────────────────────────────────── */}
+      <div style={{ background: 'rgba(139,92,246,0.04)', borderRadius: 12, border: '1px solid rgba(139,92,246,0.15)', padding: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: showInterpretation && interpQ.data ? 12 : 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Bot size={16} style={{ color: '#8b5cf6' }} />
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#c4b5fd' }}>AI Analysis</h3>
+          </div>
+          {!showInterpretation && (
+            <button
+              onClick={() => setShowInterpretation(true)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(139,92,246,0.3)',
+                background: 'rgba(139,92,246,0.1)', color: '#a78bfa', cursor: 'pointer',
+                fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              <Zap size={12} /> Interpret Results
+            </button>
+          )}
+        </div>
+        {showInterpretation && interpQ.isLoading && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'rgba(255,255,255,0.4)', fontSize: 13, padding: '12px 0' }}>
+            <Loader size={14} className="animate-spin" /> Generating analysis...
+          </div>
+        )}
+        {showInterpretation && interpQ.isError && (
+          <div style={{ color: '#ef4444', fontSize: 13, padding: '8px 0' }}>
+            Failed to generate analysis. <button onClick={() => interpQ.refetch()} style={{ color: '#a78bfa', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', fontSize: 13 }}>Retry</button>
+          </div>
+        )}
+        {showInterpretation && interpQ.data && (
+          <SimpleMarkdown text={interpQ.data.interpretation} />
+        )}
+      </div>
+
       {/* ── Trade Log ───────────────────────────────────────── */}
       {trades.length > 0 && (
         <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
@@ -630,6 +676,100 @@ function RunDetailView({ detail, isLoading, onBack, onDelete }: {
 // ═══════════════════════════════════════════════════════════════════════════
 // Sub-components
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Safe markdown renderer — handles **bold**, *italic*, `code`, - bullet lists, and paragraphs. No dangerouslySetInnerHTML. */
+function SimpleMarkdown({ text }: { text: string }) {
+  const elements = useMemo(() => {
+    const lines = text.split('\n')
+    const result: React.ReactNode[] = []
+    let listItems: string[] = []
+
+    const flushList = () => {
+      if (listItems.length) {
+        result.push(
+          <ul key={`ul-${result.length}`} style={{ margin: '6px 0', paddingLeft: 20 }}>
+            {listItems.map((item, i) => (
+              <li key={i} style={{ marginBottom: 3 }}>{inlineFormat(item)}</li>
+            ))}
+          </ul>
+        )
+        listItems = []
+      }
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) {
+        flushList()
+        continue
+      }
+      // Bullet lists
+      if (/^[-*•]\s+/.test(trimmed)) {
+        listItems.push(trimmed.replace(/^[-*•]\s+/, ''))
+        continue
+      }
+      // Numbered lists
+      if (/^\d+[.)]\s+/.test(trimmed)) {
+        listItems.push(trimmed.replace(/^\d+[.)]\s+/, ''))
+        continue
+      }
+      flushList()
+      // Headers
+      if (trimmed.startsWith('### ')) {
+        result.push(<h5 key={`h-${result.length}`} style={{ margin: '8px 0 4px', fontSize: 13, fontWeight: 700, color: '#c4b5fd' }}>{inlineFormat(trimmed.slice(4))}</h5>)
+      } else if (trimmed.startsWith('## ')) {
+        result.push(<h4 key={`h-${result.length}`} style={{ margin: '8px 0 4px', fontSize: 14, fontWeight: 700, color: '#c4b5fd' }}>{inlineFormat(trimmed.slice(3))}</h4>)
+      } else {
+        result.push(<p key={`p-${result.length}`} style={{ margin: '4px 0', lineHeight: 1.7 }}>{inlineFormat(trimmed)}</p>)
+      }
+    }
+    flushList()
+    return result
+  }, [text])
+
+  return <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)' }}>{elements}</div>
+}
+
+/** Parse inline markdown: **bold**, *italic*, `code` — returns React nodes.
+ *  Depth-limited to prevent stack overflow on malformed input. */
+function inlineFormat(text: string, depth = 0): React.ReactNode {
+  if (depth > 8) return text // Guard against pathological recursion
+
+  const parts: React.ReactNode[] = []
+  let remaining = text
+  let key = 0
+
+  while (remaining.length > 0) {
+    // Bold: **text**
+    const boldMatch = remaining.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
+    if (boldMatch) {
+      if (boldMatch[1]) parts.push(inlineFormat(boldMatch[1], depth + 1))
+      parts.push(<strong key={key++} style={{ color: '#e2e8f0', fontWeight: 600 }}>{boldMatch[2]}</strong>)
+      remaining = boldMatch[3]
+      continue
+    }
+    // Inline code: `text`
+    const codeMatch = remaining.match(/^(.*?)`(.+?)`(.*)$/s)
+    if (codeMatch) {
+      if (codeMatch[1]) parts.push(codeMatch[1])
+      parts.push(<code key={key++} style={{ background: 'rgba(255,255,255,0.08)', padding: '1px 4px', borderRadius: 3, fontSize: 12 }}>{codeMatch[2]}</code>)
+      remaining = codeMatch[3]
+      continue
+    }
+    // Italic: *text* (but not **)
+    const italicMatch = remaining.match(/^(.*?)\*(.+?)\*(.*)$/s)
+    if (italicMatch) {
+      if (italicMatch[1]) parts.push(italicMatch[1])
+      parts.push(<em key={key++}>{italicMatch[2]}</em>)
+      remaining = italicMatch[3]
+      continue
+    }
+    // Plain text
+    parts.push(remaining)
+    break
+  }
+  return parts.length === 1 ? parts[0] : <>{parts}</>
+}
 
 function MetricCard({ label, value, color }: { label: string; value: string | number; color: string }) {
   return (

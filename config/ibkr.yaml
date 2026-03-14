@@ -214,7 +214,7 @@ trading:
   quote_currency: EUR
   reconcile_every_cycles: 10
   scan_movement_threshold_pct: 1.0
-  scan_volume_threshold: 250000000.0
+  scan_volume_threshold: 150000000.0
   screener_interval_cycles: 3
   style_modifiers:
   - wider_targets

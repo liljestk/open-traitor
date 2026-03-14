@@ -1325,6 +1325,9 @@ export const fetchBacktestHistory = (days = 90, pair = '') =>
 export const fetchBacktestRun = (runId: number) =>
   apiFetch<BacktestRunDetail>(`/backtesting/run/${runId}`)
 
+export const fetchBacktestInterpretation = (runId: number) =>
+  apiFetch<{ interpretation: string; run_id: number }>(`/backtesting/run/${runId}/interpretation`)
+
 export const deleteBacktestRun = (runId: number) =>
   apiFetch<{ ok: boolean }>(`/backtesting/run/${runId}`, { method: 'DELETE' })
 
