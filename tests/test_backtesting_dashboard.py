@@ -114,6 +114,10 @@ class TestPairValidationSecurity:
         "A" * 50,                    # too long (caught by regex)
         "BTC USD",                   # space
         "BTC/USD",                   # slash
+        "@@@@@",                     # pure special chars
+        "......",                    # pure dots
+        "---@---",                   # dashes and @
+        "9AAAA",                     # leading digit
     ])
     def test_malicious_pairs_rejected(self, pair):
         with pytest.raises(ValueError):
@@ -778,3 +782,150 @@ class TestBacktestInterpretation:
             with pytest.raises(Exception) as exc_info:
                 await get_backtest_interpretation(run_id=999, profile="coinbase", db=mock_db)
             assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_llm_success_path(self):
+        """When LLM is available, its response should be used (not the fallback)."""
+        from src.dashboard.routes.backtesting import get_backtest_interpretation, _INTERP_CACHE
+
+        # Clear cache so we don't get a cached result
+        _INTERP_CACHE.clear()
+
+        row_data = self._make_row()
+        mock_row = MagicMock()
+        mock_row.__getitem__ = lambda s, k: row_data[k]
+        mock_row.keys = lambda: row_data.keys()
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: mock_conn
+        mock_conn.__exit__ = lambda s, *a: None
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+
+        mock_db = MagicMock()
+        mock_db._get_conn.return_value = mock_conn
+
+        mock_llm = AsyncMock()
+        mock_llm.chat.return_value = "**LLM generated interpretation** with good detail."
+
+        with patch("src.dashboard.routes.backtesting._SCHEMA_CREATED", True), \
+             patch("src.dashboard.routes.backtesting.deps") as mock_deps, \
+             patch("src.dashboard.routes.backtesting.LLMClient", return_value=mock_llm) if False else \
+             patch("src.dashboard.routes.backtesting.deps") as mock_deps:
+            mock_deps.resolve_profile.return_value = "ibkr"
+            mock_deps.get_config.return_value = {"llm_providers": [{"name": "test"}]}
+
+            with patch("src.core.llm_client.LLMClient") as MockLLM, \
+                 patch("src.core.llm_client.build_providers", return_value=["mock_provider"]):
+                mock_instance = AsyncMock()
+                mock_instance.chat.return_value = "**LLM generated interpretation** with actionable insights."
+                MockLLM.return_value = mock_instance
+
+                result = await get_backtest_interpretation(run_id=42, profile="ibkr", db=mock_db)
+
+        assert "LLM generated interpretation" in result["interpretation"]
+        _INTERP_CACHE.clear()
+
+    @pytest.mark.asyncio
+    async def test_exchange_filter_applied(self):
+        """When profile resolves, the SQL must filter by exchange (domain separation)."""
+        from src.dashboard.routes.backtesting import get_backtest_interpretation, _INTERP_CACHE
+
+        _INTERP_CACHE.clear()
+
+        row_data = self._make_row()
+        mock_row = MagicMock()
+        mock_row.__getitem__ = lambda s, k: row_data[k]
+        mock_row.keys = lambda: row_data.keys()
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: mock_conn
+        mock_conn.__exit__ = lambda s, *a: None
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+
+        mock_db = MagicMock()
+        mock_db._get_conn.return_value = mock_conn
+
+        with patch("src.dashboard.routes.backtesting._SCHEMA_CREATED", True), \
+             patch("src.dashboard.routes.backtesting.deps") as mock_deps:
+            mock_deps.resolve_profile.return_value = "ibkr"
+            mock_deps.get_config.return_value = {}
+
+            await get_backtest_interpretation(run_id=42, profile="ibkr", db=mock_db)
+
+        # Verify execute was called with exchange filter param
+        call_args = mock_conn.execute.call_args
+        sql_used = call_args[0][0]
+        params_used = call_args[0][1]
+        assert "exchange" in sql_used.lower(), "SQL should filter by exchange"
+        assert "ibkr" in params_used, "Exchange param should be passed"
+        _INTERP_CACHE.clear()
+
+    @pytest.mark.asyncio
+    async def test_corrupted_result_json_handled(self):
+        """Corrupted JSON fields should not crash the endpoint."""
+        from src.dashboard.routes.backtesting import get_backtest_interpretation, _INTERP_CACHE
+
+        _INTERP_CACHE.clear()
+
+        row_data = self._make_row(
+            result_json="NOT VALID JSON {{{",
+            params_json="ALSO BROKEN",
+        )
+        mock_row = MagicMock()
+        mock_row.__getitem__ = lambda s, k: row_data[k]
+        mock_row.keys = lambda: row_data.keys()
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: mock_conn
+        mock_conn.__exit__ = lambda s, *a: None
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+
+        mock_db = MagicMock()
+        mock_db._get_conn.return_value = mock_conn
+
+        with patch("src.dashboard.routes.backtesting._SCHEMA_CREATED", True), \
+             patch("src.dashboard.routes.backtesting.deps") as mock_deps:
+            mock_deps.resolve_profile.return_value = "coinbase"
+            mock_deps.get_config.return_value = {}
+
+            # Should not raise — fallback should handle gracefully
+            result = await get_backtest_interpretation(run_id=42, profile="coinbase", db=mock_db)
+
+        assert "interpretation" in result
+        assert result["run_id"] == 42
+        _INTERP_CACHE.clear()
+
+    @pytest.mark.asyncio
+    async def test_cache_prevents_duplicate_llm_calls(self):
+        """Second call with same run_id+profile should return cached result."""
+        from src.dashboard.routes.backtesting import get_backtest_interpretation, _INTERP_CACHE
+
+        _INTERP_CACHE.clear()
+
+        row_data = self._make_row()
+        mock_row = MagicMock()
+        mock_row.__getitem__ = lambda s, k: row_data[k]
+        mock_row.keys = lambda: row_data.keys()
+
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: mock_conn
+        mock_conn.__exit__ = lambda s, *a: None
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+
+        mock_db = MagicMock()
+        mock_db._get_conn.return_value = mock_conn
+
+        with patch("src.dashboard.routes.backtesting._SCHEMA_CREATED", True), \
+             patch("src.dashboard.routes.backtesting.deps") as mock_deps:
+            mock_deps.resolve_profile.return_value = "ibkr"
+            mock_deps.get_config.return_value = {}
+
+            # First call populates cache
+            result1 = await get_backtest_interpretation(run_id=42, profile="ibkr", db=mock_db)
+            # Second call should use cache — reset mock to verify no DB call
+            mock_conn.execute.reset_mock()
+            result2 = await get_backtest_interpretation(run_id=42, profile="ibkr", db=mock_db)
+
+        assert result1 == result2
+        mock_conn.execute.assert_not_called()  # Cache hit, no DB query
+        _INTERP_CACHE.clear()

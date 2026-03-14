@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
 import src.dashboard.deps as deps
@@ -86,9 +86,9 @@ def _ensure_schema(db) -> bool:
 # ---------------------------------------------------------------------------
 
 # Pair must be a valid crypto pair (XXX-YYY) or equity ticker (AAPL-USD,
-# ABB.ST-SEK, VOLV-B.ST-SEK, AAPL@SMART).  Allows alphanumerics, dots,
-# dashes, and @ for IB routing hints.
-_VALID_PAIR_RE = re.compile(r'^[A-Z0-9][A-Z0-9.\-@]{0,29}$')
+# ABB.ST-SEK, VOLV-B.ST-SEK, AAPL@SMART).  Requires leading alpha,
+# allows dot/dash-separated segments, and optional @routing suffix.
+_VALID_PAIR_RE = re.compile(r'^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,6})*(@[A-Z]{2,8})?$')
 
 
 def _validate_pair_format(pair: str) -> str:
@@ -705,9 +705,14 @@ _MAX_BACKTEST_WS = 5  # max concurrent backtest WS connections
 # GET /api/backtesting/run/{run_id}/interpretation — LLM analysis of results
 # ---------------------------------------------------------------------------
 
+# LRU cache for interpretation results (keyed by run_id + profile)
+_INTERP_CACHE: dict[tuple[int, str], dict] = {}
+_INTERP_CACHE_MAX = 64
+
+
 @router.get("/api/backtesting/run/{run_id}/interpretation", summary="AI interpretation of backtest results")
 async def get_backtest_interpretation(
-    run_id: int,
+    run_id: int = Path(..., gt=0),
     profile: str = Query(""),
     db=Depends(deps.get_profile_db),
 ):
@@ -715,6 +720,11 @@ async def get_backtest_interpretation(
     try:
         _ensure_schema(db)
         resolved = deps.resolve_profile(profile) or None
+
+        # Check server-side cache first
+        cache_key = (run_id, resolved or "")
+        if cache_key in _INTERP_CACHE:
+            return _INTERP_CACHE[cache_key]
 
         sql = """SELECT id, pair, days, params_json, result_json,
                        total_return_pct, sharpe_ratio, win_rate,
@@ -737,10 +747,10 @@ async def get_backtest_interpretation(
                 try:
                     result[json_field] = json.loads(result[json_field])
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    result[json_field] = {}
 
-        r = result.get("result_json", {})
-        p = result.get("params_json", {})
+        r = result.get("result_json") if isinstance(result.get("result_json"), dict) else {}
+        p = result.get("params_json") if isinstance(result.get("params_json"), dict) else {}
         trades = r.get("trades", [])
 
         # Build a structured data block for the LLM
@@ -826,7 +836,7 @@ COST SENSITIVITY:
                 priority="low",
             )
         except Exception as e:
-            logger.warning(f"LLM interpretation failed for run {run_id}: {e}")
+            logger.warning("LLM interpretation failed for run %d: %s", run_id, e)
             # Deterministic fallback when LLM is unavailable
             pnl = r.get("final_balance", 10000) - r.get("initial_balance", 10000)
             verdict = "profitable" if pnl > 0 else "unprofitable"
@@ -842,11 +852,19 @@ COST SENSITIVITY:
                 f"Round-trip costs of ~{round_trip_cost:.2f}% per trade may be impacting profitability."
             )
 
-        return {"interpretation": interpretation, "run_id": run_id}
+        response = {"interpretation": interpretation, "run_id": run_id}
+
+        # Store in server-side cache (evict oldest if full)
+        if len(_INTERP_CACHE) >= _INTERP_CACHE_MAX:
+            oldest = next(iter(_INTERP_CACHE))
+            del _INTERP_CACHE[oldest]
+        _INTERP_CACHE[cache_key] = response
+
+        return response
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("backtest interpretation error")
+        logger.exception("backtest interpretation error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

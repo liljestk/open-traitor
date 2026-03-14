@@ -730,8 +730,11 @@ function SimpleMarkdown({ text }: { text: string }) {
   return <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)' }}>{elements}</div>
 }
 
-/** Parse inline markdown: **bold**, *italic*, `code` — returns React nodes */
-function inlineFormat(text: string): React.ReactNode {
+/** Parse inline markdown: **bold**, *italic*, `code` — returns React nodes.
+ *  Depth-limited to prevent stack overflow on malformed input. */
+function inlineFormat(text: string, depth = 0): React.ReactNode {
+  if (depth > 8) return text // Guard against pathological recursion
+
   const parts: React.ReactNode[] = []
   let remaining = text
   let key = 0
@@ -740,7 +743,7 @@ function inlineFormat(text: string): React.ReactNode {
     // Bold: **text**
     const boldMatch = remaining.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
     if (boldMatch) {
-      if (boldMatch[1]) parts.push(inlineFormat(boldMatch[1]))
+      if (boldMatch[1]) parts.push(inlineFormat(boldMatch[1], depth + 1))
       parts.push(<strong key={key++} style={{ color: '#e2e8f0', fontWeight: 600 }}>{boldMatch[2]}</strong>)
       remaining = boldMatch[3]
       continue
