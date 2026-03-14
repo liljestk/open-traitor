@@ -15,6 +15,7 @@ import NewsFeed from './pages/NewsFeed'
 import Watchlist from './pages/Watchlist'
 import RiskExposure from './pages/RiskExposure'
 import Predictions from './pages/Predictions'
+import Backtesting from './pages/Backtesting'
 import SetupWizard from './pages/SetupWizard'
 import LLMAnalytics from './pages/LLMAnalytics'
 import Login from './pages/Login'
@@ -75,6 +76,7 @@ function AppRoutes() {
         <Route path="/trades" element={<TradesLog />} />
         <Route path="/analytics" element={<Analytics />} />
         <Route path="/predictions" element={<Predictions />} />
+        <Route path="/backtesting" element={<Backtesting />} />
         <Route path="/watchlist" element={<Watchlist />} />
         <Route path="/simulations" element={<SimulatedTrades />} />
         <Route path="/logs" element={<SystemLogs />} />

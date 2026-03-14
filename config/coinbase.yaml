@@ -2,7 +2,7 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 0
   max_cash_per_trade_pct: 0.25
-  max_daily_loss: 500
+  max_daily_loss: 250.0
   max_daily_spend: 2000
   max_portfolio_risk_pct: 0.2
   max_single_trade: 500
@@ -172,7 +172,7 @@ risk:
   max_position_pct: 0.4
   max_total_exposure_pct: 0.15
   max_trades_per_hour: 10
-  stop_loss_pct: 0.05
+  stop_loss_pct: 0.04
   take_profit_pct: 0.08
   trailing_stop_pct: 0.04
 rotation:
@@ -183,7 +183,7 @@ rotation:
   high_impact_confidence: 0.8
   llm_validation: true
   llm_validation_temperature: 0.3
-  min_confidence: 0.65
+  min_confidence: 0.95
   min_score_delta: 0.3
   swap_cooldown_seconds: 3600
 routing:
@@ -226,7 +226,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.95
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 1800
@@ -244,8 +244,8 @@ trading:
   - EURC
   quote_currency: EUR
   reconcile_every_cycles: 10
-  scan_movement_threshold_pct: 1.0
-  scan_volume_threshold: 5000.0
+  scan_movement_threshold_pct: 0.5
+  scan_volume_threshold: 10000.0
   screener_interval_cycles: 5
 training_data:
   buffer_size: 0

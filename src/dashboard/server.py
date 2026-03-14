@@ -54,6 +54,7 @@ from src.dashboard.routes.llm_analytics import router as llm_analytics_router
 from src.dashboard.routes.learning import router as learning_router
 from src.dashboard.routes.auth_routes import router as auth_router
 from src.dashboard.routes.financial_calendar import router as financial_calendar_router
+from src.dashboard.routes.backtesting import router as backtesting_router
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +366,7 @@ app.include_router(commands_router)
 app.include_router(llm_analytics_router)
 app.include_router(learning_router)
 app.include_router(financial_calendar_router)
+app.include_router(backtesting_router)
 
 
 # ---------------------------------------------------------------------------

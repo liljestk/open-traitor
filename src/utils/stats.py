@@ -156,7 +156,8 @@ class StatsDB(
                         pnl REAL DEFAULT NULL,
                         fee_quote REAL DEFAULT 0,
                         is_rotation INTEGER DEFAULT 0,
-                        approved_by TEXT DEFAULT 'auto'
+                        approved_by TEXT DEFAULT 'auto',
+                        entry_score REAL DEFAULT NULL
                     )
                 """)
 
@@ -325,6 +326,7 @@ class StatsDB(
         ("portfolio_snapshots",  "exchange"),
         ("trades",               "exchange"),
         ("trades",               "external_id"),
+        ("trades",               "entry_score"),
         ("simulated_trades",     "exchange"),
         ("scan_results",         "exchange"),
         ("events",               "exchange"),
@@ -349,6 +351,7 @@ class StatsDB(
             ("scan_results",        "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("events",              "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("trades",              "external_id",          "TEXT DEFAULT NULL"),
+            ("trades",              "entry_score",           "REAL DEFAULT NULL"),
         ]
         with self._get_conn() as conn:
             with conn.cursor() as cur:

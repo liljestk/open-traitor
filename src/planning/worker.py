@@ -38,16 +38,20 @@ from src.planning.activities import (
     evaluate_previous_plan,
     fetch_trade_history,
     fetch_portfolio_history,
+    fetch_backtest_summary,
+    fetch_score_divergence,
     call_planning_llm,
     write_strategic_context,
     write_daily_plan,
     fetch_pair_universe,
     fetch_universe_scan_summary,
+    run_nightly_backtests,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
     WeeklyReviewWorkflow,
     MonthlyReviewWorkflow,
+    NightlyBacktestWorkflow,
 )
 from src.utils.logger import setup_logger, get_logger
 
@@ -116,6 +120,12 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "cron": "0 0 1 * *",
             "desc": "Monthly portfolio review (1st of month midnight UTC)",
         },
+        {
+            "workflow": NightlyBacktestWorkflow,
+            "id": "nightly-backtest",
+            "cron": "0 2 * * *",
+            "desc": "Nightly backtest runner (2 AM UTC)",
+        },
     ]
 
     for profile in profiles:
@@ -153,16 +163,19 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
             fetch_portfolio_history,
+            fetch_backtest_summary,
+            fetch_score_divergence,
             call_planning_llm,
             write_strategic_context,
             write_daily_plan,
             fetch_pair_universe,
             fetch_universe_scan_summary,
+            run_nightly_backtests,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

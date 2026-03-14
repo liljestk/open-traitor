@@ -2,7 +2,7 @@ absolute_rules:
   always_use_stop_loss: true
   emergency_stop_portfolio: 5
   max_cash_per_trade_pct: 0.25
-  max_daily_loss: 500
+  max_daily_loss: 200.0
   max_daily_spend: 2000
   max_portfolio_risk_pct: 0.2
   max_single_trade: 500
@@ -202,7 +202,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.95
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 3600
@@ -213,8 +213,8 @@ trading:
   - EUR
   quote_currency: EUR
   reconcile_every_cycles: 10
-  scan_movement_threshold_pct: 0.5
-  scan_volume_threshold: 500000000.0
+  scan_movement_threshold_pct: 1.0
+  scan_volume_threshold: 250000000.0
   screener_interval_cycles: 3
   style_modifiers:
   - wider_targets

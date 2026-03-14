@@ -263,11 +263,13 @@ class CoinbaseClient(
         product_id: str,
         granularity: str = "ONE_HOUR",
         limit: int = 200,
+        start_time: int | None = None,
+        end_time: int | None = None,
     ) -> list[dict]:
         """Get historical candles (OHLCV data)."""
         if self._rest_client:
             try:
-                end = int(time.time())
+                end = end_time or int(time.time())
                 granularity_seconds = {
                     "ONE_MINUTE": 60,
                     "FIVE_MINUTE": 300,
@@ -279,7 +281,7 @@ class CoinbaseClient(
                     "ONE_DAY": 86400,
                 }
                 seconds = granularity_seconds.get(granularity, 3600)
-                start = end - (limit * seconds)
+                start = start_time or (end - (limit * seconds))
 
                 candles = self._throttled_request(
                     "get_candles",

@@ -1196,6 +1196,215 @@ export const regenerateBackupCodes = async (code: string): Promise<{ backup_code
   })
 }
 
+// ─── Backtesting ───────────────────────────────────────────────────────────
+
+export interface BacktestRunSummary {
+  id: number
+  run_ts: string
+  pair: string
+  exchange: string
+  days: number
+  total_return_pct: number
+  sharpe_ratio: number
+  win_rate: number
+  total_trades: number
+  max_drawdown_pct: number
+  alpha: number
+  is_wfo: boolean
+  wfo_wfe: number | null
+}
+
+export interface BacktestEquityPoint {
+  time: string
+  equity: number
+  balance: number
+  positions: number
+  drawdown: number
+}
+
+export interface BacktestTradeEntry {
+  pair: string
+  side: string
+  entry_price: number
+  exit_price: number
+  quantity: number
+  pnl: number
+  pnl_pct: number
+  exit_reason: string
+  entry_time: string
+  exit_time: string
+}
+
+export interface BacktestCostSensitivity {
+  fee_pct: number
+  slippage_pct: number
+  return_pct: number
+  sharpe: number
+  trades: number
+  profitable: boolean
+}
+
+export interface BacktestRunDetail {
+  id: number
+  run_ts: string
+  pair: string
+  exchange: string
+  days: number
+  params_json: {
+    position_size_pct: number
+    trailing_stop_pct: number
+    entry_threshold: number
+    fee_pct: number
+    slippage_pct: number
+  }
+  result_json: {
+    start_date: string
+    end_date: string
+    initial_balance: number
+    final_balance: number
+    total_return_pct: number
+    total_trades: number
+    winning_trades: number
+    losing_trades: number
+    win_rate: number
+    avg_win: number
+    avg_loss: number
+    max_drawdown_pct: number
+    sharpe_ratio: number
+    sortino_ratio: number
+    calmar_ratio: number
+    profit_factor: number
+    largest_win: number
+    largest_loss: number
+    avg_hold_time_hours: number
+    benchmark_return_pct: number
+    alpha: number
+    trades: BacktestTradeEntry[]
+    equity_curve: BacktestEquityPoint[]
+    cost_sensitivity: BacktestCostSensitivity[]
+  }
+  total_return_pct: number
+  sharpe_ratio: number
+  win_rate: number
+  total_trades: number
+  max_drawdown_pct: number
+  alpha: number
+  is_wfo: boolean
+  wfo_wfe: number | null
+}
+
+export interface BacktestTriggerParams {
+  pair: string
+  days: number
+  position_size_pct?: number
+  trailing_stop_pct?: number
+  entry_threshold?: number
+  fee_pct?: number
+  slippage_pct?: number
+}
+
+export interface BacktestPromotionEntry {
+  run_ts: string
+  pair: string
+  param_name: string
+  old_value: number
+  new_value: number
+  wfe: number
+  oos_sharpe: number | null
+  promoted: boolean
+  rolled_back: boolean
+  rollback_ts: string | null
+  rollback_reason: string | null
+  pre_promotion_accuracy: number | null
+  post_promotion_accuracy: number | null
+}
+
+export const fetchBacktestHistory = (days = 90, pair = '') =>
+  apiFetch<{ runs: BacktestRunSummary[] }>(`/backtesting/history?days=${days}${pair ? `&pair=${encodeURIComponent(pair)}` : ''}`)
+
+export const fetchBacktestRun = (runId: number) =>
+  apiFetch<BacktestRunDetail>(`/backtesting/run/${runId}`)
+
+export const deleteBacktestRun = (runId: number) =>
+  apiFetch<{ ok: boolean }>(`/backtesting/run/${runId}`, { method: 'DELETE' })
+
+export const fetchWFOHistory = (days = 90, pair = '') =>
+  apiFetch<{ runs: BacktestRunSummary[] }>(`/backtesting/wfo-history?days=${days}${pair ? `&pair=${encodeURIComponent(pair)}` : ''}`)
+
+export const fetchBacktestPromotions = (limit = 30) =>
+  apiFetch<{ promotions: BacktestPromotionEntry[] }>(`/backtesting/promotions?limit=${limit}`)
+
+export const triggerBacktest = (params: BacktestTriggerParams) =>
+  apiFetch<BacktestRunDetail>('/backtesting/trigger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+
+// ─── Backtest Pairs & WebSocket ────────────────────────────────────────────
+
+export interface BacktestPairInfo {
+  pair: string
+  source: 'config' | 'human' | 'llm'
+  followed_by_human: boolean
+  followed_by_llm: boolean
+  is_config_pair: boolean
+  last_run_ts?: string
+  last_return_pct?: number
+  last_sharpe?: number
+}
+
+export const fetchBacktestPairs = () =>
+  apiFetch<{ pairs: BacktestPairInfo[]; exchange: string }>('/backtesting/pairs')
+
+export interface BacktestProgressEvent {
+  type: 'status' | 'progress' | 'metrics' | 'complete' | 'error'
+  code?: 'no_candles' | 'insufficient_candles' | string
+  phase?: string
+  pair?: string
+  pct?: number
+  candles_found?: number
+  candles_needed?: number
+  total_candles?: number
+  candles_processed?: number
+  interim?: {
+    sharpe?: number
+    return_pct?: number
+    trades?: number
+  }
+  detail?: string
+  // complete payload
+  id?: number
+  run_ts?: string
+  exchange?: string
+  days?: number
+  params_json?: BacktestTriggerParams
+  result_json?: BacktestRunDetail['result_json']
+}
+
+export function openBacktestSocket(
+  onMessage: (event: BacktestProgressEvent) => void,
+  onClose?: () => void,
+): WebSocket {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.hostname
+  const port = window.location.port || (proto === 'wss' ? '443' : '80')
+  const profile = useLiveStore.getState().profile
+  const qs = profile ? `?profile=${encodeURIComponent(profile)}` : ''
+  const apiKey = getApiKey()
+  const protocols = apiKey ? [`apikey.${btoa(apiKey)}`] : undefined
+  const ws = new WebSocket(`${proto}://${host}:${port}/ws/backtest${qs}`, protocols)
+  ws.onmessage = (e) => {
+    try {
+      onMessage(JSON.parse(e.data))
+    } catch {
+      // ignore unparseable
+    }
+  }
+  ws.onclose = () => onClose?.()
+  return ws
+}
+
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
 export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {

@@ -101,6 +101,7 @@ class BacktestEngine:
         self.trailing_stop_pct = trailing_stop_pct
         self.fee_pct = fee_pct
         self.slippage_pct = slippage_pct
+        self._entry_threshold = 0.4
 
         tech_config = config.get("analysis", {}).get("technical", {})
         self.technical = TechnicalAnalyzer(tech_config)
@@ -150,7 +151,7 @@ class BacktestEngine:
             current_price = float(current_candle.get("close", 0))
             current_high = float(current_candle.get("high", current_price))
             current_low = float(current_candle.get("low", current_price))
-            current_time = current_candle.get("start", "")
+            current_time = current_candle.get("start") or current_candle.get("time", "")
 
             if current_price <= 0:
                 continue
@@ -267,7 +268,7 @@ class BacktestEngine:
                 pnl = (last_price - pos.entry_price) * pos.quantity - pos.entry_fee - fee
                 pos.closed = True
                 pos.exit_price = last_price
-                pos.exit_time = candles[-1].get("start", "")
+                pos.exit_time = candles[-1].get("start") or candles[-1].get("time", "")
                 pos.exit_reason = "backtest_end"
                 pos.pnl = pnl
                 pos.pnl_pct = (last_price - pos.entry_price) / pos.entry_price
@@ -283,14 +284,81 @@ class BacktestEngine:
     def _evaluate_entry(self, analysis: dict) -> dict:
         """
         Evaluate whether to enter a position based on technical analysis.
-        Uses the same scoring logic as MultiTimeframeAnalyzer for consistency.
+        Uses all computed indicators for a comprehensive entry score.
         Returns entry signal with stop and target percentages.
         """
-        # Reuse the shared scoring function from multi-timeframe
-        score = self._mtf_scorer._score_timeframe(analysis)
+        indicators = analysis.get("indicators", {})
+        score = 0.0
 
-        # Entry threshold
-        enter = score >= 0.4
+        # RSI
+        rsi = indicators.get("rsi")
+        if rsi is not None:
+            if rsi < 25:
+                score += 0.25
+            elif rsi < 35:
+                score += 0.15
+            elif rsi < 45:
+                score += 0.05
+            elif rsi > 75:
+                score -= 0.25
+            elif rsi > 65:
+                score -= 0.15
+
+        # MACD (fixed: matches actual signal values from _interpret_macd)
+        macd_signal = indicators.get("macd_signal", "neutral")
+        score += {
+            "bullish": 0.20, "weakly_bullish": 0.10,
+            "bearish": -0.20, "weakly_bearish": -0.10,
+        }.get(macd_signal, 0)
+
+        # EMA (fixed: matches actual signal values from _interpret_ema)
+        ema_signal = indicators.get("ema_signal", "neutral")
+        score += {
+            "strongly_bullish": 0.15, "bullish": 0.10,
+            "strongly_bearish": -0.15, "bearish": -0.10,
+        }.get(ema_signal, 0)
+
+        # Bollinger Bands (added below_middle/above_middle)
+        bb_signal = indicators.get("bb_signal", "neutral")
+        score += {
+            "oversold": 0.15, "below_middle": 0.05,
+            "overbought": -0.15, "above_middle": -0.05,
+        }.get(bb_signal, 0)
+
+        # Stochastic RSI
+        stoch_signal = indicators.get("stoch_rsi_signal", "neutral")
+        score += {
+            "oversold": 0.10, "bullish_crossover": 0.05,
+            "overbought": -0.10, "bearish_crossover": -0.05,
+        }.get(stoch_signal, 0)
+
+        # ADX trend strength + direction
+        adx_signal = indicators.get("adx_signal", "neutral")
+        score += {
+            "strong_uptrend": 0.10, "uptrend": 0.05,
+            "strong_downtrend": -0.10, "downtrend": -0.05,
+        }.get(adx_signal, 0)
+
+        # OBV volume-price confirmation
+        obv_signal = indicators.get("obv_signal", "neutral")
+        score += {
+            "confirmed_uptrend": 0.05, "bullish_divergence": 0.10,
+            "confirmed_downtrend": -0.05, "bearish_divergence": -0.10,
+        }.get(obv_signal, 0)
+
+        # VWAP
+        vwap_signal = indicators.get("vwap_signal", "neutral")
+        score += {"below_vwap": 0.05, "above_vwap": -0.05}.get(vwap_signal, 0)
+
+        # Volume confirmation multiplier
+        volume_ratio = indicators.get("volume_ratio", 1.0)
+        if volume_ratio > 1.5:
+            score *= 1.15
+        elif volume_ratio < 0.5:
+            score *= 0.85
+
+        score = max(-1.0, min(1.0, score))
+        enter = score >= self._entry_threshold
 
         return {
             "enter": enter,
