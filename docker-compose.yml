@@ -117,6 +117,7 @@ services:
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - DASHBOARD_COMMAND_SIGNING_KEY=${DASHBOARD_COMMAND_SIGNING_KEY}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
@@ -170,6 +171,7 @@ services:
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-at-public-key}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-at-secret-key}
+      - DASHBOARD_COMMAND_SIGNING_KEY=${DASHBOARD_COMMAND_SIGNING_KEY}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       # Override IBKR_HOST: inside Docker, 127.0.0.1 = container itself.
@@ -225,6 +227,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - DASHBOARD_COMMAND_SIGNING_KEY=${DASHBOARD_COMMAND_SIGNING_KEY}
+      - DASHBOARD_SESSION_SECRET=${DASHBOARD_SESSION_SECRET}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki

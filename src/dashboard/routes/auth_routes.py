@@ -209,10 +209,10 @@ def _persist_password_hash(pw_hash: str) -> None:
     lines: list[str] = []
     found = False
 
-    # Sanitize newlines and escape $ as $$ so docker-compose env_file
-    # parsing doesn't treat bcrypt cost markers ($2b$12$...) as variables.
-    # Both python-dotenv (interpolate=True) and compose unescape $$ → $.
-    safe_hash = pw_hash.replace("\n", "").replace("\r", "").replace("$", "$$")
+    # Sanitize newlines only.  Store the raw bcrypt hash (with $) because
+    # auth.py reads config/.env via dotenv_values() which returns the raw
+    # string.  $$ escaping would break bcrypt verification.
+    safe_hash = pw_hash.replace("\n", "").replace("\r", "")
 
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:

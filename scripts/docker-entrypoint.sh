@@ -29,15 +29,15 @@ print(h)
 PYEOF
 )
 
-    # Escape $ as $$ so docker-compose env_file parsing doesn't
-    # interpret bcrypt cost markers as variable references.
-    PASS_HASH_ESCAPED="${PASS_HASH//\$/\$\$}"
-
     # Append to config/.env
+    # NOTE: Store raw bcrypt hash (with $).  auth.py reads this file via
+    # dotenv_values() which returns the raw string — $$ escaping would break
+    # bcrypt verification.  Compose env_file may mangle $, but auth.py
+    # reads from dotenv_values first, so os.environ is only a fallback.
     {
         printf '\n'
         printf '# Dashboard password (auto-generated on first startup — %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'DASHBOARD_PASSWORD_HASH=%s\n' "$PASS_HASH_ESCAPED"
+        printf 'DASHBOARD_PASSWORD_HASH=%s\n' "$PASS_HASH"
     } >> "$CONFIG_ENV"
 
     # Print prominently to Docker logs

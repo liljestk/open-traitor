@@ -42,6 +42,8 @@ generate_root_env() {
     local clickhouse_pw="$8"
     local minio_pw="$9"
     local langfuse_enc_key="${10}"
+    local dash_signing_key="${11}"
+    local dash_session_secret="${12}"
 
     cat > .env << ROOTENV
 # Docker/Podman Compose variable substitution
@@ -70,6 +72,10 @@ CLICKHOUSE_PASSWORD=${clickhouse_pw}
 MINIO_ROOT_USER=minio
 MINIO_ROOT_PASSWORD=${minio_pw}
 LANGFUSE_ENCRYPTION_KEY=${langfuse_enc_key}
+
+# Dashboard security
+DASHBOARD_COMMAND_SIGNING_KEY=${dash_signing_key}
+DASHBOARD_SESSION_SECRET=${dash_session_secret}
 ROOTENV
 }
 
@@ -229,9 +235,11 @@ temporal_db_password=$(generate_password 32)
 clickhouse_password=$(generate_password 32)
 minio_password=$(generate_password 32)
 langfuse_encryption_key=$(generate_hex_key 32)
+dash_signing_key=$(generate_hex_key 32)
+dash_session_secret=$(generate_hex_key 32)
 
 # Generate actual root .env
-generate_root_env "$traitor_db_password" "$langfuse_db_password" "$langfuse_nextauth_secret" "$langfuse_salt" "$langfuse_admin_password" "$redis_password" "$temporal_db_password" "$clickhouse_password" "$minio_password" "$langfuse_encryption_key"
+generate_root_env "$traitor_db_password" "$langfuse_db_password" "$langfuse_nextauth_secret" "$langfuse_salt" "$langfuse_admin_password" "$redis_password" "$temporal_db_password" "$clickhouse_password" "$minio_password" "$langfuse_encryption_key" "$dash_signing_key" "$dash_session_secret"
 
 ok "Root .env created with auto-generated secrets."
 
