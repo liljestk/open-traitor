@@ -11,6 +11,10 @@ ENV_FILE="${1:-config/.env}"
 SKIP_DOCKER="${SKIP_DOCKER:-false}"
 SKIP_OLLAMA="${SKIP_OLLAMA:-false}"
 SKIP_TELEGRAM="${SKIP_TELEGRAM:-false}"
+ONLY_ENV="${ONLY_ENV:-false}"
+
+container_runtime=""
+compose_cmd=""
 
 # ===========================================================================
 # Helpers
@@ -25,6 +29,48 @@ banner() {
     echo "  ║                                               ║"
     echo "  ╚═══════════════════════════════════════════════╝"
     echo ""
+}
+
+generate_root_env() {
+    local traitor_db_pw="$1"
+    local langfuse_db_pw="$2"
+    local langfuse_secret="$3"
+    local langfuse_salt="$4"
+    local langfuse_admin_pw="$5"
+    local redis_pw="$6"
+    local temporal_db_pw="$7"
+    local clickhouse_pw="$8"
+    local minio_pw="$9"
+    local langfuse_enc_key="${10}"
+
+    cat > .env << ROOTENV
+# Docker/Podman Compose variable substitution
+# Generated: $(date '+%Y-%m-%d %H:%M:%S')
+
+OLLAMA_MODEL=qwen2.5:14b
+
+TRAITOR_DB_PASSWORD=${traitor_db_pw}
+
+LANGFUSE_NEXTAUTH_SECRET=${langfuse_secret}
+LANGFUSE_SALT=${langfuse_salt}
+LANGFUSE_ADMIN_PASSWORD=${langfuse_admin_pw}
+LANGFUSE_ADMIN_EMAIL=admin@auto-traitor.local
+LANGFUSE_ADMIN_NAME=admin
+LANGFUSE_DB_PASSWORD=${langfuse_db_pw}
+LANGFUSE_PUBLIC_KEY=at-public-key
+LANGFUSE_SECRET_KEY=at-secret-key
+
+REDIS_PASSWORD=${redis_pw}
+
+TEMPORAL_DB_USER=temporal
+TEMPORAL_DB_PASSWORD=${temporal_db_pw}
+TEMPORAL_DB_NAME=temporal
+
+CLICKHOUSE_PASSWORD=${clickhouse_pw}
+MINIO_ROOT_USER=minio
+MINIO_ROOT_PASSWORD=${minio_pw}
+LANGFUSE_ENCRYPTION_KEY=${langfuse_enc_key}
+ROOTENV
 }
 
 step() {
@@ -80,12 +126,12 @@ append_env_blank() {
 
 generate_password() {
     local length="${1:-32}"
-    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$length"
+    LC_ALL=C openssl rand -base64 "$((length + 12))" | tr -dc 'A-Za-z0-9' | head -c "$length" || true
 }
 
 generate_hex_key() {
     local length="${1:-32}"
-    LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c "$((length * 2))"
+    openssl rand -hex "$length" || true
 }
 
 # ===========================================================================
@@ -97,21 +143,23 @@ banner
 # Create config directory if needed
 mkdir -p config
 
-# Backup existing .env
-if [ -f "$ENV_FILE" ]; then
-    backup="${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$ENV_FILE" "$backup"
-    warn "Existing .env backed up to: $backup"
-fi
+if [ "$ONLY_ENV" != "true" ]; then
+    # Backup existing config/.env
+    if [ -f "$ENV_FILE" ]; then
+        backup="${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$ENV_FILE" "$backup"
+        warn "Existing .env backed up to: $backup"
+    fi
 
-# Start fresh
-cat > "$ENV_FILE" << EOF
+    # Start fresh
+    cat > "$ENV_FILE" << EOF
 # ===========================================
 # Auto-Traitor Environment Configuration
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
 # ===========================================
 EOF
-append_env_blank
+    append_env_blank
+fi
 
 # ===========================================================================
 # STEP 1: Prerequisites
@@ -120,20 +168,32 @@ append_env_blank
 step 1 "PREREQUISITE CHECKS"
 
 docker_ok=false
-if command -v docker &>/dev/null; then
-    ok "Docker: $(docker --version)"
+if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+    container_runtime="docker"
+    compose_cmd="docker compose"
     docker_ok=true
+    ok "Docker: $(docker --version)"
+    ok "Docker Compose: $(docker compose version)"
+elif command -v podman &>/dev/null && podman compose version &>/dev/null; then
+    container_runtime="podman"
+    compose_cmd="podman compose"
+    docker_ok=true
+    ok "Podman: $(podman --version)"
+    ok "Podman Compose: $(podman compose version)"
+elif command -v podman-compose &>/dev/null; then
+    container_runtime="podman"
+    compose_cmd="podman-compose"
+    docker_ok=true
+    ok "Podman: $(podman --version 2>/dev/null || echo 'installed')"
+    ok "podman-compose: $(podman-compose --version)"
 else
-    err "Docker not found!"
+    err "No supported container runtime found!"
     info "Install Docker: https://docs.docker.com/engine/install/"
+    info "or Podman: https://podman.io/docs/installation"
     if [ "$SKIP_DOCKER" != "true" ]; then
-        echo "  Cannot continue without Docker."
+        echo "  Cannot continue without Docker or Podman."
         exit 1
     fi
-fi
-
-if command -v docker &>/dev/null && docker compose version &>/dev/null; then
-    ok "Docker Compose: $(docker compose version)"
 fi
 
 if command -v nvidia-smi &>/dev/null; then
@@ -151,19 +211,54 @@ else
 fi
 
 # ===========================================================================
+# STEP 1.5: Generate Compose Secrets
+# ===========================================================================
+
+step "1.5" "GENERATING INFRASTRUCTURE SECRETS"
+
+info "Creating root .env for ${container_runtime^^} Compose variable substitution..."
+
+# Generate random secrets
+traitor_db_password=$(generate_password 32)
+langfuse_db_password=$(generate_password 32)
+langfuse_nextauth_secret=$(generate_password 48)
+langfuse_salt=$(generate_password 48)
+langfuse_admin_password=$(generate_password 20)
+redis_password=$(generate_password 32)
+temporal_db_password=$(generate_password 32)
+clickhouse_password=$(generate_password 32)
+minio_password=$(generate_password 32)
+langfuse_encryption_key=$(generate_hex_key 32)
+
+# Generate actual root .env
+generate_root_env "$traitor_db_password" "$langfuse_db_password" "$langfuse_nextauth_secret" "$langfuse_salt" "$langfuse_admin_password" "$redis_password" "$temporal_db_password" "$clickhouse_password" "$minio_password" "$langfuse_encryption_key"
+
+ok "Root .env created with auto-generated secrets."
+
+# Exit early if only generating .env
+if [ "$ONLY_ENV" = "true" ]; then
+    ok "ONLY_ENV mode: Setup complete!"
+    echo ""
+    echo "  Root .env generated at: .env"
+    echo "  You can now run: $compose_cmd up -d"
+    exit 0
+fi
+
+# ===========================================================================
 # STEP 2: Exchange Selection
 # ===========================================================================
 
 step 2 "EXCHANGE SELECTION"
 
-echo "  Which exchange do you want to trade on?"
+echo "  Which exchanges do you want to trade on?"
 echo "    1. Coinbase (crypto: BTC, ETH, etc.)"
 echo "    2. Interactive Brokers (equities: US/EU markets)"
+echo "    3. Both Coinbase + Interactive Brokers"
 echo ""
-echo "  Note: Only one exchange can be active at a time."
+echo "  Note: You can enable one or both exchanges."
 echo ""
 
-exchange_choice=$(prompt_required "Select exchange (1-2)" "1")
+exchange_choice=$(prompt_required "Select exchange setup (1-3)" "1")
 
 setup_coinbase=false
 setup_ibkr=false
@@ -171,6 +266,11 @@ setup_ibkr=false
 case "$exchange_choice" in
     1) setup_coinbase=true; ok "Coinbase (crypto) selected." ;;
     2) setup_ibkr=true; ok "Interactive Brokers (equities) selected." ;;
+    3)
+        setup_coinbase=true
+        setup_ibkr=true
+        ok "Both exchanges selected: Coinbase + Interactive Brokers."
+        ;;
     *) setup_coinbase=true; ok "Defaulting to Coinbase (crypto)." ;;
 esac
 
@@ -559,37 +659,7 @@ append_env "DASHBOARD_SESSION_SECRET" "$dash_session_secret" "Dashboard session 
 # Dashboard command signing key (HMAC for trade commands via Redis)
 dash_cmd_key=$(openssl rand -hex 32)
 append_env "DASHBOARD_COMMAND_SIGNING_KEY" "$dash_cmd_key"
-
-# Root .env for Docker Compose variable substitution
-cat > .env << EOF
-# Docker Compose variable substitution — generated by setup, do not commit
-# Mirrors the substitution keys from config/.env
-
-OLLAMA_MODEL=${ollama_model}
-
-TRAITOR_DB_PASSWORD=${traitor_db_password}
-
-LANGFUSE_NEXTAUTH_SECRET=${lf_secret}
-LANGFUSE_SALT=${lf_salt}
-LANGFUSE_ADMIN_PASSWORD=${lf_adminpw}
-LANGFUSE_ADMIN_EMAIL=admin@auto-traitor.local
-LANGFUSE_ADMIN_NAME=admin
-LANGFUSE_DB_PASSWORD=${lf_dbpw}
-LANGFUSE_PUBLIC_KEY=${lf_public_key}
-LANGFUSE_SECRET_KEY=${lf_secret_key}
-
-REDIS_PASSWORD=${redis_password}
-
-TEMPORAL_DB_USER=${temporal_db_user}
-TEMPORAL_DB_PASSWORD=${temporal_db_password}
-TEMPORAL_DB_NAME=${temporal_db_name}
-
-CLICKHOUSE_PASSWORD=${ch_password}
-MINIO_ROOT_USER=minio
-MINIO_ROOT_PASSWORD=${minio_pw}
-LANGFUSE_ENCRYPTION_KEY=${enc_key}
-EOF
-ok "Root .env written with Docker Compose substitution vars."
+append_env_blank
 
 # ===========================================================================
 # STEP 9: Create Data Directories
@@ -607,7 +677,7 @@ ok "Created: data/(trades, news, journal, audit), logs/"
 # STEP 10: Docker Compose Build & Pull
 # ===========================================================================
 
-step 10 "BUILDING DOCKER STACK"
+step 10 "BUILDING CONTAINER STACK"
 
 info "The full stack includes:"
 echo "    • Ollama (local LLM with GPU)"
@@ -619,64 +689,6 @@ echo "    • news-worker (background news aggregation)"
 echo "    • Temporal (workflow engine + planning worker)"
 echo "    • Langfuse v3 (LLM observability)"
 echo ""
-
-start_docker=false
-if [ "$docker_ok" = "true" ] && prompt_yesno "Build and start the Docker stack now?" "y"; then
-    start_docker=true
-elif [ "$docker_ok" != "true" ]; then
-    warn "Docker is not available. Skipping Docker startup."
-fi
-
-if [ "$start_docker" = "true" ]; then
-    info "Pulling Docker images..."
-    docker compose pull
-
-    info "Building agent container..."
-    docker compose build --no-cache
-
-    info "Starting services..."
-    docker compose up -d
-
-    if [ "$SKIP_OLLAMA" != "true" ]; then
-        echo ""
-        info "Waiting for Ollama to be ready..."
-        attempts=0
-        ollama_ready=false
-        while [ "$attempts" -lt 30 ] && [ "$ollama_ready" = "false" ]; do
-            attempts=$((attempts + 1))
-            if curl -sf "http://localhost:11434/api/tags" >/dev/null 2>&1; then
-                ollama_ready=true
-                ok "Ollama is ready!"
-            else
-                printf "."
-                sleep 2
-            fi
-        done
-
-        if [ "$ollama_ready" = "false" ]; then
-            warn "Ollama not ready yet. It may still be starting."
-            info "Check: docker compose logs ollama"
-        fi
-
-        echo ""
-        info "Pulling model: $ollama_model (this may take several minutes)..."
-        docker compose exec ollama ollama pull "$ollama_model"
-
-        if [ -f "config/Modelfile" ]; then
-            info "Creating custom Auto-Traitor model..."
-            docker compose cp config/Modelfile ollama:/tmp/Modelfile
-            docker compose exec ollama ollama create auto-traitor -f /tmp/Modelfile
-            ok "Custom model 'auto-traitor' created!"
-        fi
-    fi
-
-    echo ""
-    info "Checking service status..."
-    docker compose ps
-else
-    info "Skipping Docker startup."
-    info "Run 'docker compose up -d' when ready."
-fi
 
 # ===========================================================================
 # STEP 11: Complete
@@ -696,13 +708,71 @@ echo "  Trading Mode:     $trading_mode"
 echo ""
 
 echo "  Quick Commands:"
-echo "     Start:        docker compose up -d"
-echo "     Logs:         docker compose logs -f agent-coinbase"
-echo "     Stop:         docker compose down"
-echo "     Status:       docker compose ps"
+echo "     Start:        $compose_cmd up -d"
+echo "     Logs:         $compose_cmd logs -f agent-coinbase"
+echo "     Stop:         $compose_cmd down"
+echo "     Status:       $compose_cmd ps"
 echo ""
 echo "  Web UIs (once stack is running):"
 echo "     Dashboard:    http://localhost:8090"
 echo "     Langfuse:     http://localhost:3000"
 echo "     Temporal UI:  http://localhost:8233"
 echo ""
+
+start_docker=false
+if [ "$docker_ok" = "true" ] && prompt_yesno "Start the ${container_runtime^^} stack now?" "y"; then
+    start_docker=true
+elif [ "$docker_ok" != "true" ]; then
+    warn "Container runtime is not available. Skipping stack startup."
+fi
+
+if [ "$start_docker" = "true" ]; then
+    info "Pulling images..."
+    $compose_cmd pull
+
+    info "Building agent container..."
+    $compose_cmd build --no-cache
+
+    info "Starting services..."
+    $compose_cmd up -d
+
+    if [ "$SKIP_OLLAMA" != "true" ]; then
+        echo ""
+        info "Waiting for Ollama to be ready..."
+        attempts=0
+        ollama_ready=false
+        while [ "$attempts" -lt 30 ] && [ "$ollama_ready" = "false" ]; do
+            attempts=$((attempts + 1))
+            if curl -sf "http://localhost:11434/api/tags" >/dev/null 2>&1; then
+                ollama_ready=true
+                ok "Ollama is ready!"
+            else
+                printf "."
+                sleep 2
+            fi
+        done
+
+        if [ "$ollama_ready" = "false" ]; then
+            warn "Ollama not ready yet. It may still be starting."
+            info "Check: $compose_cmd logs ollama"
+        fi
+
+        echo ""
+        info "Pulling model: $ollama_model (this may take several minutes)..."
+        $compose_cmd exec ollama ollama pull "$ollama_model"
+
+        if [ -f "config/Modelfile" ]; then
+            info "Creating custom Auto-Traitor model..."
+            $compose_cmd cp config/Modelfile ollama:/tmp/Modelfile
+            $compose_cmd exec ollama ollama create auto-traitor -f /tmp/Modelfile
+            ok "Custom model 'auto-traitor' created!"
+        fi
+    fi
+
+    echo ""
+    info "Checking service status..."
+    $compose_cmd ps
+else
+    info "Skipping stack startup."
+    info "Run '$compose_cmd up -d' when ready."
+fi

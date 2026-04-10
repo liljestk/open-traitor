@@ -12,7 +12,7 @@ services:
       - ollama_data:/root/.ollama
     environment:
       # Use most of 16GB VRAM, leave ~1GB for system
-      - OLLAMA_GPU_MEMORY=15GiB
+      - OLLAMA_GPU_MEMORY=10GiB
       # Allow parallel requests for speed
       - OLLAMA_NUM_PARALLEL=2
       # Keep model loaded in memory for fast inference
