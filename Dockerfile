@@ -24,9 +24,6 @@ COPY config/ config/
 RUN mkdir -p data/trades data/news data/journal data/audit logs && \
     chown -R trader:trader /app
 
-# Switch to non-root user
-USER trader
-
 # Expose health check port
 EXPOSE 8080
 

@@ -29,11 +29,15 @@ print(h)
 PYEOF
 )
 
+    # Escape $ as $$ so docker-compose env_file parsing doesn't
+    # interpret bcrypt cost markers as variable references.
+    PASS_HASH_ESCAPED="${PASS_HASH//\$/\$\$}"
+
     # Append to config/.env
     {
         printf '\n'
         printf '# Dashboard password (auto-generated on first startup — %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'DASHBOARD_PASSWORD_HASH=%s\n' "$PASS_HASH"
+        printf 'DASHBOARD_PASSWORD_HASH=%s\n' "$PASS_HASH_ESCAPED"
     } >> "$CONFIG_ENV"
 
     # Print prominently to Docker logs

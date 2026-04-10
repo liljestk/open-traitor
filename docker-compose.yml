@@ -121,9 +121,9 @@ services:
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
     volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./config:/app/config:z
+      - ./data:/app/data:z
+      - ./logs:/app/logs:z
     ports:
       - "127.0.0.1:8080:8080" # Health check + Prometheus metrics
     # Security: read-only filesystem, drop capabilities
@@ -180,9 +180,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./config:/app/config:z
+      - ./data:/app/data:z
+      - ./logs:/app/logs:z
     ports:
       - "127.0.0.1:8082:8082" # Health check (IBKR port)
     healthcheck:
@@ -224,6 +224,7 @@ services:
       - config/.env
     environment:
       - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
       - TZ=Europe/Helsinki
@@ -233,9 +234,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./config:/app/config:z
+      - ./data:/app/data:z
+      - ./logs:/app/logs:z
     ports:
       - "8090:8090" # Web Dashboard (LAN accessible — ensure DASHBOARD_PASSWORD_HASH is set)
     # Security: read-only filesystem, drop capabilities
@@ -274,9 +275,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./config:/app/config:ro
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./config:/app/config:ro,z
+      - ./data:/app/data:z
+      - ./logs:/app/logs:z
     read_only: true
     tmpfs:
       - /tmp
@@ -573,9 +574,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     volumes:
-      - ./config:/app/config:ro
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./config:/app/config:ro,z
+      - ./data:/app/data:z
+      - ./logs:/app/logs:z
     read_only: true
     tmpfs:
       - /tmp

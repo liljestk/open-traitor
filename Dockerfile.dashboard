@@ -44,9 +44,6 @@ RUN chmod +x /entrypoint.sh
 RUN mkdir -p data logs && \
     chown -R trader:trader /app
 
-# Switch to non-root user
-USER trader
-
 # Expose Dashboard port
 EXPOSE 8090
 

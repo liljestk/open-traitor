@@ -209,12 +209,15 @@ def _persist_password_hash(pw_hash: str) -> None:
     lines: list[str] = []
     found = False
 
+    # Sanitize newlines and escape $ as $$ so docker-compose env_file
+    # parsing doesn't treat bcrypt cost markers ($2b$12$...) as variables.
+    # Both python-dotenv (interpolate=True) and compose unescape $$ → $.
+    safe_hash = pw_hash.replace("\n", "").replace("\r", "").replace("$", "$$")
+
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip().startswith("DASHBOARD_PASSWORD_HASH="):
-                    # Sanitize: strip newlines from hash to prevent .env injection
-                    safe_hash = pw_hash.replace("\n", "").replace("\r", "")
                     lines.append(f"DASHBOARD_PASSWORD_HASH={safe_hash}\n")
                     found = True
                 else:
@@ -224,7 +227,6 @@ def _persist_password_hash(pw_hash: str) -> None:
         if lines and not lines[-1].endswith("\n"):
             lines.append("\n")
         lines.append(f"\n# Dashboard password (bcrypt hash)\n")
-        safe_hash = pw_hash.replace("\n", "").replace("\r", "")
         lines.append(f"DASHBOARD_PASSWORD_HASH={safe_hash}\n")
 
     # Atomic write
