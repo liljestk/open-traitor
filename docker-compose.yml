@@ -11,20 +11,17 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     environment:
-      # Use most of 16GB VRAM, leave ~1GB for system
+      # Use most of 11GB VRAM (RTX 2080 Ti), leave ~1GB for system
       - OLLAMA_GPU_MEMORY=10GiB
       # Allow parallel requests for speed
       - OLLAMA_NUM_PARALLEL=2
       # Keep model loaded in memory for fast inference
       - OLLAMA_KEEP_ALIVE=24h
-    # NVIDIA GPU support for RTX 5080 16GB
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
+    # NVIDIA GPU support (CDI + rootless podman)
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
     healthcheck:
       test: [ "CMD-SHELL", "ollama list > /dev/null 2>&1" ]
       interval: 15s
