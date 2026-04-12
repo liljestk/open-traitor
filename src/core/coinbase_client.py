@@ -258,6 +258,8 @@ class CoinbaseClient(
             self._last_prices[pair] = price
         return price
 
+    _CANDLE_PAGE_SIZE = 300  # Coinbase limit is 350; use 300 for safety
+
     def get_candles(
         self,
         product_id: str,
@@ -266,10 +268,13 @@ class CoinbaseClient(
         start_time: int | None = None,
         end_time: int | None = None,
     ) -> list[dict]:
-        """Get historical candles (OHLCV data)."""
+        """Get historical candles (OHLCV data).
+
+        Automatically paginates when *limit* exceeds the Coinbase per-request
+        cap of 350 candles.
+        """
         if self._rest_client:
             try:
-                end = end_time or int(time.time())
                 granularity_seconds = {
                     "ONE_MINUTE": 60,
                     "FIVE_MINUTE": 300,
@@ -281,26 +286,51 @@ class CoinbaseClient(
                     "ONE_DAY": 86400,
                 }
                 seconds = granularity_seconds.get(granularity, 3600)
+                end = end_time or int(time.time())
                 start = start_time or (end - (limit * seconds))
 
-                candles = self._throttled_request(
-                    "get_candles",
-                    product_id=product_id,
-                    start=str(start),
-                    end=str(end),
-                    granularity=granularity,
-                )
-                result = (
-                    candles.to_dict()
-                    if hasattr(candles, "to_dict")
-                    else dict(candles)
-                )
-                return result.get("candles", [])
+                # If the range fits in one page, fetch directly
+                if limit <= self._CANDLE_PAGE_SIZE:
+                    return self._fetch_candle_page(product_id, start, end, granularity)
+
+                # Paginate: split into non-overlapping windows from oldest to newest
+                all_candles: list[dict] = []
+                total_span = end - start
+                page_span = self._CANDLE_PAGE_SIZE * seconds
+                cursor = start
+                while cursor < end:
+                    page_end = min(cursor + page_span, end)
+                    page = self._fetch_candle_page(product_id, cursor, page_end, granularity)
+                    if not page:
+                        break
+                    all_candles.extend(page)
+                    cursor = page_end
+                # Return only the most recent *limit* candles
+                return all_candles[-limit:] if len(all_candles) > limit else all_candles
+
             except Exception as e:
                 logger.error(f"Error fetching candles for {product_id}: {e}")
                 return []
 
         return self._mock_candles(product_id, limit)
+
+    def _fetch_candle_page(
+        self, product_id: str, start: int, end: int, granularity: str
+    ) -> list[dict]:
+        """Fetch a single page of candles (must be ≤ 350)."""
+        candles = self._throttled_request(
+            "get_candles",
+            product_id=product_id,
+            start=str(start),
+            end=str(end),
+            granularity=granularity,
+        )
+        result = (
+            candles.to_dict()
+            if hasattr(candles, "to_dict")
+            else dict(candles)
+        )
+        return result.get("candles", [])
 
     def get_market_trades(self, product_id: str, limit: int = 50) -> list[dict]:
         """Get recent market trades."""
