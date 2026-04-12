@@ -207,7 +207,8 @@ class StatsDB(
                         worst_trade TEXT DEFAULT NULL,
                         events_count INTEGER DEFAULT 0,
                         summary_text TEXT DEFAULT '',
-                        plan_text TEXT DEFAULT ''
+                        plan_text TEXT DEFAULT '',
+                        exchange TEXT NOT NULL DEFAULT 'coinbase'
                     )
                 """)
 
@@ -330,6 +331,7 @@ class StatsDB(
         ("simulated_trades",     "exchange"),
         ("scan_results",         "exchange"),
         ("events",               "exchange"),
+        ("daily_summaries",      "exchange"),
     })
 
     def _migrate_db(self) -> None:
@@ -350,6 +352,7 @@ class StatsDB(
             ("simulated_trades",    "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("scan_results",        "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("events",              "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
+            ("daily_summaries",     "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("trades",              "external_id",          "TEXT DEFAULT NULL"),
             ("trades",              "entry_score",           "REAL DEFAULT NULL"),
         ]
@@ -381,6 +384,9 @@ class StatsDB(
                 # ALTER TABLE ADD COLUMN, not during _init_db which runs first).
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_events_exchange ON events(exchange)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_daily_summaries_exchange ON daily_summaries(exchange)"
                 )
                 cur.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_external_id ON trades(external_id) WHERE external_id IS NOT NULL"
