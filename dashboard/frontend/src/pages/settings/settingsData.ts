@@ -285,7 +285,10 @@ export function formatFieldValue(key: string, val: unknown): string {
 
 export function renderValue(val: unknown): string {
   if (typeof val === 'boolean') return val ? '✓ Enabled' : '✗ Disabled'
-  if (Array.isArray(val)) return val.length ? val.join(', ') : '(empty)'
+  if (Array.isArray(val)) {
+    if (val.length > 0 && typeof val[0] === 'object') return `(${val.length} items)`
+    return val.length ? val.join(', ') : '(empty)'
+  }
   if (val === null || val === undefined) return '—'
   return String(val)
 }

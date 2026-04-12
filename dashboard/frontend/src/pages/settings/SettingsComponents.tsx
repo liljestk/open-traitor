@@ -173,6 +173,7 @@ export function SectionCard({ name, label, values, schema, telegramTier, onSave,
 
   const fields = schema?.fields ?? {}
   const fieldEntries = Object.entries(editing ? draft : values)
+    .filter(([, v]) => !(Array.isArray(v) && v.length > 0 && typeof v[0] === 'object'))
   const tierColor = TIER_COLORS[telegramTier] ?? '#6e7681'
   const icon = SECTION_ICONS[name]
   const nested = schema?.nested ?? null
