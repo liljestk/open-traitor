@@ -78,6 +78,10 @@ function FieldInput({ fieldKey, value, schema, onChange }: {
     )
   }
 
+  if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+    return null
+  }
+
   if (type === 'list' || Array.isArray(value)) {
     return (
       <input type="text"
