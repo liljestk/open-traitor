@@ -85,6 +85,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
+    // Session expired or invalidated (e.g. container restart) — force re-auth
+    if (res.status === 401) {
+      window.location.reload()
+      throw new Error('Session expired')
+    }
     const text = await res.text()
     throw new Error(`HTTP ${res.status}: ${text}`)
   }
@@ -1410,7 +1415,7 @@ export function openBacktestSocket(
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────
 
-export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: () => void): WebSocket {
+export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: (code?: number) => void): WebSocket {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = window.location.hostname
   const port = window.location.port || (proto === 'wss' ? '443' : '80')
@@ -1427,6 +1432,6 @@ export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: 
       // silently ignore unparseable messages
     }
   }
-  ws.onclose = () => onClose?.()
+  ws.onclose = (e) => onClose?.(e.code)
   return ws
 }

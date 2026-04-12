@@ -111,7 +111,7 @@ class SpanContext:
                     "exchange": self._exchange,
                     "agent_name": self.agent_name,
                     "model": self.model,
-                    "trace_id": self.trace_id,
+                    "langfuse_trace_id": self.trace_id,
                     "span_id": self.span_id,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,

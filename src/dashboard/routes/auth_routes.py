@@ -67,7 +67,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,
         secure=use_https,
-        samesite="strict",
+        samesite="lax",
         max_age=auth.SESSION_TTL,
         path="/",
     )

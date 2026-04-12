@@ -65,18 +65,28 @@ def _build_allowed_origins() -> list[str]:
     tailnet = os.environ.get("TAILSCALE_DOMAIN", "tailc4de35.ts.net")
     dashboard_ports = ["5173", "8090"]
 
+    # Collect candidate hostnames: gethostname() plus MACHINE_HOSTNAME env
+    # (containers typically don't know the host's actual hostname)
+    hostnames: set[str] = set()
     try:
-        hostname = socket.gethostname().lower()
+        hostnames.add(socket.gethostname().lower())
     except Exception:
+        pass
+    machine_host = os.environ.get("MACHINE_HOSTNAME", "").strip().lower()
+    if machine_host:
+        hostnames.add(machine_host)
+
+    if not hostnames:
         return base
 
     extra: list[str] = []
-    for suffix in [f"{hostname}.local", f"{hostname}.{tailnet}"]:
-        for port in dashboard_ports:
-            for scheme in ["http", "https"]:
-                origin = f"{scheme}://{suffix}:{port}"
-                if origin not in base:
-                    extra.append(origin)
+    for hostname in hostnames:
+        for suffix in [f"{hostname}.local", f"{hostname}.{tailnet}"]:
+            for port in dashboard_ports:
+                for scheme in ["http", "https"]:
+                    origin = f"{scheme}://{suffix}:{port}"
+                    if origin not in base:
+                        extra.append(origin)
 
     return base + extra
 

@@ -181,7 +181,11 @@ async def ws_live(websocket: WebSocket):
 
             if not authenticated:
                 _record_ws_auth_failure(client_ip)
-                logger.warning(f"WS auth failed from {client_ip}")
+                logger.warning(
+                    f"WS auth failed from {client_ip}"
+                    f" (cookie={'yes' if session_token else 'no'},"
+                    f" apikey={'yes' if api_key else 'no'})"
+                )
                 await websocket.close(code=1008, reason="Authentication required")
                 return
 

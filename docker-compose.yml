@@ -231,6 +231,8 @@ services:
       - TZ=Europe/Helsinki
       # Allow dashboard to reach IB Gateway for IBKR price/news lookups
       - IBKR_HOST=host.docker.internal
+      # Host machine hostname for CORS origin auto-detection in containers
+      - MACHINE_HOSTNAME=${HOSTNAME:-bazzite}
     # Allow container to reach IB Gateway on the host machine
     extra_hosts:
       - "host.docker.internal:host-gateway"

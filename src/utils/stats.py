@@ -100,12 +100,28 @@ class StatsDB(
 
         Yields a ``_ConnProxy`` that provides an sqlite3-like ``.execute()``
         API backed by ``RealDictCursor``.
+
+        Detects stale/closed connections and transparently replaces them.
         """
         raw = self._pool.getconn()
         try:
+            # Test connection liveness; replace if stale
+            if raw.closed:
+                self._pool.putconn(raw, close=True)
+                raw = self._pool.getconn()
+            else:
+                try:
+                    raw.cursor().execute("SELECT 1")
+                    raw.rollback()  # clean up test query transaction
+                except Exception:
+                    self._pool.putconn(raw, close=True)
+                    raw = self._pool.getconn()
             yield _ConnProxy(raw)
         except Exception:
-            raw.rollback()
+            try:
+                raw.rollback()
+            except Exception:
+                pass
             raise
         finally:
             self._pool.putconn(raw)

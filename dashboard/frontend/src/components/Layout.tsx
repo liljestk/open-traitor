@@ -96,7 +96,15 @@ export default function Layout() {
     function connect() {
       const ws = openLiveSocket(
         (e) => { setConnected(true); addEvent(e) },
-        () => { setConnected(false); reconnectTimer = setTimeout(connect, 5000) },
+        (code) => {
+          setConnected(false)
+          // 1008 = Policy Violation (auth failed) — session expired, force re-login
+          if (code === 1008) {
+            window.location.reload()
+            return
+          }
+          reconnectTimer = setTimeout(connect, 5000)
+        },
       )
       wsRef.current = ws
       setConnected(true)
