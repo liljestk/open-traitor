@@ -108,6 +108,7 @@ services:
       - config/.env
     environment:
       - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -162,6 +163,7 @@ services:
       - config/.env
     environment:
       - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - OLLAMA_BASE_URL=http://ollama:11434
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -329,6 +331,11 @@ services:
     container_name: opentraitor-clickhouse
     restart: unless-stopped
     user: "101:101"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: langfuse
@@ -407,6 +414,11 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000" # Langfuse Web UI — local only
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
     environment:
       DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
@@ -533,6 +545,11 @@ services:
     ports:
       - "127.0.0.1:7233:7233" # gRPC endpoint — local only
       - "127.0.0.1:8233:8233" # Web UI — local only
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
     environment:
       - DB=postgres12
       - DB_PORT=5432
