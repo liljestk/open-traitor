@@ -467,6 +467,46 @@ class RiskManagerAgent(BaseAgent):
                 f"(max allowed: {max_position:,.2f})"
             )
 
+        # P3: portfolio-level exposure cap. Sum of open buy-side notional +
+        # this new order must not exceed max_total_exposure_pct of portfolio.
+        # Prevents accidentally going all-in across many small positions.
+        max_total_exposure_pct = float(
+            self.risk_config.get("max_total_exposure_pct", 0.8)
+        )
+        if action == "buy" and portfolio_value > 0 and max_total_exposure_pct > 0:
+            existing_exposure = 0.0
+            try:
+                for pos_pair, pos in self.state.open_positions.items():
+                    qty = float(getattr(pos, "quantity", 0) or 0)
+                    px = float(self.state.current_prices.get(pos_pair, 0) or 0)
+                    existing_exposure += abs(qty * px)
+            except Exception:
+                existing_exposure = 0.0
+            exposure_cap = portfolio_value * max_total_exposure_pct
+            headroom = max(exposure_cap - existing_exposure, 0.0)
+            if quote_amount > headroom:
+                if headroom <= 0:
+                    self.logger.warning(
+                        f"🚫 Exposure cap reached: {existing_exposure:,.2f} / "
+                        f"{exposure_cap:,.2f} ({max_total_exposure_pct:.0%}) — rejecting buy"
+                    )
+                    return {
+                        "approved": False,
+                        "action": action,
+                        "pair": pair,
+                        "quote_amount": quote_amount,
+                        "reason": (
+                            f"Portfolio exposure cap reached "
+                            f"({existing_exposure:,.2f} / {exposure_cap:,.2f})"
+                        ),
+                    }
+                original = quote_amount
+                quote_amount = headroom
+                self.logger.info(
+                    f"Exposure cap trim: {original:,.2f} → {quote_amount:,.2f} "
+                    f"(existing {existing_exposure:,.2f} / cap {exposure_cap:,.2f})"
+                )
+
         # Calculate final quantity
         # For sells with a specific quantity from the strategist (e.g. pre-existing
         # holdings), preserve the original quantity rather than recalculating.
