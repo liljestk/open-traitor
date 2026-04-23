@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
+from src.models.llm_responses import validate_strategist
 from src.models.trade import TradeAction
 from src.utils.logger import get_logger
 from src.utils import llm_optimizer
@@ -168,6 +169,22 @@ class StrategistAgent(BaseAgent):
         if "error" in llm_response:
             self.logger.warning(f"Strategy generation failed: {llm_response}")
             return {"action": "hold", "error": llm_response["error"]}
+
+        # P0: Validate LLM JSON against Pydantic schema. Any malformed output
+        # collapses to a safe "hold" — we never trust unvalidated JSON
+        # to drive order placement.
+        sanitized, schema_err = validate_strategist(llm_response)
+        if schema_err:
+            self.logger.warning(
+                f"⚠️ Strategist schema validation failed for {pair}: {schema_err} "
+                f"— defaulting to HOLD"
+            )
+            return {
+                "action": "hold",
+                "error": "schema_validation_failed",
+                "reasoning": f"LLM response rejected by schema validator: {schema_err}",
+            }
+        llm_response = sanitized
 
         # Persist reasoning trace
         if stats_db and cycle_id:

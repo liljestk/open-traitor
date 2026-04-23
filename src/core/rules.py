@@ -57,6 +57,16 @@ class AbsoluteRules:
         self.always_use_stop_loss = config.get("always_use_stop_loss", True)
         self.max_stop_loss_pct = config.get("max_stop_loss_pct", 0.05)
 
+        # P0: Portfolio-level drawdown kill-switch.
+        # Tracks the all-time peak of `portfolio_value` seen via check_trade().
+        # If the current portfolio drops more than `portfolio_drawdown_halt_pct`
+        # from that peak, new BUY orders are blocked. 0 disables the check.
+        self.portfolio_drawdown_halt_pct = float(
+            config.get("portfolio_drawdown_halt_pct", 0.15)
+        )
+        self._portfolio_peak: float = 0.0
+        self._drawdown_halted: bool = False
+
         # Portfolio scaler - set by orchestrator after init
         self._portfolio_scaler = None
 
@@ -267,6 +277,17 @@ class AbsoluteRules:
         has_stop_loss: bool = False,
     ) -> tuple[bool, list[RuleViolation], bool]:
         """Inner implementation - caller must hold self._lock."""
+        # P0: Update portfolio peak on every check so drawdown kill-switch
+        # captures highs accurately (sells update the peak too).
+        if portfolio_value > self._portfolio_peak:
+            self._portfolio_peak = portfolio_value
+            if self._drawdown_halted:
+                logger.info(
+                    "✅ Portfolio recovered to new peak %.2f — drawdown halt cleared",
+                    portfolio_value,
+                )
+                self._drawdown_halted = False
+
         # C5 fix: Block buys if daily counter seeding failed — we can't
         # enforce spend/loss limits without knowing today's totals.
         if self._seeding_failed and action == TradeAction.BUY:
@@ -299,6 +320,32 @@ class AbsoluteRules:
             return True, [], False
 
         # -- BUY-only rules below --
+
+        # P0: Portfolio drawdown kill-switch. Latched: stays halted until
+        # portfolio recovers to a new peak (see top of this method).
+        if (
+            self.portfolio_drawdown_halt_pct > 0
+            and self._portfolio_peak > 0
+            and portfolio_value > 0
+        ):
+            drawdown = (self._portfolio_peak - portfolio_value) / self._portfolio_peak
+            if drawdown >= self.portfolio_drawdown_halt_pct:
+                if not self._drawdown_halted:
+                    logger.error(
+                        "🚨 PORTFOLIO DRAWDOWN HALT | peak=%.2f current=%.2f dd=%.1f%% "
+                        "(threshold %.1f%%) — blocking new BUYs until recovery",
+                        self._portfolio_peak,
+                        portfolio_value,
+                        drawdown * 100,
+                        self.portfolio_drawdown_halt_pct * 100,
+                    )
+                    self._drawdown_halted = True
+                violations.append(RuleViolation(
+                    "portfolio_drawdown_halt",
+                    f"Drawdown {drawdown:.1%} >= {self.portfolio_drawdown_halt_pct:.1%}",
+                    f"Peak {self._portfolio_peak:,.2f} → current {portfolio_value:,.2f}. "
+                    f"Buys halted until new peak recovered.",
+                ))
 
         # --- Rule: Blacklisted pairs ---
         if pair in self.never_trade_pairs:
@@ -451,6 +498,9 @@ class AbsoluteRules:
                 "trades_remaining": max(0, self.max_trades_per_day - self._daily_trade_count),
                 "max_single_trade": self.max_single_trade,
                 "approval_threshold": self.require_approval_above,
+                "portfolio_peak": self._portfolio_peak,
+                "portfolio_drawdown_halt_pct": self.portfolio_drawdown_halt_pct,
+                "drawdown_halted": self._drawdown_halted,
             }
 
     def get_rules_text(self) -> str:
@@ -484,6 +534,7 @@ class AbsoluteRules:
             "emergency_stop_portfolio": self.emergency_stop_portfolio,
             "always_use_stop_loss": self.always_use_stop_loss,
             "max_stop_loss_pct": self.max_stop_loss_pct,
+            "portfolio_drawdown_halt_pct": self.portfolio_drawdown_halt_pct,
         }
 
     # -----------------------------------------------------------------------

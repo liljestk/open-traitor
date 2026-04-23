@@ -203,6 +203,7 @@ class Orchestrator:
         self.trailing_stops = TrailingStopManager(
             default_trail_pct=config.get("risk", {}).get("trailing_stop_pct", 0.03),
             enable_tiers=config.get("risk", {}).get("enable_tiered_stops", True),
+            min_hold_minutes=config.get("trading", {}).get("min_hold_minutes", 0.0),
         )
 
         # Sentiment analysis (keyword-based, no external deps)
@@ -448,6 +449,10 @@ class Orchestrator:
         except Exception as _seed_err:
             logger.warning(f"⚠️ Could not seed human-followed pairs: {_seed_err}")
 
+        # Exchange name cached for periodic watchlist refresh
+        self._exchange_name: str = trading_cfg.get("exchange", "coinbase").lower()
+        self._watchlist_refresh_counter: int = 0
+
         self._SCREENER_INTERVAL: int = int(
             trading_cfg.get("screener_interval_cycles", 5)
         )
@@ -646,6 +651,54 @@ class Orchestrator:
             logger.info(msg)
             self.chat_handler.queue_event(msg, severity="info")
 
+    def _start_cycle_watchdog(self, timeout_s: float) -> None:
+        """Start a background watchdog that force-exits the process if the
+        main trading loop stops updating its heartbeat. Docker's
+        ``restart: unless-stopped`` policy will then bring the agent back up.
+        Defends against blocking-I/O hangs that exception handlers cannot catch.
+        """
+        if getattr(self, "_watchdog_thread", None) is not None:
+            return
+
+        def _watchdog_loop() -> None:
+            check_interval = max(15.0, timeout_s / 10.0)
+            warned = False
+            while self.state.is_running:
+                time.sleep(check_interval)
+                if not self.state.is_running:
+                    break
+                if self.state.is_paused:
+                    self._cycle_heartbeat = time.monotonic()
+                    warned = False
+                    continue
+                age = time.monotonic() - self._cycle_heartbeat
+                if age > timeout_s:
+                    logger.error(
+                        f"💀 Cycle watchdog: no heartbeat for {age:.0f}s "
+                        f"(>{timeout_s:.0f}s) — forcing process exit."
+                    )
+                    if self.telegram:
+                        try:
+                            self.telegram.send_alert(
+                                f"💀 Cycle watchdog tripped after {age:.0f}s — restarting agent."
+                            )
+                        except Exception:
+                            pass
+                    os._exit(1)
+                elif age > timeout_s * 0.6 and not warned:
+                    logger.warning(
+                        f"⚠️ Cycle watchdog: no heartbeat for {age:.0f}s (timeout {timeout_s:.0f}s)"
+                    )
+                    warned = True
+                elif age < check_interval:
+                    warned = False
+
+        self._watchdog_thread = threading.Thread(
+            target=_watchdog_loop, name="cycle-watchdog", daemon=True,
+        )
+        self._watchdog_thread.start()
+        logger.info(f"🐕 Cycle watchdog armed (timeout={timeout_s:.0f}s)")
+
     def run_forever(self) -> None:
         """Main loop — runs continuously until stopped."""
         logger.info("🚀 Starting main trading loop...")
@@ -676,7 +729,18 @@ class Orchestrator:
         recovery_interval = self.config.get("llm", {}).get("recovery_check_interval", 120)
         self.llm.start_recovery_polling(loop=self._loop, interval=recovery_interval)
 
+        # Cycle watchdog: defend against indefinitely-hung cycles.
+        self._cycle_heartbeat = time.monotonic()
+        _watchdog_timeout = float(
+            self.config.get("health", {}).get(
+                "cycle_watchdog_timeout_s",
+                max(self.interval * 4, 600),
+            )
+        )
+        self._start_cycle_watchdog(_watchdog_timeout)
+
         while self.state.is_running:
+            self._cycle_heartbeat = time.monotonic()
             if self.state.is_paused:
                 logger.debug("Trading paused, waiting...")
                 time.sleep(10)
@@ -804,6 +868,43 @@ class Orchestrator:
 
                     # Effective base pairs: screener-selected (if any) or configured seed list
                     # Capped by tier-scaled max_active_pairs (micro accounts get fewer pairs)
+                    # ─── Periodic watchlist DB refresh ────────────────────
+                    # Re-sync human-followed pairs from DB every screener interval
+                    # so additions via dashboard are picked up even if Redis
+                    # notification was lost.
+                    self._watchlist_refresh_counter += 1
+                    if self._watchlist_refresh_counter >= self._SCREENER_INTERVAL:
+                        self._watchlist_refresh_counter = 0
+                        try:
+                            _qc = self.config.get("trading", {}).get("quote_currency")
+                            _db_human = self.stats_db.get_followed_pairs_set(
+                                followed_by="human",
+                                quote_currency=_qc,
+                                exchange=self._exchange_name,
+                            )
+                            if _db_human:
+                                with self._pairs_lock:
+                                    _current = set(self.watchlist_pairs)
+                                    _new = sorted(_db_human - _current)
+                                    _removed = _current - _db_human
+                                    if _new or _removed:
+                                        self.watchlist_pairs = sorted(_db_human)
+                                        self.all_tracked_pairs = list(set(self.pairs + self.watchlist_pairs))
+                                        if _new:
+                                            logger.info(f"👁️ Watchlist DB sync: added {_new}")
+                                        if _removed:
+                                            logger.info(f"👁️ Watchlist DB sync: removed {sorted(_removed)}")
+                            elif not self.watchlist_pairs:
+                                pass  # both empty — nothing to do
+                            else:
+                                # DB says no human follows but runtime has some → clear
+                                with self._pairs_lock:
+                                    self.watchlist_pairs = []
+                                    self.all_tracked_pairs = list(set(self.pairs))
+                                logger.info("👁️ Watchlist DB sync: all human follows removed")
+                        except Exception as _wl_err:
+                            logger.debug(f"Watchlist DB refresh failed (non-fatal): {_wl_err}")
+
                     # Read both pairs and watchlist under lock to prevent race with settings advisor
                     with self._pairs_lock:
                         base_pairs = self._screener_active_pairs or list(self.pairs[:effective_max_active])
@@ -1300,14 +1401,42 @@ class Orchestrator:
                                 self._ws_last_prices[ep] = p_now
                 break  # restart the full interval after an early trigger
 
-        logger.info("Orchestrator stopped.")
+        logger.info("Orchestrator stopped — running graceful shutdown...")
+
+        # Save trading state before anything else
+        try:
+            self.state.save_state()
+            logger.info("✅ Trading state saved")
+        except Exception as e:
+            logger.error(f"❌ Failed to save trading state on shutdown: {e}")
+
+        # Persist trailing stop state so positions are protected on restart
+        try:
+            self.trailing_stops.save_state()
+            logger.info("✅ Trailing stop state saved")
+        except Exception as e:
+            logger.debug(f"Trailing stop save skipped: {e}")
+
         # Stop LLM recovery poller
         self.llm.stop_recovery_polling()
-        # H2 fix: close the asyncio event loop to release resources
+
+        # Cancel any pending async tasks on the event loop
+        try:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+
+        # Close the asyncio event loop to release resources
         try:
             self._loop.close()
         except Exception:
             pass
+
+        logger.info("✅ Graceful shutdown complete")
 
     # =========================================================================
     # Portfolio Rotation

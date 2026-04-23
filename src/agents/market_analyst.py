@@ -10,6 +10,7 @@ from typing import Any
 
 from src.agents.base_agent import BaseAgent
 from src.analysis.technical import TechnicalAnalyzer
+from src.models.llm_responses import validate_market_analyst
 from src.models.signal import (
     MarketCondition,
     Signal,
@@ -139,6 +140,18 @@ class MarketAnalystAgent(BaseAgent):
             self.logger.warning(f"LLM analysis failed: {llm_response['error']}")
             # Fall back to pure technical analysis
             return self._technical_only_signal(pair, current_price, indicators)
+
+        # P0: Validate LLM JSON against Pydantic schema. If the response is
+        # malformed we cannot trust it — fall back to the deterministic
+        # technical-only signal rather than passing hallucinated data downstream.
+        sanitized, schema_err = validate_market_analyst(llm_response)
+        if schema_err:
+            self.logger.warning(
+                f"⚠️ Market analyst schema validation failed for {pair}: {schema_err} "
+                f"— falling back to technical-only"
+            )
+            return self._technical_only_signal(pair, current_price, indicators)
+        llm_response = sanitized
 
         # Step 3: Persist reasoning trace
         if stats_db and cycle_id:

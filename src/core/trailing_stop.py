@@ -52,6 +52,7 @@ class TrailingStop:
         side: str = "long",
         tiers: Optional[list[dict]] = None,
         total_quantity: float = 0.0,
+        min_hold_minutes: float = 0.0,
     ):
         self.pair = pair
         self.entry_price = entry_price
@@ -60,6 +61,12 @@ class TrailingStop:
         self.created_at = datetime.now(timezone.utc)
         self.total_quantity = total_quantity
         self.remaining_quantity = total_quantity
+        # P0: Suppress full stop-outs during the first `min_hold_minutes`
+        # of a position's life. Prevents ping-pong whipsaw losses where a
+        # fresh entry is immediately closed by a volatile tick. Tiered
+        # partial exits (profit-taking) are NOT suppressed — we still
+        # want to lock in profits if the market gifts them early.
+        self.min_hold_minutes = max(0.0, float(min_hold_minutes))
 
         # Tracking
         if side == "long":
@@ -174,6 +181,13 @@ class TrailingStop:
 
         # Check if triggered
         if current_price <= self.stop_price:
+            # P0: Respect minimum holding period before firing a full exit.
+            if self._min_hold_active():
+                logger.debug(
+                    f"⏳ {self.pair} trailing stop would trigger @ ${current_price:,.2f} "
+                    f"but min_hold_minutes={self.min_hold_minutes:.1f} not yet elapsed"
+                )
+                return False
             self.triggered = True
             self.trigger_price = current_price
             self.trigger_time = datetime.now(timezone.utc)
@@ -187,6 +201,13 @@ class TrailingStop:
 
         return False
 
+    def _min_hold_active(self) -> bool:
+        """True while the position is younger than `min_hold_minutes`."""
+        if self.min_hold_minutes <= 0:
+            return False
+        age_s = (datetime.now(timezone.utc) - self.created_at).total_seconds()
+        return age_s < (self.min_hold_minutes * 60.0)
+
     def _update_short(self, current_price: float) -> bool:
         """Update trailing stop for a short position."""
         if current_price < self.lowest_price:
@@ -198,6 +219,9 @@ class TrailingStop:
                 self.updates += 1
 
         if current_price >= self.stop_price:
+            # P0: Respect minimum holding period before firing a full exit.
+            if self._min_hold_active():
+                return False
             self.triggered = True
             self.trigger_price = current_price
             self.trigger_time = datetime.now(timezone.utc)
@@ -250,9 +274,15 @@ class TrailingStopManager:
     ]
     # Final remaining % rides the trailing stop
 
-    def __init__(self, default_trail_pct: float = 0.03, enable_tiers: bool = False):
+    def __init__(
+        self,
+        default_trail_pct: float = 0.03,
+        enable_tiers: bool = False,
+        min_hold_minutes: float = 0.0,
+    ):
         self.default_trail_pct = default_trail_pct
         self.enable_tiers = enable_tiers
+        self.min_hold_minutes = max(0.0, float(min_hold_minutes))
         self.stops: dict[str, TrailingStop] = {}
         self._lock = threading.Lock()
 
@@ -265,6 +295,7 @@ class TrailingStopManager:
         side: str = "long",
         tiers: Optional[list[dict]] = None,
         total_quantity: float = 0.0,
+        min_hold_minutes: Optional[float] = None,
     ) -> TrailingStop:
         """Create a trailing stop for a position."""
         with self._lock:
@@ -279,6 +310,9 @@ class TrailingStopManager:
                 side=side,
                 tiers=use_tiers,
                 total_quantity=total_quantity,
+                min_hold_minutes=(
+                    self.min_hold_minutes if min_hold_minutes is None else min_hold_minutes
+                ),
             )
             self.stops[pair] = stop
             tier_info = f", {len(use_tiers)} tiers" if use_tiers else ""
