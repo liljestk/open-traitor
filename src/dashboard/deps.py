@@ -96,6 +96,11 @@ allowed_origins: list[str] = _build_allowed_origins()
 rules_instance = None     # AbsoluteRules instance (optional, for runtime push)
 llm_client = None         # LLMClient instance (optional, for provider status)
 
+# Phase 4/7 substrate singletons (injected via set_globals; safe to be None)
+capital_allocator = None      # src.core.capital_allocator.CapitalAllocator
+self_healing = None           # src.core.self_healing.SelfHealingController
+signal_edge_library = None    # src.strategies.quant.signal_edges.SignalEdgeLibrary
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Profile resolution

@@ -55,6 +55,7 @@ from src.dashboard.routes.learning import router as learning_router
 from src.dashboard.routes.auth_routes import router as auth_router
 from src.dashboard.routes.financial_calendar import router as financial_calendar_router
 from src.dashboard.routes.backtesting import router as backtesting_router
+from src.dashboard.routes.quant_observability import router as quant_observability_router
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,9 @@ def set_globals(
     config: dict | None = None,
     rules_instance=None,
     llm_client=None,
+    capital_allocator=None,
+    self_healing=None,
+    signal_edge_library=None,
 ):
     """Inject shared services.  Called from main.py before uvicorn starts."""
     deps.stats_db = stats_db
@@ -77,6 +81,9 @@ def set_globals(
     deps.config = config or {}
     deps.rules_instance = rules_instance
     deps.llm_client = llm_client
+    deps.capital_allocator = capital_allocator
+    deps.self_healing = self_healing
+    deps.signal_edge_library = signal_edge_library
 
     # Spin up a read-only Coinbase client for live price lookups (market data only)
     try:
@@ -385,6 +392,7 @@ app.include_router(llm_analytics_router)
 app.include_router(learning_router)
 app.include_router(financial_calendar_router)
 app.include_router(backtesting_router)
+app.include_router(quant_observability_router)
 
 
 # ---------------------------------------------------------------------------
