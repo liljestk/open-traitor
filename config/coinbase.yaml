@@ -53,6 +53,15 @@ fees:
   safety_margin: 1.5
   swap_cooldown_seconds: 3600
   trade_fee_pct: 0.006
+execution:
+  # P1: maker-only forces crypto buys to post-only limit orders.
+  maker_only: true
+  use_limit_orders: true
+  limit_price_offset_pct: 0.001
+  replace_on_drift_pct: 0.003
+  limit_order_ttl_seconds: 900
+  urgency_confidence_threshold: 0.8
+
 health:
   port: 8080
 high_stakes:
@@ -227,7 +236,8 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.55
+  min_confidence: 0.65
+  min_hold_minutes: 30
   mode: live
   pair_discovery: all
   pair_universe_refresh_seconds: 1800

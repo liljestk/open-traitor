@@ -42,6 +42,25 @@ class ExecutorAgent(BaseAgent):
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
         self.urgency_threshold = exec_cfg.get("urgency_confidence_threshold", 0.8)
+        # P1: maker-only mode. When true, ALL buys are post-only limit orders
+        # (never fall through to market). If the post-only order would cross
+        # the spread the exchange rejects it, and we skip the trade.
+        self.maker_only = bool(exec_cfg.get("maker_only", False))
+        # P1: cancel-and-replace an open limit order when the live market price
+        # drifts this far from the resting limit price (as a fraction). 0 or
+        # negative disables drift replacement.
+        self.replace_on_drift_pct = float(exec_cfg.get("replace_on_drift_pct", 0.0))
+        # P1: override the resting-limit TTL from config (seconds).
+        ttl_override = exec_cfg.get("limit_order_ttl_seconds")
+        if ttl_override is not None:
+            try:
+                self._LIMIT_ORDER_TTL = float(ttl_override)
+            except (TypeError, ValueError):
+                pass
+        # P1: fill-rate accounting
+        self._maker_filled: int = 0
+        self._maker_cancelled: int = 0
+        self._maker_replaced: int = 0
         # Track consecutive close failures per trade_id to prevent infinite retry loops
         self._close_failures: dict[str, int] = {}
         self._close_failure_limit = 3
@@ -69,6 +88,18 @@ class ExecutorAgent(BaseAgent):
         """
         if not self.use_limit_orders:
             return False
+
+        # P1: maker-only forces every buy to a post-only limit. Sells and
+        # urgent exits still use market — stop-outs must fill instantly.
+        if self.maker_only:
+            action = trade_info.get("action", "hold")
+            reason = trade_info.get("reasoning", "").lower()
+            is_urgent_exit = any(
+                kw in reason
+                for kw in ["stop_loss", "stop loss", "trailing stop", "take_profit", "take profit"]
+            )
+            if action == "buy" and not is_urgent_exit:
+                return True
 
         # prefer_maker modifier: force limit orders for all buys on crypto.
         # On equity, maker/taker fees are identical (flat per-share), so skip.
@@ -802,6 +833,14 @@ class ExecutorAgent(BaseAgent):
                     if age_seconds > self._LIMIT_ORDER_TTL:
                         cancel_result = self._cancel_stale_order(trade)
                         results.append(cancel_result)
+                    elif self.replace_on_drift_pct > 0 and self._price_drift_exceeds_threshold(trade):
+                        # P1: price drifted away from our limit — cancel and
+                        # let the next cycle re-quote. Prevents stuck orders
+                        # after quick market moves.
+                        replace_result = self._cancel_stale_order(trade)
+                        replace_result["action"] = "cancelled_drift"
+                        self._maker_replaced += 1
+                        results.append(replace_result)
                     else:
                         remaining = self._LIMIT_ORDER_TTL - age_seconds
                         self.logger.debug(
@@ -823,6 +862,27 @@ class ExecutorAgent(BaseAgent):
                 )
 
         return results
+
+    def _price_drift_exceeds_threshold(self, trade: Trade) -> bool:
+        """P1: Is the live market price far enough from the resting limit
+        that we should cancel and re-quote? Returns False on any error so a
+        flaky feed never causes churn."""
+        try:
+            live = float(self.exchange.get_current_price(trade.pair))
+        except Exception:
+            return False
+        if live <= 0 or trade.price <= 0:
+            return False
+        drift = abs(live - trade.price) / trade.price
+        return drift >= self.replace_on_drift_pct
+
+    def get_maker_stats(self) -> dict[str, int]:
+        """P1: expose maker-only fill/cancel/replace counters."""
+        return {
+            "filled": self._maker_filled,
+            "cancelled": self._maker_cancelled,
+            "replaced": self._maker_replaced,
+        }
 
     def _cancel_stale_order(self, trade: Trade) -> dict:
         """Cancel a resting limit order that has exceeded its TTL."""
