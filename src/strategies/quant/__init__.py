@@ -16,13 +16,17 @@ Public exports:
 """
 
 from .base import MarketState, QuantSignal, QuantStrategy
+from .cointegration_pairs import CointegrationPairs
 from .momentum_factor import MomentumFactor
+from .volatility_breakout import VolatilityBreakout
 from .zscore_mean_reversion import ZScoreMeanReversion
 
 __all__ = [
     "MarketState",
     "QuantSignal",
     "QuantStrategy",
+    "CointegrationPairs",
     "MomentumFactor",
+    "VolatilityBreakout",
     "ZScoreMeanReversion",
 ]
