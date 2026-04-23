@@ -178,6 +178,11 @@ risk:
   stop_loss_pct: 0.02
   take_profit_pct: 0.1
   trailing_stop_pct: 0.05
+  # P2: ATR-scaled stops.
+  atr_stop_mult: 2.0
+  atr_tp_mult: 3.0
+  atr_stop_floor_pct: 0.008
+  atr_stop_ceiling_pct: 0.06
 rotation:
   enabled: false
 routing:

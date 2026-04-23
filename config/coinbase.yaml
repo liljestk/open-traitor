@@ -185,6 +185,12 @@ risk:
   stop_loss_pct: 0.04
   take_profit_pct: 0.08
   trailing_stop_pct: 0.04
+  # P2: ATR-scaled stops — multiplier + floor/ceiling band so stops
+  # adapt to live volatility without drifting to absurd values.
+  atr_stop_mult: 2.0
+  atr_tp_mult: 3.0
+  atr_stop_floor_pct: 0.01
+  atr_stop_ceiling_pct: 0.08
 rotation:
   approval_threshold: 200
   autonomous_allocation_pct: 0.1

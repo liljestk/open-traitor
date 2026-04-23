@@ -54,6 +54,14 @@ class RiskManagerAgent(BaseAgent):
         self.trading_config = config.get("trading", {})
         self.stop_loss_pct = self.risk_config.get("stop_loss_pct", 0.03)
         self.take_profit_pct = self.risk_config.get("take_profit_pct", 0.06)
+        # P2: configurable ATR multipliers and floor/ceiling bands. The floor
+        # prevents absurdly-tight stops during low-vol regimes; the ceiling
+        # caps stop-loss distance during vol shocks so one bad candle can't
+        # wipe out risk budget.
+        self.atr_stop_mult = float(self.risk_config.get("atr_stop_mult", 2.0))
+        self.atr_tp_mult = float(self.risk_config.get("atr_tp_mult", 3.0))
+        self.atr_stop_floor_pct = float(self.risk_config.get("atr_stop_floor_pct", 0.01))
+        self.atr_stop_ceiling_pct = float(self.risk_config.get("atr_stop_ceiling_pct", 0.10))
         self.use_kelly = self.risk_config.get("use_kelly_criterion", True)
         self.kelly_fraction = self.risk_config.get("kelly_fraction", 0.5)  # Half-Kelly
         self.use_correlation_penalty = self.risk_config.get("use_correlation_penalty", True)
@@ -318,10 +326,20 @@ class RiskManagerAgent(BaseAgent):
         has_stop_loss = stop_loss is not None
         if not has_stop_loss and action == "buy" and price > 0:
             if atr:
-                # Use 2x ATR for stop loss
+                # P2: ATR-scaled stop with configurable multiplier and
+                # floor/ceiling bands. Floor prevents absurdly-tight stops
+                # in low-vol regimes; ceiling caps loss during vol shocks.
                 float_atr = float(atr)
-                stop_loss = max(price - (2 * float_atr), 0.0)
-                self.logger.info(f"Added ATR-based stop-loss (2x ATR={float_atr:.2f}): {stop_loss:,.2f}")
+                raw_pct = (self.atr_stop_mult * float_atr) / price
+                clamped_pct = max(
+                    self.atr_stop_floor_pct,
+                    min(raw_pct, self.atr_stop_ceiling_pct),
+                )
+                stop_loss = max(price * (1 - clamped_pct), 0.0)
+                self.logger.info(
+                    f"Added ATR-based stop-loss ({self.atr_stop_mult}×ATR={float_atr:.2f}, "
+                    f"raw {raw_pct:.2%} → clamped {clamped_pct:.2%}): {stop_loss:,.2f}"
+                )
             else:
                 stop_loss = price * (1 - effective_stop_loss_pct)
                 self.logger.info(f"Added default percentage stop-loss ({effective_stop_loss_pct:.1%}): {stop_loss:,.2f}")
@@ -330,10 +348,19 @@ class RiskManagerAgent(BaseAgent):
         # Ensure take-profit (tier-scaled)
         if take_profit is None and action == "buy" and price > 0:
             if atr:
-                # Use 3x ATR for take profit (1.5 risk/reward)
+                # P2: symmetric ATR TP with band preserved at configured R:R.
                 float_atr = float(atr)
-                take_profit = price + (3 * float_atr)
-                self.logger.info(f"Added ATR-based take-profit (3x ATR={float_atr:.2f}): {take_profit:,.2f}")
+                raw_pct = (self.atr_tp_mult * float_atr) / price
+                rr = self.atr_tp_mult / self.atr_stop_mult if self.atr_stop_mult > 0 else 1.5
+                clamped_pct = max(
+                    self.atr_stop_floor_pct * rr,
+                    min(raw_pct, self.atr_stop_ceiling_pct * rr),
+                )
+                take_profit = price * (1 + clamped_pct)
+                self.logger.info(
+                    f"Added ATR-based take-profit ({self.atr_tp_mult}×ATR={float_atr:.2f}, "
+                    f"raw {raw_pct:.2%} → clamped {clamped_pct:.2%}): {take_profit:,.2f}"
+                )
             else:
                 take_profit = price * (1 + effective_take_profit_pct)
                 self.logger.info(f"Added default percentage take-profit ({effective_take_profit_pct:.1%}): {take_profit:,.2f}")
