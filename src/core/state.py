@@ -101,16 +101,27 @@ class TradingState:
         try:
             with open(path) as f:
                 data = json.load(f)
-            for i, t in enumerate(data.get("trades", [])):
+            corrupt_trade_count = 0
+            corrupt_signal_count = 0
+            raw_trades = data.get("trades", [])
+            # Only load the most recent trades up to memory bound
+            if len(raw_trades) > self._max_trades_in_memory:
+                raw_trades = raw_trades[-self._max_trades_in_memory:]
+                logger.info(
+                    f"Warm-start: truncated trades from snapshot to last "
+                    f"{self._max_trades_in_memory} (was {len(data.get('trades', []))})"
+                )
+            for i, t in enumerate(raw_trades):
                 try:
                     self.trades.append(Trade(**t))
                 except Exception as exc:
-                    # M21: Log instead of silently swallowing corrupt records
+                    corrupt_trade_count += 1
                     logger.warning(f"Warm-start: skipping corrupt trade record #{i}: {exc}")
             for i, s in enumerate(data.get("signals", [])):
                 try:
                     self.signals.append(Signal(**s))
                 except Exception as exc:
+                    corrupt_signal_count += 1
                     logger.warning(f"Warm-start: skipping corrupt signal record #{i}: {exc}")
             # Restore performance counters from persisted summary
             summary = data.get("summary", {})
@@ -123,8 +134,23 @@ class TradingState:
                 f"🔄 Warm-start: loaded {len(self.trades)} trades, "
                 f"{len(self.signals)} signals from snapshot"
             )
+            # Surface data-integrity issues so an operator can investigate.
+            if corrupt_trade_count or corrupt_signal_count:
+                logger.error(
+                    f"⚠️  Warm-start integrity: skipped {corrupt_trade_count} "
+                    f"corrupt trade(s) and {corrupt_signal_count} corrupt signal(s) "
+                    f"from {path}. Review snapshot before next persistence cycle."
+                )
+                self._warm_start_corruption = {
+                    "trades": corrupt_trade_count,
+                    "signals": corrupt_signal_count,
+                    "source": str(path),
+                }
+            else:
+                self._warm_start_corruption = None
         except Exception as e:
             logger.warning(f"Warm-start failed (non-fatal): {e}")
+            self._warm_start_corruption = None
 
     # =========================================================================
     # Live Holdings Sync (from Coinbase API)

@@ -144,6 +144,19 @@ async def ws_live(websocket: WebSocket):
 
     slot_acquired = True
     try:
+        # L22 fix: echo the auth subprotocol so browsers don't reject per RFC 6455
+        _accepted_subprotocol = None
+        for _proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
+            _proto = _proto.strip()
+            if _proto.startswith("apikey."):
+                _accepted_subprotocol = _proto
+                break
+
+        # Accept first so the browser receives proper close codes (1008, etc.)
+        # Closing before accept causes browsers to see code 1006 (abnormal),
+        # which prevents the frontend from detecting auth failure and reloading.
+        await websocket.accept(subprotocol=_accepted_subprotocol)
+
         # --- Auth rate limiting (brute-force protection) ---
         if auth.is_auth_configured():
             if not _check_ws_auth_rate(client_ip):
@@ -151,27 +164,24 @@ async def ws_live(websocket: WebSocket):
                 await websocket.close(code=1008, reason="Too many auth attempts")
                 return
 
-            # Check session cookie or legacy API key via subprotocol
-            session_token = websocket.cookies.get("ot_session", "")
+            # Extract API key from subprotocol / header (always, regardless of cookie)
             api_key = ""
-            _auth_subprotocol = None
-            if not session_token:
-                # Browsers can't set custom headers on WS, so the frontend encodes
-                # the key as a subprotocol: "apikey.<base64_key>"
-                for proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
-                    proto = proto.strip()
-                    if proto.startswith("apikey."):
-                        try:
-                            raw = proto[7:]
-                            if len(raw) > 256:
-                                logger.warning("WebSocket auth: base64 payload too large, rejected")
-                                break
-                            api_key = base64.b64decode(raw).decode("utf-8")
-                            _auth_subprotocol = proto
-                        except Exception:
-                            logger.warning("WebSocket auth: invalid base64 in subprotocol")
-                        break
-                api_key = api_key or websocket.headers.get("x-api-key", "")
+            for proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
+                proto = proto.strip()
+                if proto.startswith("apikey."):
+                    try:
+                        raw = proto[7:]
+                        if len(raw) > 256:
+                            logger.warning("WebSocket auth: base64 payload too large, rejected")
+                            break
+                        api_key = base64.b64decode(raw).decode("utf-8")
+                    except Exception:
+                        logger.warning("WebSocket auth: invalid base64 in subprotocol")
+                    break
+            api_key = api_key or websocket.headers.get("x-api-key", "")
+
+            # Check session cookie
+            session_token = websocket.cookies.get("ot_session", "")
 
             authenticated = False
             if session_token and auth.validate_session(session_token):
@@ -188,15 +198,6 @@ async def ws_live(websocket: WebSocket):
                 )
                 await websocket.close(code=1008, reason="Authentication required")
                 return
-
-        # L22 fix: echo the auth subprotocol so browsers don't reject per RFC 6455
-        _accepted_subprotocol = None
-        for _proto in (websocket.headers.get("sec-websocket-protocol", "")).split(","):
-            _proto = _proto.strip()
-            if _proto.startswith("apikey."):
-                _accepted_subprotocol = _proto
-                break
-        await websocket.accept(subprotocol=_accepted_subprotocol)
 
         # Extract profile from query params for event filtering
         _qs = parse_qs(urlparse(str(websocket.url)).query)

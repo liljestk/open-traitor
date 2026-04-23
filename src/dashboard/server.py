@@ -208,6 +208,24 @@ async def lifespan(application: FastAPI):
             ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
             ib_port = int(os.environ.get("IBKR_PORT", "4001"))
             ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+            # Fast TCP probe: if IB Gateway is unreachable, skip the 30-s blocking
+            # connect attempt that would otherwise stall every dashboard startup
+            # (especially painful in the FastAPI test client lifespan).
+            import socket as _socket
+            _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            _probe.settimeout(0.5)
+            try:
+                _probe.connect((ib_host, ib_port))
+                _reachable = True
+            except (OSError, _socket.timeout):
+                _reachable = False
+            finally:
+                _probe.close()
+            if not _reachable:
+                logger.info(
+                    f"ℹ️ IB Gateway unreachable at {ib_host}:{ib_port} — skipping IBKR client init"
+                )
+                raise ConnectionError("IB Gateway unreachable")
             from src.core.ib_client import IBClient
             deps.ibkr_exchange_client = IBClient(
                 paper_mode=False,
