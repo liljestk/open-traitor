@@ -28,18 +28,23 @@ Output JSONL row schema (read by routes/quant_observability.py):
 
 from __future__ import annotations
 
-import json
-import os
-import statistics
-import time
-from datetime import timedelta, datetime, timezone
-from pathlib import Path
-from typing import Optional
+from datetime import timedelta
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
-from src.utils.logger import get_logger
+# Non-deterministic / IO-touching imports must be passed through Temporal's
+# workflow sandbox or the worker will refuse to register the workflow.
+with workflow.unsafe.imports_passed_through():
+    import json
+    import os
+    import statistics
+    import time
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from typing import Optional
+
+    from src.utils.logger import get_logger
 
 logger = get_logger("planning.wfo")
 
