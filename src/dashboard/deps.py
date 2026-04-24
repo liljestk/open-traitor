@@ -96,10 +96,20 @@ allowed_origins: list[str] = _build_allowed_origins()
 rules_instance = None     # AbsoluteRules instance (optional, for runtime push)
 llm_client = None         # LLMClient instance (optional, for provider status)
 
-# Phase 4/7 substrate singletons (injected via set_globals; safe to be None)
+# Phase 4/7 substrate singletons (legacy single-profile slots — prefer the
+# per-profile factories below). Kept for backward compat with code paths
+# that may have been wired by the orchestrator.
 capital_allocator = None      # src.core.capital_allocator.CapitalAllocator
 self_healing = None           # src.core.self_healing.SelfHealingController
-signal_edge_library = None    # src.strategies.quant.signal_edges.SignalEdgeLibrary
+signal_edge_library = None    # src.analysis.signal_edge_library.SignalEdgeLibrary
+
+# Per-profile registries — populated lazily by the get_*_for_profile() helpers
+# below. The dashboard runs in a single process but serves both the coinbase
+# (crypto) and ibkr (equity) profiles, so every per-profile artefact lives
+# under data/<profile>/... and we keep one instance per profile in memory.
+_capital_allocators: dict = {}
+_self_healers: dict = {}
+_signal_edge_libraries: dict = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -129,6 +139,71 @@ def resolve_profile(profile: str) -> str:
         return ""
     p = profile.lower().strip()
     return PROFILE_ALIASES.get(p, p)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Per-profile substrate factories (Phase 4/7 dual-domain support)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _data_root_for(profile: str) -> str:
+    """Profile-scoped data root, e.g. 'data/coinbase' or 'data/ibkr'."""
+    p = resolve_profile(profile) or "default"
+    return os.path.join("data", p)
+
+
+def get_capital_allocator_for(profile: str):
+    """Return a per-profile CapitalAllocator (lazy, persisted)."""
+    p = resolve_profile(profile) or "default"
+    if p in _capital_allocators:
+        return _capital_allocators[p]
+    try:
+        from src.core.capital_allocator import CapitalAllocator
+    except Exception as e:
+        logger.warning(f"capital_allocator import failed: {e}")
+        return None
+    root = _data_root_for(p)
+    inst = CapitalAllocator(
+        state_path=os.path.join(root, "allocator_state.json"),
+        audit_path=os.path.join(root, "audit", "capital_allocator.jsonl"),
+    )
+    _capital_allocators[p] = inst
+    return inst
+
+
+def get_self_healing_for(profile: str):
+    """Return a per-profile SelfHealingController (lazy, persisted)."""
+    p = resolve_profile(profile) or "default"
+    if p in _self_healers:
+        return _self_healers[p]
+    try:
+        from src.core.self_healing import SelfHealingController
+    except Exception as e:
+        logger.warning(f"self_healing import failed: {e}")
+        return None
+    root = _data_root_for(p)
+    inst = SelfHealingController(
+        audit_path=os.path.join(root, "audit", "self_healing.jsonl"),
+    )
+    _self_healers[p] = inst
+    return inst
+
+
+def get_signal_edge_library_for(profile: str):
+    """Return a per-profile SignalEdgeLibrary (lazy)."""
+    p = resolve_profile(profile) or "default"
+    if p in _signal_edge_libraries:
+        return _signal_edge_libraries[p]
+    try:
+        from src.analysis.signal_edge_library import (
+            SignalEdgeLibrary,
+            InMemorySignalEdgeStore,
+        )
+    except Exception as e:
+        logger.warning(f"signal_edge_library import failed: {e}")
+        return None
+    inst = SignalEdgeLibrary(store=InMemorySignalEdgeStore(), exchange=p)
+    _signal_edge_libraries[p] = inst
+    return inst
 
 
 def quote_currency_for(profile: str) -> list[str] | None:

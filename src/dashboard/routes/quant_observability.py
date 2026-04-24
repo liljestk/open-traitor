@@ -1,20 +1,17 @@
 """
 Quant observability dashboard routes (Phase 8).
 
-Exposes read-only endpoints for the Phase 1-7 substrate:
+Read-only views over the Phase 1-7 substrate, **dual-domain**:
 
-  • GET /api/quant/allocator?profile=...   — capital weights per strategy
-  • GET /api/quant/edges?profile=...       — signal edge leaderboard
-  • GET /api/quant/healing?profile=...     — strategy health + tier heartbeats
-  • GET /api/quant/promotions?profile=...  — recent WFO promotion log
+  • GET /api/quant/allocator?profile=coinbase|ibkr     capital weights
+  • GET /api/quant/edges?profile=coinbase|ibkr&regime  signal edge leaderboard
+  • GET /api/quant/healing?profile=coinbase|ibkr       strategy + tier health
+  • GET /api/quant/promotions?profile=coinbase|ibkr    WFO promotion log
 
-All endpoints degrade gracefully: when the underlying singleton has not been
-wired into ``deps`` yet (Phases 4/7 still pending orchestrator integration),
-they return a structured stub with ``available: false`` so the frontend can
-render an empty-state panel instead of erroring.
-
-Domain separation: every endpoint takes a ``profile`` query param and uses
-it to scope file paths (e.g. ``data/<profile>/audit/wfo_promotions.jsonl``).
+Each call resolves a per-profile singleton via deps.get_*_for(profile),
+so coinbase (crypto) and ibkr (equity) state never mix. File reads are
+scoped to ``data/<profile>/...``. Endpoints degrade gracefully when a
+substrate is unavailable (returns ``available: false``).
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ logger = get_logger("dashboard.routes.quant_observability")
 router = APIRouter(tags=["QuantOps"])
 
 
-def _safe_call(fn, default):
+def _safe(fn, default):
     try:
         return fn()
     except Exception as e:  # pragma: no cover
@@ -47,16 +44,18 @@ def _safe_call(fn, default):
 
 @router.get("/api/quant/allocator", summary="Capital allocator weights")
 def get_allocator_weights(profile: str = Query("coinbase")) -> dict:
-    profile = deps.resolve_profile(profile) if hasattr(deps, "resolve_profile") else profile
-    allocator = getattr(deps, "capital_allocator", None)
+    p = deps.resolve_profile(profile) or profile
+    # Prefer per-profile factory; fall back to legacy single slot for tests
+    # that monkey-patch deps.capital_allocator directly.
+    allocator = deps.capital_allocator or deps.get_capital_allocator_for(p)
     if allocator is None:
-        return {"available": False, "profile": profile, "weights": {}, "state": None}
+        return {"available": False, "profile": p, "weights": {}, "state": None}
 
-    weights = _safe_call(allocator.weights, {})
+    weights = _safe(allocator.weights, {})
     state = getattr(allocator, "state", None)
     return {
         "available": True,
-        "profile": profile,
+        "profile": p,
         "weights": weights,
         "state": {
             "cumulative_pnl": getattr(state, "cumulative_pnl", {}) if state else {},
@@ -67,44 +66,53 @@ def get_allocator_weights(profile: str = Query("coinbase")) -> dict:
 
 
 # --------------------------------------------------------------------- #
-# Signal edge leaderboard
+# Signal-edge leaderboard
 # --------------------------------------------------------------------- #
 
 @router.get("/api/quant/edges", summary="Signal edge leaderboard")
 def get_signal_edges(
     profile: str = Query("coinbase"),
+    regime: str = Query("ranging"),
     limit: int = Query(20, ge=1, le=200),
+    lookback_days: int = Query(30, ge=1, le=365),
 ) -> dict:
-    profile = deps.resolve_profile(profile) if hasattr(deps, "resolve_profile") else profile
-    library = getattr(deps, "signal_edge_library", None)
+    p = deps.resolve_profile(profile) or profile
+    library = deps.signal_edge_library or deps.get_signal_edge_library_for(p)
     if library is None:
-        return {"available": False, "profile": profile, "edges": []}
+        return {"available": False, "profile": p, "regime": regime, "edges": []}
 
-    # Library API: assume `.leaderboard(limit) -> list[dict]` or similar.
-    edges = _safe_call(
-        lambda: library.leaderboard(limit) if hasattr(library, "leaderboard") else [],
-        [],
-    )
-    return {"available": True, "profile": profile, "edges": list(edges)}
+    # Real SignalEdgeLibrary exposes .all_edges(regime, lookback_days) -> list[EdgeStats].
+    # Test stubs may expose .leaderboard(limit) -> list[dict]; honour both.
+    if hasattr(library, "all_edges"):
+        try:
+            stats = library.all_edges(regime, lookback_days)
+        except TypeError:
+            stats = _safe(library.all_edges, [])
+        edges = [
+            (s.to_dict() if hasattr(s, "to_dict") else dict(s))
+            for s in (stats or [])
+        ]
+        edges.sort(key=lambda e: e.get("sharpe", 0.0), reverse=True)
+        edges = edges[:limit]
+    elif hasattr(library, "leaderboard"):
+        edges = list(_safe(lambda: library.leaderboard(limit), []))
+    else:
+        edges = []
+    return {"available": True, "profile": p, "regime": regime, "edges": edges}
 
 
 # --------------------------------------------------------------------- #
-# Self-healing status
+# Self-healing controller status
 # --------------------------------------------------------------------- #
 
 @router.get("/api/quant/healing", summary="Self-healing controller status")
 def get_healing_status(profile: str = Query("coinbase")) -> dict:
-    profile = deps.resolve_profile(profile) if hasattr(deps, "resolve_profile") else profile
-    healer = getattr(deps, "self_healing", None)
+    p = deps.resolve_profile(profile) or profile
+    healer = deps.self_healing or deps.get_self_healing_for(p)
     if healer is None:
-        return {
-            "available": False,
-            "profile": profile,
-            "tiers": {},
-            "strategies": [],
-        }
+        return {"available": False, "profile": p, "tiers": {}, "strategies": []}
 
-    tiers = _safe_call(healer.tier_status, {})
+    tiers = _safe(healer.tier_status, {})
     strategies = []
     for name, h in getattr(healer, "_strategies", {}).items():
         strategies.append({
@@ -115,16 +123,11 @@ def get_healing_status(profile: str = Query("coinbase")) -> dict:
             "last_event_at": h.last_event_at,
             "recent_sharpes": list(h.recent_sharpes)[-10:],
         })
-    return {
-        "available": True,
-        "profile": profile,
-        "tiers": tiers,
-        "strategies": strategies,
-    }
+    return {"available": True, "profile": p, "tiers": tiers, "strategies": strategies}
 
 
 # --------------------------------------------------------------------- #
-# WFO promotion history (file-based; works even without singleton)
+# WFO promotion history (file-based — works even without a singleton)
 # --------------------------------------------------------------------- #
 
 @router.get("/api/quant/promotions", summary="Recent WFO promotion decisions")
@@ -132,8 +135,8 @@ def get_promotions(
     profile: str = Query("coinbase"),
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
-    profile = deps.resolve_profile(profile) if hasattr(deps, "resolve_profile") else profile
-    audit = Path("data") / profile / "audit" / "wfo_promotions.jsonl"
+    p = deps.resolve_profile(profile) or profile
+    audit = Path("data") / p / "audit" / "wfo_promotions.jsonl"
     items: list[dict[str, Any]] = []
     if audit.exists():
         try:
@@ -150,9 +153,4 @@ def get_promotions(
         except Exception as e:  # pragma: no cover
             logger.warning(f"failed to read promotions audit: {e}")
 
-    return {
-        "available": True,
-        "profile": profile,
-        "promotions": items,
-        "count": len(items),
-    }
+    return {"available": True, "profile": p, "promotions": items, "count": len(items)}

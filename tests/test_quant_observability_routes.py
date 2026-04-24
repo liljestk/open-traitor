@@ -24,26 +24,40 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def clean_singletons():
-    """Reset singletons before/after each test."""
+def clean_singletons(tmp_path, monkeypatch):
+    """Reset singletons + per-profile registries before each test.
+
+    Also chdir into a tmp_path so per-profile factories that write to
+    data/<profile>/... don't pollute the workspace.
+    """
+    monkeypatch.chdir(tmp_path)
     deps.capital_allocator = None
     deps.self_healing = None
     deps.signal_edge_library = None
+    deps._capital_allocators.clear()
+    deps._self_healers.clear()
+    deps._signal_edge_libraries.clear()
     yield
     deps.capital_allocator = None
     deps.self_healing = None
     deps.signal_edge_library = None
+    deps._capital_allocators.clear()
+    deps._self_healers.clear()
+    deps._signal_edge_libraries.clear()
 
 
 # --------------------------------------------------------------------- #
 
 class TestAllocator:
-    def test_unavailable_when_no_singleton(self, client):
+    def test_lazy_factory_creates_per_profile_allocator(self, client):
+        # No legacy singleton + no override => factory creates a real instance.
         r = client.get("/api/quant/allocator?profile=coinbase")
         assert r.status_code == 200
         body = r.json()
-        assert body["available"] is False
-        assert body["weights"] == {}
+        assert body["available"] is True
+        assert body["profile"] == "coinbase"
+        # weights() returns a dict
+        assert isinstance(body["weights"], dict)
 
     def test_returns_weights_when_wired(self, client):
         deps.capital_allocator = SimpleNamespace(
@@ -62,11 +76,32 @@ class TestAllocator:
 
 
 class TestEdges:
-    def test_unavailable(self, client):
-        r = client.get("/api/quant/edges?profile=coinbase")
+    def test_lazy_factory_creates_per_profile_library(self, client):
+        # Empty library => available True with empty edges list.
+        r = client.get("/api/quant/edges?profile=coinbase&regime=ranging")
         body = r.json()
-        assert body["available"] is False
+        assert body["available"] is True
         assert body["edges"] == []
+
+    def test_real_library_with_recorded_samples(self, client):
+        # Wire a real SignalEdgeLibrary, register a signal, record samples,
+        # then verify the leaderboard reflects them.
+        from src.analysis.signal_edge_library import (
+            SignalEdgeLibrary, InMemorySignalEdgeStore,
+        )
+        lib = SignalEdgeLibrary(store=InMemorySignalEdgeStore(), exchange="coinbase")
+        lib.register("rsi", lambda candles: 0.5)
+        for i in range(40):
+            lib.record_sample(
+                signal_name="rsi", regime="ranging", score=0.5,
+                forward_return=0.01, pair="BTC-EUR",
+            )
+        deps.signal_edge_library = lib
+        r = client.get("/api/quant/edges?profile=coinbase&regime=ranging&limit=5")
+        body = r.json()
+        assert body["available"] is True
+        assert body["profile"] == "coinbase"
+        assert any(e.get("signal_name") == "rsi" for e in body["edges"])
 
     def test_with_library(self, client):
         deps.signal_edge_library = SimpleNamespace(
@@ -79,11 +114,11 @@ class TestEdges:
 
 
 class TestHealing:
-    def test_unavailable(self, client):
+    def test_lazy_factory_creates_per_profile_healer(self, client):
         r = client.get("/api/quant/healing?profile=coinbase")
         body = r.json()
-        assert body["available"] is False
-        assert body["strategies"] == []
+        assert body["available"] is True
+        assert body["strategies"] == []  # nothing recorded yet
 
     def test_with_controller(self, client):
         from src.core.self_healing import SelfHealingController
@@ -101,6 +136,33 @@ class TestHealing:
         names = [s["name"] for s in body["strategies"]]
         assert "zscore" in names
         assert "quant" in body["tiers"]
+
+
+class TestDomainSeparation:
+    """Both profiles must work and never share state."""
+
+    def test_separate_allocators_per_profile(self, client):
+        c = deps.get_capital_allocator_for("coinbase")
+        i = deps.get_capital_allocator_for("ibkr")
+        assert c is not None and i is not None
+        assert c is not i
+        # State paths are profile-scoped.
+        assert "coinbase" in str(c.state_path)
+        assert "ibkr" in str(i.state_path)
+
+    def test_alias_resolution(self, client):
+        # 'crypto' -> 'coinbase', 'equity' -> 'ibkr'
+        r1 = client.get("/api/quant/allocator?profile=crypto")
+        r2 = client.get("/api/quant/allocator?profile=equity")
+        assert r1.json()["profile"] == "coinbase"
+        assert r2.json()["profile"] == "ibkr"
+
+    def test_endpoints_for_both_profiles(self, client):
+        for profile in ("coinbase", "ibkr"):
+            for path in ("allocator", "healing", "promotions"):
+                r = client.get(f"/api/quant/{path}?profile={profile}")
+                assert r.status_code == 200, f"{path}/{profile} failed"
+                assert r.json()["profile"] == profile
 
 
 class TestPromotions:
