@@ -59,6 +59,13 @@ class TelegramBot:
         self._outbound_bot = None  # H8: reuse Bot instance for outbound messages
         self._outbound_bot_lock = threading.Lock()
 
+        # Hard outbound rate limit (anti-chatty guardrail) — sliding 1h window.
+        # Critical messages (ALERT/approval) bypass this cap.
+        self._outbound_lock = threading.Lock()
+        self._outbound_history: list[float] = []
+        self._outbound_max_per_hour: int = 20  # default; overridden by config
+        self._rate_limit_warned_at: float = 0.0
+
         # =====================================================================
         # AUTHORIZATION — STRICT USER ID ALLOWLIST
         # =====================================================================
@@ -361,8 +368,42 @@ class TelegramBot:
             t.start()
         return self._send_loop
 
-    def send_message(self, text: str) -> None:
-        """Send a message to the configured chat (thread-safe, uses library)."""
+    def set_max_messages_per_hour(self, n: int) -> None:
+        """Hot-reloadable cap on non-critical outbound messages per rolling hour."""
+        try:
+            self._outbound_max_per_hour = max(1, int(n))
+        except (TypeError, ValueError):
+            pass
+
+    def _allow_outbound(self, critical: bool) -> bool:
+        """Return True if message may be sent. Critical messages always pass."""
+        if critical:
+            return True
+        import time as _t
+        now = _t.time()
+        with self._outbound_lock:
+            cutoff = now - 3600.0
+            self._outbound_history = [t for t in self._outbound_history if t >= cutoff]
+            if len(self._outbound_history) >= self._outbound_max_per_hour:
+                # One-shot warning per hour to surface the throttle in logs.
+                if now - self._rate_limit_warned_at > 3600.0:
+                    logger.warning(
+                        "Telegram outbound rate-limit hit (%d/h); dropping non-critical msg",
+                        self._outbound_max_per_hour,
+                    )
+                    self._rate_limit_warned_at = now
+                return False
+            self._outbound_history.append(now)
+        return True
+
+    def send_message(self, text: str, critical: bool = False) -> None:
+        """Send a message to the configured chat (thread-safe, uses library).
+
+        ``critical=True`` bypasses the per-hour outbound rate limit. Use for
+        alerts, approval requests, and circuit-breaker notifications only.
+        """
+        if not self._allow_outbound(critical):
+            return
         try:
             from telegram import Bot
 
@@ -410,7 +451,7 @@ class TelegramBot:
     def send_alert(self, alert: str) -> None:
         """Send an important alert (always sent, even in silent mode)."""
         tag = f"[{self.exchange_name}] " if self.exchange_name else ""
-        self.send_message(f"🚨 *{tag}ALERT*\n\n{alert}")
+        self.send_message(f"🚨 *{tag}ALERT*\n\n{alert}", critical=True)
 
     def send_daily_summary(self, summary: str) -> None:
         """Send a daily summary."""

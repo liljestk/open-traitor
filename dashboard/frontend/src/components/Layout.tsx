@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
+import RegimeBadge from './RegimeBadge'
 
 /**
  * Strict two-mode profiles — no combined "All Systems" view.
@@ -172,6 +173,7 @@ export default function Layout() {
           }}>
             {domain.label}
           </span>
+          <RegimeBadge compact />
           <div style={{ flex: 1 }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: connected ? '#22c55e' : '#6e7681' }}>
             <span style={{
@@ -537,6 +539,7 @@ export default function Layout() {
           }}>
             {domain.label}
           </span>
+          <RegimeBadge />
           <div style={{ flex: 1 }} />
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,

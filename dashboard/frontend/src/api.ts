@@ -110,6 +110,30 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
   return res.json()
 }
 
+// ─── Macro regime (cross-asset) ────────────────────────────────────────────
+
+export interface MacroRegimeProfile {
+  regime?: string
+  confidence?: number
+  atr_pct?: number
+  slope?: number
+  ts?: string
+}
+
+export interface MacroRegimeResponse {
+  available: boolean
+  ts?: string
+  profiles?: Record<string, MacroRegimeProfile>
+  consensus?: { regime: string; rationale: string }
+  error?: string
+}
+
+export async function fetchMacroRegime(): Promise<MacroRegimeResponse> {
+  const res = await fetch('/api/quant/macro_regime', { credentials: 'include' })
+  if (!res.ok) return { available: false, error: `HTTP ${res.status}` }
+  return res.json()
+}
+
 export interface CycleSummary {
   cycle_id: string
   pair: string

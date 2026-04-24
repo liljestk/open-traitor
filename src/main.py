@@ -459,6 +459,13 @@ def main():
             mode=_bot_mode,
             exchange_name=_exchange_name,
         )
+        # Apply hot-reloadable outbound rate cap from config (default 20/hr).
+        try:
+            telegram_bot.set_max_messages_per_hour(
+                int(config.get("telegram", {}).get("max_messages_per_hour", 20))
+            )
+        except Exception:
+            pass
         telegram_bot.start()
         logger.info(f"📱 Telegram bot started (mode={_bot_mode}, exchange={_exchange_name})")
         # Give the polling thread a moment to connect, then send startup ping
