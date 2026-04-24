@@ -190,7 +190,7 @@ elif command -v podman-compose &>/dev/null; then
     container_runtime="podman"
     compose_cmd="podman-compose"
     docker_ok=true
-    ok "Podman: $(podman --version 2>/dev/null || echo 'installed')"
+    ok "Podman: $(podman --version 2>/dev/null || echo 'installed')"    
     ok "podman-compose: $(podman-compose --version)"
 else
     err "No supported container runtime found!"
@@ -212,10 +212,7 @@ if command -v python3 &>/dev/null; then
     ok "Python: $(python3 --version)"
 elif command -v python &>/dev/null; then
     ok "Python: $(python --version)"
-else
-    info "Python not found locally (OK — runs in Docker)"
-fi
-
+else   
 # ===========================================================================
 # STEP 1.5: Generate Compose Secrets
 # ===========================================================================

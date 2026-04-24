@@ -151,6 +151,11 @@ class DashboardCommandManager:
             stale = [n for n, t in orch._used_nonces.items() if t < cutoff]
             for n in stale:
                 del orch._used_nonces[n]
+            # Hard cap: prevent unbounded growth even if pruning falls behind
+            if len(orch._used_nonces) > 10000:
+                oldest = sorted(orch._used_nonces.items(), key=lambda x: x[1])[:5000]
+                for n, _ in oldest:
+                    del orch._used_nonces[n]
             if nonce in orch._used_nonces:
                 return False, "nonce already used (replay detected)"
             orch._used_nonces[nonce] = now

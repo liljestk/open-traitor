@@ -4,9 +4,26 @@
 FROM node:22-slim AS frontend-builder
 
 WORKDIR /frontend
+
+# Phase 16: avoid npm ci hangs under emulation/podman.
+# - prefer-offline + no-audit + no-fund cuts network round-trips
+# - --ignore-scripts skips postinstall hooks that block on TTY/native builds
+# - explicit fetch timeouts surface real failures fast instead of hanging
+ENV npm_config_prefer_offline=true \
+    npm_config_audit=false \
+    npm_config_fund=false \
+    npm_config_progress=false \
+    npm_config_loglevel=warn \
+    npm_config_fetch_retries=2 \
+    npm_config_fetch_retry_mintimeout=10000 \
+    npm_config_fetch_retry_maxtimeout=60000 \
+    NODE_OPTIONS="--max-old-space-size=2048"
+
 COPY dashboard/frontend/package.json dashboard/frontend/package-lock.json ./
-RUN npm ci --legacy-peer-deps
+RUN npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 COPY dashboard/frontend/ ./
+# Run any deferred postinstall (e.g. esbuild platform binary) once after src is in place.
+RUN npm rebuild --no-audit --no-fund || true
 RUN npm run build
 
 # =============================================================

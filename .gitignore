@@ -69,3 +69,4 @@ redis_data/
 
 # Setup marker
 config/.setup-complete
+*.bak

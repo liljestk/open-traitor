@@ -624,6 +624,24 @@ class ExecutorAgent(BaseAgent):
                     except Exception as e:
                         self.logger.debug(f"Failed to record sell in StatsDB: {e}")
 
+            # ── Phase 9: feed the quant substrate so the dashboard's
+            # /api/quant/* endpoints reflect live performance.
+            quant = getattr(self, "quant", None)
+            if quant is not None and closed is not None and closed.pnl is not None:
+                try:
+                    entry = float(trade.filled_price or trade.price or 0.0)
+                    notional = entry * float(qty) if entry else 0.0
+                    pnl_pct = (float(closed.pnl) / notional) if notional > 0 else 0.0
+                    # Strategy attribution: derive from reasoning prefix; the
+                    # CapitalAllocator allocates over whatever names it sees.
+                    strat = (trade.reasoning or "blended").split(":")[0].strip().lower() or "blended"
+                    if strat in {"stop_loss", "take_profit", "trailing_stop"}:
+                        strat = "blended"
+                    quant.record_strategy_pnl(strat, pnl_pct)
+                    quant.update_allocator({strat: pnl_pct})
+                except Exception as _e:
+                    self.logger.debug(f"quant substrate record failed: {_e}")
+
             self._record_training_outcome(trade, close_price, reason)
 
             self.logger.info(

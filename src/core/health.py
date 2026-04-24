@@ -5,6 +5,7 @@ Docker uses this to determine if the agent is truly functional.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -157,18 +158,26 @@ def metrics():
 
 
 def start_health_server(port: int = 8080) -> threading.Thread:
-    """Start the health check server in a background thread."""
+    """Start the health check server in a background thread.
+    
+    Binds to 0.0.0.0 inside the container so Docker healthchecks and
+    inter-service probes can reach it. External access is controlled by
+    docker-compose port mapping (127.0.0.1:port:port).
+    """
+    # Allow override via env var for local development (bind to localhost only)
+    bind_host = os.environ.get("HEALTH_BIND_HOST", "0.0.0.0")
+
     def _run():
         try:
             from waitress import serve
-            serve(app, host="127.0.0.1", port=port, threads=2, _quiet=True)
+            serve(app, host=bind_host, port=port, threads=2, _quiet=True)
         except ImportError:
             # Fallback to Flask dev server if waitress not installed
             import logging
             log = logging.getLogger("werkzeug")
             log.setLevel(logging.WARNING)
             logger.warning("waitress not installed — using Flask dev server")
-            app.run(host="127.0.0.1", port=port, threaded=True)
+            app.run(host=bind_host, port=port, threaded=True)
 
     thread = threading.Thread(target=_run, daemon=True, name="health-server")
     thread.start()

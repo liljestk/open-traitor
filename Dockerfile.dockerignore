@@ -16,6 +16,7 @@ tests/
 config/.env
 config/root.env
 config/*.env.backup*
+*.bak
 
 # ── Agent does NOT need the dashboard frontend at all ──
 dashboard/

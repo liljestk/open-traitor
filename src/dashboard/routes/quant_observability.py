@@ -154,3 +154,17 @@ def get_promotions(
             logger.warning(f"failed to read promotions audit: {e}")
 
     return {"available": True, "profile": p, "promotions": items, "count": len(items)}
+
+
+# --------------------------------------------------------------------- #
+# Cross-asset macro regime view (Phase 12)
+# --------------------------------------------------------------------- #
+
+@router.get("/api/quant/macro_regime", summary="Cross-asset (crypto+equity) macro view")
+def get_macro_regime() -> dict:
+    try:
+        from src.analysis.cross_asset_regime import macro_view
+        return {"available": True, **macro_view()}
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"macro_regime failed: {e}")
+        return {"available": False, "error": str(e)}

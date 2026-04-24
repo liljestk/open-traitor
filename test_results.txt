@@ -1,0 +1,24 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.3, pytest-9.0.3, pluggy-1.6.0
+rootdir: /var/home/niklas/Documents/dev/auto-traitor
+configfile: pyproject.toml
+plugins: asyncio-1.3.0, timeout-2.4.0, anyio-4.12.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 20.0s
+timeout method: signal
+timeout func_only: False
+collected 180 items
+
+tests/test_phase9_to_16.py ..........................                    [ 14%]
+tests/test_quant_observability_routes.py .............                   [ 21%]
+tests/test_self_healing.py .................                             [ 31%]
+tests/test_smart_execution.py ..............                             [ 38%]
+tests/test_executor.py .....................                             [ 50%]
+tests/test_risk_manager.py .....................                         [ 62%]
+tests/test_domain_separation.py ....................                     [ 73%]
+tests/test_security.py ...
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/var/home/niklas/Documents/dev/auto-traitor/src/dashboard/auth.py:92: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+============================= 135 passed in 3.54s ==============================

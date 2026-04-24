@@ -276,6 +276,27 @@ class Orchestrator:
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
 
+        # ─── Quant Substrate (Phase 9) — per-profile allocator/healing/edges ───
+        # Profile is read from AUTO_TRAITOR_PROFILE; falls back to exchange
+        # class name so single-profile dev runs still produce data/<p>/...
+        try:
+            from src.core.quant_substrate import QuantSubstrate
+            _profile = (
+                os.environ.get("AUTO_TRAITOR_PROFILE")
+                or ("ibkr" if _is_ibkr else ("coinbase" if _is_coinbase else "default"))
+            ).lower()
+            self.quant = QuantSubstrate(profile=_profile)
+            # Pre-register known deterministic strategy names so allocator
+            # has slots from cycle 0.
+            self.quant.register_strategies([
+                "ema_crossover", "bollinger_reversion", "pairs_correlation",
+                "llm_strategist",
+            ])
+            logger.info(f"🧮 Quant substrate online (profile={_profile})")
+        except Exception as _e:
+            logger.warning(f"⚠️ Quant substrate init failed: {_e}")
+            self.quant = None
+
         # ─── Adaptive Learning Engine ───
         self.learning_manager = LearningManager(self)
 
@@ -283,6 +304,10 @@ class Orchestrator:
         self.training_collector = TrainingDataCollector(config)
         self.executor.training_collector = self.training_collector
         self.executor.stats_db = self.stats_db
+        # Phase 9: hand the substrate to the executor so trade outcomes
+        # feed the live allocator / health controller.
+        if self.quant is not None:
+            self.executor.quant = self.quant
         # Hook LLM callback so every prompt/response is captured
         llm_cb = self.training_collector.make_llm_callback()
         if llm_cb:

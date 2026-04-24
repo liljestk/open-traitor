@@ -61,6 +61,7 @@ class TestComposeSetupSync:
         "LANGFUSE_ADMIN_EMAIL",
         "LANGFUSE_ADMIN_NAME",
         "MINIO_ROOT_USER",
+        "HOSTNAME",  # System env var (Linux), not a secret — has compose default
     }
 
     def test_all_compose_vars_in_setup_root_env(self):

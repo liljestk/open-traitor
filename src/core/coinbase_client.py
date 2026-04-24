@@ -10,6 +10,7 @@ Composed from three mixins:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -134,15 +135,25 @@ class CoinbaseClient(
         try:
             from coinbase.rest import RESTClient
 
+            # H-fix: hard HTTP timeout (seconds) so a stuck TCP connection
+            # cannot freeze the main trading loop indefinitely.
+            _http_timeout = int(os.environ.get("COINBASE_HTTP_TIMEOUT", "30"))
+
             if key_file:
-                self._rest_client = RESTClient(key_file=key_file)
+                self._rest_client = RESTClient(
+                    key_file=key_file, timeout=_http_timeout
+                )
             elif api_key and api_secret:
                 self._rest_client = RESTClient(
-                    api_key=api_key, api_secret=api_secret
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    timeout=_http_timeout,
                 )
             else:
-                self._rest_client = RESTClient()
-            logger.info("✅ Coinbase REST client connected")
+                self._rest_client = RESTClient(timeout=_http_timeout)
+            logger.info(
+                f"✅ Coinbase REST client connected (http_timeout={_http_timeout}s)"
+            )
         except Exception as e:
             logger.error(f"❌ Failed to initialize Coinbase client: {e}")
             raise
