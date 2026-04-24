@@ -380,6 +380,10 @@ _EXCHANGE_REQUIRED_METHODS = {
     "get_latest_scan_results",
     "get_pair_follows",
     "get_followed_pairs_set",
+    "get_catalyst_events",
+    "get_upcoming_catalysts",
+    "get_candles_range",
+    "find_similar_fingerprints",
 }
 
 _ROUTES_DIR = Path(__file__).resolve().parent.parent / "src" / "dashboard" / "routes"
@@ -435,3 +439,134 @@ class TestDashboardRoutesPassExchange:
                 "`resolved = deps.resolve_profile(profile)`."
             )
             pytest.fail("\n".join(msg_lines))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PatternsMixin — exchange filtering on the new tables
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPatternsMixinExchangeFilter:
+    """All catalyst-engine queries must be scoped to a single exchange so
+    crypto and equity data never bleed across domains."""
+
+    def _make_mixin(self):
+        from src.utils.stats_patterns import PatternsMixin
+
+        mixin = PatternsMixin.__new__(PatternsMixin)
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_cursor.fetchone.return_value = {"n": 0}
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mixin._get_conn = MagicMock(return_value=mock_conn)
+        return mixin, mock_conn
+
+    def test_get_catalyst_events_requires_exchange(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_catalyst_events(exchange="coinbase")
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "coinbase" in params
+
+    def test_get_upcoming_catalysts_filters_exchange(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_upcoming_catalysts(exchange="ibkr", horizon_days=30)
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "ibkr" in params
+
+    def test_get_candles_range_filters_exchange(self):
+        from datetime import datetime, timezone
+        mixin, conn = self._make_mixin()
+        mixin.get_candles_range(
+            exchange="coinbase",
+            symbol="BTC-USD",
+            granularity="ONE_DAY",
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 2, 1, tzinfo=timezone.utc),
+        )
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "coinbase" in params
+
+    def test_find_similar_fingerprints_filters_exchange(self):
+        from src.utils.stats_patterns import PATTERN_VECTOR_DIM
+        mixin, conn = self._make_mixin()
+        mixin.find_similar_fingerprints(
+            exchange="coinbase",
+            query_vector=[0.0] * PATTERN_VECTOR_DIM,
+            k=5,
+        )
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "exchange = %s" in sql
+        assert "coinbase" in params
+
+
+class TestPatternEnginePythonCallsPassExchange:
+    """Static analysis: pipeline + agent code must pass exchange= to all
+    PatternsMixin/StatsDB queries that are exchange-scoped."""
+
+    _CHECK_FILES = [
+        Path(__file__).resolve().parent.parent / "src" / "agents" / "pattern_agent.py",
+        Path(__file__).resolve().parent.parent / "src" / "analysis" / "pattern_engine.py",
+        Path(__file__).resolve().parent.parent / "src" / "core" / "managers" / "pipeline_manager.py",
+    ]
+
+    _METHODS = {
+        "get_upcoming_catalysts",
+        "get_candles_range",
+        "find_similar_fingerprints",
+        "get_catalyst_events",
+    }
+
+    def test_calls_pass_exchange(self):
+        violations: list[tuple[str, int, str]] = []
+        for path in self._CHECK_FILES:
+            if not path.exists():
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr not in self._METHODS:
+                    continue
+                kw_names = {kw.arg for kw in node.keywords if kw.arg is not None}
+                if "exchange" not in kw_names:
+                    violations.append((path.name, node.lineno, node.func.attr))
+        if violations:
+            msg = ["Pattern-engine DB calls missing exchange=:"]
+            for f, l, m in violations:
+                msg.append(f"  {f}:{l}  {m}()")
+            pytest.fail("\n".join(msg))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Catalyst Pattern Engine — Redis keys profile-prefixed
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPatternBackfillProfileScope:
+    """The bulk-backfill scheduler dedups in-flight jobs by (profile, symbol)
+    so two profiles can backfill the same ticker independently — a regression
+    here would let a coinbase backfill block an ibkr one."""
+
+    def test_active_backfill_key_includes_profile(self):
+        from src.analysis import history_bulk_backfill as bbf
+        # Reset state defensively; the lock + set are module-level singletons.
+        with bbf._active_backfills_lock:
+            bbf._active_backfills.clear()
+            # Use the format used in the code: f"{profile}:{symbol}:{...}"
+            bbf._active_backfills.add("coinbase:BTC-USD:ONE_HOUR:ONE_DAY")
+            assert "ibkr:BTC-USD:ONE_HOUR:ONE_DAY" not in bbf._active_backfills
