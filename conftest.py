@@ -40,6 +40,10 @@ def _install_noop_rate_limiter() -> None:
         async def _noop_async_wait(self, service, timeout=30.0):
             return None
 
+        _rl.RateLimiter._orig_acquire = _rl.RateLimiter.acquire  # type: ignore[attr-defined]
+        _rl.RateLimiter._orig_async_acquire = _rl.RateLimiter.async_acquire  # type: ignore[attr-defined]
+        _rl.RateLimiter._orig_wait = _rl.RateLimiter.wait  # type: ignore[attr-defined]
+        _rl.RateLimiter._orig_async_wait = _rl.RateLimiter.async_wait  # type: ignore[attr-defined]
         _rl.RateLimiter.acquire = _noop_acquire  # type: ignore[method-assign]
         _rl.RateLimiter.async_acquire = _noop_async_acquire  # type: ignore[method-assign]
         _rl.RateLimiter.wait = _noop_wait  # type: ignore[method-assign]

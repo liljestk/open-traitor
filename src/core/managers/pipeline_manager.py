@@ -185,10 +185,79 @@ class PipelineManager:
                         # Clamp scale to [0.5, 2.0] to bound drift
                         scale = max(0.5, min(2.0, scale))
                         blended[name] = w * scale
-                    return blended
+                    base = blended
+        except Exception:
+            pass
+
+        # Phase E1: macro-regime overlay. When the cross-asset regime snapshot
+        # says risk_off, downweight trend-following and upweight mean-reversion;
+        # opposite on risk_on. Bounded so a single overlay can never zero a
+        # strategy. Reads data/<profile>/regime_snapshot.json (already written
+        # per cycle by the orchestrator). Strict opt-in via
+        # trading.use_regime_overlay (default on).
+        try:
+            cfg_use = True
+            try:
+                cfg_use = bool(
+                    self.orchestrator.config.get("trading", {})
+                    .get("use_regime_overlay", True)
+                )
+            except Exception:
+                cfg_use = True
+            if cfg_use:
+                regime = self._read_macro_regime()
+                tilts = self._REGIME_STRATEGY_TILTS.get(regime)
+                if tilts:
+                    tilted: dict[str, float] = {}
+                    for name, w in base.items():
+                        # Per-strategy tilt clamped to [0.6, 1.4] inside the
+                        # tilt table; safe to multiply directly.
+                        tilted[name] = w * float(tilts.get(name, 1.0))
+                    base = tilted
         except Exception:
             pass
         return base
+
+    # Macro-regime → per-strategy multiplier table. Keys must be a subset of
+    # _STRATEGY_WEIGHTS. Values are bounded to [0.6, 1.4]. Unknown regimes
+    # fall through to the neutral base weights.
+    _REGIME_STRATEGY_TILTS: dict[str, dict[str, float]] = {
+        "risk_off": {
+            "ema_crossover": 0.7,        # trend-following struggles in chop
+            "bollinger_reversion": 1.3,  # mean-reversion shines
+        },
+        "risk_on": {
+            "ema_crossover": 1.3,        # let momentum run
+            "bollinger_reversion": 0.7,  # reversion gets run over
+        },
+        "neutral": {
+            "ema_crossover": 1.0,
+            "bollinger_reversion": 1.0,
+        },
+    }
+
+    def _read_macro_regime(self) -> str:
+        """Read the macro regime from the per-profile snapshot file.
+
+        Returns ``"unknown"`` when the snapshot is missing or malformed so
+        callers fall back to neutral weights.
+        """
+        try:
+            from pathlib import Path as _P
+            profile = (
+                getattr(self.orchestrator, "profile", None)
+                or getattr(self.orchestrator.state, "profile", None)
+                or "default"
+            )
+            p = _P("data") / str(profile).lower() / "regime_snapshot.json"
+            if not p.exists():
+                return "unknown"
+            data = json.loads(p.read_text())
+            return str(
+                data.get("regime") or data.get("macro_regime") or "unknown"
+            ).lower()
+        except Exception:
+            return "unknown"
 
     def _get_equity_event_str(self, exchange_name: str, pair: str) -> str:
         """Return a formatted equity event string for injection into agent prompts.

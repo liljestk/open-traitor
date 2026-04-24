@@ -223,6 +223,30 @@ class TestMaskSecret:
 # Rate Limiter
 # ═══════════════════════════════════════════════════════════════════════════
 
+@pytest.fixture
+def _real_rate_limiter_methods():
+    """Restore the real RateLimiter methods for the duration of the test.
+
+    The session-wide ``conftest._install_noop_rate_limiter`` swaps in
+    no-op ``acquire``/``wait`` methods so other tests never block on real
+    timing. The rate-limiter's *own* unit tests need the genuine
+    behaviour, so we temporarily re-bind the originals (stashed by
+    conftest under ``_orig_*``) for these tests only.
+    """
+    from src.utils import rate_limiter as _rl
+
+    names = ("acquire", "async_acquire", "wait", "async_wait")
+    saved = {n: getattr(_rl.RateLimiter, n) for n in names}
+    for n in names:
+        original = getattr(_rl.RateLimiter, f"_orig_{n}", None)
+        if original is not None:
+            setattr(_rl.RateLimiter, n, original)
+    yield
+    for n, fn in saved.items():
+        setattr(_rl.RateLimiter, n, fn)
+
+
+@pytest.mark.usefixtures("_real_rate_limiter_methods")
 class TestRateLimiter:
     def test_unknown_service_always_passes(self):
         rl = RateLimiter()
