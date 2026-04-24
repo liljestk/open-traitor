@@ -14,6 +14,7 @@ from typing import Any
 from src.agents.base_agent import BaseAgent
 from src.core.exchange_client import ExchangeClient
 from src.core.rules import AbsoluteRules
+from src.core.smart_execution import MicroSnapshot, SmartExecutionPlanner
 from src.models.trade import Trade, TradeAction, TradeStatus
 from src.utils.logger import get_logger
 
@@ -61,6 +62,26 @@ class ExecutorAgent(BaseAgent):
         self._maker_filled: int = 0
         self._maker_cancelled: int = 0
         self._maker_replaced: int = 0
+        # Phase 5: smart-execution planner — pre-trade microstructure gate.
+        # Strict opt-in via execution.use_smart_execution; only consulted for
+        # buys above smart_exec_min_notional and only when the exchange exposes
+        # a usable order book (Coinbase yes, IBKR no).
+        self.use_smart_execution = bool(exec_cfg.get("use_smart_execution", True))
+        self.smart_exec_min_notional = float(
+            exec_cfg.get("smart_exec_min_notional", 1000.0)
+        )
+        try:
+            self._smart_planner = SmartExecutionPlanner(
+                max_spread_bps=float(exec_cfg.get("max_spread_bps", 30.0)),
+                max_slippage_bps=float(exec_cfg.get("max_slippage_bps", 15.0)),
+                depth_safety_factor=float(
+                    exec_cfg.get("depth_safety_factor", 3.0)
+                ),
+            )
+        except Exception as _e:
+            logger.warning(f"smart_execution disabled (init failed): {_e}")
+            self._smart_planner = None
+            self.use_smart_execution = False
         # Track consecutive close failures per trade_id to prevent infinite retry loops
         self._close_failures: dict[str, int] = {}
         self._close_failure_limit = 3
@@ -199,6 +220,41 @@ class ExecutorAgent(BaseAgent):
         if quote_amount <= 0 or quantity < 0:
             self.logger.error(f"❌ Trade rejected: invalid amounts quote_amount={quote_amount}, quantity={quantity}")
             return {"executed": False, "reason": "Invalid trade amounts"}
+
+        # Phase 5: smart-execution pre-trade microstructure gate.
+        # Only for buys above min notional, and only when the exchange has a
+        # usable order book. On rejection (spread too wide / depth too thin)
+        # we abort the trade rather than slipping into bad fills.
+        smart_plan = None
+        if (
+            self.use_smart_execution
+            and self._smart_planner is not None
+            and action == "buy"
+            and quote_amount >= self.smart_exec_min_notional
+            and hasattr(self.exchange, "get_product_book")
+        ):
+            smart_plan = self._build_smart_plan(
+                pair=pair,
+                side="buy",
+                quote_amount=quote_amount,
+                price=price,
+                confidence=confidence,
+            )
+            if smart_plan is not None and not smart_plan.is_executable:
+                self.logger.warning(
+                    f"🛑 SmartExecution rejected {pair} buy: "
+                    f"{smart_plan.rejected_reason} | notes={smart_plan.notes}"
+                )
+                return {
+                    "executed": False,
+                    "reason": f"smart_execution: {smart_plan.rejected_reason}",
+                    "smart_plan_notes": dict(smart_plan.notes),
+                }
+            if smart_plan is not None and smart_plan.is_executable:
+                self.logger.info(
+                    f"📐 SmartExecution accepted {pair} buy: "
+                    f"slices={len(smart_plan.children)} notes={smart_plan.notes}"
+                )
 
         # Create Trade record
         trade = Trade(
@@ -352,6 +408,107 @@ class ExecutorAgent(BaseAgent):
             trade.status = TradeStatus.FAILED
             self.logger.error(f"❌ Execution error: {e}", exc_info=True)
             return {"executed": False, "error": str(e), "trade_id": trade.id}
+
+    def _read_macro_regime(self) -> str:
+        """Read the latest macro regime label from the per-profile snapshot.
+
+        Returns ``"unknown"`` when the snapshot is missing or unreadable so
+        callers never need to handle a None.
+        """
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            profile = (
+                getattr(self.exchange, "profile", None)
+                or getattr(self.state, "profile", None)
+                or "default"
+            )
+            p = _Path("data") / str(profile).lower() / "regime_snapshot.json"
+            if not p.exists():
+                return "unknown"
+            data = _json.loads(p.read_text())
+            return str(data.get("regime") or data.get("macro_regime") or "unknown")
+        except Exception:
+            return "unknown"
+
+    def _build_smart_plan(
+        self,
+        *,
+        pair: str,
+        side: str,
+        quote_amount: float,
+        price: float,
+        confidence: float,
+    ):
+        """Build a SmartExecution plan from the live order book. Returns None
+        when the order book is unavailable (so we fall through to the legacy
+        single-order path) and an :class:`ExecutionPlan` otherwise. Any
+        exception is logged and converted to None — the gate must never crash
+        the trading loop.
+        """
+        try:
+            book = self.exchange.get_product_book(pair, limit=10)
+        except NotImplementedError:
+            return None
+        except Exception as e:
+            self.logger.debug(f"smart_exec: book fetch failed for {pair}: {e}")
+            return None
+
+        if not isinstance(book, dict):
+            return None
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        if not bids or not asks:
+            return None
+
+        def _row(r):
+            # Coinbase returns objects with .price/.size or {price,size}.
+            if isinstance(r, dict):
+                return float(r.get("price", 0)), float(r.get("size", 0))
+            p = getattr(r, "price", None)
+            s = getattr(r, "size", None)
+            try:
+                return float(p), float(s)
+            except (TypeError, ValueError):
+                return 0.0, 0.0
+
+        try:
+            best_bid_px, _ = _row(bids[0])
+            best_ask_px, _ = _row(asks[0])
+            bid_depth = sum(_row(r)[1] for r in bids[:10])
+            ask_depth = sum(_row(r)[1] for r in asks[:10])
+        except Exception as e:
+            self.logger.debug(f"smart_exec: book parse failed for {pair}: {e}")
+            return None
+
+        if best_bid_px <= 0 or best_ask_px <= 0:
+            return None
+
+        if price <= 0:
+            price = 0.5 * (best_bid_px + best_ask_px)
+
+        snap = MicroSnapshot(
+            pair=pair,
+            best_bid=best_bid_px,
+            best_ask=best_ask_px,
+            bid_depth=bid_depth,
+            ask_depth=ask_depth,
+            atr=0.0,
+        )
+        # Convert quote notional → base size for the planner.
+        total_size = quote_amount / price if price > 0 else 0.0
+        if total_size <= 0:
+            return None
+
+        urgency = "high" if confidence >= self.urgency_threshold else "medium"
+        try:
+            return self._smart_planner.plan(
+                pair=pair, side=side, total_size=total_size,
+                snap=snap, urgency=urgency,
+            )
+        except Exception as e:
+            self.logger.debug(f"smart_exec: plan() failed for {pair}: {e}")
+            return None
 
     async def _verify_fill(self, order_id: str, initial_order: dict, max_attempts: int = 8) -> dict:
         """Poll order status to verify fill (for live orders).
@@ -658,6 +815,29 @@ class ExecutorAgent(BaseAgent):
                         strat = "blended"
                     quant.record_strategy_pnl(strat, pnl_pct)
                     quant.update_allocator({strat: pnl_pct})
+                    # Phase 11: trigger the per-strategy healing evaluation
+                    # so SLO breaches actually toggle is_disabled(). Without
+                    # this call the disable cool-down would never engage.
+                    try:
+                        if hasattr(quant, "evaluate_health"):
+                            quant.evaluate_health([strat])
+                    except Exception as _eh:
+                        self.logger.debug(f"healing evaluate failed: {_eh}")
+                    # Phase 12: feed the live signal sample into the edge
+                    # library so the SignalEdgeLibrary's regime-conditional
+                    # IR estimates reflect production fills.
+                    try:
+                        regime = self._read_macro_regime()
+                        if regime and hasattr(quant, "record_signal_sample"):
+                            quant.record_signal_sample(
+                                signal_name=strat,
+                                regime=regime,
+                                score=float(trade.confidence or 0.0),
+                                forward_return=pnl_pct,
+                                pair=trade.pair or "UNKNOWN",
+                            )
+                    except Exception as _es:
+                        self.logger.debug(f"edge sample record failed: {_es}")
                 except Exception as _e:
                     self.logger.debug(f"quant substrate record failed: {_e}")
 

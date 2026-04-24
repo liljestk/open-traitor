@@ -12,6 +12,7 @@ from typing import Any
 from src.agents.base_agent import BaseAgent
 from src.core.rules import AbsoluteRules
 from src.core.portfolio_scaler import PortfolioScaler
+from src.core.vol_target import vol_target_multiplier
 from src.models.trade import TradeAction
 from src.utils.logger import get_logger
 
@@ -452,6 +453,29 @@ class RiskManagerAgent(BaseAgent):
                 volatility_reduction = min(0.5, (0.05 / atr_pct))  # Cap reduction at 50%
                 max_position = max_position * volatility_reduction
                 self.logger.info(f"High volatility detected (ATR {atr_pct:.1%}). Reduced max position size by {1-volatility_reduction:.1%}.")
+
+        # Step 2b (Phase 13): vol-target multiplier — scale position inversely
+        # with realised return-volatility. Strict opt-in via risk.use_vol_target.
+        # Strict bound [0.10, 3.00] inside the helper; we additionally cap the
+        # *upscale* leg here so vol-target can never DOUBLE a Kelly-sized bet.
+        if action == "buy" and self.risk_config.get("use_vol_target", True):
+            recent_returns = context.get("recent_returns") or []
+            if recent_returns:
+                target_vol = float(self.risk_config.get("vol_target", 0.01))
+                vt_mult = vol_target_multiplier(
+                    recent_returns, target_vol=target_vol
+                )
+                # Clamp upscale: max 1.25x of Kelly-sized notional. Downscale
+                # is unbounded (subject to floor 0.10) so calm regimes shrink
+                # rather than grow positions.
+                vt_mult_capped = min(vt_mult, 1.25)
+                if abs(vt_mult_capped - 1.0) > 0.01:
+                    max_position *= vt_mult_capped
+                    self.logger.info(
+                        f"Vol-target × {vt_mult_capped:.2f} "
+                        f"(target={target_vol:.2%}, n={len(recent_returns)}) "
+                        f"→ max {max_position:,.2f}"
+                    )
 
         # Step 3: Correlation penalty
         if action == "buy":

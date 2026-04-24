@@ -15,6 +15,36 @@ from src.utils import llm_optimizer
 logger = get_logger("core.pipeline")
 
 
+def _candle_returns(candles: list, lookback: int = 30) -> list[float]:
+    """Extract close-to-close pct returns from the last `lookback+1` candles.
+
+    Returns [] when candles are missing or malformed so vol_target falls back
+    to a neutral multiplier of 1.0 instead of zeroing the trade.
+    """
+    if not candles or len(candles) < 2:
+        return []
+    try:
+        closes = []
+        for c in candles[-(lookback + 1):]:
+            if isinstance(c, dict):
+                px = c.get("close") or c.get("c")
+            else:
+                # tuple/list-like (ts, o, h, l, c, v)
+                px = c[4] if len(c) > 4 else None
+            if px is None:
+                continue
+            closes.append(float(px))
+        if len(closes) < 2:
+            return []
+        return [
+            (closes[i] - closes[i - 1]) / closes[i - 1]
+            for i in range(1, len(closes))
+            if closes[i - 1] > 0
+        ]
+    except Exception:
+        return []
+
+
 def _build_accuracy_ctx(
     pair_accuracy: dict | None, weighted_acc: dict
 ) -> dict | None:
@@ -761,6 +791,9 @@ class PipelineManager:
             # Signal strength context for position sizing
             "signal_type": signal_type,
             "signal_type_win_rate": signal_type_win_rate,
+            # Phase 13: vol-target sizing — pass the recent close-to-close
+            # returns so RiskManager can compute target_vol / realised_vol.
+            "recent_returns": _candle_returns(candles, lookback=30),
         })
 
         if not risk_result.get("approved"):
