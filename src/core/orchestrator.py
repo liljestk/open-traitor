@@ -724,6 +724,55 @@ class Orchestrator:
         self._watchdog_thread.start()
         logger.info(f"🐕 Cycle watchdog armed (timeout={timeout_s:.0f}s)")
 
+    def _write_regime_snapshot(self) -> None:
+        """Phase 12: write a per-profile regime snapshot to
+        ``data/<profile>/regime_snapshot.json`` for the cross-asset
+        macro view. Uses the first tracked pair as a representative
+        sample. Best-effort; never raises."""
+        if not self.pairs:
+            return
+        try:
+            from src.analysis.regime_detector import RegimeDetector
+        except Exception:
+            return
+        pair = self.pairs[0]
+        try:
+            candles = self.exchange.get_candles(pair, granularity="ONE_HOUR", limit=200)
+        except Exception:
+            return
+        if not candles:
+            return
+        try:
+            snap = RegimeDetector().detect(candles)
+        except Exception:
+            return
+        profile = (
+            os.environ.get("AUTO_TRAITOR_PROFILE")
+            or ("ibkr" if self.exchange.__class__.__name__ == "IBClient"
+                else "coinbase")
+        ).lower()
+        out = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "profile": profile,
+            "pair": pair,
+            "regime": getattr(snap.regime, "value", str(snap.regime)),
+            "confidence": float(getattr(snap, "confidence", 0.0) or 0.0),
+            "adx": float(getattr(snap, "adx", 0.0) or 0.0),
+            "atr_pct": float(getattr(snap, "atr_pct", 0.0) or 0.0),
+            "slope": float(getattr(snap, "slope", 0.0) or 0.0),
+            "slope_r2": float(getattr(snap, "slope_r2", 0.0) or 0.0),
+            "hurst": float(getattr(snap, "hurst", 0.5) or 0.5),
+        }
+        path = os.path.join("data", profile, "regime_snapshot.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(out, f)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
     def run_forever(self) -> None:
         """Main loop — runs continuously until stopped."""
         logger.info("🚀 Starting main trading loop...")
@@ -1326,6 +1375,13 @@ class Orchestrator:
                     cycle_duration_s=round(_cycle_duration_s, 2),
                 )
                 logger.info(f"⏱️ Cycle #{cycle_count} completed in {_cycle_duration_s:.1f}s")
+
+                # Phase 12: write per-profile regime snapshot for the
+                # cross-asset macro view. Best-effort, never blocks the cycle.
+                try:
+                    self._write_regime_snapshot()
+                except Exception as _e:
+                    logger.debug(f"regime snapshot write skipped: {_e}")
 
                 # ─── Slow-cycle Telegram alert ────────────────────────
                 _slow_threshold = self.interval * 2

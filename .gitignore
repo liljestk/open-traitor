@@ -70,3 +70,4 @@ redis_data/
 # Setup marker
 config/.setup-complete
 *.bak
+pytest_output.txt

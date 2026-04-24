@@ -123,6 +123,35 @@ class RiskManagerAgent(BaseAgent):
 
         return position_frac
 
+    def _read_news_bias(self) -> float:
+        """Read the per-profile news_bias multiplier written by NewsReflex.
+        Returns 1.0 (neutral) on any error or if file is missing/stale."""
+        try:
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            profile = (
+                os.environ.get("AUTO_TRAITOR_PROFILE")
+                or self.trading_config.get("exchange", "default")
+            ).lower()
+            path = Path("data") / profile / "news_bias.json"
+            if not path.exists():
+                return 1.0
+            # Stale guard: ignore biases older than 6h
+            try:
+                age = time.time() - path.stat().st_mtime
+                if age > 6 * 3600:
+                    return 1.0
+            except Exception:
+                pass
+            data = json.loads(path.read_text())
+            return float(data.get("bias", 1.0))
+        except Exception as e:
+            self.logger.debug(f"news_bias read failed: {e}")
+            return 1.0
+
     def _compute_correlation_penalty(
         self,
         pair: str,
@@ -439,6 +468,18 @@ class RiskManagerAgent(BaseAgent):
                 self.logger.info(
                     f"Signal strength ({signal_type}): size × {strength_mult:.0%} → "
                     f"max {max_position:,.2f}"
+                )
+
+        # Step 4b (Phase 14): news bias multiplier — bounded [0.5, 1.5].
+        # Strict opt-in: only applied when risk.use_news_bias is true.
+        if action == "buy" and self.risk_config.get("use_news_bias", True):
+            news_bias = self._read_news_bias()
+            if news_bias and abs(news_bias - 1.0) > 0.01:
+                # Clamp defensively even if file was tampered with.
+                news_bias = max(0.5, min(1.5, float(news_bias)))
+                max_position *= news_bias
+                self.logger.info(
+                    f"News bias × {news_bias:.2f} → max {max_position:,.2f}"
                 )
 
         # Step 5: Strong-signal floor (override quality penalty for new/poor-history assets)

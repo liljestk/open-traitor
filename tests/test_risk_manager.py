@@ -329,3 +329,60 @@ class TestSignalStrength:
     def test_weak_buy_sixty_percent(self):
         RiskManagerAgent = _import_risk_manager()
         assert RiskManagerAgent._SIGNAL_STRENGTH_MULT["weak_buy"] == 0.6
+
+
+# --------------------------------------------------------------------- #
+# Phase 14 — News bias multiplier
+# --------------------------------------------------------------------- #
+
+class TestNewsBiasMultiplier:
+    def test_no_file_returns_neutral(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRAITOR_PROFILE", "coinbase")
+        rm = _make_rm()
+        assert rm._read_news_bias() == 1.0
+
+    def test_reads_persisted_bias(self, tmp_path, monkeypatch):
+        import json as _j
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRAITOR_PROFILE", "coinbase")
+        d = tmp_path / "data" / "coinbase"
+        d.mkdir(parents=True)
+        (d / "news_bias.json").write_text(_j.dumps({"bias": 1.3}))
+        rm = _make_rm()
+        assert rm._read_news_bias() == pytest.approx(1.3)
+
+    def test_stale_file_ignored(self, tmp_path, monkeypatch):
+        import json as _j
+        import os as _os
+        import time as _t
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRAITOR_PROFILE", "coinbase")
+        d = tmp_path / "data" / "coinbase"
+        d.mkdir(parents=True)
+        f = d / "news_bias.json"
+        f.write_text(_j.dumps({"bias": 1.3}))
+        old = _t.time() - 7 * 3600
+        _os.utime(str(f), (old, old))
+        rm = _make_rm()
+        assert rm._read_news_bias() == 1.0
+
+    def test_corrupt_file_returns_neutral(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRAITOR_PROFILE", "coinbase")
+        d = tmp_path / "data" / "coinbase"
+        d.mkdir(parents=True)
+        (d / "news_bias.json").write_text("not-json")
+        rm = _make_rm()
+        assert rm._read_news_bias() == 1.0
+
+    def test_clamped_to_bounds_in_pipeline(self, tmp_path, monkeypatch):
+        import json as _j
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRAITOR_PROFILE", "coinbase")
+        d = tmp_path / "data" / "coinbase"
+        d.mkdir(parents=True)
+        # Tampered file outside bounds — _read returns raw, but pipeline clamps
+        (d / "news_bias.json").write_text(_j.dumps({"bias": 5.0}))
+        rm = _make_rm()
+        assert rm._read_news_bias() == 5.0  # raw read, bounds applied at use site
