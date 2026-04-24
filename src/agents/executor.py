@@ -160,6 +160,25 @@ class ExecutorAgent(BaseAgent):
         if action == "hold":
             return {"executed": False, "reason": "Hold — no trade"}
 
+        # Phase 11: self-healing veto — strategies that breach SLOs get
+        # disabled by SelfHealingController. Honour that before any I/O.
+        try:
+            quant = getattr(self, "quant", None)
+            if quant and getattr(quant, "healing", None):
+                strat_name = (trade_info.get("reasoning") or "blended").split(":")[0].strip().lower()
+                if strat_name and strat_name not in {"blended", "stop_loss", "take_profit", "trailing_stop", "manual"}:
+                    if quant.healing.is_disabled(strat_name):
+                        self.logger.warning(
+                            f"⚙️ Strategy '{strat_name}' is disabled by self-healing — skipping trade"
+                        )
+                        return {
+                            "executed": False,
+                            "reason": f"Strategy '{strat_name}' disabled by self-healing",
+                            "strategy": strat_name,
+                        }
+        except Exception as _e:
+            self.logger.debug(f"self-healing veto skipped: {_e}")
+
         pair = trade_info["pair"]
         quote_amount = trade_info.get("quote_amount", trade_info.get("usd_amount", 0))
         quantity = trade_info.get("quantity", 0)

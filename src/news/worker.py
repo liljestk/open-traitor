@@ -249,6 +249,24 @@ def main():
                     )
                     logger.info(f"  └─ {pname}: {len(matched)} articles")
 
+            # Phase 14: evaluate news reflex bias for each profile and persist
+            # to data/<profile>/news_bias.json so RiskManagerAgent picks it up.
+            if profile_configs:
+                try:
+                    from src.news.reflex import NewsReflex
+                    for pname in profile_configs.keys():
+                        try:
+                            rec = NewsReflex(pname, redis_client=redis_client).evaluate_and_persist()
+                            logger.info(
+                                f"  └─ news_bias[{pname}]={rec.get('bias', 1.0):.2f} "
+                                f"(n={rec.get('sample_size', 0)}, "
+                                f"hi={rec.get('high_impact_count', 0)})"
+                            )
+                        except Exception as e:
+                            logger.debug(f"news_bias[{pname}] failed: {e}")
+                except Exception as e:
+                    logger.debug(f"NewsReflex import failed: {e}")
+
             stats = aggregator.get_stats()
             if redis_client:
                 redis_client.set("news:stats", json.dumps(stats, default=str), ex=600)

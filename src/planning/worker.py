@@ -54,6 +54,10 @@ from src.planning.workflows import (
     MonthlyReviewWorkflow,
     NightlyBacktestWorkflow,
 )
+from src.planning.wfo_workflow import (
+    WeeklyWFOWorkflow,
+    run_wfo_for_strategies,
+)
 from src.utils.logger import setup_logger, get_logger
 
 setup_logger(log_level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -127,6 +131,12 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "cron": "0 2 * * *",
             "desc": "Nightly backtest runner (2 AM UTC)",
         },
+        {
+            "workflow": WeeklyWFOWorkflow,
+            "id": "weekly-wfo",
+            "cron": "0 3 * * 1",
+            "desc": "Weekly walk-forward optimisation (Monday 03:00 UTC)",
+        },
     ]
 
     for profile in profiles:
@@ -164,7 +174,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -178,6 +188,7 @@ async def main() -> None:
             fetch_pair_universe,
             fetch_universe_scan_summary,
             run_nightly_backtests,
+            run_wfo_for_strategies,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

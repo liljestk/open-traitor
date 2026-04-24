@@ -126,16 +126,39 @@ class PipelineManager:
         """Fetch learned strategy weights from ALE ensemble optimizer.
 
         Falls back to static ``_STRATEGY_WEIGHTS`` on any error.
+        Phase 9: blends in ``QuantSubstrate.capital_allocator`` weights —
+        gives self-learning capital flow influence over the ensemble.
         """
         try:
             lm = getattr(self.orchestrator, "learning_manager", None)
             if lm and lm.ensemble:
                 # Detect current regime from latest state
                 regime = getattr(self.orchestrator.state, "market_regime", "unknown")
-                return lm.ensemble.get_weights(market_regime=regime)
+                base = lm.ensemble.get_weights(market_regime=regime)
+            else:
+                base = dict(self._STRATEGY_WEIGHTS)
+        except Exception:
+            base = dict(self._STRATEGY_WEIGHTS)
+
+        # Phase 9 blend: multiplicative overlay of allocator weights, capped
+        # so a single hot strategy can't run away from the ensemble.
+        try:
+            quant = getattr(self.orchestrator, "quant", None)
+            if quant and getattr(quant, "allocator", None):
+                alloc_w = quant.allocator.weights() or {}
+                if alloc_w:
+                    blended: dict[str, float] = {}
+                    for name, w in base.items():
+                        # Allocator weight averages around 1/N; normalise to 1.0 baseline.
+                        n = max(len(alloc_w), 1)
+                        scale = alloc_w.get(name, 1.0 / n) * n
+                        # Clamp scale to [0.5, 2.0] to bound drift
+                        scale = max(0.5, min(2.0, scale))
+                        blended[name] = w * scale
+                    return blended
         except Exception:
             pass
-        return dict(self._STRATEGY_WEIGHTS)
+        return base
 
     def _get_equity_event_str(self, exchange_name: str, pair: str) -> str:
         """Return a formatted equity event string for injection into agent prompts.
