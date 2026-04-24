@@ -191,6 +191,9 @@ class Orchestrator:
             llm, self.state, config, rules,
             portfolio_scaler=self.portfolio_scaler,
         )
+        # Catalyst Pattern Engine — deterministic, no LLM call.
+        from src.agents.pattern_agent import PatternAgent
+        self.pattern_agent = PatternAgent(llm, self.state, config)
         self.executor = ExecutorAgent(llm, self.state, config, exchange, rules, telegram=telegram_bot)
         self.settings_advisor = SettingsAdvisorAgent(
             llm, self.state, config, rules,

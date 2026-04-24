@@ -8,6 +8,7 @@ in its constructor (same pattern as PipelineManager / StateManager).
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 
 from src.analysis.technical import TechnicalAnalyzer
@@ -365,6 +366,27 @@ class UniverseScanner:
                                     orch.stats_db.follow_pair(ap, followed_by="llm", exchange=exchange_name)
                             except Exception as db_err:
                                 logger.debug(f"Failed to persist LLM pair follows: {db_err}")
+
+                            # Catalyst Pattern Engine: schedule background
+                            # historical-data backfill for any newly-followed
+                            # symbol so the engine can produce a signal as
+                            # soon as enough history is local.
+                            try:
+                                from src.analysis.history_bulk_backfill import (
+                                    schedule_symbol_backfill,
+                                )
+                                profile = (
+                                    os.environ.get("AUTO_TRAITOR_PROFILE")
+                                    or orch.config.get("trading", {}).get("exchange", "coinbase")
+                                ).lower()
+                                for ap in added:
+                                    schedule_symbol_backfill(
+                                        profile=profile,
+                                        symbol=ap,
+                                        granularities=("ONE_HOUR", "ONE_DAY"),
+                                    )
+                            except Exception as bf_err:
+                                logger.debug(f"Backfill schedule failed (non-fatal): {bf_err}")
 
                             # Update WebSocket subscriptions
                             try:

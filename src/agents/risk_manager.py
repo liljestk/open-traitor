@@ -506,6 +506,37 @@ class RiskManagerAgent(BaseAgent):
                     f"News bias × {news_bias:.2f} → max {max_position:,.2f}"
                 )
 
+        # Step 4c: Catalyst Pattern Engine multiplier.
+        # Advisory only — bounded [0.5, 1.5] and never overrides AbsoluteRules.
+        # Direction-aware: bullish historical analogs amplify a buy proposal,
+        # bearish ones shrink it. Magnitude scales with engine confidence.
+        pattern_signal = context.get("pattern_signal") or {}
+        if (
+            action == "buy"
+            and self.risk_config.get("use_pattern_engine", True)
+            and isinstance(pattern_signal, dict)
+            and pattern_signal.get("available")
+        ):
+            try:
+                p_dir = pattern_signal.get("direction", "neutral")
+                p_conf = float(pattern_signal.get("confidence", 0.0))
+                # Map (direction, confidence) → multiplier in [0.5, 1.5].
+                if p_dir == "bullish":
+                    pattern_mult = 1.0 + 0.5 * max(0.0, min(1.0, p_conf))
+                elif p_dir == "bearish":
+                    pattern_mult = 1.0 - 0.5 * max(0.0, min(1.0, p_conf))
+                else:
+                    pattern_mult = 1.0
+                pattern_mult = max(0.5, min(1.5, pattern_mult))
+                if abs(pattern_mult - 1.0) > 0.01:
+                    max_position *= pattern_mult
+                    self.logger.info(
+                        f"Pattern engine ({p_dir}, conf {p_conf:.2f}) × "
+                        f"{pattern_mult:.2f} → max {max_position:,.2f}"
+                    )
+            except (TypeError, ValueError) as _e:
+                self.logger.debug(f"pattern_signal multiplier skipped: {_e}")
+
         # Step 5: Strong-signal floor (override quality penalty for new/poor-history assets)
         # A confident strong signal should not be near-zero-sized just because Kelly
         # produced a tiny fraction from a thin/bad historical track record.

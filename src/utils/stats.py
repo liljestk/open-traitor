@@ -32,6 +32,7 @@ from src.utils.stats_trades import TradesMixin
 from src.utils.stats_reasoning import ReasoningMixin
 from src.utils.stats_predictions import PredictionsMixin
 from src.utils.stats_simulated import SimulatedMixin
+from src.utils.stats_patterns import PatternsMixin
 
 logger = get_logger("stats")
 
@@ -80,6 +81,7 @@ class StatsDB(
     ReasoningMixin,
     PredictionsMixin,
     SimulatedMixin,
+    PatternsMixin,
 ):
     """Thread-safe PostgreSQL statistics database.
 
@@ -326,6 +328,14 @@ class StatsDB(
         # Run migrations on a fresh connection so any failure is fully
         # independent of the schema-creation transaction above (MED-10).
         self._migrate_db()
+
+        # Pattern-engine tables (historical_candles, catalyst_events,
+        # pattern_fingerprints, backfill_progress + pgvector). Independent
+        # connection / savepoints — failures degrade gracefully.
+        try:
+            self._init_pattern_schema()
+        except Exception as _e:
+            logger.warning(f"Pattern schema init failed: {_e}")
 
     # Allowlist for DDL migrations — prevents any interpolation of
     # unexpected identifiers into ALTER TABLE statements (CRIT-2).

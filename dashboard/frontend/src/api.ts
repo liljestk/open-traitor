@@ -979,6 +979,71 @@ export const fetchFinancialSummary = (ticker: string, profile = '') =>
     `/financial-calendar/summary?ticker=${encodeURIComponent(ticker)}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`
   )
 
+// ─── Catalyst Pattern Engine ───────────────────────────────────────────────
+
+export interface CatalystEvent {
+  id: string
+  exchange: string
+  symbol: string
+  event_type: string
+  event_ts: string
+  source?: string | null
+  confidence?: number | null
+  metadata?: Record<string, unknown>
+  inserted_at?: string
+}
+
+export interface PatternOutcomeSummary {
+  direction: 'bullish' | 'bearish' | 'neutral' | string
+  expected_drift: Record<string, number>
+  dispersion: Record<string, number>
+  n_matches: number
+  confidence: number
+  matches?: Array<Record<string, unknown>>
+  error?: string
+}
+
+export interface UpcomingPatternRow {
+  symbol: string
+  exchange: string
+  upcoming_event: CatalystEvent
+  outcome: PatternOutcomeSummary
+}
+
+export interface UpcomingPatternsResponse {
+  profile: string
+  exchange: string
+  horizon_days: number
+  count: number
+  items: UpcomingPatternRow[]
+}
+
+export interface EventMatchesResponse {
+  profile: string
+  exchange: string
+  event: CatalystEvent
+  outcome: PatternOutcomeSummary
+}
+
+export const fetchUpcomingPatterns = (
+  horizonDays = 30,
+  granularity = 'ONE_DAY',
+  k = 20,
+  limit = 25,
+) =>
+  apiFetch<UpcomingPatternsResponse>(
+    `/patterns/upcoming?horizon_days=${horizonDays}&granularity=${encodeURIComponent(granularity)}&k=${k}&limit=${limit}`,
+  )
+
+export const fetchEventMatches = (
+  eventId: string,
+  granularity = 'ONE_DAY',
+  k = 20,
+) =>
+  apiFetch<EventMatchesResponse>(
+    `/patterns/${encodeURIComponent(eventId)}/matches?granularity=${encodeURIComponent(granularity)}&k=${k}`,
+  )
+
 // ─── Watchlist ─────────────────────────────────────────────────────────────
 
 export interface ScanResult {

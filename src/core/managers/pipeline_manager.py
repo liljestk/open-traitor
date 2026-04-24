@@ -15,6 +15,32 @@ from src.utils import llm_optimizer
 logger = get_logger("core.pipeline")
 
 
+def _read_sentiment_score(exchange: str) -> float | None:
+    """Read the latest news_bias.json's ``sentiment_mean`` (∈[-1, +1]) for
+    pattern-engine sentiment fusion. Returns ``None`` on any error so the
+    fusion step is skipped gracefully."""
+    try:
+        from pathlib import Path
+        profile = (
+            os.environ.get("AUTO_TRAITOR_PROFILE") or exchange or ""
+        ).lower()
+        if not profile:
+            return None
+        path = Path("data") / profile / "news_bias.json"
+        if not path.exists():
+            return None
+        # Stale guard: ignore older than 6h.
+        if time.time() - path.stat().st_mtime > 6 * 3600:
+            return None
+        data = json.loads(path.read_text())
+        v = data.get("sentiment_mean")
+        if v is None:
+            return None
+        return max(-1.0, min(1.0, float(v)))
+    except Exception:
+        return None
+
+
 def _candle_returns(candles: list, lookback: int = 30) -> list[float]:
     """Extract close-to-close pct returns from the last `lookback+1` candles.
 
@@ -766,6 +792,24 @@ class PipelineManager:
             if signal_obj:
                 orch.telegram.send_signal_notification(signal_obj.to_summary())
 
+        # Step 2.5: Catalyst Pattern Engine (deterministic, no-LLM).
+        # Surfaces an upcoming-event-driven pattern_signal for the strategist
+        # and risk manager. Always runs but no-ops when no catalyst is in
+        # range or when there are too few historical analogs.
+        pattern_signal: dict = {"available": False, "reason": "not_run"}
+        try:
+            _pattern_sentiment = _read_sentiment_score(exchange_name)
+            pattern_result = await orch.pattern_agent.execute({
+                "pair": pair,
+                "exchange": exchange_name,
+                "stats_db": orch.stats_db,
+                "cycle_id": cycle_id,
+                "sentiment_score": _pattern_sentiment,
+            })
+            pattern_signal = pattern_result.get("pattern_signal", pattern_signal)
+        except Exception as _pat_e:
+            logger.debug(f"PatternAgent failed for {pair}: {_pat_e}")
+
         # Step 3: Strategy Generation
         _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context
@@ -802,6 +846,7 @@ class PipelineManager:
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
             "exchange": exchange_name,
+            "pattern_signal": pattern_signal,
         })
 
         if strategy_result.get("action") == "hold":
@@ -863,6 +908,9 @@ class PipelineManager:
             # Phase 13: vol-target sizing — pass the recent close-to-close
             # returns so RiskManager can compute target_vol / realised_vol.
             "recent_returns": _candle_returns(candles, lookback=30),
+            # Catalyst Pattern Engine signal — used as an advisory size
+            # multiplier (never overrides AbsoluteRules).
+            "pattern_signal": pattern_signal,
         })
 
         if not risk_result.get("approved"):
