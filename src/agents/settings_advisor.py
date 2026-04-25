@@ -342,7 +342,42 @@ class SettingsAdvisorAgent(BaseAgent):
             if not clamped:
                 continue
 
-            # Persist to settings.yaml
+            # ── ShadowTester gate ────────────────────────────────────
+            # Route every proposed delta through the 24h shadow-PnL gate
+            # instead of writing directly to settings.yaml. The
+            # orchestrator's settings-apply hook will consume promotable
+            # deltas (`shadow_tester.list_promotable()`) and only then
+            # call `sm.update_section`.
+            shadow = context.get("shadow_tester")
+            if shadow is not None:
+                try:
+                    delta_id = shadow.propose(
+                        strategy=f"settings:{section}",
+                        params=dict(clamped),
+                        rationale=overall_reasoning[:300],
+                    )
+                    for field, val in clamped.items():
+                        reason = change_reasons.get(f"{section}.{field}", "")
+                        applied.append({
+                            "section": section,
+                            "field": field,
+                            "value": val,
+                            "reason": reason,
+                            "shadow_delta_id": delta_id,
+                            "status": "shadow_pending",
+                        })
+                    logger.info(
+                        f"🔬 Settings Advisor: proposed {len(clamped)} change(s) "
+                        f"to [{section}] via ShadowTester (delta_id={delta_id})"
+                    )
+                    continue
+                except Exception as _shadow_e:
+                    logger.warning(
+                        f"ShadowTester propose failed: {_shadow_e} — "
+                        f"falling back to direct apply"
+                    )
+
+            # Fallback: direct persist when shadow tester is unavailable.
             persist_ok, persist_err, persisted = sm.update_section(section, clamped)
             if not persist_ok:
                 rejected.append({"section": section, "error": persist_err})
@@ -356,6 +391,7 @@ class SettingsAdvisorAgent(BaseAgent):
                     "field": field,
                     "value": val,
                     "reason": reason,
+                    "status": "applied_direct",
                 })
 
             logger.warning(

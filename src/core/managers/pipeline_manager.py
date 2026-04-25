@@ -88,8 +88,9 @@ class PipelineManager:
 
     # Weights for each strategy in ensemble scoring
     _STRATEGY_WEIGHTS: dict[str, float] = {
-        "ema_crossover": 0.55,        # trend-following weight
-        "bollinger_reversion": 0.45,   # mean-reversion weight
+        "ema_crossover": 0.45,        # trend-following weight
+        "bollinger_reversion": 0.35,   # mean-reversion weight
+        "pattern_engine": 0.20,        # catalyst pattern engine (event-driven)
     }
 
     # Equity calendar TTL: refresh earnings/dividend data at most every 4 hours
@@ -810,6 +811,30 @@ class PipelineManager:
         except Exception as _pat_e:
             logger.debug(f"PatternAgent failed for {pair}: {_pat_e}")
 
+        # Promote pattern_engine to a first-class ensemble contributor so the
+        # ensemble vote (and downstream DecisionEngine agreement gate) factor
+        # in catalyst-pattern direction.
+        if isinstance(pattern_signal, dict) and pattern_signal.get("available"):
+            _direction = pattern_signal.get("direction", "neutral")
+            _action = "buy" if _direction == "bullish" else (
+                "sell" if _direction == "bearish" else "hold"
+            )
+            strategy_signals["pattern_engine"] = {
+                "action": _action,
+                "confidence": float(pattern_signal.get("confidence", 0.0) or 0.0),
+                "market_regime": pattern_signal.get("regime", "unknown"),
+                "reasoning": (
+                    f"catalyst pattern {_direction} "
+                    f"(matches={pattern_signal.get('n_matches', 0)})"
+                ),
+            }
+            # Re-run ensemble with the pattern member included.
+            _ens2 = self._compute_ensemble({
+                k: v for k, v in strategy_signals.items() if not k.startswith("_")
+            })
+            if _ens2:
+                strategy_signals["_ensemble"] = _ens2
+
         # Step 3: Strategy Generation
         _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context
@@ -848,6 +873,45 @@ class PipelineManager:
             "exchange": exchange_name,
             "pattern_signal": pattern_signal,
         })
+
+        # ─── TraderAgent: autonomous LLM operator over deterministic toolkit ─────
+        # The strategist call above is kept as a sidecar for reasoning logging
+        # (its output is recorded to agent_reasoning) but the live decision
+        # is made by the TraderAgent which routes every proposal through
+        # the deterministic DecisionEngine (edge library, allocator, rules).
+        trader = getattr(orch, "trader", None)
+        if trader is not None:
+            try:
+                _regime = (signal.get("market_condition") or "unknown")
+                trader_result = await trader.execute({
+                    "pair": pair,
+                    "exchange": exchange_name,
+                    "regime": _regime,
+                    "current_price": price,
+                    "market_signal": signal,
+                    "strategy_signals": strategy_signals,
+                    "pattern_signal": pattern_signal,
+                    "sentiment": sentiment_data,
+                    "news_headlines": news_headlines,
+                    "fee_context": fee_context,
+                    "kelly_stats": kelly_stats,
+                    "recent_outcomes": recent_outcomes,
+                    "strategic_context": _effective_strategic_ctx,
+                    "portfolio_value": _portfolio_value,
+                    "cash_balance": _cash_balance,
+                    "open_positions": orch.state.open_positions,
+                    "edges": getattr(orch.quant, "edges", None) if orch.quant else None,
+                    "allocator": getattr(orch.quant, "allocator", None) if orch.quant else None,
+                    "cycle_id": cycle_id,
+                    "stats_db": orch.stats_db,
+                    "trace_ctx": trace_ctx,
+                })
+                if trader_result and not trader_result.get("error"):
+                    strategy_result = trader_result
+            except Exception as _trader_e:
+                logger.warning(
+                    f"TraderAgent failed for {pair}: {_trader_e} — falling back to strategist"
+                )
 
         if strategy_result.get("action") == "hold":
             _timings["strategist"] = time.monotonic() - _step_t
@@ -911,6 +975,10 @@ class PipelineManager:
             # Catalyst Pattern Engine signal — used as an advisory size
             # multiplier (never overrides AbsoluteRules).
             "pattern_signal": pattern_signal,
+            # Phase 6/9: per-profile quant substrate so the risk manager
+            # can honour the capital-allocator's strategy budget when the
+            # proposal didn't already carry one.
+            "quant": getattr(orch, "quant", None),
         })
 
         if not risk_result.get("approved"):

@@ -18,8 +18,11 @@ from src.agents.market_analyst import MarketAnalystAgent
 from src.agents.strategist import StrategistAgent
 from src.agents.risk_manager import RiskManagerAgent
 from src.agents.executor import ExecutorAgent
+from src.agents.trader import TraderAgent
 from src.agents.settings_advisor import SettingsAdvisorAgent, format_advisor_notification
+from src.core.decision_engine import DecisionEngine
 from src.core.exchange_client import ExchangeClient
+from src.core.llm_advisor import LLMAdvisor, ShadowTester
 from src.core.llm_client import LLMClient
 from src.core.rules import AbsoluteRules
 from src.core.state import TradingState
@@ -300,12 +303,84 @@ class Orchestrator:
             # has slots from cycle 0.
             self.quant.register_strategies([
                 "ema_crossover", "bollinger_reversion", "pairs_correlation",
-                "llm_strategist",
+                "llm_strategist", "pattern_engine",
             ])
             logger.info(f"🧮 Quant substrate online (profile={_profile})")
         except Exception as _e:
             logger.warning(f"⚠️ Quant substrate init failed: {_e}")
             self.quant = None
+
+        # ─── DecisionEngine + TraderAgent (autonomous super-trader path) ───
+        # The trader is the LLM-driven decision-maker; the DecisionEngine is
+        # the deterministic guardrail it cannot bypass. Edge library +
+        # capital allocator + AbsoluteRules are wired in here.
+        self._decision_profile = (
+            os.environ.get("AUTO_TRAITOR_PROFILE")
+            or ("ibkr" if _is_ibkr else ("coinbase" if _is_coinbase else "default"))
+        ).lower()
+        self.decision_engine = DecisionEngine(
+            rules=rules,
+            edges=getattr(self.quant, "edges", None) if self.quant else None,
+            allocator=getattr(self.quant, "allocator", None) if self.quant else None,
+            exchange=self._decision_profile,
+            min_edge_sharpe=float(
+                config.get("quant", {}).get("min_edge_sharpe", 0.10)
+            ),
+            min_edge_samples=int(
+                config.get("quant", {}).get("min_edge_samples", 30)
+            ),
+            min_agreement=float(
+                config.get("quant", {}).get("min_ensemble_agreement", 0.50)
+            ),
+            min_confidence=float(
+                config.get("trading", {}).get("min_signal_confidence", 0.50)
+            ),
+            max_total_exposure_pct=float(
+                config.get("risk", {}).get("max_total_exposure_pct", 0.80)
+            ),
+        )
+        self.trader = TraderAgent(llm, self.state, config, self.decision_engine)
+        logger.info("🧠 TraderAgent + DecisionEngine online")
+
+        # ─── LLMAdvisor + ShadowTester (Phase 6 — autonomous parameter adaptation) ───
+        # The advisor handles news classification / postmortems / param-delta
+        # proposals; the shadow tester gates parameter changes behind a
+        # 24h+ shadow-PnL test before they can become live.
+        try:
+            _data_root = os.path.join("data", self._decision_profile)
+            os.makedirs(_data_root, exist_ok=True)
+            # Adapter: LLMAdvisor wants a sync (str) -> str transport.
+            def _llm_text_adapter(prompt: str) -> str:
+                try:
+                    coro = self.llm.chat_json(
+                        system_prompt="You are a JSON-only assistant.",
+                        user_message=prompt,
+                        max_tokens=400,
+                        agent_name="advisor",
+                    )
+                    if asyncio.iscoroutine(coro):
+                        loop = asyncio.new_event_loop()
+                        try:
+                            data = loop.run_until_complete(coro)
+                        finally:
+                            loop.close()
+                    else:
+                        data = coro
+                    if isinstance(data, dict):
+                        return json.dumps(data)
+                    return str(data or "")
+                except Exception as _e:
+                    logger.debug(f"advisor llm adapter failed: {_e}")
+                    return ""
+            self.advisor = LLMAdvisor(llm_client=_llm_text_adapter)
+            self.shadow_tester = ShadowTester(
+                state_path=os.path.join(_data_root, "shadow_state.json"),
+            )
+            logger.info("🔬 LLMAdvisor + ShadowTester online")
+        except Exception as _adv_e:
+            logger.warning(f"⚠️ LLMAdvisor/ShadowTester init failed: {_adv_e}")
+            self.advisor = None
+            self.shadow_tester = None
 
         # ─── Adaptive Learning Engine ───
         self.learning_manager = LearningManager(self)
@@ -883,6 +958,58 @@ class Orchestrator:
         except Exception:
             pass
 
+    def _apply_promotable_shadow_deltas(self) -> int:
+        """Consume any deltas that have passed the ShadowTester gate and
+        promote them to live config. Called once per cycle.
+
+        Returns the number of deltas promoted.
+        """
+        st = getattr(self, "shadow_tester", None)
+        if st is None:
+            return 0
+        try:
+            promotable = st.list_promotable()
+        except Exception as exc:
+            logger.debug(f"shadow promotable list failed: {exc}")
+            return 0
+        if not promotable:
+            return 0
+        n = 0
+        for delta in promotable:
+            try:
+                strat = delta.strategy or ""
+                if not strat.startswith("settings:"):
+                    continue
+                section = strat.split(":", 1)[1]
+                # Re-validate via the autonomous schema before applying.
+                ok, errors, clamped = sm.validate_autonomous_update(section, delta.proposed_params)
+                if not ok or not clamped:
+                    logger.warning(
+                        f"🔬 Shadow delta {delta.delta_id} failed re-validation "
+                        f"({errors}); rejecting"
+                    )
+                    st.reject(delta.delta_id, "revalidation_failed")
+                    st.consume(delta.delta_id)
+                    continue
+                persist_ok, persist_err, persisted = sm.update_section(section, clamped)
+                if not persist_ok:
+                    logger.warning(
+                        f"🔬 Shadow delta {delta.delta_id} persist failed: {persist_err}"
+                    )
+                    st.reject(delta.delta_id, persist_err)
+                    st.consume(delta.delta_id)
+                    continue
+                sm.push_section_to_runtime(section, persisted, self.rules, self.config)
+                logger.warning(
+                    f"🔬 Promoted shadow delta {delta.delta_id} → "
+                    f"[{section}] {persisted}"
+                )
+                st.consume(delta.delta_id)
+                n += 1
+            except Exception as exc:
+                logger.debug(f"shadow delta promotion failed: {exc}")
+        return n
+
     def run_forever(self) -> None:
         """Main loop — runs continuously until stopped."""
         logger.info("🚀 Starting main trading loop...")
@@ -1408,6 +1535,9 @@ class Orchestrator:
                         self.holdings_manager.reconcile_positions()
 
                 # ─── Autonomous Settings Advisor ────────────────────
+                # Promote any shadow-tested deltas first, then run a fresh
+                # advisor pass.
+                self._apply_promotable_shadow_deltas()
                 if self.settings_advisor.should_run():
                     try:
                         exchange_name = self.config.get("trading", {}).get("exchange", "coinbase").lower()
@@ -1422,14 +1552,20 @@ class Orchestrator:
                             "scan_results_summary": self.universe_scanner.get_scan_summary(),
                             "universe_size": len(self._pair_universe),
                             "exchange": exchange_name,
+                            "shadow_tester": getattr(self, "shadow_tester", None),
                         }
                         advisor_result = self._loop.run_until_complete(
                             self.settings_advisor.execute(advisor_ctx)
                         )
 
                         if advisor_result and advisor_result.get("changes_applied", 0) > 0:
-                            # Push updated sections to runtime config
+                            # Push updated sections to runtime config — but ONLY for
+                            # changes that were directly applied. Shadow-pending
+                            # deltas wait in ShadowTester until they accumulate
+                            # enough positive shadow-PnL to be promoted.
                             for ch in advisor_result.get("applied", []):
+                                if ch.get("status") == "shadow_pending":
+                                    continue
                                 sec = ch["section"]
                                 sm.push_section_to_runtime(
                                     sec, {ch["field"]: ch["value"]},
@@ -1439,6 +1575,7 @@ class Orchestrator:
                             changed_fields = {
                                 (ch["section"], ch["field"])
                                 for ch in advisor_result.get("applied", [])
+                                if ch.get("status") != "shadow_pending"
                             }
                             if ("trading", "pairs") in changed_fields:
                                 new_pairs = self.config.get("trading", {}).get("pairs", self.pairs)

@@ -563,6 +563,36 @@ class RiskManagerAgent(BaseAgent):
                 f"(max allowed: {max_position:,.2f})"
             )
 
+        # Step 4d: Capital-allocator budget cap.
+        # The TraderAgent's DecisionEngine attaches an `allocator_budget_cap`
+        # to every approved proposal. We honour it as an additional hard
+        # ceiling so a hot-running strategy cannot starve underweighted ones.
+        # Falls back to reading directly from `context['quant'].allocator`
+        # when the proposal predates the engine (legacy strategist paths).
+        allocator_cap = proposal.get("allocator_budget_cap")
+        if allocator_cap is None and action == "buy":
+            quant_ctx = context.get("quant")
+            if quant_ctx is not None and getattr(quant_ctx, "allocator", None):
+                try:
+                    weights = quant_ctx.allocator.weights() or {}
+                    strat_name = proposal.get("strategy") or "llm_strategist"
+                    if strat_name in weights and portfolio_value > 0:
+                        allocator_cap = float(weights[strat_name]) * portfolio_value
+                except Exception:
+                    allocator_cap = None
+        if (
+            action == "buy"
+            and allocator_cap is not None
+            and float(allocator_cap) > 0
+            and quote_amount > float(allocator_cap)
+        ):
+            original = quote_amount
+            quote_amount = float(allocator_cap)
+            self.logger.info(
+                f"Allocator budget cap: {original:,.2f} → {quote_amount:,.2f} "
+                f"(allocator_cap={allocator_cap:,.2f})"
+            )
+
         # P3: portfolio-level exposure cap. Sum of open buy-side notional +
         # this new order must not exceed max_total_exposure_pct of portfolio.
         # Prevents accidentally going all-in across many small positions.
