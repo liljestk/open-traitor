@@ -747,7 +747,12 @@ class Orchestrator:
         def _indexer_loop() -> None:
             time.sleep(warmup_delay_s)
             from src.analysis.pattern_engine import index_all_events
+            # Adaptive interval: while no fingerprints exist yet (cold-start
+            # / backfill in progress), retry every 10 minutes instead of
+            # waiting 24 h.
+            cold_interval_s = 600
             while self.state.is_running:
+                indexed = 0
                 try:
                     res = index_all_events(
                         db=self.stats_db,
@@ -755,17 +760,24 @@ class Orchestrator:
                         granularity="ONE_DAY",
                         min_anchor_age_days=min_age_days,
                     )
+                    indexed = int(res.get("indexed", 0) or 0)
                     logger.info(
                         f"🧬 Pattern fingerprint indexer [{profile}]: "
-                        f"indexed={res.get('indexed', 0)} "
+                        f"indexed={indexed} "
                         f"skipped={res.get('skipped', 0)}"
                     )
                 except Exception as e:
                     logger.debug(f"Pattern indexer pass failed: {e}")
+                # Determine current population to decide cadence.
+                try:
+                    total = int(self.stats_db.count_fingerprints(profile) or 0)
+                except Exception:
+                    total = 0
+                next_sleep = interval_s if total > 0 else cold_interval_s
                 # Sleep in short slices so shutdown isn't blocked.
                 slept = 0
-                while slept < interval_s and self.state.is_running:
-                    time.sleep(min(30, interval_s - slept))
+                while slept < next_sleep and self.state.is_running:
+                    time.sleep(min(30, next_sleep - slept))
                     slept += 30
 
         self._pattern_indexer_thread = threading.Thread(
@@ -861,23 +873,43 @@ class Orchestrator:
         # background bulk-backfill (deduped). This runs in daemon threads
         # so the main loop is never blocked.
         try:
-            from src.analysis.history_bulk_backfill import schedule_symbol_backfill
+            from src.analysis.history_bulk_backfill import bulk_backfill_symbol
             _profile = (
                 os.environ.get("AUTO_TRAITOR_PROFILE")
                 or self.config.get("trading", {}).get("exchange", "")
             ).lower()
             if _profile and self.pairs:
-                _scheduled = 0
-                for _sym in self.pairs:
-                    try:
-                        if schedule_symbol_backfill(
-                            profile=_profile,
-                            symbol=_sym,
-                            granularities=("ONE_HOUR", "ONE_DAY"),
-                        ):
-                            _scheduled += 1
-                    except Exception:
-                        pass
+                # Serialize warm-up: one daemon thread that walks every
+                # configured pair sequentially. 35 parallel threads
+                # saturate the 5 req/s coinbase rate-limiter and cause
+                # 60 s timeouts; sequential at 5 req/s finishes ~35 × 6
+                # pages / 5 ≈ 45 s for ONE_DAY.
+                _pairs_snapshot = list(self.pairs)
+
+                def _warmup_loop() -> None:
+                    for _sym in _pairs_snapshot:
+                        if not self.state.is_running:
+                            return
+                        try:
+                            bulk_backfill_symbol(
+                                profile=_profile,
+                                symbol=_sym,
+                                granularities=("ONE_DAY",),
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                f"Warm-up backfill {_sym} failed: {e}"
+                            )
+                    logger.info(
+                        f"🧬 Warm-up bulk-backfill finished "
+                        f"({len(_pairs_snapshot)} pair(s) [{_profile}])"
+                    )
+
+                _t = threading.Thread(
+                    target=_warmup_loop, name="pattern-warmup", daemon=True
+                )
+                _t.start()
+                _scheduled = len(_pairs_snapshot)
                 if _scheduled:
                     logger.info(
                         f"🧬 Scheduled background bulk-backfill for "

@@ -29,7 +29,7 @@ class RateLimiter:
 
     # Default rate limits per service
     DEFAULT_LIMITS = {
-        "coinbase_rest": {"calls": 5, "period": 1.0},        # 5/s (safe buffer from 10)
+        "coinbase_rest": {"calls": 8, "period": 1.0},        # 8/s (buffer from 10)
         "coinbase_ws": {"calls": 500, "period": 1.0},        # 500/s (buffer from 750)
         "yahoo_finance": {"calls": 2, "period": 1.0},        # ~2/s conservative (unofficial API)
         "telegram": {"calls": 25, "period": 1.0},            # 25/s (buffer from 30)
