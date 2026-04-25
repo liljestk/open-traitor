@@ -39,6 +39,10 @@ class ExecutorAgent(BaseAgent):
         self._telegram = telegram  # H1/H2: for orphaned order alerts
         self.training_collector = None  # set by orchestrator if enabled
         self.stats_db = None  # set by orchestrator for trade persistence
+        # LLMAdvisor (optional) — used to write a postmortem on losing
+        # closes. Orchestrator wires this after constructing the advisor.
+        self.advisor = None
+        # Runtime profile/exchange used for reasoning persistence.
         exec_cfg = config.get("execution", {})
         self.use_limit_orders = exec_cfg.get("use_limit_orders", True)
         self.limit_price_offset_pct = exec_cfg.get("limit_price_offset_pct", 0.001)
@@ -842,6 +846,56 @@ class ExecutorAgent(BaseAgent):
                     self.logger.debug(f"quant substrate record failed: {_e}")
 
             self._record_training_outcome(trade, close_price, reason)
+
+            # ── Losing-trade postmortem (LLMAdvisor) ───────────────────
+            # Fire a brief postmortem when a position is closed at a loss.
+            # Persisted via stats_db.save_reasoning(agent_name="postmortem")
+            # so it is queryable from the dashboard. Best-effort: never
+            # blocks the close path.
+            try:
+                if (
+                    self.advisor is not None
+                    and closed is not None
+                    and closed.pnl is not None
+                    and float(closed.pnl) < 0
+                ):
+                    event = {
+                        "pair": trade.pair,
+                        "action": getattr(trade.action, "value", str(trade.action)),
+                        "entry_price": float(trade.filled_price or trade.price or 0.0),
+                        "exit_price": float(close_price),
+                        "quantity": float(qty),
+                        "pnl": float(closed.pnl),
+                        "fees": float(fees),
+                        "reason": reason,
+                        "confidence": float(trade.confidence or 0.0),
+                        "strategy": (trade.reasoning or "").split(":")[0].strip().lower() or "unknown",
+                        "trade_id": trade.id,
+                    }
+                    pm = self.advisor.write_postmortem(event)
+                    if self.stats_db is not None:
+                        try:
+                            _exchange = self.config.get("trading", {}).get("exchange", "coinbase").lower()
+                            self.stats_db.save_reasoning(
+                                cycle_id=str(trade.id),
+                                pair=trade.pair,
+                                agent_name="postmortem",
+                                reasoning_json={
+                                    "title": pm.title,
+                                    "timeline": pm.timeline,
+                                    "root_cause": pm.root_cause,
+                                    "lessons": list(pm.lessons),
+                                    "recommendations": list(pm.recommendations),
+                                    "event": event,
+                                },
+                                signal_type="postmortem",
+                                confidence=0.0,
+                                exchange=_exchange,
+                            )
+                        except Exception as _pe:
+                            self.logger.debug(f"postmortem persist failed: {_pe}")
+            except Exception as _pe:
+                self.logger.debug(f"postmortem generation failed: {_pe}")
 
             self.logger.info(
                 f"Position closed ({reason}): {trade.to_summary()}"

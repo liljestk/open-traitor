@@ -100,12 +100,99 @@ class EventManager:
                         logger.debug(
                             "📰 Breaking news detected via pub/sub — early pipeline queued"
                         )
+                        # ── LLMAdvisor classification (best-effort) ──
+                        # Pull the freshest headlines from Redis and ask
+                        # the advisor to classify them. Result is stored
+                        # under a profile-prefixed key so the pipeline
+                        # can read it without re-running the LLM.
+                        try:
+                            self._classify_latest_news()
+                        except Exception as _ce:
+                            logger.debug(f"news classification failed: {_ce}")
             except Exception as e:
                 logger.debug(f"News pub/sub subscriber error: {e}")
 
         t = threading.Thread(target=_listener, daemon=True, name="news-sub")
         t.start()
         logger.info("📰 News pub/sub subscriber started")
+
+    # ---------------------------------------------------------------------
+    # News classification helper
+    # ---------------------------------------------------------------------
+
+    # How many headlines to classify per pub/sub burst. Bounded to keep the
+    # latency budget tight and the LLM fee budget predictable.
+    _NEWS_CLASSIFY_BATCH: int = 5
+    _NEWS_CLASSIFY_TTL_S: int = 600  # 10 min — drops stale classifications
+
+    def _classify_latest_news(self) -> None:
+        """Pull freshest headlines from Redis, ask the advisor to classify
+        the top ``_NEWS_CLASSIFY_BATCH`` of them, and stash results back
+        under a profile-prefixed key for the pipeline to consume.
+
+        No-op when Redis or the advisor is unavailable.
+        """
+        import json as _json
+
+        orch = self.orchestrator
+        advisor = getattr(orch, "advisor", None)
+        if advisor is None or not orch.redis:
+            return
+        # Profile resolution mirrors pipeline_manager / telegram_manager.
+        profile = (
+            os.environ.get("AUTO_TRAITOR_PROFILE")
+            or orch.config.get("trading", {}).get("exchange", "coinbase")
+            or "default"
+        ).lower()
+        raw = (
+            orch.redis.get(f"news:{profile}:latest")
+            or orch.redis.get("news:latest")
+        )
+        if not raw:
+            return
+        try:
+            payload = _json.loads(raw)
+        except Exception:
+            return
+        articles = payload if isinstance(payload, list) else payload.get("articles", [])
+        if not articles:
+            return
+        results: list[dict] = []
+        for art in articles[: self._NEWS_CLASSIFY_BATCH]:
+            if not isinstance(art, dict):
+                continue
+            headline = str(art.get("title") or art.get("headline") or "").strip()
+            body = str(art.get("description") or art.get("body") or "")[:500]
+            if not headline:
+                continue
+            try:
+                cls = advisor.classify_news(headline, body)
+            except Exception as _e:
+                logger.debug(f"advisor.classify_news failed: {_e}")
+                continue
+            results.append({
+                "headline": headline,
+                "sentiment": cls.sentiment,
+                "severity": cls.severity,
+                "affected_assets": list(cls.affected_assets),
+                "confidence": cls.confidence,
+                "reasoning": cls.reasoning,
+                "ts": time.time(),
+            })
+        if not results:
+            return
+        try:
+            orch.redis.setex(
+                f"news:{profile}:classified",
+                self._NEWS_CLASSIFY_TTL_S,
+                _json.dumps(results),
+            )
+            logger.info(
+                f"🧠 News classification: {len(results)} headlines processed "
+                f"(profile={profile})"
+            )
+        except Exception as _e:
+            logger.debug(f"news:classified setex failed: {_e}")
 
     # =========================================================================
     # Emergency Re-Planning

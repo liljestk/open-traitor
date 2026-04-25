@@ -389,6 +389,9 @@ class Orchestrator:
         self.training_collector = TrainingDataCollector(config)
         self.executor.training_collector = self.training_collector
         self.executor.stats_db = self.stats_db
+        # LLMAdvisor → executor: enables losing-trade postmortems.
+        if getattr(self, "advisor", None) is not None:
+            self.executor.advisor = self.advisor
         # Phase 9: hand the substrate to the executor so trade outcomes
         # feed the live allocator / health controller.
         if self.quant is not None:

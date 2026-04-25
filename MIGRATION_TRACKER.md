@@ -31,8 +31,8 @@
 - [x] Instantiated in `Orchestrator.__init__` with per-profile state path
 - [x] Exposed as `orch.advisor`, `orch.shadow_tester`
 - [x] Parameter delta path: `settings_advisor` → `shadow_tester.propose()` → orchestrator promotion consumer
-- [ ] News classification path: `EventManager` calls `advisor.classify_news` *(future hook; advisor reachable but not auto-invoked)*
-- [ ] Postmortem path: losing trades trigger `advisor.write_postmortem` *(future hook)*
+- [x] News classification path: `EventManager._classify_latest_news` invoked on every `news:updates` pub/sub burst; results stored under `news:{profile}:classified`
+- [x] Postmortem path: `executor` fires `advisor.write_postmortem()` on every losing close and persists via `stats_db.save_reasoning(agent_name="postmortem")`
 
 ## 5. Allocator-driven sizing ([src/agents/risk_manager.py](src/agents/risk_manager.py))
 - [x] Step 4d: honour `proposal["allocator_budget_cap"]` written by `DecisionEngine`
