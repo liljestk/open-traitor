@@ -15,6 +15,7 @@ import { Sparkles, TrendingUp, TrendingDown, Minus, RefreshCw, ChevronRight, Ale
 import {
   fetchUpcomingPatterns,
   fetchEventMatches,
+  fetchPatternStatus,
   type UpcomingPatternRow,
   type PatternOutcomeSummary,
 } from '../api'
@@ -168,6 +169,12 @@ export default function PatternsPage() {
     queryFn: () => fetchUpcomingPatterns(horizonDays, 'ONE_DAY', 20, 50),
   })
 
+  const { data: status } = useQuery({
+    queryKey: ['patterns-status', profile],
+    queryFn: () => fetchPatternStatus(),
+    refetchInterval: 60_000,
+  })
+
   return (
     <PageTransition>
       <div className="px-4 py-4 space-y-4">
@@ -206,6 +213,21 @@ export default function PatternsPage() {
         {error && (
           <div className="text-sm text-rose-400 flex items-center gap-1">
             <AlertCircle size={14} /> Failed to load patterns
+          </div>
+        )}
+
+        {status && (
+          <div className="rounded-xl border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-300 flex flex-wrap items-center gap-x-6 gap-y-1">
+            <div className="flex items-center gap-1">
+              <span className={status.ready ? 'text-emerald-400' : 'text-amber-400'}>
+                ●
+              </span>
+              <span>{status.ready ? 'Engine ready' : 'Warming up'}</span>
+            </div>
+            <div>Catalysts: <span className="text-gray-100">{status.counts.catalyst_events}</span></div>
+            <div>Fingerprints: <span className="text-gray-100">{status.counts.pattern_fingerprints}</span></div>
+            <div>Symbols w/ history: <span className="text-gray-100">{status.counts.historical_candles_symbols}</span></div>
+            <div>Backfill rows: <span className="text-gray-100">{status.counts.backfill_progress_rows}</span></div>
           </div>
         )}
 

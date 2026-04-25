@@ -1044,6 +1044,35 @@ export const fetchEventMatches = (
     `/patterns/${encodeURIComponent(eventId)}/matches?granularity=${encodeURIComponent(granularity)}&k=${k}`,
   )
 
+export interface BackfillProgressRow {
+  exchange: string
+  symbol: string
+  granularity: string
+  earliest_ts?: string | null
+  latest_ts?: string | null
+  last_source?: string | null
+  last_run_at?: string | null
+  row_count?: number
+  status?: string
+  error_message?: string | null
+}
+
+export interface PatternStatusResponse {
+  profile: string
+  exchange: string
+  ready: boolean
+  counts: {
+    catalyst_events: number
+    pattern_fingerprints: number
+    historical_candles_symbols: number
+    backfill_progress_rows: number
+  }
+  recent_backfills: BackfillProgressRow[]
+}
+
+export const fetchPatternStatus = () =>
+  apiFetch<PatternStatusResponse>(`/patterns/status`)
+
 // ─── Watchlist ─────────────────────────────────────────────────────────────
 
 export interface ScanResult {

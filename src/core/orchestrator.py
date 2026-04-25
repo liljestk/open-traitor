@@ -727,6 +727,56 @@ class Orchestrator:
         self._watchdog_thread.start()
         logger.info(f"🐕 Cycle watchdog armed (timeout={timeout_s:.0f}s)")
 
+    def _start_pattern_indexer(self, profile: str) -> None:
+        """Background thread that periodically rebuilds the pattern
+        fingerprint store from any newly-arrived catalyst events / candles.
+
+        Runs once at startup (after a short delay so the first backfills
+        have a chance to land) and then every 24h. Each run only touches
+        events whose anchor is older than ``min_anchor_age_days`` so the
+        20-day forward-return label is observable.
+        """
+        if getattr(self, "_pattern_indexer_thread", None) is not None:
+            return
+
+        cfg = (self.config.get("pattern_engine") or {})
+        interval_s = int(cfg.get("indexer_interval_s", 86400))
+        warmup_delay_s = int(cfg.get("indexer_warmup_s", 300))
+        min_age_days = int(cfg.get("min_anchor_age_days", 30))
+
+        def _indexer_loop() -> None:
+            time.sleep(warmup_delay_s)
+            from src.analysis.pattern_engine import index_all_events
+            while self.state.is_running:
+                try:
+                    res = index_all_events(
+                        db=self.stats_db,
+                        exchange=profile,
+                        granularity="ONE_DAY",
+                        min_anchor_age_days=min_age_days,
+                    )
+                    logger.info(
+                        f"🧬 Pattern fingerprint indexer [{profile}]: "
+                        f"indexed={res.get('indexed', 0)} "
+                        f"skipped={res.get('skipped', 0)}"
+                    )
+                except Exception as e:
+                    logger.debug(f"Pattern indexer pass failed: {e}")
+                # Sleep in short slices so shutdown isn't blocked.
+                slept = 0
+                while slept < interval_s and self.state.is_running:
+                    time.sleep(min(30, interval_s - slept))
+                    slept += 30
+
+        self._pattern_indexer_thread = threading.Thread(
+            target=_indexer_loop, name="pattern-indexer", daemon=True,
+        )
+        self._pattern_indexer_thread.start()
+        logger.info(
+            f"🧬 Pattern indexer armed "
+            f"(warmup={warmup_delay_s}s, interval={interval_s}s)"
+        )
+
     def _write_regime_snapshot(self) -> None:
         """Phase 12: write a per-profile regime snapshot to
         ``data/<profile>/regime_snapshot.json`` for the cross-asset
@@ -805,6 +855,39 @@ class Orchestrator:
         # Start LLM provider recovery polling on the orchestrator's event loop
         recovery_interval = self.config.get("llm", {}).get("recovery_check_interval", 120)
         self.llm.start_recovery_polling(loop=self._loop, interval=recovery_interval)
+
+        # Catalyst Pattern Engine — opportunistic warm-up. For every
+        # configured trading pair without local history, schedule a
+        # background bulk-backfill (deduped). This runs in daemon threads
+        # so the main loop is never blocked.
+        try:
+            from src.analysis.history_bulk_backfill import schedule_symbol_backfill
+            _profile = (
+                os.environ.get("AUTO_TRAITOR_PROFILE")
+                or self.config.get("trading", {}).get("exchange", "")
+            ).lower()
+            if _profile and self.pairs:
+                _scheduled = 0
+                for _sym in self.pairs:
+                    try:
+                        if schedule_symbol_backfill(
+                            profile=_profile,
+                            symbol=_sym,
+                            granularities=("ONE_HOUR", "ONE_DAY"),
+                        ):
+                            _scheduled += 1
+                    except Exception:
+                        pass
+                if _scheduled:
+                    logger.info(
+                        f"🧬 Scheduled background bulk-backfill for "
+                        f"{_scheduled} configured pair(s) [{_profile}]"
+                    )
+
+                # Also schedule a daily fingerprint re-index task.
+                self._start_pattern_indexer(_profile)
+        except Exception as _e:
+            logger.debug(f"Pattern engine warm-up skipped: {_e}")
 
         # Cycle watchdog: defend against indefinitely-hung cycles.
         self._cycle_heartbeat = time.monotonic()

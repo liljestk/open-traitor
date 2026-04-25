@@ -152,7 +152,7 @@ class PatternsMixin:
     def _init_pattern_schema(self) -> None:
         """Create pattern-engine tables. Safe to call at every startup."""
         # Asserted invariant — keep DDL string in sync with PATTERN_VECTOR_DIM.
-        assert "vector(64)" in self._PATTERN_DDL_STATEMENTS[5], (
+        assert "vector(64)" in self._PATTERN_DDL_STATEMENTS[8], (
             "Pattern DDL vector dim must match PATTERN_VECTOR_DIM"
         )
         assert PATTERN_VECTOR_DIM == 64, "PATTERN_VECTOR_DIM hard-coded to 64"

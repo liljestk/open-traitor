@@ -267,6 +267,57 @@ def main():
                 except Exception as e:
                     logger.debug(f"NewsReflex import failed: {e}")
 
+            # Catalyst Pattern Engine: harvest events into catalyst_events.
+            # Equity profile pulls earnings/dividend/macro calendars (yfinance);
+            # crypto profile emits halvings + listings + regex-tagged regulatory
+            # items from the just-fetched articles. Cheap; runs every news cycle.
+            if profile_configs:
+                try:
+                    from src.news.catalyst_collector import collect_catalysts
+                    from src.utils.stats import StatsDB
+                    _db = StatsDB()
+                    for pname in profile_configs.keys():
+                        try:
+                            _pairs: list[str] = []
+                            _path = Path(config_dir) / f"{pname}.yaml"
+                            if _path.exists():
+                                with open(_path) as _f:
+                                    _pcfg = yaml.safe_load(_f) or {}
+                                _pairs = list(
+                                    _pcfg.get("trading", {}).get("pairs", []) or []
+                                )
+                            # Augment with anything the agents are tracking — this
+                            # keeps catalyst coverage in lock-step with the live
+                            # universe, including dynamically-discovered pairs.
+                            try:
+                                _exch = (
+                                    (_pcfg.get("trading", {}) or {}).get("exchange")
+                                    if _path.exists() else None
+                                ) or pname
+                                _followed = _db.get_followed_pairs_set(
+                                    exchange=_exch
+                                )
+                                _pairs = sorted(set(_pairs) | set(_followed))
+                            except Exception:
+                                pass
+                            _result = collect_catalysts(
+                                profile=pname,
+                                pairs=_pairs,
+                                stats_db=_db,
+                                news_articles=articles,
+                                days_ahead=2000,
+                            )
+                            _new = sum(_result.values())
+                            if _new > 0:
+                                logger.info(
+                                    f"  └─ catalysts[{pname}] +{_new} "
+                                    f"({_result})"
+                                )
+                        except Exception as e:
+                            logger.debug(f"catalyst collect[{pname}] failed: {e}")
+                except Exception as e:
+                    logger.debug(f"catalyst_collector import failed: {e}")
+
             stats = aggregator.get_stats()
             if redis_client:
                 redis_client.set("news:stats", json.dumps(stats, default=str), ex=600)

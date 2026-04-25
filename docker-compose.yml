@@ -272,11 +272,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      traitor-db:
+        condition: service_healthy
     env_file:
       - config/.env
     environment:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - OLLAMA_BASE_URL=http://ollama:11434
+      - DATABASE_URL=postgresql://traitor:${TRAITOR_DB_PASSWORD}@traitor-db:5432/autotraitor
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       # Allow IBKR news fetching from within Docker

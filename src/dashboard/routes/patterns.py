@@ -189,3 +189,80 @@ def get_event_matches(
             "matches": outcome.matches,
         },
     }
+
+
+@router.get(
+    "/api/patterns/status",
+    summary="Pattern engine readiness — table counts + recent backfill progress",
+)
+def get_pattern_engine_status(
+    profile: str = Query("", description="Exchange profile"),
+):
+    """Cheap snapshot used by the dashboard PatternsPage to communicate
+    whether the engine is warm (has data + fingerprints), still
+    backfilling, or completely empty."""
+    resolved = deps.resolve_profile(profile)
+    db = deps.require_db(resolved)
+    exchange = _profile_to_exchange(resolved)
+    if not exchange:
+        raise HTTPException(status_code=400, detail="profile has no exchange mapping")
+
+    # Counts (per-exchange).
+    counts: dict[str, int] = {
+        "catalyst_events": 0,
+        "pattern_fingerprints": 0,
+        "historical_candles_symbols": 0,
+        "backfill_progress_rows": 0,
+    }
+    try:
+        with db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM catalyst_events WHERE exchange = %s",
+                (exchange,),
+            ).fetchone()
+            counts["catalyst_events"] = int(row["n"] or 0) if row else 0
+    except Exception as e:
+        logger.debug(f"catalyst_events count failed: {e}")
+    try:
+        counts["pattern_fingerprints"] = db.count_fingerprints(exchange=exchange)
+    except Exception as e:
+        logger.debug(f"count_fingerprints failed: {e}")
+    try:
+        with db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT symbol) AS n FROM historical_candles WHERE exchange = %s",
+                (exchange,),
+            ).fetchone()
+            counts["historical_candles_symbols"] = int(row["n"] or 0) if row else 0
+    except Exception as e:
+        logger.debug(f"historical_candles count failed: {e}")
+
+    # Recent backfill progress rows (latest 25 by run time).
+    progress: list[dict] = []
+    try:
+        rows = db.get_backfill_progress(exchange=exchange) or []
+        # Sort newest-run-first for the dashboard view.
+        rows.sort(
+            key=lambda r: (r.get("last_run_at") or datetime.min).isoformat()
+            if isinstance(r.get("last_run_at"), datetime)
+            else "",
+            reverse=True,
+        )
+        for r in rows[:25]:
+            progress.append({k: _iso(v) for k, v in r.items()})
+        counts["backfill_progress_rows"] = len(rows)
+    except Exception as e:
+        logger.debug(f"get_backfill_progress failed: {e}")
+
+    ready = (
+        counts["pattern_fingerprints"] > 0
+        and counts["catalyst_events"] > 0
+        and counts["historical_candles_symbols"] > 0
+    )
+    return {
+        "profile": resolved,
+        "exchange": exchange,
+        "ready": ready,
+        "counts": counts,
+        "recent_backfills": progress,
+    }
