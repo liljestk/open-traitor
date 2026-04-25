@@ -1,0 +1,10 @@
+# Xcode / generated
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+.build/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+Pods/
