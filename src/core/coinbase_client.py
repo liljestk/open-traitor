@@ -121,9 +121,14 @@ class CoinbaseClient(
         else:
             self._try_init_client(api_key, api_secret, key_file)
 
-        logger.info(
-            f"CoinbaseClient initialized in {'📝 PAPER' if paper_mode else '💰 LIVE'} mode"
-        )
+        # Demote routine paper-mode init to DEBUG so read-only helpers
+        # (backfill, universe scan, dashboard probes) don't spam the
+        # operational logs with misleading "PAPER mode" notices while
+        # the real trading agent is running LIVE.
+        if paper_mode:
+            logger.debug("CoinbaseClient initialized in 📝 PAPER mode")
+        else:
+            logger.info("CoinbaseClient initialized in 💰 LIVE mode")
 
     def _init_real_client(
         self,

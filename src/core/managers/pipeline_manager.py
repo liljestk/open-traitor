@@ -908,6 +908,12 @@ class PipelineManager:
                 })
                 if trader_result and not trader_result.get("error"):
                     strategy_result = trader_result
+                    logger.info(
+                        f"🧠 TraderAgent decision for {pair}: "
+                        f"{trader_result.get('action', '?').upper()} "
+                        f"(verdict approved="
+                        f"{trader_result.get('decision_engine_verdict', {}).get('approved')})"
+                    )
             except Exception as _trader_e:
                 logger.warning(
                     f"TraderAgent failed for {pair}: {_trader_e} — falling back to strategist"

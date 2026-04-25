@@ -1033,7 +1033,9 @@ async def fetch_pair_universe(profile: str = "") -> dict:
     # crypto / Coinbase path
     try:
         from src.core.coinbase_client import CoinbaseClient
-        coinbase = CoinbaseClient()
+        # Read-only universe scan; paper_mode flag is irrelevant for
+        # the public product-listing endpoints used here.
+        coinbase = CoinbaseClient(paper_mode=True)
         products = coinbase.discover_all_pairs_detailed(include_crypto_quotes=True)
         by_quote = {}
         for p in products:

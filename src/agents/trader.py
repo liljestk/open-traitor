@@ -127,6 +127,10 @@ class TraderAgent(BaseAgent):
             and confidence < self.min_confidence
             and not _ensemble_actionable(ctx.strategy_signals.get("_ensemble"))
         ):
+            self.logger.info(
+                f"📋 Trader: HOLD {ctx.pair} (pre-screen: "
+                f"signal={signal_type}/{confidence:.2f}, ensemble inactive)"
+            )
             return self._hold_result(
                 ctx.pair,
                 f"signal {signal_type}/{confidence:.2f} below threshold and ensemble inactive",

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import threading
 from contextlib import contextmanager
 from typing import Any, Optional
 
@@ -87,13 +88,36 @@ class StatsDB(
 
     All domain-specific methods are inherited from mixin classes.
     This class owns schema initialisation and connection management.
+
+    Implemented as a per-DSN singleton so that helper modules
+    (planning activities, news worker, dashboard handlers, etc.)
+    that call ``StatsDB()`` repeatedly do not each open their own
+    connection pool and exhaust Postgres ``max_connections``.
     """
 
+    _instances: dict = {}
+    _lock = threading.Lock()
+
+    def __new__(cls, dsn: str = None):
+        key = dsn or get_dsn()
+        with cls._lock:
+            inst = cls._instances.get(key)
+            if inst is None:
+                inst = super().__new__(cls)
+                cls._instances[key] = inst
+        return inst
+
     def __init__(self, dsn: str = None):
+        if getattr(self, "_initialized", False):
+            return
         self._dsn = dsn or get_dsn()
-        self._pool = psycopg2.pool.ThreadedConnectionPool(2, 10, self._dsn)
+        # Small pool: with 4+ services (coinbase, ibkr, dashboard,
+        # planning, news) sharing a single Postgres, keep per-process
+        # usage well under the default ``max_connections=100``.
+        self._pool = psycopg2.pool.ThreadedConnectionPool(1, 4, self._dsn)
         self._init_db()
         atexit.register(self.close)
+        self._initialized = True
         logger.info("📊 Stats DB initialized: PostgreSQL")
 
     @contextmanager

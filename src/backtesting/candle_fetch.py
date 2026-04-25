@@ -122,7 +122,12 @@ def _build_coinbase_client():
         if not api_key or not api_secret:
             return None
         from src.core.coinbase_client import CoinbaseClient
-        return CoinbaseClient(api_key=api_key, api_secret=api_secret)
+        # Read-only helper for candle backfill: paper_mode is irrelevant
+        # for public candle endpoints; pass it explicitly so the init
+        # log line doesn't confuse operators about the live agent's mode.
+        return CoinbaseClient(
+            api_key=api_key, api_secret=api_secret, paper_mode=True,
+        )
     except Exception:
         return None
 
