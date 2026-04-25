@@ -141,12 +141,17 @@ class StateManager:
         orch = self.orchestrator
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        removed = []
+        removed: list[str] = []
+        expired_summaries: list[str] = []
         with orch._pending_approvals_lock:
             for trade_id, approval in list(orch._pending_approvals.items()):
                 queued_at_str = approval.get("_queued_at")
                 if not queued_at_str:
                     removed.append(trade_id)
+                    expired_summaries.append(
+                        f"{approval.get('action', '?').upper()} "
+                        f"{approval.get('pair', '?')} (no timestamp)"
+                    )
                     continue
                 try:
                     queued_at = datetime.fromisoformat(queued_at_str)
@@ -154,11 +159,37 @@ class StateManager:
                     # 1 hour TTL for pending approvals
                     if age_seconds > 3600:
                         removed.append(trade_id)
+                        amt = approval.get("quote_amount") or approval.get("usd_amount") or 0
+                        expired_summaries.append(
+                            f"{approval.get('action', '?').upper()} "
+                            f"{approval.get('pair', '?')} "
+                            f"~${float(amt):.2f} (queued {age_seconds/60:.0f}m ago)"
+                        )
                 except Exception:
                     removed.append(trade_id)
+                    expired_summaries.append(
+                        f"{approval.get('action', '?').upper()} "
+                        f"{approval.get('pair', '?')} (bad timestamp)"
+                    )
 
             for trade_id in removed:
                 del orch._pending_approvals[trade_id]
 
         if removed:
-            logger.info(f"Pruned {len(removed)} stale pending approvals")
+            logger.warning(
+                f"⌛ Pruned {len(removed)} stale pending approval(s) — "
+                + "; ".join(expired_summaries)
+            )
+            # Notify the user via Telegram so they understand why an
+            # "agent said buy" never executed: the approval simply timed
+            # out. Best-effort — never fail the cycle on a Telegram error.
+            try:
+                tg = getattr(orch, "telegram", None)
+                if tg and hasattr(tg, "send_alert"):
+                    tg.send_alert(
+                        "⌛ *Pending approvals expired*\n\n"
+                        + "\n".join(f"• {s}" for s in expired_summaries)
+                        + "\n\n_TTL: 1 hour. The trades were not executed._"
+                    )
+            except Exception as e:
+                logger.debug(f"Telegram expiry notification failed (non-fatal): {e}")

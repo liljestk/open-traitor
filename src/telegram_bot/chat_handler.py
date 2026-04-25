@@ -32,7 +32,7 @@ from typing import Any, Callable, Optional
 
 from src.utils.logger import get_logger
 from src.utils.security import sanitize_input
-from src.telegram_bot.tools import ToolDef, BUILTIN_TOOL_REGISTRY
+from src.telegram_bot.tools import ToolDef, BUILTIN_TOOL_REGISTRY, get_tool_registry
 
 # Extracted modules
 from src.telegram_bot.persona import (
@@ -66,8 +66,11 @@ class TelegramChatHandler:
     def __init__(self, llm_client, rate_limiter=None, exchange_type: str = "coinbase"):
         self.llm = llm_client
         self.rate_limiter = rate_limiter
-        self.exchange_type = exchange_type
-        self._persona = build_persona(exchange_type)
+        self.exchange_type = (exchange_type or "coinbase").lower()
+        self._persona = build_persona(self.exchange_type)
+        # Tool catalogue adapted for this exchange (IBKR drops crypto-only
+        # tools and rewrites Coinbase / crypto wording in descriptions).
+        self._exchange_tool_registry = get_tool_registry(self.exchange_type)
         self.personality = PersonalityConfig()
         self.memory = ConversationMemory(max_messages=30)
 
@@ -91,7 +94,11 @@ class TelegramChatHandler:
         self._function_handlers[name] = handler
         if tool_def is not None:
             self._tool_defs[name] = tool_def
-        elif name in BUILTIN_TOOL_REGISTRY:
+        elif name in self._exchange_tool_registry:
+            self._tool_defs[name] = self._exchange_tool_registry[name]
+        elif name in BUILTIN_TOOL_REGISTRY and self.exchange_type != "ibkr":
+            # Crypto-only tools (e.g. fear & greed) are intentionally absent
+            # from the IBKR registry and must not be exposed there.
             self._tool_defs[name] = BUILTIN_TOOL_REGISTRY[name]
 
     def set_send_callback(self, callback: Callable) -> None:
@@ -419,11 +426,17 @@ class TelegramChatHandler:
 
         # Model responded with no tool calls — just return the text.
         if not tool_calls:
-            _PRICE_KEYWORDS = (
-                "price", "worth", "cost", "value", "market", "trading at",
-                "how much", "bitcoin", "btc", "eth", "ethereum", "atom",
-                "sol", "ada", "bnb", "xrp", "coin", "crypto",
-            )
+            if self.exchange_type == "ibkr":
+                _PRICE_KEYWORDS = (
+                    "price", "worth", "cost", "value", "market", "trading at",
+                    "how much", "share", "shares", "stock", "ticker", "equity",
+                )
+            else:
+                _PRICE_KEYWORDS = (
+                    "price", "worth", "cost", "value", "market", "trading at",
+                    "how much", "bitcoin", "btc", "eth", "ethereum", "atom",
+                    "sol", "ada", "bnb", "xrp", "coin", "crypto",
+                )
             if any(kw in text.lower() for kw in _PRICE_KEYWORDS):
                 price_handler = self._function_handlers.get("get_current_prices")
                 if price_handler:
@@ -630,10 +643,12 @@ class TelegramChatHandler:
         priority_tools = [
             "get_status",
             "get_current_prices",
-            "get_fear_greed",
             "get_highstakes_status",
             "get_positions",
         ]
+        # Crypto-only context: only include sentiment for crypto bots.
+        if self.exchange_type != "ibkr":
+            priority_tools.insert(2, "get_fear_greed")
         for func_name in priority_tools:
             handler = self._function_handlers.get(func_name)
             if handler:

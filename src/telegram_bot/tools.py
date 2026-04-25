@@ -634,3 +634,103 @@ _BUILTIN_TOOLS: list[ToolDef] = [
 ]
 
 BUILTIN_TOOL_REGISTRY: dict[str, ToolDef] = {t.name: t for t in _BUILTIN_TOOLS}
+
+
+# ============================================================================
+# Per-exchange description adaptation
+#
+# The static descriptions above are crypto/Coinbase-flavoured for backwards
+# compatibility. When the bot runs against IBKR (equities) we rewrite the
+# descriptions so the LLM never sees Coinbase / crypto wording — preventing
+# the model from talking about coins, BTC, fear & greed, etc. on an equity
+# account.
+# ============================================================================
+
+# Tools that are crypto-specific and have no equity equivalent. They are
+# omitted from the IBKR tool catalogue entirely so the LLM cannot suggest them.
+_CRYPTO_ONLY_TOOLS: frozenset[str] = frozenset({
+    "get_fear_greed",
+})
+
+_IBKR_DESCRIPTION_OVERRIDES: dict[str, str] = {
+    "get_news_summary": (
+        "Get a summary of the latest aggregated equity / market news articles."
+    ),
+    "get_account_holdings": (
+        "Fetch the LIVE account holdings directly from the Interactive Brokers "
+        "API: all positions held, share quantities, current prices, and "
+        "EUR-equivalent values. Use this whenever the user asks about their "
+        "portfolio, holdings, what they own, their balance, or any stock they hold."
+    ),
+    "simulate_trade": (
+        "Open a simulated (paper) trade to see how it would perform without real "
+        "money. Supports EUR→Stock (e.g. spend 1000 EUR to buy ASML). The entry "
+        "price is fetched live from IBKR."
+    ),
+}
+
+# Generic word-level rewrites applied to any IBKR tool description that does
+# not have an explicit override above. Order matters — longer / more specific
+# phrases first so they aren't shadowed by single-word substitutions.
+_IBKR_WORD_REWRITES: tuple[tuple[str, str], ...] = (
+    ("Crypto Fear & Greed Index", "market sentiment indicator"),
+    ("crypto news", "equity / market news"),
+    ("Coinbase API", "Interactive Brokers (IBKR) API"),
+    ("Coinbase", "IBKR"),
+    ("crypto", "equity"),
+    ("Crypto", "Equity"),
+    ("BTC-USD", "ASML"),
+    ("BTC-EUR", "ASML"),
+    ("ETH-BTC", "AAPL"),
+)
+
+
+def _apply_ibkr_rewrites(text: str) -> str:
+    out = text
+    for old, new in _IBKR_WORD_REWRITES:
+        out = out.replace(old, new)
+    return out
+
+
+def adapt_tool_for_exchange(tool: ToolDef, exchange_type: str) -> Optional[ToolDef]:
+    """Return a copy of ``tool`` with description / params adapted for the
+    given exchange type, or ``None`` if the tool should be hidden entirely.
+
+    Coinbase / default: returns the tool unchanged.
+    IBKR: rewrites crypto / Coinbase wording in the description so the LLM
+    never references digital assets on the equity bot.
+    """
+    et = (exchange_type or "coinbase").lower()
+    if et != "ibkr":
+        return tool
+    if tool.name in _CRYPTO_ONLY_TOOLS:
+        return None
+
+    new_desc = _IBKR_DESCRIPTION_OVERRIDES.get(tool.name) or _apply_ibkr_rewrites(tool.description)
+    new_params = [
+        ParamDef(
+            name=p.name,
+            type=p.type,
+            description=_apply_ibkr_rewrites(p.description),
+            required=p.required,
+            default=p.default,
+            enum=p.enum,
+        )
+        for p in tool.params
+    ]
+    return ToolDef(
+        name=tool.name,
+        description=new_desc,
+        category=tool.category,
+        params=new_params,
+    )
+
+
+def get_tool_registry(exchange_type: str = "coinbase") -> dict[str, ToolDef]:
+    """Return the tool catalogue adapted for the given exchange type."""
+    out: dict[str, ToolDef] = {}
+    for name, td in BUILTIN_TOOL_REGISTRY.items():
+        adapted = adapt_tool_for_exchange(td, exchange_type)
+        if adapted is not None:
+            out[name] = adapted
+    return out

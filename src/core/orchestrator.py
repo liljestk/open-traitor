@@ -276,6 +276,13 @@ class Orchestrator:
         self._pending_approvals_lock = threading.Lock()
         self.state_manager.load_pending_approvals()
 
+        # Per-cycle diagnostics: track BUY proposals that the strategist
+        # produced but that never reached the exchange. Reset at the start
+        # of each cycle by `run()`; consumed at end-of-cycle for a summary
+        # line so the user can immediately see *why* a buy was skipped.
+        self._buy_drops_this_cycle: list[dict] = []
+        self._buy_drops_lock = threading.Lock()
+
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
 
@@ -644,6 +651,44 @@ class Orchestrator:
         self.chat_handler.queue_event(f"CRITICAL: {msg}", severity="critical")
         self.event_manager.trigger_emergency_replan(f"Circuit breaker: {reason} {value}")
 
+    def record_buy_drop(
+        self,
+        pair: str,
+        stage: str,
+        reason: str,
+        *,
+        amount: float | None = None,
+        confidence: float | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """Record a BUY proposal that the strategist generated but that
+        never resulted in an exchange order.
+
+        Used purely for diagnostics: surfaces the *why* in the per-cycle
+        summary so users can immediately tell whether a buy was killed by
+        the risk manager, the fee gate, smart-execution, an exchange
+        error, or a pending Telegram approval.
+
+        ``stage`` is a short tag such as ``risk``, ``fee_gate``,
+        ``smart_execution``, ``exec_failed`` or ``pending_approval``.
+        """
+        entry = {
+            "pair": pair,
+            "stage": stage,
+            "reason": reason,
+            "amount": float(amount) if amount is not None else None,
+            "confidence": float(confidence) if confidence is not None else None,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        if details:
+            # Keep the snapshot small — only string/number fields.
+            entry["details"] = {
+                k: v for k, v in details.items()
+                if isinstance(v, (str, int, float, bool))
+            }
+        with self._buy_drops_lock:
+            self._buy_drops_this_cycle.append(entry)
+
     def _try_circuit_breaker_recovery(self) -> None:
         """Auto-recover from circuit breaker if conditions have improved.
 
@@ -947,6 +992,10 @@ class Orchestrator:
             cycle_count += 1
             logger.info(f"━━━ Cycle #{cycle_count} ━━━━━━━━━━━━━━━━━━━━━━━━")
             _cycle_t0 = time.monotonic()
+
+            # Reset per-cycle BUY-drop diagnostics.
+            with self._buy_drops_lock:
+                self._buy_drops_this_cycle = []
 
             try:
                 # ─── LLM provider recovery check ─────────────────────
@@ -1493,6 +1542,36 @@ class Orchestrator:
                     cycle_duration_s=round(_cycle_duration_s, 2),
                 )
                 logger.info(f"⏱️ Cycle #{cycle_count} completed in {_cycle_duration_s:.1f}s")
+
+                # ─── BUY-drop diagnostic summary ──────────────────────
+                # Surface every BUY proposal that the strategist generated
+                # but that did not reach the exchange this cycle. Helps
+                # users immediately understand *why* an "agent said buy"
+                # never resulted in an order.
+                with self._buy_drops_lock:
+                    drops = list(self._buy_drops_this_cycle)
+                if drops:
+                    by_stage: dict[str, list[dict]] = {}
+                    for d in drops:
+                        by_stage.setdefault(d.get("stage", "unknown"), []).append(d)
+                    summary_parts = [f"{stage}={len(items)}" for stage, items in by_stage.items()]
+                    logger.warning(
+                        f"🚫 BUY_DROPPED summary cycle #{cycle_count}: "
+                        f"{len(drops)} proposal(s) — " + ", ".join(summary_parts)
+                    )
+                    for d in drops:
+                        amt = d.get("amount")
+                        conf = d.get("confidence")
+                        extras = []
+                        if amt is not None:
+                            extras.append(f"amount={amt:.2f}")
+                        if conf is not None:
+                            extras.append(f"confidence={conf:.2f}")
+                        extra_str = (" | " + " ".join(extras)) if extras else ""
+                        logger.warning(
+                            f"🚫 BUY_DROPPED [{d.get('stage')}] {d.get('pair')}: "
+                            f"{d.get('reason')}{extra_str}"
+                        )
 
                 # Phase 12: write per-profile regime snapshot for the
                 # cross-asset macro view. Best-effort, never blocks the cycle.

@@ -933,15 +933,34 @@ class PipelineManager:
 
             _total = time.monotonic() - _t0
             _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
+            _proposed_action = strategy_result.get("action", "unknown")
+            _reject_reason = risk_result.get("reason", "Unknown")
             logger.info(f"⏱️ Pipeline {pair}: {_parts} total={_total:.1f}s [rejected]")
-            logger.info(f"🚫 {pair}: Trade rejected — {risk_result.get('reason', 'Unknown')}")
-            orch.journal.log_decision("trade_rejected", pair, strategy_result.get("action", "unknown"), {
-                "reason": risk_result.get("reason", "Unknown"),
+            if _proposed_action == "buy":
+                # Promote BUY rejections to a structured WARN so they're easy
+                # to grep and feed the per-cycle BUY_DROPPED summary.
+                logger.warning(
+                    f"🚫 BUY_DROPPED [risk] {pair}: {_reject_reason} | "
+                    f"confidence={strategy_result.get('confidence', 0):.2f}"
+                )
+                try:
+                    orch.record_buy_drop(
+                        pair, "risk", _reject_reason,
+                        amount=strategy_result.get("quote_amount") or strategy_result.get("usd_amount"),
+                        confidence=strategy_result.get("confidence"),
+                        details={"violations": ",".join(risk_result.get("violations", []) or [])},
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.info(f"🚫 {pair}: Trade rejected — {_reject_reason}")
+            orch.journal.log_decision("trade_rejected", pair, _proposed_action, {
+                "reason": _reject_reason,
                 "proposal": strategy_result,
             })
-            orch.audit.log_rule_check("risk_validation", passed=False, details=risk_result.get('reason', 'Unknown'))
+            orch.audit.log_rule_check("risk_validation", passed=False, details=_reject_reason)
             if trace_ctx is not None:
-                trace_ctx.finish(metadata={"action": "rejected", "reason": risk_result.get("reason", "")})
+                trace_ctx.finish(metadata={"action": "rejected", "reason": _reject_reason})
             return
 
         # Step 5: Handle approval or execute
@@ -1049,11 +1068,33 @@ class PipelineManager:
                                 bumped = True
 
                     if not bumped and not worthwhile:
-                        logger.info(
-                            f"💸 {pair}: {_trade_action.upper()} NOT worthwhile after fees "
-                            f"(amount={trade_amount:.2f}, expected={expected_gain_pct*100:.1f}%, "
-                            f"breakeven={fee_est.breakeven_move_pct*100:.1f}%)"
+                        _fg_reason = (
+                            f"Fees > expected gain (expected={expected_gain_pct*100:.2f}%, "
+                            f"breakeven={fee_est.breakeven_move_pct*100:.2f}%)"
                         )
+                        if _trade_action == "buy":
+                            logger.warning(
+                                f"🚫 BUY_DROPPED [fee_gate] {pair}: {_fg_reason} | "
+                                f"amount={trade_amount:.2f}"
+                            )
+                            try:
+                                orch.record_buy_drop(
+                                    pair, "fee_gate", _fg_reason,
+                                    amount=trade_amount,
+                                    confidence=risk_result.get("confidence"),
+                                    details={
+                                        "expected_gain_pct": expected_gain_pct,
+                                        "breakeven_pct": fee_est.breakeven_move_pct,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.info(
+                                f"💸 {pair}: {_trade_action.upper()} NOT worthwhile after fees "
+                                f"(amount={trade_amount:.2f}, expected={expected_gain_pct*100:.1f}%, "
+                                f"breakeven={fee_est.breakeven_move_pct*100:.1f}%)"
+                            )
                         orch.journal.log_decision(
                             "fee_gate_reject", pair, _trade_action,
                             {"reason": "Fees would eat expected gains",
@@ -1081,6 +1122,20 @@ class PipelineManager:
 
             if orch.telegram:
                 orch.telegram.request_approval(trade_desc, trade_id)
+            if risk_result.get("action") == "buy":
+                logger.warning(
+                    f"🚫 BUY_DROPPED [pending_approval] {pair}: "
+                    f"Awaiting Telegram approval (trade_id={trade_id})"
+                )
+                try:
+                    orch.record_buy_drop(
+                        pair, "pending_approval",
+                        f"Awaiting Telegram approval (trade_id={trade_id})",
+                        amount=risk_result.get("quote_amount"),
+                        confidence=risk_result.get("confidence"),
+                    )
+                except Exception:
+                    pass
             if trace_ctx is not None:
                 trace_ctx.finish(metadata={"action": "pending_approval", "trade_id": trade_id})
             return
@@ -1274,6 +1329,18 @@ class PipelineManager:
                 f"⚠️ Trade execution FAILED for {pair}: {exec_error} | "
                 f"action={risk_result.get('action')} amount={risk_result.get('quote_amount')}"
             )
+            if risk_result.get("action") == "buy":
+                logger.warning(
+                    f"🚫 BUY_DROPPED [exec_failed] {pair}: {exec_error}"
+                )
+                try:
+                    orch.record_buy_drop(
+                        pair, "exec_failed", str(exec_error),
+                        amount=risk_result.get("quote_amount"),
+                        confidence=risk_result.get("confidence"),
+                    )
+                except Exception:
+                    pass
             _timings["exec"] = time.monotonic() - _step_t
             _total = time.monotonic() - _t0
             _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
