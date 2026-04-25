@@ -69,7 +69,11 @@ services:
   # Trading Stats DB — PostgreSQL backend for all trading data
   # =========================================================================
   traitor-db:
-    image: postgres:16-alpine
+    # pgvector-enabled Postgres 16 — required by the Catalyst Pattern
+    # Engine (vector(64) columns + ivfflat ANN index). Drop-in replacement
+    # for postgres:16-alpine; data dir on the existing volume is
+    # forward-compatible.
+    image: docker.io/pgvector/pgvector:pg16
     container_name: opentraitor-traitor-db
     restart: unless-stopped
     env_file:
