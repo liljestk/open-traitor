@@ -1441,6 +1441,156 @@ async def run_event_regressions(profile: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Nightly historical-OHLCV backfill activity
+# ---------------------------------------------------------------------------
+
+# Lookback window for the FIRST run of a symbol (no prior coverage).
+# Trusted public sources support multi-decade daily candles, but pulling
+# 10 years for a hundred symbols on every cron tick is wasteful — once the
+# initial fill lands, ``bulk_backfill_symbol`` only walks the missing tail
+# (the delta), so the second night's run is cheap regardless of this knob.
+_PRICE_BACKFILL_DEFAULT_YEARS = 5
+_PRICE_BACKFILL_MAX_YEARS = 10
+
+
+def _price_backfill_years() -> int:
+    """Initial-fill lookback in years. Env-overridable, hard-clipped to 10."""
+    raw = os.environ.get("PRICE_BACKFILL_LOOKBACK_YEARS", "")
+    try:
+        v = int(raw) if raw else _PRICE_BACKFILL_DEFAULT_YEARS
+    except ValueError:
+        v = _PRICE_BACKFILL_DEFAULT_YEARS
+    return max(1, min(v, _PRICE_BACKFILL_MAX_YEARS))
+
+
+def _price_backfill_universe(profile: str, exchange: str) -> list[str]:
+    """Return the union of yaml-configured pairs and currently-followed pairs.
+
+    Mirrors the universe we already use for catalyst collection so the price
+    history stays in lock-step with the symbols the agents actually see.
+    """
+    pairs: set[str] = set()
+    # 1) yaml-configured pairs
+    try:
+        safe_profile = "".join(c for c in (profile or "") if c.isalnum() or c in "-_")
+        if safe_profile:
+            cfg_path = os.path.join("config", f"{safe_profile}.yaml")
+            if os.path.isfile(cfg_path):
+                with open(cfg_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                for p in (cfg.get("trading", {}) or {}).get("pairs", []) or []:
+                    if isinstance(p, str) and p.strip():
+                        pairs.add(p.strip())
+    except Exception as e:
+        logger.debug(f"price_backfill: yaml pair load failed for {profile}: {e}")
+    # 2) followed pairs (orchestrator/agents have these in pair_follows)
+    try:
+        from src.utils.stats import StatsDB
+        followed = StatsDB().get_followed_pairs_set(exchange=exchange) or set()
+        pairs.update(followed)
+    except Exception as e:
+        logger.debug(f"price_backfill: followed-pair load failed for {exchange}: {e}")
+    return sorted(pairs)
+
+
+@activity.defn
+async def run_price_backfill(profile: str = "") -> dict:
+    """Nightly OHLCV history backfill for every symbol in the active profile.
+
+    Strategy:
+      * On a symbol's first run (no prior rows in ``historical_candles``)
+        walk back ``PRICE_BACKFILL_LOOKBACK_YEARS`` (default 5y, capped 10y)
+        on ONE_DAY granularity to seed the regression / pattern engines.
+      * On subsequent runs ``bulk_backfill_symbol`` consults
+        ``backfill_progress`` / ``get_candles_coverage`` and only fetches
+        the missing tail (delta), so the activity is cheap after seeding.
+      * Granularities: ``ONE_DAY`` (event-regression input) plus
+        ``ONE_HOUR`` (analysis.technical) — same pair the bulk CLI uses.
+      * Sources are profile-scoped via ``select_sources(profile)`` —
+        equity profiles hit Yahoo Finance + Stooq; crypto profiles hit
+        Coinbase + CryptoCompare + Binance.
+
+    Domain isolation: all writes carry ``exchange`` explicitly so coinbase
+    rows can never bleed into ibkr or vice versa.
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.history_bulk_backfill import bulk_backfill_symbol
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    universe = _price_backfill_universe(profile, exchange)
+    if not universe:
+        logger.info(
+            f"price_backfill: no symbols to backfill for {exchange} "
+            f"(profile={profile!r})"
+        )
+        return {
+            "profile": profile,
+            "exchange": exchange,
+            "symbols": 0,
+            "rows_written": 0,
+            "skipped": True,
+        }
+
+    granularities = ("ONE_DAY", "ONE_HOUR")
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(days=365 * _price_backfill_years())
+
+    db = StatsDB()
+    total_rows = 0
+    per_symbol: dict[str, int] = {}
+    errors: list[str] = []
+
+    logger.info(
+        f"price_backfill: {exchange} starting — symbols={len(universe)} "
+        f"granularities={list(granularities)} since={since.date().isoformat()}"
+    )
+
+    for sym in universe:
+        try:
+            # Heartbeat so Temporal knows long-running fills are alive.
+            try:
+                activity.heartbeat({"symbol": sym, "rows_so_far": total_rows})
+            except Exception:
+                # heartbeat is best-effort — never fail the activity over it
+                pass
+            written = bulk_backfill_symbol(
+                profile=resolved,
+                symbol=sym,
+                granularities=granularities,
+                since=since,
+                until=until,
+                stats_db=db,
+            )
+            n = sum(int(v or 0) for v in (written or {}).values())
+            per_symbol[sym] = n
+            total_rows += n
+        except Exception as e:
+            err = f"{sym}: {e}"
+            errors.append(err)
+            logger.warning(f"price_backfill: {err}")
+
+    logger.info(
+        f"price_backfill: {exchange} complete — "
+        f"symbols={len(per_symbol)} rows_written={total_rows} errors={len(errors)}"
+    )
+
+    return {
+        "profile": profile,
+        "exchange": exchange,
+        "symbols": len(per_symbol),
+        "rows_written": total_rows,
+        "lookback_years": _price_backfill_years(),
+        "granularities": list(granularities),
+        "errors": errors[:10],  # cap returned payload
+    }
+
+
+# ---------------------------------------------------------------------------
 # Fine-tuning export activity
 # ---------------------------------------------------------------------------
 

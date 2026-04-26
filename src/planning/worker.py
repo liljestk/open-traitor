@@ -48,6 +48,7 @@ from src.planning.activities import (
     fetch_universe_scan_summary,
     run_nightly_backtests,
     run_event_regressions,
+    run_price_backfill,
     run_finetune_export,
 )
 from src.planning.workflows import (
@@ -56,6 +57,7 @@ from src.planning.workflows import (
     MonthlyReviewWorkflow,
     NightlyBacktestWorkflow,
     EventRegressionWorkflow,
+    NightlyPriceBackfillWorkflow,
     FinetuneExportWorkflow,
 )
 from src.planning.wfo_workflow import (
@@ -142,6 +144,14 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "desc": "Weekly walk-forward optimisation (Monday 03:00 UTC)",
         },
         {
+            "workflow": NightlyPriceBackfillWorkflow,
+            "id": "nightly-price-backfill",
+            # 01:00 UTC — must finish before EventRegressionWorkflow at 02:30
+            # so the regression sees fresh candles.
+            "cron": "0 1 * * *",
+            "desc": "Nightly OHLCV history backfill (01:00 UTC)",
+        },
+        {
             "workflow": EventRegressionWorkflow,
             "id": "event-regression",
             "cron": "30 2 * * *",
@@ -190,7 +200,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, FinetuneExportWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, NightlyPriceBackfillWorkflow, FinetuneExportWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -206,6 +216,7 @@ async def main() -> None:
             run_nightly_backtests,
             run_wfo_for_strategies,
             run_event_regressions,
+            run_price_backfill,
             run_finetune_export,
         ],
     ) as worker:

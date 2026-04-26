@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_equity_events,
         run_nightly_backtests,
         run_event_regressions,
+        run_price_backfill,
         run_finetune_export,
     )
 
@@ -384,6 +385,40 @@ class EventRegressionWorkflow:
         workflow.logger.info(
             f"EventRegressionWorkflow: complete — fitted={result.get('fitted')} "
             f"ok={result.get('ok')}"
+        )
+        return result
+
+
+@workflow.defn
+class NightlyPriceBackfillWorkflow:
+    """Nightly OHLCV backfill that keeps ``historical_candles`` fresh.
+
+    Runs at 01:00 UTC — strictly *before* the 02:30 UTC event-regression
+    refit so the regression always sees up-to-date prices. First run for
+    a symbol seeds up to ``PRICE_BACKFILL_LOOKBACK_YEARS`` (default 5y,
+    cap 10y) of daily candles from trusted public sources; subsequent
+    runs only walk the missing tail via ``backfill_progress`` resume.
+    """
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(
+            f"NightlyPriceBackfillWorkflow: starting (profile={profile!r})"
+        )
+        # Generous timeout: first run for a hundred symbols at 5y daily
+        # candles can take a while; the activity heartbeats per symbol so
+        # Temporal won't kill it as long as it's making progress.
+        result = await workflow.execute_activity(
+            run_price_backfill,
+            args=[profile],
+            start_to_close_timeout=timedelta(hours=4),
+            heartbeat_timeout=timedelta(minutes=10),
+            retry_policy=_RETRY,
+        )
+        workflow.logger.info(
+            f"NightlyPriceBackfillWorkflow: complete \u2014 "
+            f"symbols={result.get('symbols')} "
+            f"rows_written={result.get('rows_written')}"
         )
         return result
 
