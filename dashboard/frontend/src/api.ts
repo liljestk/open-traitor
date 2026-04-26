@@ -1605,3 +1605,157 @@ export const fetchRegressionModelsForSymbol = (symbol: string, limit = 50) =>
   apiFetch<RegressionModelsResponse>(
     `/regression/models/${encodeURIComponent(symbol)}?limit=${limit}`,
   )
+
+export interface RegressionTriggerResponse {
+  status: string
+  workflow_id: string
+  run_id: string
+  profile: string
+  exchange: string
+}
+
+export const triggerRegressionRun = () =>
+  apiFetch<RegressionTriggerResponse>('/regression/trigger', { method: 'POST' })
+
+// ─── Symbols (per-symbol picker + drill-down) ──────────────────────────────
+
+export interface SymbolListItem {
+  symbol: string
+  base: string
+  quote: string
+  domain: 'crypto' | 'equity'
+  has_regression: boolean
+  has_patterns: boolean
+  has_trades: boolean
+  regression_quality: 'strong' | 'moderate' | 'weak' | 'n_a' | null
+}
+
+export interface SymbolListResponse {
+  profile: string
+  exchange: string
+  domain: 'crypto' | 'equity'
+  count: number
+  items: SymbolListItem[]
+}
+
+export const fetchSymbolList = (q?: string) => {
+  const params = new URLSearchParams()
+  if (q) params.set('q', q)
+  const qs = params.toString()
+  return apiFetch<SymbolListResponse>(`/symbols/list${qs ? `?${qs}` : ''}`)
+}
+
+export interface SymbolUpcomingEvent {
+  event_id?: string
+  event_type: string
+  event_ts: string
+  symbol?: string
+  outcome?: {
+    direction: string
+    n_matches: number
+    confidence?: number | null
+    expected_drift?: Record<string, number | null>
+    error?: string
+  }
+}
+
+export interface SymbolReasoningCycle {
+  cycle_id: string
+  pair: string
+  started_at: string
+  finished_at: string
+  agent_count: number
+  signal_type?: string | null
+  confidence?: number | null
+  action?: string | null
+  trade_id?: number | null
+  pnl?: number | null
+}
+
+export interface SymbolLiveImpactBlock {
+  in_decision_loop: boolean
+  where: string
+  feature_flag?: string
+  bounds?: [number, number]
+  quality_gate?: string
+}
+
+export interface SymbolSummaryResponse {
+  profile: string
+  exchange: string
+  symbol: string
+  domain: 'crypto' | 'equity'
+  plain_summary: string
+  regression: { count: number; rows: RegressionModelRow[] }
+  patterns: { count: number; upcoming: SymbolUpcomingEvent[] }
+  trades: { count: number; rows: Record<string, unknown>[] }
+  reasoning: { count: number; cycles: SymbolReasoningCycle[] }
+  live_impact: {
+    patterns: SymbolLiveImpactBlock
+    regressions: SymbolLiveImpactBlock
+    trades: SymbolLiveImpactBlock
+    reasoning_journal: SymbolLiveImpactBlock
+  }
+}
+
+export const fetchSymbolSummary = (symbol: string) =>
+  apiFetch<SymbolSummaryResponse>(
+    `/symbols/${encodeURIComponent(symbol)}/summary`,
+  )
+
+
+// ─── Backtest Recommendations ──────────────────────────────────────────────
+
+export type RecommendationStatus = 'pending' | 'approved' | 'rejected' | 'expired'
+
+export interface RecommendationRow {
+  id: number
+  exchange: string
+  kind: string
+  symbol: string
+  summary: string
+  rationale: string
+  payload: Record<string, unknown>
+  metric_name: string
+  metric_value: number | null
+  status: RecommendationStatus
+  decided_by: string
+  decided_at: string | null
+  created_at: string
+  expires_at: string
+  source: string
+}
+
+export interface RecommendationsResponse {
+  profile: string
+  exchange: string
+  counts: Record<string, number>
+  count: number
+  rows: RecommendationRow[]
+}
+
+export const fetchRecommendations = (
+  params: { status?: RecommendationStatus | ''; kind?: string; limit?: number } = {},
+) => {
+  const q = new URLSearchParams()
+  if (params.status) q.set('status', params.status)
+  if (params.kind) q.set('kind', params.kind)
+  if (params.limit != null) q.set('limit', String(params.limit))
+  const qs = q.toString()
+  return apiFetch<RecommendationsResponse>(
+    `/recommendations${qs ? `?${qs}` : ''}`,
+  )
+}
+
+export const decideRecommendation = (
+  recId: number,
+  status: 'approved' | 'rejected',
+) =>
+  apiFetch<{ recommendation: RecommendationRow }>(
+    `/recommendations/${recId}/decision`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    },
+  )

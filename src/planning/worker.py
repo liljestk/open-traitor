@@ -48,6 +48,7 @@ from src.planning.activities import (
     fetch_universe_scan_summary,
     run_nightly_backtests,
     run_event_regressions,
+    run_finetune_export,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
@@ -55,6 +56,7 @@ from src.planning.workflows import (
     MonthlyReviewWorkflow,
     NightlyBacktestWorkflow,
     EventRegressionWorkflow,
+    FinetuneExportWorkflow,
 )
 from src.planning.wfo_workflow import (
     WeeklyWFOWorkflow,
@@ -145,6 +147,12 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "cron": "30 2 * * *",
             "desc": "Nightly event–price regression refit (02:30 UTC)",
         },
+        {
+            "workflow": FinetuneExportWorkflow,
+            "id": "finetune-export",
+            "cron": "0 4 1 * *",
+            "desc": "Monthly fine-tuning dataset export (1st of month, 04:00 UTC)",
+        },
     ]
 
     for profile in profiles:
@@ -182,7 +190,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, FinetuneExportWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -198,6 +206,7 @@ async def main() -> None:
             run_nightly_backtests,
             run_wfo_for_strategies,
             run_event_regressions,
+            run_finetune_export,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

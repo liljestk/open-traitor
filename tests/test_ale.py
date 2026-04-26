@@ -300,7 +300,7 @@ class TestFinetuningPipeline:
                     ts TEXT, pair TEXT, action TEXT, price REAL,
                     quantity REAL, pnl REAL, confidence REAL,
                     signal_type TEXT, stop_loss REAL, take_profit REAL,
-                    reasoning TEXT
+                    reasoning TEXT, exchange TEXT
                 )
             """)
             conn.execute("""
@@ -309,6 +309,18 @@ class TestFinetuningPipeline:
                     reasoning_id TEXT, ts TEXT, agent_name TEXT,
                     pair TEXT, exchange TEXT, reasoning_json TEXT,
                     raw_prompt TEXT, trade_id INTEGER
+                )
+            """)
+            # trade_labels — added for human-feedback upweighting in
+            # finetuning_pipeline._gather_examples LEFT JOIN.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trade_labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exchange TEXT, trade_id INTEGER,
+                    label TEXT, note TEXT,
+                    user_id TEXT, source TEXT,
+                    created_at TEXT, updated_at TEXT,
+                    UNIQUE (exchange, trade_id)
                 )
             """)
             conn.commit()

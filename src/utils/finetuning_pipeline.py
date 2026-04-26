@@ -150,16 +150,22 @@ class FinetuningPipeline:
             _exch_params = (cutoff, _exchange, f"{_exchange}_paper")
 
         with self._db._get_conn() as conn:
-            # Get trades with associated reasoning and meaningful PnL
+            # Get trades with associated reasoning and meaningful PnL.
+            # LEFT JOIN trade_labels so operator-supplied labels can upweight
+            # / override the noisy automatic win/loss classification.
             trades = conn.execute(
                 f"""
                 SELECT t.id, t.ts, t.pair, t.action, t.price, t.quantity,
                        t.pnl, t.confidence, t.signal_type, t.stop_loss,
                        t.take_profit, t.reasoning,
-                       ar.reasoning_json, ar.raw_prompt
+                       ar.reasoning_json, ar.raw_prompt,
+                       tl.label  AS human_label,
+                       tl.note   AS human_note
                 FROM trades t
                 LEFT JOIN agent_reasoning ar ON ar.trade_id = t.id
                     AND ar.agent_name = 'market_analyst'
+                LEFT JOIN trade_labels tl ON tl.trade_id = t.id
+                    AND tl.exchange = t.exchange
                 WHERE t.ts >= %s
                   AND t.pnl IS NOT NULL
                   AND t.price > 0
@@ -183,9 +189,21 @@ class FinetuningPipeline:
             else:
                 continue
 
-            # Filter: only clear signals (|pnl_pct| > threshold)
-            if abs(pnl_pct) < _MIN_PNL_PCT:
+            # Human label takes precedence: a "skip" label drops the example
+            # entirely (operator marked it ambiguous); "win"/"loss" override
+            # the noisy automatic classification; "unsure" passes through but
+            # only if the |pnl| threshold is met.
+            human_label = (trade.get("human_label") or "").strip().lower() or None
+            if human_label == "skip":
                 continue
+            if human_label in ("win", "loss"):
+                is_win = (human_label == "win")
+            else:
+                # Filter: only clear signals (|pnl_pct| > threshold) for
+                # automatically classified examples.
+                if abs(pnl_pct) < _MIN_PNL_PCT:
+                    continue
+                is_win = pnl > 0
 
             # Parse reasoning context
             try:
@@ -207,15 +225,31 @@ class FinetuningPipeline:
                 "take_profit": trade["take_profit"],
                 "reasoning": reasoning,
                 "raw_prompt": trade.get("raw_prompt", ""),
-                "is_win": pnl > 0,
+                "is_win": is_win,
+                "human_label": human_label,
+                "human_note": trade.get("human_note") or "",
             })
 
         return examples
 
     def _balance_examples(self, examples: list[dict]) -> list[dict]:
-        """Balance win/loss ratio and cap total examples."""
-        wins = [e for e in examples if e["is_win"]]
-        losses = [e for e in examples if not e["is_win"]]
+        """Balance win/loss ratio and cap total examples.
+
+        Operator-labeled examples (``human_label in {win,loss,unsure}``)
+        are duplicated once so the balancer is more likely to sample them
+        \u2014 this is the human-feedback upweighting.
+        """
+        # Upweight human-labeled examples by duplicating them once. This is
+        # a cheap proxy for true sample-weighted training that works for
+        # any downstream consumer (Ollama, OpenAI, HF) without changes.
+        weighted: list[dict] = []
+        for e in examples:
+            weighted.append(e)
+            if e.get("human_label"):
+                weighted.append(dict(e))
+
+        wins = [e for e in weighted if e["is_win"]]
+        losses = [e for e in weighted if not e["is_win"]]
 
         # Shuffle for variety
         random.shuffle(wins)

@@ -90,6 +90,12 @@ class TelegramBot:
         self._unauthorized_log_times: dict[str, float] = {}  # last log timestamp per user
         self._MAX_TRACKED_UNAUTHORIZED = 1000  # Cap to prevent unbounded memory growth
 
+        # Optional stats_db handle for direct deterministic commands
+        # (e.g. /label) that should NOT route through the LLM. Set via
+        # ``set_stats_db()`` after construction.
+        self._stats_db = None
+        self._label_exchange: str = (exchange_name or "").lower()
+
         logger.info(
             f"🔒 Telegram bot initialized | Chat: {self.chat_id} | "
             f"Authorized users: {len(self.authorized_users)} "
@@ -129,6 +135,13 @@ class TelegramBot:
         ]
         for cmd in shortcuts:
             self._app.add_handler(CommandHandler(cmd, self._handle_command))
+
+        # Direct deterministic handlers — bypass the LLM. Used for write
+        # operations where the operator needs unambiguous behaviour
+        # (labelling trades, listing pending labels, removing a label).
+        self._app.add_handler(CommandHandler("label", self._handle_label))
+        self._app.add_handler(CommandHandler("labels", self._handle_labels_list))
+        self._app.add_handler(CommandHandler("unlabel", self._handle_unlabel))
 
         # Inline keyboard callbacks (approve/reject buttons)
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -251,6 +264,163 @@ class TelegramBot:
 
         response = await self._get_response(update.message.text, user)
         await self._send_reply(update.message, response)
+
+    # ─── Direct deterministic handlers (bypass LLM) ──────────────────────
+
+    def set_stats_db(self, stats_db, exchange: str = "") -> None:
+        """Attach a StatsDB handle for deterministic write commands.
+
+        Called from the orchestrator after construction. Without this the
+        ``/label`` family of commands replies with a configuration error
+        instead of silently routing through the LLM.
+        """
+        self._stats_db = stats_db
+        if exchange:
+            self._label_exchange = exchange.lower()
+
+    async def _handle_label(self, update, context) -> None:
+        """``/label <trade_id> <win|loss|skip|unsure> [note...]``
+
+        Persists an operator-supplied label on a closed trade. Last write
+        wins per (exchange, trade_id). Direct DB write — no LLM round-trip.
+        """
+        user = update.effective_user
+        if not self._is_authorized(user.id, user.username, "/label"):
+            await update.message.reply_text("⛔ Unauthorized. This attempt has been logged.")
+            return
+        if self._stats_db is None or not self._label_exchange:
+            await update.message.reply_text(
+                "⚠️ Labelling is not available — stats DB is not attached."
+            )
+            return
+        args = context.args or []
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: `/label <trade_id> <win|loss|skip|unsure> [note...]`\n"
+                "Tip: send `/labels` to see recent unlabeled trades.",
+                parse_mode="Markdown",
+            )
+            return
+        raw_id, raw_label, *note_parts = args
+        note = " ".join(note_parts).strip()
+        try:
+            row = await asyncio.to_thread(
+                self._stats_db.add_trade_label,
+                int(raw_id),
+                raw_label,
+                self._label_exchange,
+                note,
+                str(user.id),
+                "telegram",
+            )
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {e}")
+            return
+        except Exception as e:
+            logger.warning(f"/label failed: {e}")
+            await update.message.reply_text(f"❌ Internal error labelling trade: {e}")
+            return
+        note_suffix = f" — _{note}_" if note else ""
+        await update.message.reply_text(
+            f"🏷️ Labeled trade `#{row.get('trade_id')}` as *{row.get('label')}*"
+            f"{note_suffix}",
+            parse_mode="Markdown",
+        )
+
+    async def _handle_labels_list(self, update, context) -> None:
+        """``/labels [N]`` — list up to N (default 10) recent unlabeled
+        closed trades for the operator to review.
+        """
+        user = update.effective_user
+        if not self._is_authorized(user.id, user.username, "/labels"):
+            await update.message.reply_text("⛔ Unauthorized. This attempt has been logged.")
+            return
+        if self._stats_db is None or not self._label_exchange:
+            await update.message.reply_text(
+                "⚠️ Labelling is not available — stats DB is not attached."
+            )
+            return
+        args = context.args or []
+        try:
+            limit = int(args[0]) if args else 10
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 25))
+        try:
+            rows = await asyncio.to_thread(
+                self._stats_db.get_recent_unlabeled_trades,
+                self._label_exchange,
+                limit,
+                720,  # 30-day window
+            )
+            counts = await asyncio.to_thread(
+                self._stats_db.count_trade_labels, self._label_exchange
+            )
+        except Exception as e:
+            logger.warning(f"/labels lookup failed: {e}")
+            await update.message.reply_text(f"❌ Could not list trades: {e}")
+            return
+        if not rows:
+            await update.message.reply_text(
+                f"✅ No unlabeled closed trades in the last 30 days "
+                f"(total labels: {counts.get('total', 0)})."
+            )
+            return
+        lines = [
+            f"🏷️ *{len(rows)} unlabeled trades* "
+            f"(W={counts.get('win',0)} L={counts.get('loss',0)} "
+            f"S={counts.get('skip',0)} U={counts.get('unsure',0)})",
+            "",
+        ]
+        for r in rows:
+            pnl = float(r.get("pnl") or 0.0)
+            sign = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+            lines.append(
+                f"{sign} `#{r.get('id')}` {r.get('pair')} "
+                f"{str(r.get('action','')).upper()} "
+                f"pnl={pnl:+.2f}"
+            )
+        lines.append("")
+        lines.append("Use `/label <id> <win|loss|skip|unsure> [note]`")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _handle_unlabel(self, update, context) -> None:
+        """``/unlabel <trade_id>`` — remove a label."""
+        user = update.effective_user
+        if not self._is_authorized(user.id, user.username, "/unlabel"):
+            await update.message.reply_text("⛔ Unauthorized. This attempt has been logged.")
+            return
+        if self._stats_db is None or not self._label_exchange:
+            await update.message.reply_text(
+                "⚠️ Labelling is not available — stats DB is not attached."
+            )
+            return
+        args = context.args or []
+        if not args:
+            await update.message.reply_text("Usage: `/unlabel <trade_id>`",
+                                            parse_mode="Markdown")
+            return
+        try:
+            ok = await asyncio.to_thread(
+                self._stats_db.delete_trade_label,
+                int(args[0]),
+                self._label_exchange,
+            )
+        except (TypeError, ValueError):
+            await update.message.reply_text("❌ trade_id must be an integer.")
+            return
+        except Exception as e:
+            logger.warning(f"/unlabel failed: {e}")
+            await update.message.reply_text(f"❌ Internal error: {e}")
+            return
+        if ok:
+            await update.message.reply_text(f"🗑️ Removed label for trade `#{args[0]}`",
+                                            parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                f"ℹ️ No label found for trade `#{args[0]}`",
+                parse_mode="Markdown",
+            )
 
     async def _handle_callback(self, update, context) -> None:
         """Handle inline keyboard callbacks (approve/reject buttons)."""

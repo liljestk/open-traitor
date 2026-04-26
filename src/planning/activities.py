@@ -1250,6 +1250,61 @@ async def run_nightly_backtests(profile: str = "") -> dict:
             logger.warning(f"Nightly BT failed for {pair}: {e}")
 
     logger.info(f"🌙 Nightly backtests complete: {results_saved}/{len(pairs)} saved")
+
+    # ── Recommendations queue ─────────────────────────────────────────────
+    # Surface noteworthy results as pending recommendations so the operator
+    # has an actionable inbox instead of just dashboard telemetry. Heuristic
+    # is intentionally conservative: high Sharpe + sufficient sample size on
+    # a pair that is *not* currently in the active rotation.
+    try:
+        from src.utils.stats import StatsDB
+        db = StatsDB()
+        active_pairs: set[str] = set()
+        for _ex in (full_config.get("trading", {}).get("pairs") or []):
+            active_pairs.add(str(_ex))
+        recs_made = 0
+        for pr in pair_results:
+            sharpe = float(pr.get("sharpe", 0) or 0)
+            ret = float(pr.get("return_pct", 0) or 0)
+            trades = int(pr.get("trades", 0) or 0)
+            sym = str(pr.get("pair") or "")
+            if not sym:
+                continue
+            # Only suggest pairs that aren't already actively traded.
+            if sym in active_pairs:
+                continue
+            if sharpe >= 1.5 and trades >= 5 and ret > 0:
+                db.upsert_recommendation(
+                    exchange=_resolved,
+                    kind="add_pair",
+                    symbol=sym,
+                    summary=(
+                        f"Add {sym} to active rotation "
+                        f"(Sharpe {sharpe:.2f}, return {ret:+.1f}%, {trades} trades)"
+                    ),
+                    rationale=(
+                        "30-day nightly backtest produced a Sharpe ≥ 1.5 with a "
+                        "positive return on a pair that is not in the current "
+                        "active rotation. Operator review required before any "
+                        "config change is applied."
+                    ),
+                    payload={
+                        "pair": sym,
+                        "sharpe": sharpe,
+                        "return_pct": ret,
+                        "trades": trades,
+                        "window_days": 30,
+                    },
+                    metric_name="sharpe_30d",
+                    metric_value=sharpe,
+                    source="nightly_backtest",
+                )
+                recs_made += 1
+        if recs_made:
+            logger.info(f"🌙 Nightly BT: surfaced {recs_made} recommendations")
+    except Exception as _rec_e:  # pragma: no cover — best-effort
+        logger.debug(f"Nightly BT recommendation surfacing failed: {_rec_e}")
+
     return {"ran": len(pairs), "saved": results_saved, "pairs": pair_results}
 
 
@@ -1383,3 +1438,88 @@ async def run_event_regressions(profile: str = "") -> dict:
         "ok": ok,
         "horizons": list(DEFAULT_HORIZONS_DAYS),
     }
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuning export activity
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def run_finetune_export(profile: str = "", window_days: int = 90) -> dict:
+    """Curate trade reasoning into Ollama/OpenAI fine-tuning datasets.
+
+    Wraps :py:meth:`src.utils.finetuning_pipeline.FinetuningPipeline.curate_and_export`
+    so the monthly export runs on Temporal's schedule rather than the
+    in-process LearningManager (which only ticks during a healthy cycle).
+
+    The export itself is local-disk only; downstream model training is
+    operator-owned. We notify Telegram when a new dataset lands.
+    """
+    from src.utils.stats import StatsDB
+    from src.utils.finetuning_pipeline import FinetuningPipeline
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    cfg: dict = {"trading": {"exchange": exchange}}
+    db = StatsDB()
+    try:
+        pipe = FinetuningPipeline(db, cfg, audit=None)
+        result = pipe.curate_and_export(window_days=int(window_days))
+    except Exception as e:
+        logger.warning(f"run_finetune_export failed: {e}")
+        return {"profile": profile, "exchange": exchange, "skipped": True, "error": str(e)}
+
+    out: dict = {"profile": profile, "exchange": exchange, **result}
+
+    # Best-effort operator notification — never block the activity on it.
+    try:
+        if not result.get("skipped"):
+            ollama_path = (result.get("exports") or {}).get("ollama", {}).get("path")
+            n = result.get("total_examples") or 0
+            wins = result.get("win_count") or 0
+            losses = result.get("loss_count") or 0
+            _notify_operator(
+                exchange,
+                f"📦 Fine-tuning dataset ready ({n} examples, "
+                f"{wins} wins, {losses} losses).\n"
+                f"`{ollama_path}`\n"
+                f"Operator action: import into Ollama / training pipeline.",
+            )
+    except Exception as _e:  # pragma: no cover
+        logger.debug(f"finetune notify skipped: {_e}")
+
+    return out
+
+
+def _notify_operator(exchange: str, message: str) -> None:
+    """Send a Telegram message via the agent's outbound bot endpoint.
+
+    Activities run in the planning worker process, which has no direct
+    handle to the agent's TelegramBot. We post to the agent's local
+    webhook (``/api/notify``) when available; otherwise we just log.
+    """
+    import os
+    import urllib.request
+    import urllib.error
+
+    base = os.environ.get(
+        f"AGENT_NOTIFY_URL_{exchange.upper()}",
+        os.environ.get("AGENT_NOTIFY_URL", ""),
+    )
+    if not base:
+        logger.info(f"[notify {exchange}] {message}")
+        return
+    try:
+        req = urllib.request.Request(
+            base,
+            data=json.dumps({"message": message, "exchange": exchange}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5).read()
+    except (urllib.error.URLError, OSError) as e:
+        logger.info(f"[notify {exchange}] {message} (delivery skipped: {e})")

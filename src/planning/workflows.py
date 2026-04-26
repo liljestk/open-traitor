@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_equity_events,
         run_nightly_backtests,
         run_event_regressions,
+        run_finetune_export,
     )
 
 
@@ -383,5 +384,37 @@ class EventRegressionWorkflow:
         workflow.logger.info(
             f"EventRegressionWorkflow: complete — fitted={result.get('fitted')} "
             f"ok={result.get('ok')}"
+        )
+        return result
+
+
+@workflow.defn
+class FinetuneExportWorkflow:
+    """Monthly fine-tuning dataset export.
+
+    Curates trade reasoning samples (with human label upweighting) into the
+    Ollama / OpenAI fine-tuning JSONL files. Cron: ``'0 4 1 * *'``
+    (04:00 UTC on the 1st of every month).
+
+    Closes the compounded-learning loop: trades → reasoning → labels →
+    dataset → operator-driven model retrain.
+    """
+
+    @workflow.run
+    async def run(self, profile: str = "", window_days: int = 90) -> dict:
+        workflow.logger.info(
+            f"FinetuneExportWorkflow: starting (profile={profile!r}, "
+            f"window_days={window_days})"
+        )
+        result = await workflow.execute_activity(
+            run_finetune_export,
+            args=[profile, window_days],
+            start_to_close_timeout=timedelta(hours=1),
+            retry_policy=_RETRY,
+        )
+        workflow.logger.info(
+            f"FinetuneExportWorkflow: complete — "
+            f"examples={result.get('total_examples', 0)} "
+            f"skipped={result.get('skipped', False)}"
         )
         return result

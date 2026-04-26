@@ -34,6 +34,8 @@ from src.utils.stats_reasoning import ReasoningMixin
 from src.utils.stats_predictions import PredictionsMixin
 from src.utils.stats_simulated import SimulatedMixin
 from src.utils.stats_patterns import PatternsMixin
+from src.utils.stats_labels import LabelsMixin
+from src.utils.stats_recommendations import RecommendationsMixin
 
 logger = get_logger("stats")
 
@@ -83,6 +85,8 @@ class StatsDB(
     PredictionsMixin,
     SimulatedMixin,
     PatternsMixin,
+    LabelsMixin,
+    RecommendationsMixin,
 ):
     """Thread-safe PostgreSQL statistics database.
 
@@ -360,6 +364,21 @@ class StatsDB(
             self._init_pattern_schema()
         except Exception as _e:
             logger.warning(f"Pattern schema init failed: {_e}")
+
+        # Trade-label table for human-in-the-loop feedback. Independent
+        # connection / savepoints so a permission failure cannot brick the
+        # trading loop.
+        try:
+            self._init_labels_schema()
+        except Exception as _e:
+            logger.warning(f"Labels schema init failed: {_e}")
+
+        # Backtest recommendations queue — surfaces nightly-backtest insights
+        # that need operator review (advisory; never auto-applied).
+        try:
+            self._init_recommendations_schema()
+        except Exception as _e:
+            logger.warning(f"Recommendations schema init failed: {_e}")
 
     # Allowlist for DDL migrations — prevents any interpolation of
     # unexpected identifiers into ALTER TABLE statements (CRIT-2).

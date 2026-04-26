@@ -646,6 +646,12 @@ class Orchestrator:
                 self.chat_handler._proactive.set_stats_db(self.stats_db)
                 # Pass live config reference so notification settings take effect immediately
                 self.chat_handler._proactive.set_config(self.config)
+            # Direct deterministic /label commands need a stats_db handle that
+            # bypasses the LLM. Best-effort \u2014 older bots without setter degrade.
+            try:
+                self.telegram.set_stats_db(self.stats_db, _exchange_type)
+            except Exception as _set_e:
+                logger.debug(f"set_stats_db on telegram bot skipped: {_set_e}")
 
         # Start health server
         start_health_server(port=config.get("health", {}).get("port", 8080))
