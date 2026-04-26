@@ -537,6 +537,34 @@ class RiskManagerAgent(BaseAgent):
             except (TypeError, ValueError) as _e:
                 self.logger.debug(f"pattern_signal multiplier skipped: {_e}")
 
+        # Step 4d: Regression factor — turns nightly event-price OLS fits
+        # into a real, bounded size adjustment. Strict opt-in (built upstream
+        # in pipeline_manager honoring REGRESSION_RISK_FACTOR_ENABLED env or
+        # per-profile risk.use_regression_factor). When the upstream factor
+        # is not "applied" (disabled, no catalyst, weak fit) this block is a
+        # no-op — the multiplier defaults to 1.0.
+        regression_factor = context.get("regression_factor") or {}
+        if (
+            action == "buy"
+            and isinstance(regression_factor, dict)
+            and regression_factor.get("applied")
+        ):
+            try:
+                rf = float(regression_factor.get("factor", 1.0))
+                # Defensive clip — pipeline_manager already bounds this but
+                # we never trust an upstream-supplied multiplier blindly.
+                rf = max(0.9, min(1.1, rf))
+                if abs(rf - 1.0) > 0.005:
+                    max_position *= rf
+                    _model = regression_factor.get("model") or {}
+                    self.logger.info(
+                        f"Regression factor ({regression_factor.get('direction', '?')}, "
+                        f"R²={(_model.get('r_squared') or 0):.2f}, N={_model.get('sample_count')}) "
+                        f"× {rf:.3f} → max {max_position:,.2f}"
+                    )
+            except (TypeError, ValueError) as _e:
+                self.logger.debug(f"regression_factor multiplier skipped: {_e}")
+
         # Step 5: Strong-signal floor (override quality penalty for new/poor-history assets)
         # A confident strong signal should not be near-zero-sized just because Kelly
         # produced a tiny fraction from a thin/bad historical track record.

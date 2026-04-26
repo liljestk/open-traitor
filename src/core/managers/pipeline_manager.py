@@ -811,6 +811,34 @@ class PipelineManager:
         except Exception as _pat_e:
             logger.debug(f"PatternAgent failed for {pair}: {_pat_e}")
 
+        # Step 2.6: Regression factor — turns nightly OLS fits into a real
+        # bounded sizing multiplier (formerly observational only). Strict
+        # opt-in via REGRESSION_RISK_FACTOR_ENABLED env or per-profile
+        # ``risk.use_regression_factor: true``. The payload is shaped so
+        # ``risk_manager`` can apply it without re-querying the DB.
+        regression_factor: dict = {
+            "available": False, "applied": False, "factor": 1.0,
+            "direction": "neutral", "reason": "not_run",
+            "model": None, "upcoming_event": None,
+        }
+        try:
+            from src.analysis.regression_factor import build_regression_factor
+            _risk_cfg = (orch.config or {}).get("risk", {}) if hasattr(orch, "config") else {}
+            regression_factor = build_regression_factor(
+                db=orch.stats_db,
+                exchange=exchange_name,
+                symbol=pair,
+                risk_config=_risk_cfg,
+            )
+            if regression_factor.get("applied"):
+                logger.info(
+                    f"[regression_factor] {pair} factor={regression_factor['factor']:.3f} "
+                    f"({regression_factor['direction']}) — model R²="
+                    f"{(regression_factor.get('model') or {}).get('r_squared'):.2f}"
+                )
+        except Exception as _rf_e:
+            logger.debug(f"regression_factor build failed for {pair}: {_rf_e}")
+
         # Promote pattern_engine to a first-class ensemble contributor so the
         # ensemble vote (and downstream DecisionEngine agreement gate) factor
         # in catalyst-pattern direction.
@@ -849,7 +877,13 @@ class PipelineManager:
             "min_gain_pct": orch.fee_manager.min_gain_after_fees_pct + _rt_fee,
         }
 
-        strategy_result = await orch.strategist.execute({
+        # Build strategist payload up front but defer the call. When the
+        # TraderAgent is enabled and succeeds, its output overwrites
+        # strategy_result anyway — so invoking the strategist eagerly is pure
+        # waste (an LLM round-trip, prompt build, reasoning-log write, and
+        # Langfuse span whose result is immediately discarded). We invoke the
+        # strategist lazily, only when there is no TraderAgent or it failed.
+        _strategist_inputs = {
             "signal": signal,
             "active_tasks": [t.to_dict() for t in orch.active_tasks if not t.completed],
             "current_balance": orch.exchange.balance if hasattr(orch.exchange, 'balance') else {},
@@ -872,13 +906,15 @@ class PipelineManager:
             "trace_ctx": trace_ctx,
             "exchange": exchange_name,
             "pattern_signal": pattern_signal,
-        })
+            "regression_factor": regression_factor,
+        }
+
+        strategy_result: dict | None = None
 
         # ─── TraderAgent: autonomous LLM operator over deterministic toolkit ─────
-        # The strategist call above is kept as a sidecar for reasoning logging
-        # (its output is recorded to agent_reasoning) but the live decision
-        # is made by the TraderAgent which routes every proposal through
-        # the deterministic DecisionEngine (edge library, allocator, rules).
+        # Live decision-maker. Routes every proposal through the deterministic
+        # DecisionEngine (edge library, allocator, rules). When this succeeds
+        # the strategist is short-circuited entirely.
         trader = getattr(orch, "trader", None)
         if trader is not None:
             try:
@@ -891,6 +927,7 @@ class PipelineManager:
                     "market_signal": signal,
                     "strategy_signals": strategy_signals,
                     "pattern_signal": pattern_signal,
+                    "regression_factor": regression_factor,
                     "sentiment": sentiment_data,
                     "news_headlines": news_headlines,
                     "fee_context": fee_context,
@@ -918,6 +955,12 @@ class PipelineManager:
                 logger.warning(
                     f"TraderAgent failed for {pair}: {_trader_e} — falling back to strategist"
                 )
+
+        # Strategist fallback: only invoke when TraderAgent is absent or did
+        # not return a usable decision. Prevents the wasted LLM call that
+        # previously ran on every cycle just to be discarded.
+        if strategy_result is None:
+            strategy_result = await orch.strategist.execute(_strategist_inputs)
 
         if strategy_result.get("action") == "hold":
             _timings["strategist"] = time.monotonic() - _step_t
@@ -981,6 +1024,10 @@ class PipelineManager:
             # Catalyst Pattern Engine signal — used as an advisory size
             # multiplier (never overrides AbsoluteRules).
             "pattern_signal": pattern_signal,
+            # Regression factor — bounded sizing multiplier sourced from
+            # the nightly OLS event-price fits (no-op when disabled or
+            # no imminent matching catalyst). See analysis/regression_factor.py.
+            "regression_factor": regression_factor,
             # Phase 6/9: per-profile quant substrate so the risk manager
             # can honour the capital-allocator's strategy budget when the
             # proposal didn't already carry one.
