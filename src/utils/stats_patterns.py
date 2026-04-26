@@ -147,6 +147,32 @@ class PatternsMixin:
         """,
         "CREATE INDEX IF NOT EXISTS idx_bp_exchange_status "
         "ON backfill_progress(exchange, status)",
+        # Event–price regression results (see src/analysis/event_regression.py).
+        # One row per (exchange, symbol, event_type, horizon_days). Coefficients
+        # and t-stats stored as JSON to keep the schema flexible if features
+        # are added later.
+        """
+        CREATE TABLE IF NOT EXISTS event_price_regressions (
+            exchange              TEXT NOT NULL,
+            symbol                TEXT NOT NULL,
+            event_type            TEXT NOT NULL,
+            horizon_days          INTEGER NOT NULL,
+            sample_count          INTEGER NOT NULL,
+            coefficients_json     TEXT NOT NULL DEFAULT '{}',
+            t_stats_json          TEXT NOT NULL DEFAULT '{}',
+            r_squared             DOUBLE PRECISION,
+            mean_forward_return   DOUBLE PRECISION,
+            median_forward_return DOUBLE PRECISION,
+            hit_rate              DOUBLE PRECISION,
+            notes                 TEXT NOT NULL DEFAULT '',
+            computed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (exchange, symbol, event_type, horizon_days)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_epr_exchange_event_type "
+        "ON event_price_regressions(exchange, event_type)",
+        "CREATE INDEX IF NOT EXISTS idx_epr_exchange_r2 "
+        "ON event_price_regressions(exchange, r_squared DESC NULLS LAST)",
     )
 
     def _init_pattern_schema(self) -> None:
@@ -544,6 +570,114 @@ class PatternsMixin:
         with self._get_conn() as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Event–price regression results
+    # ------------------------------------------------------------------
+    def upsert_event_regression(self, row: dict) -> None:
+        """Persist one fitted regression. Idempotent on the composite PK.
+
+        ``row`` must contain the keys produced by
+        ``RegressionResult.to_db_row()``.
+        """
+        sql = (
+            "INSERT INTO event_price_regressions "
+            "(exchange, symbol, event_type, horizon_days, sample_count, "
+            " coefficients_json, t_stats_json, r_squared, mean_forward_return, "
+            " median_forward_return, hit_rate, notes, computed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now()) "
+            "ON CONFLICT (exchange, symbol, event_type, horizon_days) DO UPDATE SET "
+            "sample_count = EXCLUDED.sample_count, "
+            "coefficients_json = EXCLUDED.coefficients_json, "
+            "t_stats_json = EXCLUDED.t_stats_json, "
+            "r_squared = EXCLUDED.r_squared, "
+            "mean_forward_return = EXCLUDED.mean_forward_return, "
+            "median_forward_return = EXCLUDED.median_forward_return, "
+            "hit_rate = EXCLUDED.hit_rate, "
+            "notes = EXCLUDED.notes, "
+            "computed_at = now()"
+        )
+        with self._get_conn() as conn:
+            conn.execute(
+                sql,
+                (
+                    row["exchange"],
+                    row["symbol"],
+                    row["event_type"],
+                    int(row["horizon_days"]),
+                    int(row["sample_count"]),
+                    json.dumps(row.get("coefficients_json") or {}),
+                    json.dumps(row.get("t_stats_json") or {}),
+                    row.get("r_squared"),
+                    row.get("mean_forward_return"),
+                    row.get("median_forward_return"),
+                    row.get("hit_rate"),
+                    row.get("notes") or "",
+                ),
+            )
+            conn.commit()
+
+    def get_event_regressions(
+        self,
+        exchange: str,
+        *,
+        symbol: Optional[str] = None,
+        event_type: Optional[str] = None,
+        min_samples: int = 0,
+        order_by: str = "r_squared",
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return regression rows for the dashboard. Always exchange-scoped."""
+        clauses = ["exchange = %s"]
+        params: list = [exchange]
+        if symbol:
+            clauses.append("symbol = %s")
+            params.append(symbol)
+        if event_type:
+            clauses.append("event_type = %s")
+            params.append(event_type)
+        if min_samples > 0:
+            clauses.append("sample_count >= %s")
+            params.append(int(min_samples))
+
+        order_sql = {
+            "r_squared": "r_squared DESC NULLS LAST",
+            "samples": "sample_count DESC",
+            "computed_at": "computed_at DESC",
+            "abs_return": "ABS(COALESCE(mean_forward_return,0)) DESC",
+        }.get(order_by, "r_squared DESC NULLS LAST")
+
+        sql = (
+            "SELECT exchange, symbol, event_type, horizon_days, sample_count, "
+            "coefficients_json, t_stats_json, r_squared, mean_forward_return, "
+            "median_forward_return, hit_rate, notes, computed_at "
+            "FROM event_price_regressions "
+            f"WHERE {' AND '.join(clauses)} "
+            f"ORDER BY {order_sql} LIMIT %s"
+        )
+        params.append(int(limit))
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            for k in ("coefficients_json", "t_stats_json"):
+                v = d.get(k)
+                if isinstance(v, str):
+                    try:
+                        d[k] = json.loads(v)
+                    except Exception:
+                        d[k] = {}
+            out.append(d)
+        return out
+
+    def count_event_regressions(self, exchange: str) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM event_price_regressions WHERE exchange = %s",
+                (exchange,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
 
 
 def _coerce_ts(v: Any) -> Optional[datetime]:

@@ -19,6 +19,7 @@ import Backtesting from './pages/Backtesting'
 import SetupWizard from './pages/SetupWizard'
 import LLMAnalytics from './pages/LLMAnalytics'
 import PatternsPage from './pages/PatternsPage'
+import RegressionAI from './pages/RegressionAI'
 import Login from './pages/Login'
 import { fetchSystemStatus, type SystemStatus } from './api'
 
@@ -88,6 +89,7 @@ function AppRoutes() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/llm-analytics" element={<LLMAnalytics />} />
         <Route path="/patterns" element={<PatternsPage />} />
+        <Route path="/regression" element={<RegressionAI />} />
       </Route>
     </Routes>
   )

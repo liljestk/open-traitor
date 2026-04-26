@@ -47,12 +47,14 @@ from src.planning.activities import (
     fetch_pair_universe,
     fetch_universe_scan_summary,
     run_nightly_backtests,
+    run_event_regressions,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
     WeeklyReviewWorkflow,
     MonthlyReviewWorkflow,
     NightlyBacktestWorkflow,
+    EventRegressionWorkflow,
 )
 from src.planning.wfo_workflow import (
     WeeklyWFOWorkflow,
@@ -137,6 +139,12 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "cron": "0 3 * * 1",
             "desc": "Weekly walk-forward optimisation (Monday 03:00 UTC)",
         },
+        {
+            "workflow": EventRegressionWorkflow,
+            "id": "event-regression",
+            "cron": "30 2 * * *",
+            "desc": "Nightly event–price regression refit (02:30 UTC)",
+        },
     ]
 
     for profile in profiles:
@@ -174,7 +182,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -189,6 +197,7 @@ async def main() -> None:
             fetch_universe_scan_summary,
             run_nightly_backtests,
             run_wfo_for_strategies,
+            run_event_regressions,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

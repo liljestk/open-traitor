@@ -57,6 +57,7 @@ from src.dashboard.routes.financial_calendar import router as financial_calendar
 from src.dashboard.routes.backtesting import router as backtesting_router
 from src.dashboard.routes.quant_observability import router as quant_observability_router
 from src.dashboard.routes.patterns import router as patterns_router
+from src.dashboard.routes.regression import router as regression_router
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +396,7 @@ app.include_router(financial_calendar_router)
 app.include_router(backtesting_router)
 app.include_router(quant_observability_router)
 app.include_router(patterns_router)
+app.include_router(regression_router)
 
 
 # ---------------------------------------------------------------------------

@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_universe_scan_summary,
         fetch_equity_events,
         run_nightly_backtests,
+        run_event_regressions,
     )
 
 
@@ -356,5 +357,31 @@ class NightlyBacktestWorkflow:
         workflow.logger.info(
             f"NightlyBacktestWorkflow: complete — "
             f"{result.get('saved', 0)}/{result.get('ran', 0)} pairs backtested"
+        )
+        return result
+
+
+@workflow.defn
+class EventRegressionWorkflow:
+    """Nightly event–price regression refit.
+
+    Re-fits OLS forward-return regressions for every (symbol, event_type,
+    horizon) the system has data for. Cron: '30 2 * * *' (02:30 UTC).
+    """
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(
+            f"EventRegressionWorkflow: starting (profile={profile!r})"
+        )
+        result = await workflow.execute_activity(
+            run_event_regressions,
+            args=[profile],
+            start_to_close_timeout=timedelta(minutes=45),
+            retry_policy=_RETRY,
+        )
+        workflow.logger.info(
+            f"EventRegressionWorkflow: complete — fitted={result.get('fitted')} "
+            f"ok={result.get('ok')}"
         )
         return result

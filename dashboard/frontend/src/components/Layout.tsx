@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu, Sparkles } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu, Sparkles, Brain } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
 import RegimeBadge from './RegimeBadge'
@@ -29,6 +29,7 @@ const NAV = [
       { to: '/analytics', icon: <TrendingUp size={16} />, label: 'Analytics' },
       { to: '/predictions', icon: <Crosshair size={16} />, label: 'Predictions' },
       { to: '/patterns', icon: <Sparkles size={16} />, label: 'Patterns' },
+      { to: '/regression', icon: <Brain size={16} />, label: 'Regression AI' },
       { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
       { to: '/backtesting', icon: <Zap size={16} />, label: 'Backtesting' },
@@ -62,6 +63,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/analytics': 'Analytics',
   '/predictions': 'Predictions',
   '/patterns': 'Catalyst Patterns',
+  '/regression': 'Regression AI',
   '/watchlist': 'Watchlist',
   '/simulations': 'Simulate Trade',
   '/logs': 'System Logs',

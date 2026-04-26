@@ -1553,3 +1553,55 @@ export function openLiveSocket(onMessage: (event: LiveEvent) => void, onClose?: 
   ws.onclose = (e) => onClose?.(e.code)
   return ws
 }
+
+// ─── RegressionAI ──────────────────────────────────────────────────────────
+
+export interface RegressionModelRow {
+  exchange: string
+  symbol: string
+  event_type: string
+  horizon_days: number
+  sample_count: number
+  coefficients_json: Record<string, number>
+  t_stats_json: Record<string, number>
+  r_squared: number | null
+  mean_forward_return: number | null
+  median_forward_return: number | null
+  hit_rate: number | null
+  notes: string
+  computed_at: string
+}
+
+export interface RegressionModelsResponse {
+  profile: string
+  exchange: string
+  total: number
+  count: number
+  rows: RegressionModelRow[]
+}
+
+export const fetchRegressionModels = (
+  params: {
+    eventType?: string
+    symbol?: string
+    minSamples?: number
+    orderBy?: 'r_squared' | 'samples' | 'computed_at' | 'abs_return'
+    limit?: number
+  } = {},
+) => {
+  const q = new URLSearchParams()
+  if (params.eventType) q.set('event_type', params.eventType)
+  if (params.symbol) q.set('symbol', params.symbol)
+  if (params.minSamples != null) q.set('min_samples', String(params.minSamples))
+  if (params.orderBy) q.set('order_by', params.orderBy)
+  if (params.limit != null) q.set('limit', String(params.limit))
+  const qs = q.toString()
+  return apiFetch<RegressionModelsResponse>(
+    `/regression/models${qs ? `?${qs}` : ''}`,
+  )
+}
+
+export const fetchRegressionModelsForSymbol = (symbol: string, limit = 50) =>
+  apiFetch<RegressionModelsResponse>(
+    `/regression/models/${encodeURIComponent(symbol)}?limit=${limit}`,
+  )

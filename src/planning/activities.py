@@ -1336,3 +1336,50 @@ async def fetch_score_divergence(profile: str = "") -> dict:
                 "below_threshold_avg_pnl": round(sum(below_pnl) / len(below_pnl), 4) if below_pnl else 0,
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# Event–price regression activity
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def run_event_regressions(profile: str = "") -> dict:
+    """Fit OLS forward-return regressions on every (symbol, event_type) pair.
+
+    Reads ``catalyst_events`` and ``historical_candles`` from StatsDB,
+    fits one model per (symbol, event_type, horizon) using
+    ``EventRegressionEngine``, and writes results back to
+    ``event_price_regressions`` for the dashboard. Domain-isolated by
+    exchange. Called by EventRegressionWorkflow nightly.
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.event_regression import (
+        DEFAULT_HORIZONS_DAYS,
+        run_event_regressions_for_profile,
+    )
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    db = StatsDB()
+    try:
+        results = run_event_regressions_for_profile(
+            db=db,
+            exchange=exchange,
+            horizons=DEFAULT_HORIZONS_DAYS,
+        )
+    except Exception as e:
+        logger.warning(f"run_event_regressions failed: {e}")
+        return {"profile": profile, "exchange": exchange, "fitted": 0, "error": str(e)}
+
+    ok = sum(1 for r in results if r.notes == "ok")
+    return {
+        "profile": profile,
+        "exchange": exchange,
+        "fitted": len(results),
+        "ok": ok,
+        "horizons": list(DEFAULT_HORIZONS_DAYS),
+    }
