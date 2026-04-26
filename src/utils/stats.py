@@ -36,6 +36,7 @@ from src.utils.stats_simulated import SimulatedMixin
 from src.utils.stats_patterns import PatternsMixin
 from src.utils.stats_labels import LabelsMixin
 from src.utils.stats_recommendations import RecommendationsMixin
+from src.utils.stats_correlations import CorrelationsMixin
 
 logger = get_logger("stats")
 
@@ -87,6 +88,7 @@ class StatsDB(
     PatternsMixin,
     LabelsMixin,
     RecommendationsMixin,
+    CorrelationsMixin,
 ):
     """Thread-safe PostgreSQL statistics database.
 
@@ -379,6 +381,14 @@ class StatsDB(
             self._init_recommendations_schema()
         except Exception as _e:
             logger.warning(f"Recommendations schema init failed: {_e}")
+
+        # Cross-asset correlation, taxonomy & cross-event regression tables.
+        # Independent connection / savepoints so a permission failure cannot
+        # brick the trading loop.
+        try:
+            self._init_correlations_schema()
+        except Exception as _e:
+            logger.warning(f"Correlations schema init failed: {_e}")
 
     # Allowlist for DDL migrations — prevents any interpolation of
     # unexpected identifiers into ALTER TABLE statements (CRIT-2).

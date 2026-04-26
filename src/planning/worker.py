@@ -50,6 +50,9 @@ from src.planning.activities import (
     run_event_regressions,
     run_price_backfill,
     run_finetune_export,
+    run_taxonomy_seed,
+    run_correlation_matrix,
+    run_cross_event_regressions,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
@@ -59,6 +62,7 @@ from src.planning.workflows import (
     EventRegressionWorkflow,
     NightlyPriceBackfillWorkflow,
     FinetuneExportWorkflow,
+    CrossAssetAnalyticsWorkflow,
 )
 from src.planning.wfo_workflow import (
     WeeklyWFOWorkflow,
@@ -152,6 +156,14 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "desc": "Nightly OHLCV history backfill (01:00 UTC)",
         },
         {
+            "workflow": CrossAssetAnalyticsWorkflow,
+            "id": "cross-asset-analytics",
+            # 02:15 UTC — between nightly-backtest (02:00) and
+            # event-regression (02:30).
+            "cron": "15 2 * * *",
+            "desc": "Cross-asset taxonomy + correlations + clusters + cross-event regressions (02:00 UTC)",
+        },
+        {
             "workflow": EventRegressionWorkflow,
             "id": "event-regression",
             "cron": "30 2 * * *",
@@ -200,7 +212,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, NightlyPriceBackfillWorkflow, FinetuneExportWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, NightlyPriceBackfillWorkflow, FinetuneExportWorkflow, CrossAssetAnalyticsWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -218,6 +230,9 @@ async def main() -> None:
             run_event_regressions,
             run_price_backfill,
             run_finetune_export,
+            run_taxonomy_seed,
+            run_correlation_matrix,
+            run_cross_event_regressions,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

@@ -46,6 +46,9 @@ with workflow.unsafe.imports_passed_through():
         run_event_regressions,
         run_price_backfill,
         run_finetune_export,
+        run_taxonomy_seed,
+        run_correlation_matrix,
+        run_cross_event_regressions,
     )
 
 
@@ -453,3 +456,54 @@ class FinetuneExportWorkflow:
             f"skipped={result.get('skipped', False)}"
         )
         return result
+
+
+@workflow.defn
+class CrossAssetAnalyticsWorkflow:
+    """Nightly cross-asset analytics: taxonomy + correlation matrix +
+    cluster snapshot + cross-event regressions.
+
+    Runs at 02:00 UTC — *after* the 01:00 price backfill (fresh candles)
+    and *before* the 02:30 event regressions (so per-symbol regressions
+    can downstream consume the cluster snapshot if they wish). All four
+    sub-steps run in sequence inside one workflow so a single Temporal
+    schedule covers the full pipeline per profile.
+    """
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(
+            f"CrossAssetAnalyticsWorkflow: starting (profile={profile!r})"
+        )
+        taxonomy = await workflow.execute_activity(
+            run_taxonomy_seed,
+            args=[profile],
+            start_to_close_timeout=timedelta(minutes=30),
+            retry_policy=_RETRY,
+        )
+        correlations = await workflow.execute_activity(
+            run_correlation_matrix,
+            args=[profile],
+            start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(minutes=5),
+            retry_policy=_RETRY,
+        )
+        cross_events = await workflow.execute_activity(
+            run_cross_event_regressions,
+            args=[profile],
+            start_to_close_timeout=timedelta(hours=1),
+            retry_policy=_RETRY,
+        )
+        workflow.logger.info(
+            f"CrossAssetAnalyticsWorkflow: complete — "
+            f"taxonomy={taxonomy.get('rows_written', 0)} "
+            f"pairs={correlations.get('pairs', 0)} "
+            f"clusters={correlations.get('clusters', 0)} "
+            f"cross_regressions={cross_events.get('regressions', 0)}"
+        )
+        return {
+            "profile": profile,
+            "taxonomy": taxonomy,
+            "correlations": correlations,
+            "cross_events": cross_events,
+        }

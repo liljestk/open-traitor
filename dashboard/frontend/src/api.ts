@@ -215,8 +215,15 @@ export interface CycleFull {
   langfuse_url: string | null
   spans: AgentSpan[]
   trade: Trade | null
-  decision_outcome: 'executed' | 'hold' | 'rejected' | 'pending_approval' | 'execution_failed'
+  decision_outcome:
+    | 'executed'
+    | 'hold'
+    | 'hold_fallback'
+    | 'rejected'
+    | 'pending_approval'
+    | 'execution_failed'
   decision_reason: string
+  decision_blocker?: string | null
 }
 
 export interface StatsSummary {
@@ -1759,3 +1766,171 @@ export const decideRecommendation = (
       body: JSON.stringify({ status }),
     },
   )
+
+
+// ─── Cross-Asset Analytics ────────────────────────────────────────────────
+//
+// Surfaces the rows persisted by CrossAssetAnalyticsWorkflow:
+// taxonomy / correlations / clusters / cross-event regressions / cascade.
+//
+// All hooks must include `profile` in their queryKey (domain-separation rule
+// enforced by tests/test_domain_separation.py::TestFrontendQueryKeysIncludeProfile).
+
+export interface AssetTaxonomyRow {
+  exchange: string
+  symbol: string
+  asset_class: string
+  ecosystem: string | null
+  sector: string | null
+  tags: Record<string, unknown>
+  source: string
+  updated_at: string | null
+}
+
+export interface AssetTaxonomyResponse {
+  exchange: string
+  rows: AssetTaxonomyRow[]
+}
+
+export const fetchAssetTaxonomy = (params: {
+  symbol?: string
+  ecosystem?: string
+  sector?: string
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.symbol) qs.set('symbol', params.symbol)
+  if (params.ecosystem) qs.set('ecosystem', params.ecosystem)
+  if (params.sector) qs.set('sector', params.sector)
+  return apiFetch<AssetTaxonomyResponse>(
+    `/cross-asset/taxonomy${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface AssetCorrelationRow {
+  exchange: string
+  base_symbol: string
+  peer_symbol: string
+  window_days: number
+  pearson: number | null
+  spearman: number | null
+  lead_lag_days: number
+  lead_lag_score: number | null
+  sample_count: number
+  computed_at: string | null
+}
+
+export interface AssetCorrelationsResponse {
+  exchange: string
+  rows: AssetCorrelationRow[]
+}
+
+export const fetchAssetCorrelations = (params: {
+  symbol?: string
+  windowDays?: number
+  minAbsPearson?: number
+  limit?: number
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.symbol) qs.set('symbol', params.symbol)
+  if (params.windowDays != null) qs.set('window_days', String(params.windowDays))
+  if (params.minAbsPearson != null) qs.set('min_abs_pearson', String(params.minAbsPearson))
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  return apiFetch<AssetCorrelationsResponse>(
+    `/cross-asset/correlations${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface AssetCluster {
+  cluster_id: number
+  label: string | null
+  cohesion: number | null
+  computed_at: string | null
+  members: string[]
+}
+
+export interface AssetClustersResponse {
+  exchange: string
+  clusters: AssetCluster[]
+}
+
+export const fetchAssetClusters = (symbol?: string) => {
+  const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''
+  return apiFetch<AssetClustersResponse>(`/cross-asset/clusters${qs}`)
+}
+
+export interface CrossEventRegressionRow {
+  exchange: string
+  driver_symbol: string
+  driver_event_type: string
+  target_symbol: string
+  horizon_days: number
+  sample_count: number
+  beta: number | null
+  intercept: number | null
+  r_squared: number | null
+  t_stat_beta: number | null
+  mean_forward_return: number | null
+  hit_rate: number | null
+  notes: string
+  computed_at: string | null
+}
+
+export interface CrossEventRegressionsResponse {
+  exchange: string
+  rows: CrossEventRegressionRow[]
+}
+
+export const fetchCrossEventRegressions = (params: {
+  driverSymbol?: string
+  targetSymbol?: string
+  driverEventType?: string
+  minSamples?: number
+  minAbsBeta?: number
+  limit?: number
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.driverSymbol) qs.set('driver_symbol', params.driverSymbol)
+  if (params.targetSymbol) qs.set('target_symbol', params.targetSymbol)
+  if (params.driverEventType) qs.set('driver_event_type', params.driverEventType)
+  if (params.minSamples != null) qs.set('min_samples', String(params.minSamples))
+  if (params.minAbsBeta != null) qs.set('min_abs_beta', String(params.minAbsBeta))
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  return apiFetch<CrossEventRegressionsResponse>(
+    `/cross-asset/regressions${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface CascadePrediction {
+  target_symbol: string
+  horizon_days: number
+  beta: number | null
+  r_squared: number | null
+  expected_drift: number | null
+  sample_count: number
+  hit_rate: number | null
+  mean_forward_return: number | null
+}
+
+export interface CascadeResponse {
+  exchange: string
+  driver_symbol: string
+  driver_event_type: string
+  horizon_days: number
+  predictions: CascadePrediction[]
+}
+
+export const fetchCascade = (params: {
+  driverSymbol: string
+  driverEventType: string
+  horizonDays?: number
+  minR2?: number
+  minSamples?: number
+}) => {
+  const qs = new URLSearchParams()
+  qs.set('driver_symbol', params.driverSymbol)
+  qs.set('driver_event_type', params.driverEventType)
+  if (params.horizonDays != null) qs.set('horizon_days', String(params.horizonDays))
+  if (params.minR2 != null) qs.set('min_r2', String(params.minR2))
+  if (params.minSamples != null) qs.set('min_samples', String(params.minSamples))
+  return apiFetch<CascadeResponse>(`/cross-asset/cascade?${qs.toString()}`)
+}

@@ -1673,3 +1673,147 @@ def _notify_operator(exchange: str, message: str) -> None:
         urllib.request.urlopen(req, timeout=5).read()
     except (urllib.error.URLError, OSError) as e:
         logger.info(f"[notify {exchange}] {message} (delivery skipped: {e})")
+
+
+# ---------------------------------------------------------------------------
+# Cross-asset analytics activities
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def run_taxonomy_seed(profile: str = "") -> dict:
+    """Seed/refresh the asset_taxonomy table for the active profile.
+
+    Idempotent — re-running merges new tags into existing rows. Uses
+    curated crypto ecosystems for crypto profiles and yfinance sector
+    lookups for equity profiles. Operator overrides in
+    ``config/{profile}.taxonomy.yaml`` always win.
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.taxonomy_seeder import seed_taxonomy_for_profile
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    universe = _price_backfill_universe(profile, exchange)
+    if not universe:
+        logger.info(f"taxonomy_seed: no symbols for {exchange} (profile={profile!r})")
+        return {"profile": profile, "exchange": exchange, "symbols": 0, "skipped": True}
+
+    db = StatsDB()
+    try:
+        written = seed_taxonomy_for_profile(profile or exchange, universe, stats_db=db)
+    except Exception as e:
+        logger.warning(f"taxonomy_seed failed: {e}")
+        return {"profile": profile, "exchange": exchange, "error": str(e)}
+
+    return {
+        "profile": profile,
+        "exchange": exchange,
+        "symbols": len(universe),
+        "rows_written": int(written),
+    }
+
+
+@activity.defn
+async def run_correlation_matrix(profile: str = "") -> dict:
+    """Compute the nightly pairwise correlation matrix + asset clusters.
+
+    Reads ``ONE_DAY`` candles for the active profile's universe, computes
+    pearson + spearman + lead-lag scores, then derives clusters via
+    union-find on the |pearson| ≥ threshold edges. Both the correlation
+    rows and the cluster snapshot are persisted (the cluster snapshot is
+    *replaced* atomically per exchange).
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.cross_asset import (
+        compute_correlation_matrix,
+        compute_clusters_from_correlations,
+        DEFAULT_WINDOW_DAYS,
+    )
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    universe = _price_backfill_universe(profile, exchange)
+    if len(universe) < 2:
+        logger.info(
+            f"correlation_matrix: <2 symbols for {exchange} "
+            f"(profile={profile!r}) — skipping"
+        )
+        return {
+            "profile": profile,
+            "exchange": exchange,
+            "symbols": len(universe),
+            "skipped": True,
+        }
+
+    db = StatsDB()
+    try:
+        rows = compute_correlation_matrix(
+            exchange=exchange,
+            symbols=universe,
+            stats_db=db,
+            window_days=DEFAULT_WINDOW_DAYS,
+        )
+        # Heartbeat once between heavy phases.
+        try:
+            activity.heartbeat({"phase": "correlations_done", "pairs": len(rows)})
+        except Exception:
+            pass
+        written_pairs = db.upsert_asset_correlations(exchange, rows) if rows else 0
+        clusters = compute_clusters_from_correlations(rows)
+        written_cluster_rows = db.replace_asset_clusters(exchange, clusters)
+    except Exception as e:
+        logger.warning(f"run_correlation_matrix failed: {e}")
+        return {"profile": profile, "exchange": exchange, "error": str(e)}
+
+    logger.info(
+        f"correlation_matrix: {exchange} — "
+        f"pairs={written_pairs} clusters={len(clusters)} "
+        f"cluster_rows={written_cluster_rows}"
+    )
+    return {
+        "profile": profile,
+        "exchange": exchange,
+        "symbols": len(universe),
+        "pairs": int(written_pairs),
+        "clusters": len(clusters),
+    }
+
+
+@activity.defn
+async def run_cross_event_regressions(profile: str = "") -> dict:
+    """Fit cross-asset event-reaction regressions.
+
+    For every (driver, target) pair where ``|pearson| ≥ min_correlation``
+    and every ``driver_event_type``, fits OLS of the target's forward
+    return (1d/5d/20d) on the driver's pre-event log return. Persists to
+    ``cross_event_regressions``.
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.cross_asset import fit_cross_event_regressions
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    db = StatsDB()
+    try:
+        results = fit_cross_event_regressions(exchange=exchange, stats_db=db)
+    except Exception as e:
+        logger.warning(f"run_cross_event_regressions failed: {e}")
+        return {"profile": profile, "exchange": exchange, "error": str(e)}
+
+    return {
+        "profile": profile,
+        "exchange": exchange,
+        "regressions": len(results),
+    }

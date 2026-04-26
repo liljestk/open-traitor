@@ -20,6 +20,7 @@ import SetupWizard from './pages/SetupWizard'
 import LLMAnalytics from './pages/LLMAnalytics'
 import PatternsPage from './pages/PatternsPage'
 import RegressionAI from './pages/RegressionAI'
+import CrossAsset from './pages/CrossAsset'
 import RecommendationsPage from './pages/Recommendations'
 import Login from './pages/Login'
 import { fetchSystemStatus, type SystemStatus } from './api'
@@ -91,6 +92,7 @@ function AppRoutes() {
         <Route path="/llm-analytics" element={<LLMAnalytics />} />
         <Route path="/patterns" element={<PatternsPage />} />
         <Route path="/regression" element={<RegressionAI />} />
+        <Route path="/cross-asset" element={<CrossAsset />} />
         <Route path="/recommendations" element={<RecommendationsPage />} />
       </Route>
     </Routes>
