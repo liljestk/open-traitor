@@ -1934,3 +1934,45 @@ export const fetchCascade = (params: {
   if (params.minSamples != null) qs.set('min_samples', String(params.minSamples))
   return apiFetch<CascadeResponse>(`/cross-asset/cascade?${qs.toString()}`)
 }
+
+// ─── Smarts (Phases 1-8) ───────────────────────────────────────────────────
+
+export interface SmartsResponse<T = any> {
+  profile: string
+  exchange: string
+  rows: T[]
+  follower?: string
+  symbol?: string
+}
+
+export const fetchSmartsFeatureBrier = (limit = 200) =>
+  apiFetch<SmartsResponse>(`/smarts/feature-brier?limit=${limit}`)
+
+export const fetchSmartsBandit = () =>
+  apiFetch<SmartsResponse>(`/smarts/bandit`)
+
+export const fetchSmartsCounterfactual = (limit = 100) =>
+  apiFetch<SmartsResponse>(`/smarts/counterfactual?limit=${limit}`)
+
+export const fetchSmartsLeadLag = (follower: string) =>
+  apiFetch<SmartsResponse>(`/smarts/lead-lag/${encodeURIComponent(follower)}`)
+
+export const fetchSmartsUpcomingEvents = (withinHours = 168) =>
+  apiFetch<SmartsResponse>(`/smarts/upcoming-events?within_hours=${withinHours}`)
+
+export const fetchSmartsDecisionDrift = (limit = 60) =>
+  apiFetch<SmartsResponse>(`/smarts/decision-drift?limit=${limit}`)
+
+export const fetchSmartsReasoningJudge = (limit = 100) =>
+  apiFetch<SmartsResponse>(`/smarts/reasoning-judge?limit=${limit}`)
+
+export const fetchSmartsOnchain = (asset: string, metric: string, limit = 100) =>
+  apiFetch<SmartsResponse>(
+    `/smarts/onchain/${encodeURIComponent(asset)}/${encodeURIComponent(metric)}?limit=${limit}`
+  )
+
+export const fetchSmartsShadow = (limit = 200) =>
+  apiFetch<SmartsResponse>(`/smarts/shadow?limit=${limit}`)
+
+export const fetchSmartsL2 = (symbol: string, limit = 100) =>
+  apiFetch<SmartsResponse>(`/smarts/l2-snapshots/${encodeURIComponent(symbol)}?limit=${limit}`)

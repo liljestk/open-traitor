@@ -1817,3 +1817,156 @@ async def run_cross_event_regressions(profile: str = "") -> dict:
         "exchange": exchange,
         "regressions": len(results),
     }
+
+
+# ─── Phase 1-8 smarts activities ────────────────────────────────────────────
+
+
+def _smart_exchange(profile: str) -> str:
+    """Resolve canonical exchange string for smarts activities."""
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    return "ibkr" if domain == "equity" else resolved
+
+
+def _smart_universe(exchange: str, limit: int = 25) -> list[str]:
+    """Return up to ``limit`` actively-traded pairs for the given exchange."""
+    try:
+        from src.utils.stats import StatsDB
+        db = StatsDB()
+        with db._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT pair, COUNT(*) AS n
+                FROM trades
+                WHERE exchange = %s
+                GROUP BY pair
+                ORDER BY n DESC
+                LIMIT %s
+                """,
+                (exchange, int(limit)),
+            ).fetchall()
+        out = [r["pair"] if isinstance(r, dict) else r[0] for r in rows]
+        if out:
+            return out
+    except Exception:
+        pass
+    # Fallback to followed pairs
+    try:
+        from src.utils.stats import StatsDB
+        return sorted(StatsDB().get_followed_pairs_set(exchange=exchange) or [])[:limit]
+    except Exception:
+        return []
+
+
+@activity.defn
+async def run_outcome_attribution(profile: str = "") -> dict:
+    """Phase 1: nightly Brier-score attribution per (feature, agent)."""
+    from src.utils.stats import StatsDB
+    from src.utils.attribution import compute_attribution
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        n = compute_attribution(db, exchange=exch, lookback_days=30)
+        return {"profile": profile, "exchange": exch, "rows_written": int(n)}
+    except Exception as e:
+        logger.warning(f"run_outcome_attribution failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_counterfactual_replay(profile: str = "") -> dict:
+    """Phase 1: replay strategist on historical contexts to detect drift."""
+    from src.utils.stats import StatsDB
+    from src.utils.attribution import replay_strategist
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        llm = _get_llm_client()
+        n = await replay_strategist(db, llm, exchange=exch, lookback_days=7, sample_size=30)
+        return {"profile": profile, "exchange": exch, "replays": int(n)}
+    except Exception as e:
+        logger.warning(f"run_counterfactual_replay failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_lead_lag_matrix(profile: str = "") -> dict:
+    """Phase 3: refit pairwise lead-lag OLS for the active universe."""
+    from src.utils.stats import StatsDB
+    from src.analysis.lead_lag import compute_lead_lag
+    exch = _smart_exchange(profile)
+    universe = _smart_universe(exch, limit=25)
+    db = StatsDB()
+    try:
+        n = compute_lead_lag(db, exchange=exch, universe=universe)
+        return {
+            "profile": profile, "exchange": exch,
+            "universe_size": len(universe), "edges_persisted": int(n),
+        }
+    except Exception as e:
+        logger.warning(f"run_lead_lag_matrix failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_event_calendar_sync(profile: str = "") -> dict:
+    """Phase 4: refresh upcoming macro / unlock / earnings events."""
+    from src.utils.stats import StatsDB
+    from src.news.event_calendar import fetch_and_persist_calendar
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        result = fetch_and_persist_calendar(db, exchange=exch)
+        return {"profile": profile, "exchange": exch, **(result if isinstance(result, dict) else {"persisted": result})}
+    except Exception as e:
+        logger.warning(f"run_event_calendar_sync failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_decision_drift(profile: str = "") -> dict:
+    """Phase 6: snapshot decision drift vs 30-day baseline."""
+    from src.utils.stats import StatsDB
+    from src.utils.decision_drift import compute_drift_snapshot
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        snap = compute_drift_snapshot(db, exchange=exch)
+        return {"profile": profile, "exchange": exch, "snapshot": snap}
+    except Exception as e:
+        logger.warning(f"run_decision_drift failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_reasoning_judge(profile: str = "") -> dict:
+    """Phase 6: LLM-judge a 1% sample of recent reasoning outputs."""
+    from src.utils.stats import StatsDB
+    from src.utils.llm_judge import sample_and_judge
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        llm = _get_llm_client()
+        n = await sample_and_judge(db, llm, exchange=exch, lookback_hours=24, sample_pct=0.01)
+        return {"profile": profile, "exchange": exch, "judged": int(n)}
+    except Exception as e:
+        logger.warning(f"run_reasoning_judge failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_onchain_sync(profile: str = "") -> dict:
+    """Phase 7: refresh on-chain signals (BTC hashrate, stablecoin supply, dominance)."""
+    from src.utils.stats import StatsDB
+    from src.news.onchain import fetch_and_persist_onchain
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        result = fetch_and_persist_onchain(db, exchange=exch)
+        return {"profile": profile, "exchange": exch, **(result if isinstance(result, dict) else {"persisted": result})}
+    except Exception as e:
+        logger.warning(f"run_onchain_sync failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}

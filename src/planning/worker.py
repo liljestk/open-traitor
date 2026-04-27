@@ -53,6 +53,13 @@ from src.planning.activities import (
     run_taxonomy_seed,
     run_correlation_matrix,
     run_cross_event_regressions,
+    run_outcome_attribution,
+    run_counterfactual_replay,
+    run_lead_lag_matrix,
+    run_event_calendar_sync,
+    run_decision_drift,
+    run_reasoning_judge,
+    run_onchain_sync,
 )
 from src.planning.workflows import (
     DailyPlanWorkflow,
@@ -63,6 +70,9 @@ from src.planning.workflows import (
     NightlyPriceBackfillWorkflow,
     FinetuneExportWorkflow,
     CrossAssetAnalyticsWorkflow,
+    SmartsNightlyWorkflow,
+    SmartsHourlyWorkflow,
+    SmartsJudgeWorkflow,
 )
 from src.planning.wfo_workflow import (
     WeeklyWFOWorkflow,
@@ -175,6 +185,25 @@ async def start_cron_schedules(client: temporalio.client.Client) -> None:
             "cron": "0 4 1 * *",
             "desc": "Monthly fine-tuning dataset export (1st of month, 04:00 UTC)",
         },
+        {
+            "workflow": SmartsNightlyWorkflow,
+            "id": "smarts-nightly",
+            # 03:30 UTC — after backfill (01:00) and analytics (02:15-02:30).
+            "cron": "30 3 * * *",
+            "desc": "Smarts nightly: attribution + replay + lead-lag + drift",
+        },
+        {
+            "workflow": SmartsHourlyWorkflow,
+            "id": "smarts-hourly",
+            "cron": "5 * * * *",
+            "desc": "Smarts hourly: event calendar + on-chain signals",
+        },
+        {
+            "workflow": SmartsJudgeWorkflow,
+            "id": "smarts-judge",
+            "cron": "45 */6 * * *",
+            "desc": "Smarts every-6h: LLM-judge sample of reasoning outputs",
+        },
     ]
 
     for profile in profiles:
@@ -212,7 +241,7 @@ async def main() -> None:
     async with temporalio.worker.Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, NightlyPriceBackfillWorkflow, FinetuneExportWorkflow, CrossAssetAnalyticsWorkflow],
+        workflows=[DailyPlanWorkflow, WeeklyReviewWorkflow, MonthlyReviewWorkflow, NightlyBacktestWorkflow, WeeklyWFOWorkflow, EventRegressionWorkflow, NightlyPriceBackfillWorkflow, FinetuneExportWorkflow, CrossAssetAnalyticsWorkflow, SmartsNightlyWorkflow, SmartsHourlyWorkflow, SmartsJudgeWorkflow],
         activities=[
             evaluate_previous_plan,
             fetch_trade_history,
@@ -233,6 +262,13 @@ async def main() -> None:
             run_taxonomy_seed,
             run_correlation_matrix,
             run_cross_event_regressions,
+            run_outcome_attribution,
+            run_counterfactual_replay,
+            run_lead_lag_matrix,
+            run_event_calendar_sync,
+            run_decision_drift,
+            run_reasoning_judge,
+            run_onchain_sync,
         ],
     ) as worker:
         logger.info("✅ Planning worker running — waiting for tasks...")

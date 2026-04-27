@@ -197,6 +197,27 @@ class Orchestrator:
         # Catalyst Pattern Engine — deterministic, no LLM call.
         from src.agents.pattern_agent import PatternAgent
         self.pattern_agent = PatternAgent(llm, self.state, config)
+        # Cross-Asset Engine — reactive + proactive cross-symbol signals.
+        # Optional Redis client lets the agent broadcast a live envelope
+        # to the dashboard WebSocket; never required for the trading loop.
+        from src.agents.cross_asset_agent import CrossAssetAgent
+        self.cross_asset_agent = CrossAssetAgent(
+            llm, self.state, config, redis_client=self.redis,
+        )
+        # Phase 8: shadow strategist — parallel variant logger, never trades.
+        # Configured via top-level ``shadow_strategists`` list (may be empty).
+        try:
+            from src.agents.shadow_strategist import ShadowStrategist
+            _shadow_variants = config.get("shadow_strategists") or []
+            _exch = config.get("trading", {}).get("exchange", "coinbase")
+            self.shadow_strategist = ShadowStrategist(
+                llm, getattr(self, "stats_db", None),
+                exchange=_exch,
+                variants=_shadow_variants,
+            )
+        except Exception as _se:
+            logger.warning(f"shadow_strategist init failed: {_se}")
+            self.shadow_strategist = None
         self.executor = ExecutorAgent(llm, self.state, config, exchange, rules, telegram=telegram_bot)
         self.settings_advisor = SettingsAdvisorAgent(
             llm, self.state, config, rules,

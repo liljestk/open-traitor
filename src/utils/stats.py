@@ -37,6 +37,8 @@ from src.utils.stats_patterns import PatternsMixin
 from src.utils.stats_labels import LabelsMixin
 from src.utils.stats_recommendations import RecommendationsMixin
 from src.utils.stats_correlations import CorrelationsMixin
+from src.utils.stats_news import NewsMixin
+from src.utils.stats_smarts import SmartsMixin
 
 logger = get_logger("stats")
 
@@ -89,6 +91,8 @@ class StatsDB(
     LabelsMixin,
     RecommendationsMixin,
     CorrelationsMixin,
+    NewsMixin,
+    SmartsMixin,
 ):
     """Thread-safe PostgreSQL statistics database.
 
@@ -389,6 +393,19 @@ class StatsDB(
             self._init_correlations_schema()
         except Exception as _e:
             logger.warning(f"Correlations schema init failed: {_e}")
+
+        # News articles + pgvector embeddings — same isolation contract.
+        try:
+            self._init_news_schema()
+        except Exception as _e:
+            logger.warning(f"News schema init failed: {_e}")
+
+        # Smarts feature set (bandit, attribution, lead-lag, calendar,
+        # drift, judge, L2 snapshots, on-chain, shadow). Same isolation.
+        try:
+            self._init_smarts_schema()
+        except Exception as _e:
+            logger.warning(f"Smarts schema init failed: {_e}")
 
     # Allowlist for DDL migrations — prevents any interpolation of
     # unexpected identifiers into ALTER TABLE statements (CRIT-2).

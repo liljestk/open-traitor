@@ -49,6 +49,13 @@ with workflow.unsafe.imports_passed_through():
         run_taxonomy_seed,
         run_correlation_matrix,
         run_cross_event_regressions,
+        run_outcome_attribution,
+        run_counterfactual_replay,
+        run_lead_lag_matrix,
+        run_event_calendar_sync,
+        run_decision_drift,
+        run_reasoning_judge,
+        run_onchain_sync,
     )
 
 
@@ -507,3 +514,62 @@ class CrossAssetAnalyticsWorkflow:
             "correlations": correlations,
             "cross_events": cross_events,
         }
+
+
+@workflow.defn
+class SmartsNightlyWorkflow:
+    """Phase 1/3/6 nightly: attribution + counterfactual + lead-lag + drift."""
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"SmartsNightlyWorkflow: starting (profile={profile!r})")
+        attribution = await workflow.execute_activity(
+            run_outcome_attribution, args=[profile],
+            start_to_close_timeout=timedelta(minutes=20), retry_policy=_RETRY,
+        )
+        replay = await workflow.execute_activity(
+            run_counterfactual_replay, args=[profile],
+            start_to_close_timeout=timedelta(minutes=30), retry_policy=_RETRY,
+        )
+        lead_lag = await workflow.execute_activity(
+            run_lead_lag_matrix, args=[profile],
+            start_to_close_timeout=timedelta(minutes=20), retry_policy=_RETRY,
+        )
+        drift = await workflow.execute_activity(
+            run_decision_drift, args=[profile],
+            start_to_close_timeout=timedelta(minutes=10), retry_policy=_RETRY,
+        )
+        return {"profile": profile, "attribution": attribution, "replay": replay,
+                "lead_lag": lead_lag, "drift": drift}
+
+
+@workflow.defn
+class SmartsHourlyWorkflow:
+    """Phase 4/7 hourly: macro/event-calendar refresh + on-chain signals."""
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"SmartsHourlyWorkflow: starting (profile={profile!r})")
+        events = await workflow.execute_activity(
+            run_event_calendar_sync, args=[profile],
+            start_to_close_timeout=timedelta(minutes=10), retry_policy=_RETRY,
+        )
+        onchain = await workflow.execute_activity(
+            run_onchain_sync, args=[profile],
+            start_to_close_timeout=timedelta(minutes=10), retry_policy=_RETRY,
+        )
+        return {"profile": profile, "events": events, "onchain": onchain}
+
+
+@workflow.defn
+class SmartsJudgeWorkflow:
+    """Phase 6 (every 6h): LLM-judge a sample of recent reasoning."""
+
+    @workflow.run
+    async def run(self, profile: str = "") -> dict:
+        workflow.logger.info(f"SmartsJudgeWorkflow: starting (profile={profile!r})")
+        judged = await workflow.execute_activity(
+            run_reasoning_judge, args=[profile],
+            start_to_close_timeout=timedelta(minutes=30), retry_policy=_RETRY,
+        )
+        return {"profile": profile, "judged": judged}

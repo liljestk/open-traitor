@@ -662,6 +662,11 @@ class NewsAggregator:
             except Exception as e:
                 logger.warning(f"Redis store failed: {e}")
 
+        # Persist to Postgres + compute embeddings (best-effort).
+        # Failures here NEVER block the in-memory / Redis cache path so the
+        # trading loop is independent of the news DB. See stats_news.py.
+        self._persist_to_db(self.articles)
+
         logger.info(
             f"📰 Total aggregated: {len(unique_articles)} articles from all sources"
         )
@@ -748,3 +753,56 @@ class NewsAggregator:
                 "rss_feeds": len(self.rss_feeds),
             },
         }
+
+    # ─── Postgres persistence + embeddings ────────────────────────────────
+
+    def _persist_to_db(self, articles: list[NewsArticle]) -> None:
+        """Best-effort persistence of articles + embeddings to Postgres.
+
+        Embeddings are computed inline via ``utils.embeddings.embed_text``,
+        which falls back to a deterministic hash when Ollama is offline so
+        the column is never NULL on a fresh insert. Failures are logged
+        and swallowed; the in-memory + Redis cache path is unaffected.
+        """
+        if not articles:
+            return
+        try:
+            from src.utils.stats import StatsDB
+            from src.utils.embeddings import embed_text
+        except Exception as e:
+            logger.debug(f"news persistence imports failed: {e}")
+            return
+        try:
+            db = StatsDB()
+        except Exception as e:
+            logger.debug(f"StatsDB unavailable for news persistence: {e}")
+            return
+
+        rows: list[dict] = []
+        for a in articles:
+            text = f"{a.title}\n{a.summary}".strip()
+            try:
+                emb = embed_text(text) if text else None
+            except Exception as e:
+                logger.debug(f"embed_text failed for {a.id}: {e}")
+                emb = None
+            rows.append({
+                "id": a.id,
+                "source": a.source,
+                "title": a.title,
+                "summary": a.summary,
+                "url": a.url,
+                "published": a.published,
+                "sentiment": a.sentiment,
+                "relevance_score": a.relevance_score,
+                "tickers": list(a.tags or []),
+                "embedding": emb,
+            })
+        try:
+            n = db.upsert_news_articles(
+                rows, profile=self.profile or "default",
+            )
+            if n:
+                logger.debug(f"📰 persisted {n} articles to Postgres")
+        except Exception as e:
+            logger.warning(f"news upsert failed (non-fatal): {e}")

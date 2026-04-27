@@ -17,6 +17,7 @@ import { useLiveStore } from '../store'
 const OUTCOME_CONFIG = {
   executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
   hold: { label: 'Hold', icon: PauseCircle, color: 'text-yellow-400', bg: 'bg-yellow-900/30 border-yellow-800/50' },
+  hold_fallback: { label: 'Hold (Fallback)', icon: PauseCircle, color: 'text-yellow-500', bg: 'bg-yellow-900/30 border-yellow-800/50' },
   rejected: { label: 'Rejected', icon: XCircle, color: 'text-red-400', bg: 'bg-red-900/30 border-red-800/50' },
   pending_approval: { label: 'Pending Approval', icon: Clock, color: 'text-blue-400', bg: 'bg-blue-900/30 border-blue-800/50' },
   execution_failed: { label: 'Execution Failed', icon: AlertTriangle, color: 'text-orange-400', bg: 'bg-orange-900/30 border-orange-800/50' },

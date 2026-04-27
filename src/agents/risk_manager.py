@@ -240,6 +240,11 @@ class RiskManagerAgent(BaseAgent):
         win_rate = context.get("win_rate", 0)
         avg_win = context.get("avg_win", 0)
         avg_loss = context.get("avg_loss", 0)
+        # Phase 5: sample size feeds shrinkage in shrunk-Kelly. Best-effort
+        # — defaults to a value that makes shrinkage neutral when missing.
+        kelly_samples = int(context.get("trade_count")
+                            or (context.get("kelly_stats") or {}).get("samples")
+                            or 100)
         correlation_matrix = context.get("correlation_matrix")
         signal_type = context.get("signal_type", "neutral")
         signal_type_win_rate = context.get("signal_type_win_rate")  # float | None
@@ -354,6 +359,28 @@ class RiskManagerAgent(BaseAgent):
 
         # Ensure stop-loss (tier-scaled)
         has_stop_loss = stop_loss is not None
+
+        # Phase 5: regime-conditioned stop tightening + CVaR-based widening.
+        # Both are best-effort and only narrow/widen the *clamped* stop pct
+        # within configured bands — they never bypass AbsoluteRules.
+        regime_label = (
+            (context.get("market_signal") or {}).get("market_condition")
+            or (context.get("strategy_signals") or {}).get("_ensemble", {}).get("market_regime")
+            or context.get("regime")
+            or "unknown"
+        )
+        # Correlation spike heuristic from cross_asset_signal (when present).
+        _ca = context.get("cross_asset_signal") or {}
+        _correlation_spike = bool(_ca.get("correlation_spike", False))
+        try:
+            from src.utils.cvar import regime_stop_multiplier as _stop_mult
+            _regime_mult = _stop_mult(
+                str(regime_label).lower(),
+                correlation_spike=_correlation_spike,
+            )
+        except Exception:
+            _regime_mult = 1.0
+
         if not has_stop_loss and action == "buy" and price > 0:
             if atr:
                 # P2: ATR-scaled stop with configurable multiplier and
@@ -365,10 +392,16 @@ class RiskManagerAgent(BaseAgent):
                     self.atr_stop_floor_pct,
                     min(raw_pct, self.atr_stop_ceiling_pct),
                 )
+                # Apply regime-conditioned multiplier within bands.
+                clamped_pct = max(
+                    self.atr_stop_floor_pct,
+                    min(clamped_pct * _regime_mult, self.atr_stop_ceiling_pct),
+                )
                 stop_loss = max(price * (1 - clamped_pct), 0.0)
                 self.logger.info(
                     f"Added ATR-based stop-loss ({self.atr_stop_mult}×ATR={float_atr:.2f}, "
-                    f"raw {raw_pct:.2%} → clamped {clamped_pct:.2%}): {stop_loss:,.2f}"
+                    f"raw {raw_pct:.2%} → clamped {clamped_pct:.2%}, "
+                    f"regime={regime_label} ×{_regime_mult:.2f}): {stop_loss:,.2f}"
                 )
             else:
                 stop_loss = price * (1 - effective_stop_loss_pct)
@@ -435,9 +468,24 @@ class RiskManagerAgent(BaseAgent):
             )
 
         if self.use_kelly and action == "buy" and portfolio_value > 0:
-            kelly_frac = self._compute_kelly_size(
-                portfolio_value, effective_win_rate, avg_win, avg_loss
-            )
+            # Phase 5: shrunk fractional-Kelly. Falls back to legacy half-Kelly
+            # via _compute_kelly_size when the helper returns 0 (e.g. no edge).
+            try:
+                from src.utils.cvar import shrunk_kelly
+                kelly_frac = shrunk_kelly(
+                    effective_win_rate, avg_win, avg_loss, kelly_samples,
+                    kelly_fraction=self.kelly_fraction,
+                    kelly_cap=float(self.risk_config.get("kelly_cap", 0.25)),
+                    shrinkage_n=float(self.risk_config.get("kelly_shrinkage_n", 50.0)),
+                )
+                if kelly_frac <= 0:
+                    kelly_frac = self._compute_kelly_size(
+                        portfolio_value, effective_win_rate, avg_win, avg_loss
+                    )
+            except Exception:
+                kelly_frac = self._compute_kelly_size(
+                    portfolio_value, effective_win_rate, avg_win, avg_loss
+                )
             # Cap Kelly by the tier's max_position_pct, not just config
             kelly_frac = min(kelly_frac, effective_max_position_pct)
             max_position = portfolio_value * kelly_frac

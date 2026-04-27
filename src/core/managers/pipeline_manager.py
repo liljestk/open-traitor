@@ -186,6 +186,25 @@ class PipelineManager:
         Phase 9: blends in ``QuantSubstrate.capital_allocator`` weights —
         gives self-learning capital flow influence over the ensemble.
         """
+        # Phase 1 (smarts): Thompson-sampling bandit overlay. Strict opt-in
+        # via top-level config ``smarts.use_bandit`` (default off so the
+        # rollout is gradual). Falls back to existing weights on any error.
+        bandit_weights: dict[str, float] | None = None
+        try:
+            cfg = getattr(self.orchestrator, "config", {}) or {}
+            if cfg.get("smarts", {}).get("use_bandit", False):
+                from src.utils.bandit import StrategyBandit
+                exch = cfg.get("trading", {}).get("exchange", "coinbase")
+                regime = (
+                    getattr(self.orchestrator.state, "market_regime", "unknown")
+                    or "unknown"
+                )
+                strats = list(self._STRATEGY_WEIGHTS.keys())
+                bandit_weights = StrategyBandit(
+                    self.orchestrator.stats_db, exchange=exch,
+                ).sample_weights(regime, strats)
+        except Exception:
+            bandit_weights = None
         try:
             lm = getattr(self.orchestrator, "learning_manager", None)
             if lm and lm.ensemble:
@@ -243,6 +262,22 @@ class PipelineManager:
                     base = tilted
         except Exception:
             pass
+
+        # Phase 1 (smarts): apply Thompson-sampled bandit weights as a
+        # multiplicative overlay [0.5, 1.5] so existing weights are not
+        # overridden — only re-weighted by recent performance.
+        if bandit_weights:
+            try:
+                n = max(len(bandit_weights), 1)
+                blended2: dict[str, float] = {}
+                for name, w in base.items():
+                    bw = bandit_weights.get(name, 1.0 / n)
+                    scale = max(0.5, min(1.5, bw * n))
+                    blended2[name] = w * scale
+                base = blended2
+            except Exception:
+                pass
+
         return base
 
     # Macro-regime → per-strategy multiplier table. Keys must be a subset of
@@ -811,6 +846,93 @@ class PipelineManager:
         except Exception as _pat_e:
             logger.debug(f"PatternAgent failed for {pair}: {_pat_e}")
 
+        # Step 2.55: Cross-Asset Engine — reactive (driver events about to
+        # fire on correlated symbols) + proactive (cluster-mate catalyst
+        # density). Always best-effort; failures NEVER halt the pipeline.
+        cross_asset_signal: dict = {"available": False, "reason": "not_run"}
+        try:
+            cross_asset_result = await orch.cross_asset_agent.execute({
+                "pair": pair,
+                "exchange": exchange_name,
+                "stats_db": orch.stats_db,
+                "cycle_id": cycle_id,
+            })
+            cross_asset_signal = cross_asset_result.get(
+                "cross_asset_signal", cross_asset_signal,
+            )
+        except Exception as _ca_e:
+            logger.debug(f"CrossAssetAgent failed for {pair}: {_ca_e}")
+
+        # Step 2.56: Smarts decision-time priors — best-effort, all isolated.
+        # ``news_knn_prior``: pgvector kNN over news_articles → forward-drift
+        # ``lead_lag``: significant leaders for this follower
+        # ``upcoming_events``: ≤72h forward catalysts
+        # ``onchain_now``: latest BTC dominance / stablecoin supply snapshot
+        smarts_prior: dict = {"available": False, "reason": "not_run"}
+        try:
+            from src.utils.news_knn import news_knn_prior
+            from datetime import datetime as _dt, timedelta as _td
+            # Grab a small sample of headlines for this pair as the kNN query.
+            try:
+                _articles = orch.stats_db.get_news_for_pair(
+                    pair=pair, exchange=exchange_name, limit=5,
+                ) if hasattr(orch.stats_db, "get_news_for_pair") else []
+            except Exception:
+                _articles = []
+            _query = " ".join(
+                (a.get("title") or "")[:200] for a in (_articles or [])[:5]
+            ).strip() or pair
+            smarts_prior = news_knn_prior(
+                orch.stats_db,
+                exchange=exchange_name,
+                pair=pair,
+                query_text=_query,
+                horizon_hours=24,
+                k=10,
+            )
+        except Exception as _kp_e:
+            logger.debug(f"news_knn_prior failed for {pair}: {_kp_e}")
+
+        lead_lag_signals: list[dict] = []
+        try:
+            if hasattr(orch.stats_db, "get_lead_lag_for"):
+                lead_lag_signals = orch.stats_db.get_lead_lag_for(
+                    exchange_name, pair, min_abs_t=2.0,
+                )[:5]
+        except Exception as _ll_e:
+            logger.debug(f"lead_lag fetch failed for {pair}: {_ll_e}")
+
+        upcoming_events: list[dict] = []
+        try:
+            if hasattr(orch.stats_db, "get_upcoming_events"):
+                upcoming_events = orch.stats_db.get_upcoming_events(
+                    exchange_name, symbol=pair, within_hours=72, min_importance=2,
+                )
+        except Exception as _ue_e:
+            logger.debug(f"upcoming_events fetch failed for {pair}: {_ue_e}")
+
+        onchain_now: dict = {"available": False}
+        try:
+            if hasattr(orch.stats_db, "get_recent_onchain"):
+                _btc_dom = orch.stats_db.get_recent_onchain(
+                    exchange_name, "BTC", "market_cap_dominance_pct", limit=2,
+                )
+                _usdt = orch.stats_db.get_recent_onchain(
+                    exchange_name, "USDT", "supply_usd", limit=2,
+                )
+                if _btc_dom or _usdt:
+                    onchain_now = {
+                        "available": True,
+                        "btc_dominance_pct": (
+                            _btc_dom[0].get("value") if _btc_dom else None
+                        ),
+                        "usdt_supply_usd": (
+                            _usdt[0].get("value") if _usdt else None
+                        ),
+                    }
+        except Exception as _oc_e:
+            logger.debug(f"onchain fetch failed: {_oc_e}")
+
         # Step 2.6: Regression factor — turns nightly OLS fits into a real
         # bounded sizing multiplier (formerly observational only). Strict
         # opt-in via REGRESSION_RISK_FACTOR_ENABLED env or per-profile
@@ -907,6 +1029,11 @@ class PipelineManager:
             "exchange": exchange_name,
             "pattern_signal": pattern_signal,
             "regression_factor": regression_factor,
+            "cross_asset_signal": cross_asset_signal,
+            "news_knn_prior": smarts_prior,
+            "lead_lag_signals": lead_lag_signals,
+            "upcoming_events": upcoming_events,
+            "onchain_now": onchain_now,
         }
 
         strategy_result: dict | None = None
@@ -928,6 +1055,11 @@ class PipelineManager:
                     "strategy_signals": strategy_signals,
                     "pattern_signal": pattern_signal,
                     "regression_factor": regression_factor,
+                    "cross_asset_signal": cross_asset_signal,
+                    "news_knn_prior": smarts_prior,
+                    "lead_lag_signals": lead_lag_signals,
+                    "upcoming_events": upcoming_events,
+                    "onchain_now": onchain_now,
                     "sentiment": sentiment_data,
                     "news_headlines": news_headlines,
                     "fee_context": fee_context,
@@ -961,6 +1093,21 @@ class PipelineManager:
         # previously ran on every cycle just to be discarded.
         if strategy_result is None:
             strategy_result = await orch.strategist.execute(_strategist_inputs)
+
+        # Phase 8: shadow strategist — fire-and-forget variant logging.
+        # Never blocks the live decision and never executes a trade.
+        try:
+            shadow = getattr(orch, "shadow_strategist", None)
+            if shadow is not None and getattr(shadow, "variants", None):
+                asyncio.create_task(shadow.shadow(
+                    cycle_id=cycle_id,
+                    pair=pair,
+                    live_action=strategy_result.get("action"),
+                    live_confidence=strategy_result.get("confidence"),
+                    context=_strategist_inputs,
+                ))
+        except Exception as _shd_e:
+            logger.debug(f"shadow strategist dispatch failed: {_shd_e}")
 
         if strategy_result.get("action") == "hold":
             _timings["strategist"] = time.monotonic() - _step_t
@@ -1028,6 +1175,9 @@ class PipelineManager:
             # the nightly OLS event-price fits (no-op when disabled or
             # no imminent matching catalyst). See analysis/regression_factor.py.
             "regression_factor": regression_factor,
+            # Cross-asset signal — reactive driver-event drift estimate
+            # plus proactive cluster-mate catalyst density. Advisory only.
+            "cross_asset_signal": cross_asset_signal,
             # Phase 6/9: per-profile quant substrate so the risk manager
             # can honour the capital-allocator's strategy budget when the
             # proposal didn't already carry one.
@@ -1265,6 +1415,11 @@ class PipelineManager:
         _step_t = time.monotonic()
         exec_result = await orch.executor.execute({
             "approved_trade": risk_result,
+            "cross_asset_signal": cross_asset_signal,
+            "news_knn_prior": smarts_prior,
+            "lead_lag_signals": lead_lag_signals,
+            "upcoming_events": upcoming_events,
+            "cycle_id": cycle_id,
         })
 
         if exec_result.get("executed"):

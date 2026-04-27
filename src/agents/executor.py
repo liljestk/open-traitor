@@ -213,6 +213,45 @@ class ExecutorAgent(BaseAgent):
         confidence = trade_info.get("confidence", 0)
         reasoning = trade_info.get("reasoning", "")
 
+        # Phase 3: cross-asset signal → sizing & limit-aggression nudges.
+        # ``cross_asset_signal`` arrives in context (set by pipeline_manager).
+        # Bounded multiplier in [0.7, 1.3] so it can never blow up sizing.
+        # Direction-aligned signals widen the limit offset so we get fills
+        # before the cluster move; opposed signals tighten and shrink size.
+        ca = (context.get("cross_asset_signal") or {})
+        if ca.get("available") and action in ("buy", "sell"):
+            try:
+                drift = float(
+                    (ca.get("expected_drift") or {}).get("mean") or 0.0
+                )
+            except (TypeError, ValueError):
+                drift = 0.0
+            ca_dir = (ca.get("direction") or "neutral").lower()
+            aligned = (
+                (action == "buy" and (ca_dir in ("long", "bullish")))
+                or (action == "sell" and (ca_dir in ("short", "bearish")))
+            )
+            opposed = (
+                (action == "buy" and ca_dir in ("short", "bearish"))
+                or (action == "sell" and ca_dir in ("long", "bullish"))
+            )
+            # Multiplier in [0.7, 1.3]: bounded by 5× drift magnitude clamp.
+            ca_mult = 1.0 + max(-0.30, min(0.30, drift * 5.0))
+            if opposed:
+                ca_mult = min(ca_mult, 0.85)
+            elif aligned:
+                ca_mult = max(ca_mult, 1.05)
+            else:
+                ca_mult = 1.0
+            if abs(ca_mult - 1.0) > 0.02:
+                quote_amount = float(quote_amount) * ca_mult
+                if quantity:
+                    quantity = float(quantity) * ca_mult
+                self.logger.info(
+                    f"🔗 cross_asset sizing: {pair} {action} ×{ca_mult:.2f} "
+                    f"(direction={ca_dir}, drift={drift:.4f})"
+                )
+
         use_limit = self._should_use_limit(trade_info)
 
         # H4: Validate price is positive before using it for calculations
@@ -259,6 +298,53 @@ class ExecutorAgent(BaseAgent):
                     f"📐 SmartExecution accepted {pair} buy: "
                     f"slices={len(smart_plan.children)} notes={smart_plan.notes}"
                 )
+
+        # Phase 7: persist L2 snapshot at decision time so we can backtest
+        # microstructure-aware execution later. Best-effort; never blocks.
+        try:
+            if (
+                action == "buy"
+                and self.stats_db is not None
+                and hasattr(self.exchange, "get_product_book")
+                and hasattr(self.stats_db, "write_l2_snapshot")
+            ):
+                book = self.exchange.get_product_book(pair, level=2) or {}
+                bids = book.get("bids") or []
+                asks = book.get("asks") or []
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
+                    mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else None
+                    spread_bps = (
+                        ((best_ask - best_bid) / mid) * 10000.0
+                        if (mid and mid > 0)
+                        else None
+                    )
+                    bid_depth_5 = sum(float(b[1]) for b in bids[:5])
+                    ask_depth_5 = sum(float(a[1]) for a in asks[:5])
+                    obi = (
+                        (bid_depth_5 - ask_depth_5)
+                        / (bid_depth_5 + ask_depth_5)
+                        if (bid_depth_5 + ask_depth_5) > 0
+                        else None
+                    )
+                    exch = getattr(self.exchange, "name", None) or context.get(
+                        "exchange", "coinbase"
+                    )
+                    self.stats_db.write_l2_snapshot(
+                        exchange=exch, symbol=pair, snap={
+                            "cycle_id": context.get("cycle_id"),
+                            "mid": mid,
+                            "spread_bps": spread_bps,
+                            "bid_depth_5": bid_depth_5,
+                            "ask_depth_5": ask_depth_5,
+                            "obi": obi,
+                            "bids": bids,
+                            "asks": asks,
+                        },
+                    )
+        except Exception as _l2_e:
+            self.logger.debug(f"L2 snapshot persist skipped: {_l2_e}")
 
         # Create Trade record
         trade = Trade(

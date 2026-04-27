@@ -22,6 +22,7 @@ downstream.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -35,12 +36,14 @@ logger = get_logger("agent.cross_asset")
 _MIN_R2: float = 0.05
 _MIN_SAMPLES: int = 6
 _MAX_REACTIVE_SIGNALS: int = 5
+# Redis pub/sub channel — dashboard/WebSocket subscriber tags & forwards.
+_REDIS_CHANNEL: str = "cross_asset:signals"
 
 
 class CrossAssetAgent(BaseAgent):
     """Reactive + proactive cross-asset reaction signal producer."""
 
-    def __init__(self, llm, state, config):
+    def __init__(self, llm, state, config, *, redis_client=None):
         super().__init__("cross_asset_agent", llm, state, config)
         ccfg = (config.get("cross_asset_engine") or {})
         self.enabled: bool = bool(ccfg.get("enabled", True))
@@ -49,6 +52,13 @@ class CrossAssetAgent(BaseAgent):
         self.min_r2: float = float(ccfg.get("min_r2", _MIN_R2))
         self.min_samples: int = int(ccfg.get("min_samples", _MIN_SAMPLES))
         self.preferred_horizon_days: int = int(ccfg.get("preferred_horizon_days", 5))
+        # Opt-in: ask the LLM to write a 1-2 sentence narrative over the
+        # signal payload. Off by default — keeps trading loop deterministic.
+        self.narrate_with_llm: bool = bool(ccfg.get("narrate_with_llm", False))
+        self.narrative_max_tokens: int = int(ccfg.get("narrative_max_tokens", 220))
+        # Optional Redis client for live WebSocket broadcast — agent works
+        # fully without it (per AGENTS.MD: Redis is never a hard dep).
+        self.redis = redis_client
 
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
@@ -103,11 +113,21 @@ class CrossAssetAgent(BaseAgent):
             "cluster_mates": cluster_mates,
             "computed_at": now.isoformat(),
         }
+        # Optional LLM narrative (best-effort; never blocks the signal).
+        if self.narrate_with_llm:
+            try:
+                narrative = await self._narrate(payload)
+                if narrative:
+                    payload["narrative"] = narrative
+            except Exception as e:
+                self.logger.debug(f"narrate failed for {pair}: {e}")
         self.logger.info(
             f"🔗 {pair}: cross_asset={direction} drift={net_drift:+.4f} "
             f"reactive={len(reactive_signals)} "
             f"proactive_density={proactive['upcoming_count']}"
         )
+        # Live broadcast for the dashboard.
+        self._publish(payload)
         return {"cross_asset_signal": payload}
 
     # ─── Reactive ────────────────────────────────────────────────────────
@@ -254,3 +274,94 @@ class CrossAssetAgent(BaseAgent):
             "horizon_days": self.proactive_horizon_days,
             "events": upcoming[:10],
         }
+
+    # ─── LLM narrative (opt-in) ──────────────────────────────────────────
+
+    async def _narrate(self, payload: dict[str, Any]) -> Optional[str]:
+        """Best-effort 1-2 sentence English summary of the signal payload.
+
+        Returns None if the LLM is unavailable, the call fails, or the
+        result is empty. The trading loop never depends on this output.
+        """
+        if self.llm is None:
+            return None
+        try:
+            available = bool(self.llm.is_available())
+        except Exception:
+            available = False
+        if not available:
+            return None
+
+        # Compact, deterministic prompt.
+        reactive = payload.get("reactive") or []
+        proactive = payload.get("proactive") or {}
+        compact = {
+            "target": payload.get("target"),
+            "direction": payload.get("direction"),
+            "expected_drift": payload.get("expected_drift"),
+            "reactive_top": [
+                {
+                    "driver": s.get("driver_symbol"),
+                    "event": s.get("driver_event_type"),
+                    "days_to_event": s.get("days_to_event"),
+                    "expected_drift": s.get("expected_drift"),
+                    "r2": s.get("r_squared"),
+                    "n": s.get("sample_count"),
+                }
+                for s in reactive[:3]
+            ],
+            "proactive_count": proactive.get("upcoming_count", 0),
+            "proactive_top": (proactive.get("events") or [])[:3],
+            "cluster_mates": (payload.get("cluster_mates") or [])[:6],
+        }
+        system_prompt = (
+            "You are an unbiased market microstructure analyst. "
+            "Given a JSON cross-asset signal payload, write a single 1-2 "
+            "sentence English summary that names the driver(s), expected "
+            "direction, and time horizon. Be concrete; never speculate. "
+            "If the signal is weak, say so."
+        )
+        try:
+            txt = await self.llm.chat(
+                system_prompt=system_prompt,
+                user_message=json.dumps(compact, default=str),
+                max_tokens=self.narrative_max_tokens,
+                temperature=0.2,
+                agent_name=self.name,
+                priority="low",
+            )
+        except Exception as e:
+            self.logger.debug(f"llm.chat narrate failed: {e}")
+            return None
+        if not txt:
+            return None
+        s = str(txt).strip()
+        return s or None
+
+    # ─── Redis broadcast ─────────────────────────────────────────────────
+
+    def _publish(self, payload: dict[str, Any]) -> None:
+        """Publish a small envelope to Redis for the WebSocket subscriber.
+
+        Failures are swallowed — Redis is never a hard dep on the trading
+        loop (per AGENTS.MD).
+        """
+        if self.redis is None:
+            return
+        try:
+            envelope = {
+                "type": "cross_asset_signal",
+                "exchange": payload.get("exchange"),
+                "target": payload.get("target"),
+                "direction": payload.get("direction"),
+                "expected_drift": payload.get("expected_drift"),
+                "reactive_n": len(payload.get("reactive") or []),
+                "proactive_n": int(
+                    (payload.get("proactive") or {}).get("upcoming_count") or 0
+                ),
+                "narrative": payload.get("narrative"),
+                "ts": payload.get("computed_at"),
+            }
+            self.redis.publish(_REDIS_CHANNEL, json.dumps(envelope, default=str))
+        except Exception as e:
+            self.logger.debug(f"redis publish cross_asset failed: {e}")

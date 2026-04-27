@@ -246,8 +246,8 @@ async def redis_subscriber():
         try:
             async_redis = aioredis.from_url(redis_url)
             pubsub = async_redis.pubsub()
-            await pubsub.subscribe("llm:events")
-            logger.info("Subscribed to Redis llm:events")
+            await pubsub.subscribe("llm:events", "cross_asset:signals")
+            logger.info("Subscribed to Redis llm:events + cross_asset:signals")
             backoff = 1.0  # Reset on successful connect
 
             async for message in pubsub.listen():
@@ -257,6 +257,13 @@ async def redis_subscriber():
                     payload = json.loads(message["data"])
                 except Exception:
                     continue
+
+                # Tag cross-asset envelopes so frontend can route by type.
+                channel = message.get("channel")
+                if isinstance(channel, (bytes, bytearray)):
+                    channel = channel.decode("utf-8", errors="ignore")
+                if channel == "cross_asset:signals" and "type" not in payload:
+                    payload["type"] = "cross_asset_signal"
 
                 # Extract exchange from event for profile filtering
                 event_exchange = (payload.get("exchange") or "").lower()
@@ -278,7 +285,7 @@ async def redis_subscriber():
         except asyncio.CancelledError:
             # Graceful shutdown
             try:
-                await pubsub.unsubscribe("llm:events")
+                await pubsub.unsubscribe("llm:events", "cross_asset:signals")
                 await async_redis.aclose()
             except Exception:
                 pass

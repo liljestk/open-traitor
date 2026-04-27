@@ -13,7 +13,7 @@
  */
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Network, RefreshCw, Search, AlertCircle, ArrowRight, Layers, Activity } from 'lucide-react'
+import { Network, RefreshCw, Search, ArrowRight, Layers, Activity } from 'lucide-react'
 import {
   fetchAssetClusters,
   fetchAssetCorrelations,
@@ -21,7 +21,6 @@ import {
   fetchCascade,
   type AssetCluster,
   type AssetCorrelationRow,
-  type CrossEventRegressionRow,
   type CascadePrediction,
 } from '../api'
 import { useLiveStore } from '../store'
@@ -211,7 +210,7 @@ function ClustersTab({ clusters }: { clusters: AssetCluster[] }) {
   if (clusters.length === 0) {
     return (
       <EmptyState
-        icon={<Layers size={28} className="text-gray-600" />}
+        icon="chart"
         title="No clusters yet"
         description="Run the CrossAssetAnalyticsWorkflow (cron 02:15 UTC) or wait for tonight's snapshot."
       />
@@ -258,7 +257,7 @@ function CorrelationsTab({ rows }: { rows: AssetCorrelationRow[] }) {
   if (rows.length === 0) {
     return (
       <EmptyState
-        icon={<Activity size={28} className="text-gray-600" />}
+        icon="chart"
         title="No correlation rows"
         description="Tonight's correlation matrix has not been computed yet."
       />
@@ -356,7 +355,7 @@ function CascadeTab({
 
       {!selectedDriver && (
         <EmptyState
-          icon={<ArrowRight size={28} className="text-gray-600" />}
+          icon="search"
           title="Pick a driver event to see predicted reactions"
           description="The cascade view shows persisted cross-event regression predictions per related symbol."
         />
@@ -366,7 +365,7 @@ function CascadeTab({
 
       {selectedDriver && !isLoading && data.length === 0 && (
         <EmptyState
-          icon={<AlertCircle size={28} className="text-gray-600" />}
+          icon="chart"
           title="No predictions for this driver/horizon"
           description="No (target, horizon) pairs survived the min_samples filter."
         />
