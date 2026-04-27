@@ -212,6 +212,12 @@ class ReasoningMixin:
         # Check agent spans for more specific outcomes
         risk_span = next((s for s in spans_list if s["agent_name"] == "risk_manager"), None)
         strategist_span = next((s for s in spans_list if s["agent_name"] == "strategist"), None)
+        # ``trader`` is the autonomous LLM operator that replaced ``strategist``
+        # in the live decision path. Treat it as the strategy span when present
+        # so the dashboard can surface its verdict instead of the legacy
+        # "No strategy generated" placeholder.
+        trader_span = next((s for s in spans_list if s["agent_name"] == "trader"), None)
+        strategy_span = strategist_span or trader_span
 
         if trade_row:
             decision_outcome = "executed"
@@ -227,11 +233,38 @@ class ReasoningMixin:
             else:
                 decision_outcome = "execution_failed"
                 decision_reason = "Risk manager approved but trade was not recorded."
-        elif strategist_span:
-            rj = strategist_span.get("reasoning_json") or {}
-            if rj.get("action") == "hold":
+        elif strategy_span:
+            rj = strategy_span.get("reasoning_json") or {}
+            action = (rj.get("action") or "").lower()
+            verdict = rj.get("decision_engine_verdict") or rj.get("verdict") or {}
+            if action == "hold":
                 decision_outcome = "hold"
-                decision_reason = rj.get("reasoning") or rj.get("reason") or "Strategist recommended hold."
+                decision_reason = (
+                    rj.get("reason")
+                    or rj.get("reasoning")
+                    or "Trader recommended hold."
+                )
+            elif verdict and not verdict.get("approved", True):
+                decision_outcome = "rejected"
+                veto = verdict.get("veto") or "decision_engine"
+                reasons = verdict.get("reasons") or []
+                decision_reason = (
+                    f"Vetoed by DecisionEngine ({veto}): "
+                    + ("; ".join(str(r) for r in reasons) if reasons else "no detail")
+                )
+            else:
+                # Trader/strategist approved a buy/sell but neither a risk
+                # span nor a trade row exists. This was the silent-drop bug
+                # where RiskManager early-returned (e.g. "No valid trade
+                # amount specified") without persisting a span. Surface the
+                # trader's proposed action plus a hint at the missing stage.
+                decision_outcome = "execution_failed"
+                proposed = (action or rj.get("decision_engine_verdict", {}).get("action") or "trade")
+                decision_reason = (
+                    f"Trader proposed {proposed.upper()} but no risk_manager "
+                    "span or trade was recorded — pipeline aborted before "
+                    "execution. Check the agent worker logs for this cycle."
+                )
         else:
             decision_outcome = "hold"
             decision_reason = "No strategy generated."

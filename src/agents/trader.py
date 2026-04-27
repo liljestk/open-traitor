@@ -203,6 +203,24 @@ class TraderAgent(BaseAgent):
         result.setdefault("action", verdict["action"])
         result.setdefault("confidence", float(proposal.get("confidence", 0.0) or 0.0))
         result["decision_engine_verdict"] = verdict
+
+        # Sizing fallback: an LLM proposal that omits quote_amount/quantity
+        # would otherwise be silently rejected downstream by RiskManager
+        # ("No valid trade amount specified"). The DecisionEngine has already
+        # computed the allocator-bounded ceiling — use it as the size when
+        # the LLM left sizing to the toolkit. Risk manager will re-clamp.
+        if verdict["approved"] and result.get("action") == "buy":
+            qa = _optional_float(result.get("quote_amount"))
+            qty = _optional_float(result.get("quantity"))
+            if (qa is None or qa <= 0) and (qty is None or qty <= 0):
+                cap = _optional_float(verdict.get("quote_amount_max"))
+                if cap is not None and cap > 0:
+                    result["quote_amount"] = cap
+                    self.logger.info(
+                        f"Trader sizing fallback: quote_amount=null → "
+                        f"allocator_cap {cap:.2f} for {ctx.pair}"
+                    )
+
         if not verdict["approved"]:
             result["action"] = "hold"
             result["reason"] = (

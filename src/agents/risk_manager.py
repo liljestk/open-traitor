@@ -238,6 +238,28 @@ class RiskManagerAgent(BaseAgent):
         stats_db = context.get("stats_db")
         exchange = context.get("exchange", "coinbase")
         win_rate = context.get("win_rate", 0)
+
+        def _reject(result: dict[str, Any]) -> dict[str, Any]:
+            """Return ``result`` after persisting a ``risk_manager`` reasoning
+            span. Ensures rejection paths are always visible on the dashboard
+            instead of silently disappearing into the cycle (only the trader
+            span would otherwise be persisted, leaving the UI to render
+            'No strategy generated')."""
+            if stats_db and cycle_id:
+                try:
+                    stats_db.save_reasoning(
+                        cycle_id=cycle_id,
+                        pair=result.get("pair") or proposal.get("pair") or "?",
+                        agent_name="risk_manager",
+                        reasoning_json=result,
+                        signal_type=result.get("action") or proposal.get("action") or "hold",
+                        confidence=float(proposal.get("confidence", 0) or 0),
+                        exchange=exchange,
+                    )
+                except Exception as _e:  # pragma: no cover — diagnostics only
+                    self.logger.debug(f"Failed to persist risk_manager rejection: {_e}")
+            return result
+
         avg_win = context.get("avg_win", 0)
         avg_loss = context.get("avg_loss", 0)
         # Phase 5: sample size feeds shrinkage in shrunk-Kelly. Best-effort
@@ -265,7 +287,7 @@ class RiskManagerAgent(BaseAgent):
                 f"🚫 Trade rejected: confidence {proposal_confidence:.0%} "
                 f"below minimum {min_signal_confidence:.0%}"
             )
-            return {
+            return _reject({
                 "approved": False,
                 "action": action,
                 "pair": proposal.get("pair", "?"),
@@ -273,7 +295,7 @@ class RiskManagerAgent(BaseAgent):
                     f"Signal confidence {proposal_confidence:.0%} below "
                     f"minimum {min_signal_confidence:.0%} — not worth the fee risk"
                 ),
-            }
+            })
         # ─── High-conviction-only modifier ───────────────────────
         # Reject anything weaker than strong_buy / strong_sell.
         if "high_conviction_only" in self._style_modifiers and action == "buy":
@@ -281,7 +303,7 @@ class RiskManagerAgent(BaseAgent):
                 self.logger.info(
                     f"🚫 High-conviction-only: rejecting {signal_type} signal for {proposal.get('pair', '?')}"
                 )
-                return {
+                return _reject({
                     "approved": False,
                     "action": action,
                     "pair": proposal.get("pair", "?"),
@@ -289,7 +311,7 @@ class RiskManagerAgent(BaseAgent):
                         f"Style modifier 'high_conviction_only' active — "
                         f"{signal_type} rejected (only strong_buy/strong_sell allowed)"
                     ),
-                }
+                })
         # ─── Portfolio-tier scaling ───────────────────────────────
         # Override static config values with tier-appropriate ones.
         if self.scaler and portfolio_value > 0:
@@ -331,11 +353,15 @@ class RiskManagerAgent(BaseAgent):
 
         # If still no amount, reject
         if quote_amount <= 0:
-            return {
+            return _reject({
                 "approved": False,
                 "action": action,
-                "reason": "No valid trade amount specified",
-            }
+                "pair": pair,
+                "reason": (
+                    "No valid trade amount specified "
+                    "(strategist/trader returned quote_amount=null and quantity=0)"
+                ),
+            })
 
         # Enforce max_open_positions for buy orders (tier-scaled)
         if action == "buy":
@@ -346,7 +372,7 @@ class RiskManagerAgent(BaseAgent):
                     f"🚫 Trade rejected: {current_positions} open positions "
                     f"(max {max_positions})"
                 )
-                return {
+                return _reject({
                     "approved": False,
                     "action": action,
                     "pair": pair,
@@ -355,7 +381,7 @@ class RiskManagerAgent(BaseAgent):
                         f"Max open positions reached ({current_positions}/{max_positions}). "
                         f"Close an existing position before opening a new one."
                     ),
-                }
+                })
 
         # Ensure stop-loss (tier-scaled)
         has_stop_loss = stop_loss is not None
@@ -442,14 +468,14 @@ class RiskManagerAgent(BaseAgent):
         if not is_allowed:
             violation_text = "; ".join(str(v) for v in violations)
             self.logger.warning(f"🚫 Trade REJECTED by absolute rules: {violation_text}")
-            return {
+            return _reject({
                 "approved": False,
                 "action": action,
                 "pair": pair,
                 "quote_amount": quote_amount,
                 "reason": f"Absolute rule violation: {violation_text}",
                 "violations": [str(v) for v in violations],
-            }
+            })
 
         # ===== POSITION SIZING (tier-scaled) =====
         # Step 1: Kelly Criterion — use signal-type-specific win rate for strong signals
@@ -692,7 +718,7 @@ class RiskManagerAgent(BaseAgent):
                         f"🚫 Exposure cap reached: {existing_exposure:,.2f} / "
                         f"{exposure_cap:,.2f} ({max_total_exposure_pct:.0%}) — rejecting buy"
                     )
-                    return {
+                    return _reject({
                         "approved": False,
                         "action": action,
                         "pair": pair,
@@ -701,7 +727,7 @@ class RiskManagerAgent(BaseAgent):
                             f"Portfolio exposure cap reached "
                             f"({existing_exposure:,.2f} / {exposure_cap:,.2f})"
                         ),
-                    }
+                    })
                 original = quote_amount
                 quote_amount = headroom
                 self.logger.info(
