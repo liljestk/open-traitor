@@ -17,7 +17,7 @@ ENV npm_config_prefer_offline=true \
     npm_config_fetch_retries=2 \
     npm_config_fetch_retry_mintimeout=10000 \
     npm_config_fetch_retry_maxtimeout=60000 \
-    NODE_OPTIONS="--max-old-space-size=2048"
+    NODE_OPTIONS="--max-old-space-size=4096"
 
 COPY dashboard/frontend/package.json dashboard/frontend/package-lock.json ./
 RUN npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund

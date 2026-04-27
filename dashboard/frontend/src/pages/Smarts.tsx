@@ -7,7 +7,7 @@
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Brain, Activity, Calendar, GitCompare, Eye, Zap, RefreshCw } from 'lucide-react'
+import { Brain, Activity, Calendar, GitCompare, Eye, Zap } from 'lucide-react'
 import {
   fetchSmartsFeatureBrier,
   fetchSmartsBandit,
