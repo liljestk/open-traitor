@@ -829,6 +829,17 @@ class Orchestrator:
             logger.info(msg)
             self.chat_handler.queue_event(msg, severity="info")
 
+    def bump_heartbeat(self) -> None:
+        """Refresh the cycle watchdog heartbeat. Safe to call from any thread or
+        asyncio task. Pipelines/managers should call this between long-running
+        sub-steps (per-pair pipeline, screener pass, batched LLM call) so the
+        watchdog only fires on genuine hangs rather than long-but-progressing
+        cycles."""
+        try:
+            self._cycle_heartbeat = time.monotonic()
+        except Exception:
+            pass
+
     def _start_cycle_watchdog(self, timeout_s: float) -> None:
         """Start a background watchdog that force-exits the process if the
         main trading loop stops updating its heartbeat. Docker's
@@ -1128,7 +1139,7 @@ class Orchestrator:
         _watchdog_timeout = float(
             self.config.get("health", {}).get(
                 "cycle_watchdog_timeout_s",
-                max(self.interval * 4, 600),
+                max(self.interval * 8, 1800),
             )
         )
         self._start_cycle_watchdog(_watchdog_timeout)

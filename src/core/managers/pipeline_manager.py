@@ -414,6 +414,13 @@ class PipelineManager:
         """Run the full analysis → strategy → risk → execute pipeline for a pair asynchronously."""
         # Unpack dependencies from orchestrator for brevity
         orch = self.orchestrator
+        # Refresh cycle watchdog heartbeat: per-pair work means the cycle is
+        # making progress even if the total wall-clock exceeds a single
+        # watchdog window (e.g. screener + many pairs + slow LLM provider).
+        try:
+            orch.bump_heartbeat()
+        except Exception:
+            pass
         _t0 = time.monotonic()  # wall-clock start
         _timings: dict[str, float] = {}  # step → seconds
         
