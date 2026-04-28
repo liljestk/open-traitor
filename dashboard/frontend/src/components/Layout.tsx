@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, Crosshair, MoreHorizontal, X, Cpu, Sparkles, Brain, Lightbulb, Network } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, MoreHorizontal, X, Cpu, Sparkles, Brain, Lightbulb } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
 import RegimeBadge from './RegimeBadge'
@@ -27,11 +27,8 @@ const NAV = [
       { to: '/', icon: <BarChart2 size={16} />, label: 'Cycle Explorer' },
       { to: '/trades', icon: <List size={16} />, label: 'Trades Log' },
       { to: '/analytics', icon: <TrendingUp size={16} />, label: 'Analytics' },
-      { to: '/predictions', icon: <Crosshair size={16} />, label: 'Predictions' },
-      { to: '/patterns', icon: <Sparkles size={16} />, label: 'Patterns' },
-      { to: '/regression', icon: <Brain size={16} />, label: 'Regression AI' },
-      { to: '/cross-asset', icon: <Network size={16} />, label: 'Cross-Asset' },
-      { to: '/smarts', icon: <Brain size={16} />, label: 'Smarts' },
+      { to: '/intelligence', icon: <Brain size={16} />, label: 'Model Intelligence' },
+      { to: '/smarts', icon: <Sparkles size={16} />, label: 'Advanced Analytics' },
       { to: '/recommendations', icon: <Lightbulb size={16} />, label: 'Recommendations' },
       { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
@@ -64,11 +61,12 @@ const PAGE_TITLES: Record<string, string> = {
   '/': 'Cycle Explorer',
   '/trades': 'Trades Log',
   '/analytics': 'Analytics',
-  '/predictions': 'Predictions',
-  '/patterns': 'Catalyst Patterns',
-  '/regression': 'Regression AI',
-  '/cross-asset': 'Cross-Asset Analytics',
-  '/smarts': 'Smarts',
+  '/intelligence': 'Model Intelligence',
+  '/predictions': 'Model Intelligence',
+  '/patterns': 'Model Intelligence',
+  '/regression': 'Model Intelligence',
+  '/cross-asset': 'Model Intelligence',
+  '/smarts': 'Advanced Analytics',
   '/recommendations': 'Recommendations',
   '/watchlist': 'Watchlist',
   '/simulations': 'Simulate Trade',

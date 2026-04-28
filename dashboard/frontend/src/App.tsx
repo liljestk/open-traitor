@@ -14,13 +14,10 @@ import Analytics from './pages/Analytics'
 import NewsFeed from './pages/NewsFeed'
 import Watchlist from './pages/Watchlist'
 import RiskExposure from './pages/RiskExposure'
-import Predictions from './pages/Predictions'
 import Backtesting from './pages/Backtesting'
 import SetupWizard from './pages/SetupWizard'
 import LLMAnalytics from './pages/LLMAnalytics'
-import PatternsPage from './pages/PatternsPage'
-import RegressionAI from './pages/RegressionAI'
-import CrossAsset from './pages/CrossAsset'
+import Intelligence from './pages/Intelligence'
 import Smarts from './pages/Smarts'
 import RecommendationsPage from './pages/Recommendations'
 import Login from './pages/Login'
@@ -80,7 +77,12 @@ function AppRoutes() {
         <Route path="/cycle/:cycleId" element={<CyclePlayback />} />
         <Route path="/trades" element={<TradesLog />} />
         <Route path="/analytics" element={<Analytics />} />
-        <Route path="/predictions" element={<Predictions />} />
+        <Route path="/intelligence" element={<Intelligence />} />
+        {/* Legacy routes — redirect into the unified Intelligence shell */}
+        <Route path="/predictions" element={<Navigate to="/intelligence?tab=signals" replace />} />
+        <Route path="/patterns" element={<Navigate to="/intelligence?tab=patterns" replace />} />
+        <Route path="/regression" element={<Navigate to="/intelligence?tab=regressions" replace />} />
+        <Route path="/cross-asset" element={<Navigate to="/intelligence?tab=cross-asset" replace />} />
         <Route path="/backtesting" element={<Backtesting />} />
         <Route path="/watchlist" element={<Watchlist />} />
         <Route path="/simulations" element={<SimulatedTrades />} />
@@ -91,9 +93,6 @@ function AppRoutes() {
         <Route path="/planning" element={<PlanningAudit />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/llm-analytics" element={<LLMAnalytics />} />
-        <Route path="/patterns" element={<PatternsPage />} />
-        <Route path="/regression" element={<RegressionAI />} />
-        <Route path="/cross-asset" element={<CrossAsset />} />
         <Route path="/smarts" element={<Smarts />} />
         <Route path="/recommendations" element={<RecommendationsPage />} />
       </Route>
