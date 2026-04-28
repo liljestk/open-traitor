@@ -117,11 +117,17 @@ def news_knn_prior(
         return {"available": False, "reason": "empty embedding"}
 
     try:
-        neighbors = db.search_similar_news(
-            embedding=vec,
-            k=int(k),
-            min_similarity=0.0,
-        )
+        # NewsMixin.search_similar_news(query_vector, *, profile=None, limit=10)
+        # Pass exchange as profile so results stay domain-isolated.
+        try:
+            neighbors = db.search_similar_news(
+                vec, profile=exchange, limit=int(k),
+            )
+        except TypeError:
+            # Fallback for older/test fakes that accept arbitrary kwargs
+            neighbors = db.search_similar_news(
+                vec, limit=int(k),
+            )
     except Exception as e:
         logger.warning(f"news_knn: search failed: {e}")
         return {"available": False, "reason": f"search_failed: {e}"}
@@ -132,7 +138,7 @@ def news_knn_prior(
     drifts: list[float] = []
     enriched: list[dict] = []
     for n in neighbors:
-        ts = n.get("published_at") or n.get("ts")
+        ts = n.get("published") or n.get("published_at") or n.get("ts")
         if isinstance(ts, str):
             try:
                 ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))

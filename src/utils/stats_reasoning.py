@@ -217,6 +217,12 @@ class ReasoningMixin:
         # so the dashboard can surface its verdict instead of the legacy
         # "No strategy generated" placeholder.
         trader_span = next((s for s in spans_list if s["agent_name"] == "trader"), None)
+        # ``executor`` spans are synthetic — written by the pipeline manager
+        # when a risk-approved trade is dropped between RiskManager and the
+        # actual exchange call (fee gate, pending Telegram approval,
+        # exec_failed). Without surfacing them, the dashboard would render
+        # the generic "Risk manager approved but trade was not recorded."
+        executor_span = next((s for s in spans_list if s["agent_name"] == "executor"), None)
         strategy_span = strategist_span or trader_span
 
         if trade_row:
@@ -230,6 +236,15 @@ class ReasoningMixin:
             elif rj.get("needs_approval"):
                 decision_outcome = "pending_approval"
                 decision_reason = "Trade queued for Telegram approval."
+            elif executor_span:
+                ej = executor_span.get("reasoning_json") or {}
+                _stage = ej.get("stage") or "executor"
+                _reason = ej.get("reason") or "Trade dropped before execution."
+                if _stage == "pending_approval":
+                    decision_outcome = "pending_approval"
+                else:
+                    decision_outcome = "execution_failed"
+                decision_reason = f"[{_stage}] {_reason}"
             else:
                 decision_outcome = "execution_failed"
                 decision_reason = "Risk manager approved but trade was not recorded."

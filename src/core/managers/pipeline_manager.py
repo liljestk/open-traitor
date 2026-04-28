@@ -410,6 +410,58 @@ class PipelineManager:
             pass
         return raw_confidence
 
+    def _persist_executor_drop(
+        self,
+        *,
+        cycle_id: str,
+        pair: str,
+        exchange: str,
+        stage: str,
+        reason: str,
+        risk_result: dict,
+        details: dict | None = None,
+    ) -> None:
+        """Persist an ``executor`` reasoning span when a risk-approved trade
+        is dropped between RiskManager and the actual exchange call (fee
+        gate, pending Telegram approval, exec_failed).
+
+        Without this, the dashboard sees ``[market_analyst, trader,
+        risk_manager(approved)]`` with no trade row and can only render the
+        generic "Risk manager approved but trade was not recorded." Now it
+        can surface the real blocking stage and reason. Best-effort: never
+        raises into the trading loop.
+        """
+        orch = self.orchestrator
+        stats_db = getattr(orch, "stats_db", None)
+        if not stats_db or not cycle_id:
+            return
+        try:
+            payload = {
+                "approved": False,
+                "stage": stage,
+                "reason": reason,
+                "action": risk_result.get("action"),
+                "pair": pair,
+                "quote_amount": risk_result.get("quote_amount"),
+                "confidence": risk_result.get("confidence"),
+            }
+            if details:
+                payload["details"] = {
+                    k: v for k, v in details.items()
+                    if isinstance(v, (str, int, float, bool))
+                }
+            stats_db.save_reasoning(
+                cycle_id=cycle_id,
+                pair=pair,
+                agent_name="executor",
+                reasoning_json=payload,
+                signal_type=risk_result.get("action") or "hold",
+                confidence=float(risk_result.get("confidence") or 0),
+                exchange=exchange,
+            )
+        except Exception as _e:  # pragma: no cover — diagnostics only
+            logger.debug(f"Failed to persist executor drop span: {_e}")
+
     async def run_pipeline(self, pair: str) -> None:
         """Run the full analysis → strategy → risk → execute pipeline for a pair asynchronously."""
         # Unpack dependencies from orchestrator for brevity
@@ -1380,6 +1432,19 @@ class PipelineManager:
                              "breakeven_pct": fee_est.breakeven_move_pct,
                              "expected_gain_pct": expected_gain_pct},
                         )
+                        self._persist_executor_drop(
+                            cycle_id=cycle_id,
+                            pair=pair,
+                            exchange=exchange_name,
+                            stage="fee_gate",
+                            reason=_fg_reason,
+                            risk_result=risk_result,
+                            details={
+                                "trade_amount": float(trade_amount),
+                                "expected_gain_pct": float(expected_gain_pct),
+                                "breakeven_pct": float(fee_est.breakeven_move_pct),
+                            },
+                        )
                         if trace_ctx is not None:
                             trace_ctx.finish(metadata={"action": "fee_gate_reject"})
                         return
@@ -1414,6 +1479,15 @@ class PipelineManager:
                     )
                 except Exception:
                     pass
+            self._persist_executor_drop(
+                cycle_id=cycle_id,
+                pair=pair,
+                exchange=exchange_name,
+                stage="pending_approval",
+                reason=f"Awaiting Telegram approval (trade_id={trade_id})",
+                risk_result=risk_result,
+                details={"pending_trade_id": trade_id},
+            )
             if trace_ctx is not None:
                 trace_ctx.finish(metadata={"action": "pending_approval", "trade_id": trade_id})
             return
@@ -1624,6 +1698,14 @@ class PipelineManager:
                     )
                 except Exception:
                     pass
+            self._persist_executor_drop(
+                cycle_id=cycle_id,
+                pair=pair,
+                exchange=exchange_name,
+                stage="exec_failed",
+                reason=str(exec_error),
+                risk_result=risk_result,
+            )
             _timings["exec"] = time.monotonic() - _step_t
             _total = time.monotonic() - _t0
             _parts = " ".join(f"{k}={v:.1f}s" for k, v in _timings.items())
