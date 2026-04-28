@@ -16,6 +16,7 @@ Tracks run history in ``learning_runs`` DB table.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,10 @@ _ENSEMBLE_INTERVAL = 7 * 24 * 3600     # weekly
 _PROMPT_INTERVAL = 7 * 24 * 3600       # weekly
 _WFO_INTERVAL = 7 * 24 * 3600          # weekly
 _FINETUNE_INTERVAL = 30 * 24 * 3600    # monthly
+
+# How often the heartbeat-pump thread bumps the orchestrator watchdog
+# while a learning subsystem is running. Module-level so tests can patch.
+_HEARTBEAT_PUMP_INTERVAL_S = 30.0
 
 
 class LearningManager:
@@ -357,8 +362,44 @@ class LearningManager:
     async def _run_subsystem(
         self, name: str, cycle_count: int, fn
     ) -> dict[str, Any]:
-        """Run a subsystem with timing, logging, and error handling."""
+        """Run a subsystem with timing, logging, and error handling.
+
+        While the subsystem runs, a daemon thread bumps the orchestrator's
+        cycle watchdog heartbeat every 30s. Long-but-progressing learning
+        work (e.g. weekly Auto-WFO running 1000+ backtests, prompt evolver
+        making slow LLM calls) would otherwise starve the heartbeat and
+        trigger a spurious watchdog-driven container restart, since
+        ``LearningManager.tick`` is invoked synchronously from the
+        orchestrator's main loop. Genuine hangs in the trading pipeline
+        (not in here) still trip the watchdog as intended.
+        """
         t0 = time.monotonic()
+        stop_evt = threading.Event()
+        bump = getattr(self.orch, "bump_heartbeat", None)
+
+        def _heartbeat_pump() -> None:
+            # Bump immediately so we don't wait 30s for the first refresh.
+            try:
+                if bump:
+                    bump()
+            except Exception:
+                pass
+            while not stop_evt.wait(_HEARTBEAT_PUMP_INTERVAL_S):
+                try:
+                    if bump:
+                        bump()
+                except Exception:
+                    pass
+
+        pump_thread: Optional[threading.Thread] = None
+        if bump is not None:
+            pump_thread = threading.Thread(
+                target=_heartbeat_pump,
+                name=f"ale-heartbeat-{name}",
+                daemon=True,
+            )
+            pump_thread.start()
+
         try:
             result = await fn()
             duration_ms = int((time.monotonic() - t0) * 1000)
@@ -374,6 +415,16 @@ class LearningManager:
             self._persist_run(name, cycle_count, duration_ms, "error", None, str(e))
             logger.warning(f"🧠 ALE.{name} failed ({duration_ms}ms): {e}")
             return {"status": "error", "error": str(e), "duration_ms": duration_ms}
+        finally:
+            stop_evt.set()
+            if pump_thread is not None:
+                pump_thread.join(timeout=1.0)
+            # Final bump so the next watchdog window starts fresh.
+            try:
+                if bump:
+                    bump()
+            except Exception:
+                pass
 
     def _persist_run(
         self, subsystem: str, cycle_count: int,
