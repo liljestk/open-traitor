@@ -1212,3 +1212,389 @@ struct ExecutiveSummaryResponse: Decodable {
     let profiles: [ExecutiveProfileRow]
     let combined: ExecutiveCombined
 }
+
+// MARK: - Symbols / Symbol summary (Intelligence)
+
+struct SymbolListItem: Decodable, Identifiable {
+    var id: String { symbol }
+    let symbol: String
+    let base: String
+    let quote: String
+    let domain: String
+    let has_regression: Bool
+    let has_patterns: Bool
+    let has_trades: Bool
+    let regression_quality: String?
+}
+
+struct SymbolListResponse: Decodable {
+    let profile: String
+    let exchange: String
+    let domain: String
+    let count: Int
+    let items: [SymbolListItem]
+}
+
+struct RegressionModelRow: Decodable, Identifiable {
+    var id: String { "\(symbol)-\(event_type)-\(horizon_days)" }
+    let exchange: String
+    let symbol: String
+    let event_type: String
+    let horizon_days: Int
+    let sample_count: Int
+    let coefficients_json: [String: Double]?
+    let t_stats_json: [String: Double]?
+    let r_squared: Double?
+    let mean_forward_return: Double?
+    let median_forward_return: Double?
+    let hit_rate: Double?
+    let notes: String?
+    let computed_at: String?
+}
+
+struct RegressionModelsResponse: Decodable {
+    let profile: String
+    let exchange: String
+    let total: Int
+    let count: Int
+    let rows: [RegressionModelRow]
+}
+
+struct SymbolPatternOutcome: Decodable {
+    let direction: String?
+    let n_matches: Int?
+    let confidence: Double?
+    let expected_drift: JSONValue?
+    let error: String?
+}
+
+struct SymbolUpcomingEvent: Decodable, Identifiable {
+    var id: String { (event_id ?? "?") + "-" + event_type + "-" + event_ts }
+    let event_id: String?
+    let event_type: String
+    let event_ts: String
+    let symbol: String?
+    let outcome: SymbolPatternOutcome?
+}
+
+struct SymbolReasoningCycle: Decodable, Identifiable {
+    var id: String { cycle_id }
+    let cycle_id: String
+    let pair: String
+    let started_at: String
+    let finished_at: String
+    let agent_count: Int
+    let signal_type: String?
+    let confidence: Double?
+    let action: String?
+    let trade_id: Int?
+    let pnl: Double?
+}
+
+struct SymbolImpactBlock: Decodable {
+    let in_decision_loop: Bool
+    let `where`: String?
+    let feature_flag: String?
+    let bounds: JSONValue?
+    let quality_gate: String?
+}
+
+struct SymbolLiveImpact: Decodable {
+    let patterns: SymbolImpactBlock?
+    let regressions: SymbolImpactBlock?
+    let trades: SymbolImpactBlock?
+    let reasoning_journal: SymbolImpactBlock?
+}
+
+struct SymbolSummaryRegression: Decodable {
+    let count: Int
+    let rows: [RegressionModelRow]
+}
+
+struct SymbolSummaryPatterns: Decodable {
+    let count: Int
+    let upcoming: [SymbolUpcomingEvent]
+}
+
+struct SymbolSummaryTrades: Decodable {
+    let count: Int
+    let rows: [Trade]
+}
+
+struct SymbolSummaryReasoning: Decodable {
+    let count: Int
+    let cycles: [SymbolReasoningCycle]
+}
+
+struct SymbolSummary: Decodable {
+    let profile: String
+    let exchange: String
+    let symbol: String
+    let domain: String
+    let plain_summary: String
+    let regression: SymbolSummaryRegression
+    let patterns: SymbolSummaryPatterns
+    let trades: SymbolSummaryTrades
+    let reasoning: SymbolSummaryReasoning
+    let live_impact: SymbolLiveImpact?
+}
+
+// MARK: - Cross-asset
+
+struct AssetTaxonomyRow: Decodable, Identifiable {
+    var id: String { symbol }
+    let symbol: String
+    let asset_class: String
+    let ecosystem: String?
+    let sector: String?
+    let tags: JSONValue?
+    let source: String?
+    let updated_at: String?
+}
+
+struct CrossAssetTaxonomyResponse: Decodable {
+    let exchange: String
+    let rows: [AssetTaxonomyRow]
+}
+
+struct AssetCorrelationRow: Decodable, Identifiable {
+    var id: String { "\(base_symbol)-\(peer_symbol)-\(window_days)" }
+    let base_symbol: String
+    let peer_symbol: String
+    let window_days: Int
+    let pearson: Double?
+    let spearman: Double?
+    let lead_lag_days: Int
+    let lead_lag_score: Double?
+    let sample_count: Int
+    let computed_at: String?
+}
+
+struct CrossAssetCorrelationsResponse: Decodable {
+    let exchange: String
+    let rows: [AssetCorrelationRow]
+}
+
+struct AssetCluster: Decodable, Identifiable {
+    var id: Int { cluster_id }
+    let cluster_id: Int
+    let label: String?
+    let cohesion: Double?
+    let computed_at: String?
+    let members: [String]
+}
+
+struct CrossAssetClustersResponse: Decodable {
+    let exchange: String
+    let clusters: [AssetCluster]
+}
+
+struct CrossEventRegressionRow: Decodable, Identifiable {
+    var id: String { "\(driver_symbol)-\(driver_event_type)-\(target_symbol)-\(horizon_days)" }
+    let driver_symbol: String
+    let driver_event_type: String
+    let target_symbol: String
+    let horizon_days: Int
+    let sample_count: Int
+    let beta: Double?
+    let intercept: Double?
+    let r_squared: Double?
+    let t_stat_beta: Double?
+    let mean_forward_return: Double?
+    let hit_rate: Double?
+    let notes: String?
+    let computed_at: String?
+}
+
+struct CrossAssetRegressionsResponse: Decodable {
+    let exchange: String
+    let rows: [CrossEventRegressionRow]
+}
+
+struct CascadePrediction: Decodable, Identifiable {
+    var id: String { "\(target_symbol)-\(horizon_days)" }
+    let target_symbol: String
+    let horizon_days: Int
+    let beta: Double?
+    let r_squared: Double?
+    let expected_drift: Double?
+    let sample_count: Int
+    let hit_rate: Double?
+    let mean_forward_return: Double?
+}
+
+struct CrossAssetCascadeResponse: Decodable {
+    let exchange: String
+    let driver_symbol: String
+    let driver_event_type: String
+    let horizon_days: Int
+    let predictions: [CascadePrediction]
+}
+
+// MARK: - Recommendations
+
+enum RecommendationStatus: String, Decodable {
+    case pending, approved, rejected, expired
+}
+
+struct RecommendationRow: Decodable, Identifiable {
+    let id: Int
+    let exchange: String
+    let kind: String
+    let symbol: String
+    let summary: String
+    let rationale: String
+    let payload: JSONValue?
+    let metric_name: String?
+    let metric_value: Double?
+    let status: String
+    let decided_by: String?
+    let decided_at: String?
+    let created_at: String
+    let expires_at: String
+    let source: String?
+}
+
+struct RecommendationsResponse: Decodable {
+    let profile: String
+    let exchange: String
+    let counts: [String: Int]
+    let count: Int
+    let rows: [RecommendationRow]
+}
+
+struct RecommendationDecisionBody: Encodable { let status: String }
+struct RecommendationDecisionResp: Decodable { let recommendation: RecommendationRow }
+
+// MARK: - Smarts
+
+struct SmartsResponse<Row: Decodable>: Decodable {
+    let profile: String?
+    let exchange: String?
+    let rows: [Row]
+}
+
+struct FeatureBrierRow: Decodable, Identifiable {
+    var id: String { feature_name }
+    let feature_name: String
+    let samples: Int
+    let brier_score: Double?
+    let avg_confidence: Double?
+    let last_seen: String?
+}
+
+struct BanditRow: Decodable, Identifiable {
+    var id: String { "\(regime)-\(strategy)" }
+    let regime: String
+    let strategy: String
+    let alpha: Double
+    let beta: Double
+    let n_pulls: Int
+    let last_update: String?
+}
+
+struct CounterfactualRow: Decodable, Identifiable {
+    var id: String { cycle_id }
+    let cycle_id: String
+    let pair: String
+    let ts: String
+    let actual_action: String
+    let replay_action: String
+    let actual_conf: Double?
+    let replay_conf: Double?
+    let actual_pnl_pct: Double?
+    let replay_pnl_pct: Double?
+    let agreed: Bool?
+}
+
+struct LeadLagRow: Decodable, Identifiable {
+    var id: String { "\(leader)-\(follower)-\(lag_minutes)" }
+    let leader: String
+    let follower: String
+    let lag_minutes: Int
+    let beta: Double?
+    let t_stat: Double?
+    let r_squared: Double?
+    let sample_count: Int
+    let computed_at: String?
+}
+
+struct LeadLagResponse: Decodable {
+    let profile: String
+    let exchange: String
+    let follower: String
+    let rows: [LeadLagRow]
+}
+
+struct UpcomingSmartEvent: Decodable, Identifiable {
+    let id: Int
+    let event_type: String
+    let symbol: String
+    let event_ts: String
+    let importance: Double?
+    let source: String?
+    let title: String?
+    let metadata_json: JSONValue?
+}
+
+struct DecisionDriftRow: Decodable, Identifiable {
+    var id: String { "\(snapshot_date)-\(agent)" }
+    let snapshot_date: String
+    let agent: String
+    let n_decisions: Int
+    let mean_conf: Double?
+    let p10_conf: Double?
+    let p50_conf: Double?
+    let p90_conf: Double?
+    let baseline_mean: Double?
+    let baseline_std: Double?
+    let z_score: Double?
+    let alert: String?
+    let computed_at: String
+}
+
+struct ReasoningJudgeRow: Decodable, Identifiable {
+    var id: String { "\(cycle_id)-\(agent)" }
+    let cycle_id: String
+    let agent: String
+    let pair: String
+    let judged_at: String
+    let verdict: String
+    let score: Double?
+    let rationale: String?
+}
+
+struct OnchainRow: Decodable, Identifiable {
+    var id: String { "\(asset)-\(metric)-\(ts)" }
+    let asset: String
+    let metric: String
+    let value: Double?
+    let ts: String
+    let source: String?
+}
+
+struct ShadowRow: Decodable, Identifiable {
+    var id: String { "\(cycle_id)-\(variant)" }
+    let cycle_id: String
+    let variant: String
+    let pair: String
+    let action: String
+    let confidence: Double?
+    let live_action: String
+    let live_confidence: Double?
+    let diff_action: Bool?
+    let ts: String
+    let reasoning: String?
+}
+
+struct L2SnapshotRow: Decodable, Identifiable {
+    var id: String { "\(cycle_id)-\(ts)" }
+    let cycle_id: String
+    let symbol: String
+    let ts: String
+    let mid: Double?
+    let spread_bps: Double?
+    let bid_depth_5: Double?
+    let ask_depth_5: Double?
+    let obi: Double?
+}

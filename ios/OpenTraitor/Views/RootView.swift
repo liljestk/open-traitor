@@ -48,6 +48,15 @@ struct MainTabs: View {
 struct MoreView: View {
     var body: some View {
         List {
+            Section("Intelligence") {
+                NavigationLink { IntelligenceView() } label: { Label("Intelligence Hub", systemImage: "sparkles") }
+                NavigationLink { SymbolInsightsView() } label: { Label("Symbol Insights", systemImage: "magnifyingglass.circle") }
+                NavigationLink { SmartsView() } label: { Label("Smarts", systemImage: "wand.and.stars") }
+                NavigationLink { RecommendationsView() } label: { Label("Recommendations", systemImage: "checkmark.seal") }
+                NavigationLink { CrossAssetView() } label: { Label("Cross-asset", systemImage: "point.3.connected.trianglepath.dotted") }
+                NavigationLink { RegressionCatalogView() } label: { Label("Regression Models", systemImage: "function") }
+            }
+
             Section("Reasoning") {
                 NavigationLink { CyclesView() } label: { Label("Cycles", systemImage: "brain") }
                 NavigationLink { LLMAnalyticsView() } label: { Label("LLM Analytics", systemImage: "cpu") }
