@@ -119,18 +119,191 @@ class HistoricalSource(Protocol):
         ...
 
 
-# ─── Yahoo Finance (equity) ────────────────────────────────────────────────
+# ─── Yahoo Chart API (equity, primary) ─────────────────────────────────────
+
+
+class YahooChartSource:
+    """Direct Yahoo chart-API client (no `yfinance` / no `fc.yahoo.com`).
+
+    The ``yfinance`` library performs a cookie/crumb negotiation against
+    ``fc.yahoo.com`` on every download. That host is blocked on many
+    networks (corporate firewalls, container egress policies), which
+    causes ``yfinance.download`` to silently return empty frames even
+    though ``query{1,2}.finance.yahoo.com/v8/finance/chart`` is reachable
+    and serves the same OHLCV without any auth.
+
+    This adapter calls the chart endpoint directly with a browser-ish
+    User-Agent and returns the same row schema the rest of the engine
+    expects. It is intentionally listed *before* :class:`YahooFinanceSource`
+    in :func:`select_sources` so equity backfills succeed even when
+    ``fc.yahoo.com`` is unreachable.
+    """
+
+    name = "yahoo_chart"
+    domain = "equity"
+
+    _BASES = (
+        "https://query2.finance.yahoo.com/v8/finance/chart/",
+        "https://query1.finance.yahoo.com/v8/finance/chart/",
+    )
+    _INTERVAL: dict[str, str] = {
+        "ONE_MINUTE": "1m",
+        "FIVE_MINUTE": "5m",
+        "FIFTEEN_MINUTE": "15m",
+        "ONE_HOUR": "60m",
+        "ONE_DAY": "1d",
+    }
+
+    def __init__(self, rate_per_sec: float = 1.0, timeout: float = 20.0) -> None:
+        self._bucket = TokenBucket(rate_per_sec=rate_per_sec, capacity=2)
+        self._timeout = timeout
+
+    @staticmethod
+    def _normalise_symbol(symbol: str) -> str:
+        """``NOKIA.HE-EUR`` -> ``NOKIA.HE``. See ``YahooFinanceSource``."""
+        if not symbol:
+            return symbol
+        parts = symbol.upper().split("-")
+        if len(parts) > 1 and len(parts[-1]) == 3 and parts[-1].isalpha():
+            return "-".join(parts[:-1])
+        return symbol.upper()
+
+    def fetch(
+        self, symbol: str, granularity: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        interval = self._INTERVAL.get(granularity)
+        if interval is None:
+            return []
+        ticker = self._normalise_symbol(symbol)
+        params = {
+            "period1": int(start.timestamp()),
+            "period2": int(end.timestamp()),
+            "interval": interval,
+            "includePrePost": "false",
+            "events": "div,splits",
+        }
+        headers = {
+            # Yahoo treats the verbose Chrome UA used by yfinance as bot
+            # traffic and returns 429 for many IP ranges. A minimal
+            # "Mozilla/5.0" UA is accepted by the chart endpoint.
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json,text/plain,*/*",
+        }
+        payload = None
+        max_429_retries = 3
+        for base in self._BASES:
+            for attempt in range(max_429_retries + 1):
+                self._bucket.take()
+                try:
+                    resp = requests.get(
+                        f"{base}{ticker}",
+                        params=params,
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                except requests.RequestException as e:
+                    logger.warning(f"YahooChart request failed for {ticker}: {e}")
+                    break
+                if resp.status_code == 429:
+                    # Honour Retry-After if present, otherwise exponential backoff.
+                    ra = resp.headers.get("Retry-After")
+                    delay = 2.0 * (2 ** attempt)
+                    if ra:
+                        try:
+                            delay = max(delay, float(ra))
+                        except ValueError:
+                            pass
+                    delay = min(delay, 60.0)
+                    logger.debug(
+                        f"YahooChart {ticker} 429 from {base} "
+                        f"(attempt {attempt + 1}/{max_429_retries + 1}); sleeping {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"YahooChart {ticker}: HTTP {resp.status_code} from {base}"
+                    )
+                    break
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = None
+                break
+            if payload is not None:
+                break
+        if not payload:
+            return []
+        try:
+            chart = payload.get("chart") or {}
+            err = chart.get("error")
+            if err:
+                logger.debug(f"YahooChart {ticker}: API error {err}")
+                return []
+            results = chart.get("result") or []
+            if not results:
+                return []
+            res = results[0]
+            timestamps = res.get("timestamp") or []
+            quote = (res.get("indicators", {}).get("quote") or [{}])[0]
+            o = quote.get("open") or []
+            h = quote.get("high") or []
+            l = quote.get("low") or []  # noqa: E741
+            c = quote.get("close") or []
+            v = quote.get("volume") or []
+        except (KeyError, TypeError):
+            return []
+        out: list[dict[str, Any]] = []
+        n = min(len(timestamps), len(o), len(h), len(l), len(c))
+        for i in range(n):
+            try:
+                # Yahoo zero-pads holidays as `null`; skip rows with no close.
+                if c[i] is None or o[i] is None or h[i] is None or l[i] is None:
+                    continue
+                out.append({
+                    "ts": datetime.fromtimestamp(int(timestamps[i]), tz=timezone.utc),
+                    "o": float(o[i]),
+                    "h": float(h[i]),
+                    "l": float(l[i]),
+                    "c": float(c[i]),
+                    "v": float(v[i]) if i < len(v) and v[i] is not None else 0.0,
+                })
+            except (TypeError, ValueError):
+                continue
+        return out
+
+
+# ─── Yahoo Finance (equity, fallback via yfinance) ─────────────────────────
 
 
 class YahooFinanceSource:
     """Yahoo Finance via ``yfinance``. Daily back to inception is reliable;
-    intraday is limited (60m → ~730 days; 1m → ~30 days)."""
+    intraday is limited (60m → ~730 days; 1m → ~30 days).
+
+    Accepts the project's ``BASE.EXCH-CCY`` pair format (e.g.
+    ``NOKIA.HE-EUR``) and strips the trailing currency suffix before
+    calling Yahoo, since Yahoo tickers don't carry the quote currency.
+    """
 
     name = "yfinance"
     domain = "equity"
 
     def __init__(self, rate_per_sec: float = 2.0) -> None:
         self._bucket = TokenBucket(rate_per_sec=rate_per_sec, capacity=4)
+
+    @staticmethod
+    def _normalise_symbol(symbol: str) -> str:
+        """Strip a trailing 3-letter currency suffix (``-EUR``, ``-USD``).
+
+        Mirrors :func:`src.core.equity_feed.pair_to_yahoo` but kept local
+        so this module has no upward import dependency on ``src.core``.
+        """
+        if not symbol:
+            return symbol
+        parts = symbol.upper().split("-")
+        if len(parts) > 1 and len(parts[-1]) == 3 and parts[-1].isalpha():
+            return "-".join(parts[:-1])
+        return symbol.upper()
 
     def fetch(
         self, symbol: str, granularity: str, start: datetime, end: datetime
@@ -143,10 +316,11 @@ class YahooFinanceSource:
         interval = _YF_INTERVAL.get(granularity)
         if interval is None:
             return []
+        ticker = self._normalise_symbol(symbol)
         self._bucket.take()
         try:
             df = yfinance.download(
-                symbol,
+                ticker,
                 start=start.date().isoformat(),
                 end=(end + timedelta(days=1)).date().isoformat(),
                 interval=interval,
@@ -155,7 +329,7 @@ class YahooFinanceSource:
                 threads=False,
             )
         except Exception as e:
-            logger.warning(f"yfinance.download({symbol}) failed: {e}")
+            logger.warning(f"yfinance.download({ticker}) failed: {e}")
             return []
         if df is None or df.empty:
             return []
@@ -195,22 +369,61 @@ class StooqSource:
     """Stooq daily CSV — no API key, decades of history.
 
     URL: https://stooq.com/q/d/l/?s={symbol}&d1=YYYYMMDD&d2=YYYYMMDD&i=d
-    Symbols: US tickers must be suffixed ``.us`` (e.g. ``aapl.us``).
+    Symbols: US tickers must be suffixed ``.us`` (e.g. ``aapl.us``); EU
+    tickers use Stooq's own exchange codes (e.g. Helsinki ``.fi``,
+    Frankfurt ``.de``, Stockholm ``.sf``).
     """
 
     name = "stooq"
     domain = "equity"
     _BASE = "https://stooq.com/q/d/l/"
 
+    # Yahoo exchange suffix → Stooq exchange suffix.
+    # Add new mappings as new venues come online.
+    _YAHOO_TO_STOOQ_EXCHANGE: dict[str, str] = {
+        "HE": "fi",   # Nasdaq Helsinki
+        "ST": "sf",   # Stockholm
+        "DE": "de",   # Xetra
+        "F": "de",    # Frankfurt
+        "PA": "fr",   # Euronext Paris
+        "AS": "nl",   # Euronext Amsterdam
+        "BR": "be",   # Euronext Brussels
+        "MI": "it",   # Borsa Italiana
+        "MC": "es",   # Bolsa de Madrid
+        "L": "uk",    # London
+        "VI": "at",   # Vienna
+        "SW": "ch",   # SIX Swiss
+        "CO": "dk",   # Copenhagen
+        "OL": "no",   # Oslo
+        "WA": "pl",   # Warsaw
+        "LS": "pt",   # Lisbon
+    }
+
     def __init__(self, rate_per_sec: float = 1.0, timeout: float = 20.0) -> None:
         self._bucket = TokenBucket(rate_per_sec=rate_per_sec, capacity=2)
         self._timeout = timeout
 
-    @staticmethod
-    def _normalise_symbol(symbol: str) -> str:
-        s = symbol.lower().strip()
+    @classmethod
+    def _normalise_symbol(cls, symbol: str) -> str:
+        """Convert project pair / Yahoo ticker into a Stooq symbol.
+
+        ``NOKIA.HE-EUR`` → ``nokia.fi``
+        ``AAPL-USD``    → ``aapl.us``
+        ``VOLV-B.ST``   → ``volv-b.sf``
+        ``aapl``        → ``aapl.us``
+        """
+        s = symbol.strip()
+        # Strip trailing 3-letter currency suffix (project pair format).
+        parts = s.split("-")
+        if len(parts) > 1 and len(parts[-1]) == 3 and parts[-1].isalpha():
+            s = "-".join(parts[:-1])
+        s = s.lower()
         if "." in s:
-            return s  # caller already disambiguated
+            base, _, exch = s.rpartition(".")
+            mapped = cls._YAHOO_TO_STOOQ_EXCHANGE.get(exch.upper())
+            if mapped:
+                return f"{base}.{mapped}"
+            return s  # already a Stooq-style suffix or unknown — try as-is
         return f"{s}.us"
 
     def fetch(
@@ -548,5 +761,5 @@ def select_sources(profile: str) -> list[HistoricalSource]:
     if p in {"coinbase", "coinbase_paper"}:
         return [CoinbaseSource(), CryptoCompareSource(), BinanceSource()]
     if p == "ibkr":
-        return [YahooFinanceSource(), StooqSource()]
+        return [YahooChartSource(), YahooFinanceSource(), StooqSource()]
     return []

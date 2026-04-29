@@ -14,6 +14,8 @@ from src.analysis.history_sources import (
     CryptoCompareSource,
     StooqSource,
     TokenBucket,
+    YahooChartSource,
+    YahooFinanceSource,
     _parse_stooq_csv,
     select_sources,
 )
@@ -53,9 +55,123 @@ def test_select_sources_equity_profile():
     domains = {s.domain for s in srcs}
     assert "equity" in domains
     assert "crypto" not in domains
+    # YahooChartSource must be primary so backfills work without
+    # `fc.yahoo.com` (yfinance's cookie endpoint, often blocked).
+    assert srcs[0].name == "yahoo_chart"
+
+
+def test_yahoo_chart_normalise_strips_currency_suffix():
+    assert YahooChartSource._normalise_symbol("NOKIA.HE-EUR") == "NOKIA.HE"
+    assert YahooChartSource._normalise_symbol("AAPL-USD") == "AAPL"
+    assert YahooChartSource._normalise_symbol("BRK-B") == "BRK-B"
+
+
+def test_yahoo_chart_parses_v8_payload():
+    payload = {
+        "chart": {
+            "error": None,
+            "result": [
+                {
+                    "timestamp": [1700000000, 1700086400, 1700172800],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open":   [10.0, 10.5, None],
+                                "high":   [10.6, 10.8, None],
+                                "low":    [9.9,  10.4, None],
+                                "close":  [10.5, 10.7, None],   # null -> skipped
+                                "volume": [1000, 2000, 3000],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    }
+    fake_resp = MagicMock(status_code=200)
+    fake_resp.json.return_value = payload
+    src = YahooChartSource()
+    with patch("src.analysis.history_sources.requests.get", return_value=fake_resp):
+        rows = src.fetch(
+            "NOKIA.HE-EUR", "ONE_DAY",
+            datetime(2023, 11, 1, tzinfo=timezone.utc),
+            datetime(2023, 11, 30, tzinfo=timezone.utc),
+        )
+    assert len(rows) == 2
+    assert rows[0]["c"] == 10.5
+    assert rows[1]["v"] == 2000
+    assert rows[0]["ts"].tzinfo is timezone.utc
+
+
+def test_yahoo_chart_uses_normalised_ticker_in_url():
+    fake_resp = MagicMock(status_code=200)
+    fake_resp.json.return_value = {"chart": {"error": None, "result": []}}
+    src = YahooChartSource()
+    with patch(
+        "src.analysis.history_sources.requests.get",
+        return_value=fake_resp,
+    ) as mock_get:
+        src.fetch(
+            "NOKIA.HE-EUR", "ONE_DAY",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 5, tzinfo=timezone.utc),
+        )
+    assert mock_get.called
+    url = mock_get.call_args.args[0]
+    assert url.endswith("/NOKIA.HE"), f"expected …/NOKIA.HE, got {url}"
+
+
+def test_yahoo_chart_handles_http_error():
+    fake_resp = MagicMock(status_code=404, text="not found")
+    fake_resp.json.side_effect = ValueError
+    src = YahooChartSource()
+    with patch("src.analysis.history_sources.requests.get", return_value=fake_resp):
+        rows = src.fetch(
+            "BOGUS-USD", "ONE_DAY",
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 5, tzinfo=timezone.utc),
+        )
+    assert rows == []
 
 
 # ───────────────────────── Stooq parser + adapter ──────────────────────────
+
+
+def test_yahoo_normalise_strips_currency_suffix():
+    # Project pair format -> Yahoo ticker
+    assert YahooFinanceSource._normalise_symbol("NOKIA.HE-EUR") == "NOKIA.HE"
+    assert YahooFinanceSource._normalise_symbol("AAPL-USD") == "AAPL"
+    assert YahooFinanceSource._normalise_symbol("VOLV-B.ST-SEK") == "VOLV-B.ST"
+    # Already a Yahoo ticker -> unchanged (uppercased)
+    assert YahooFinanceSource._normalise_symbol("nokia.he") == "NOKIA.HE"
+    assert YahooFinanceSource._normalise_symbol("AAPL") == "AAPL"
+    # Currency-looking but actual suffix (>3 chars) -> unchanged
+    assert YahooFinanceSource._normalise_symbol("BRK-B") == "BRK-B"
+
+
+def test_yahoo_fetch_uses_normalised_ticker():
+    """The download must be issued for the normalised ticker, not the raw pair."""
+    src = YahooFinanceSource()
+    with patch("yfinance.download") as mock_dl:
+        mock_dl.return_value = None  # treat as empty
+        src.fetch(
+            "NOKIA.HE-EUR", "ONE_DAY",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 5, tzinfo=timezone.utc),
+        )
+    assert mock_dl.called, "yfinance.download was never called"
+    args, kwargs = mock_dl.call_args
+    called_ticker = args[0] if args else kwargs.get("tickers")
+    assert called_ticker == "NOKIA.HE", f"expected NOKIA.HE, got {called_ticker!r}"
+
+
+def test_stooq_normalise_maps_eu_exchanges():
+    assert StooqSource._normalise_symbol("NOKIA.HE-EUR") == "nokia.fi"
+    assert StooqSource._normalise_symbol("SAP.DE-EUR") == "sap.de"
+    assert StooqSource._normalise_symbol("VOLV-B.ST-SEK") == "volv-b.sf"
+    assert StooqSource._normalise_symbol("AAPL-USD") == "aapl.us"
+    assert StooqSource._normalise_symbol("AAPL") == "aapl.us"
+    assert StooqSource._normalise_symbol("aapl.us") == "aapl.us"
 
 
 def test_parse_stooq_csv_basic():
