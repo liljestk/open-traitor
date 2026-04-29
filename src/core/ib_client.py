@@ -62,6 +62,19 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     def asset_class(self) -> str:
         return "equity"
 
+    @property
+    def rate_limit_key(self) -> str:
+        """Use a dedicated IB Gateway bucket.
+
+        The default ``equity`` mapping points to the 2/s ``yahoo_finance``
+        bucket, which is correct for Yahoo-based data sources but wildly
+        too strict for direct IB Gateway requests (IB allows ~50 msgs/s).
+        Routing IB calls through the Yahoo bucket caused continuous
+        ``Rate limit timeout for yahoo_finance`` warnings and starved the
+        live data path.
+        """
+        return "ibkr_gateway"
+
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     def __init__(
@@ -858,9 +871,12 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     def search_symbols(self, query: str, limit: int = 25) -> list[dict]:
         """Search for tradable symbols.
 
-        In **live mode** uses IBKR ``reqMatchingSymbols()`` which guarantees
-        every result is actually tradable on Interactive Brokers.
-        In **paper mode** falls back to Yahoo Finance search.
+        Merges results from **IBKR** ``reqMatchingSymbols()`` (in live mode,
+        guaranteed tradable on IB) with **Yahoo Finance** autocomplete
+        (broader coverage). IBKR matches are listed first so users see the
+        truly tradable instruments at the top, but Yahoo fills in the long
+        tail of European mid/small caps that ``reqMatchingSymbols`` omits
+        (it returns at most ~16 results and skews to large-caps).
 
         Returns a list of dicts with keys:
         ``id, base, quote, display_name, exchange, volume_24h, price_change_24h``
@@ -869,11 +885,13 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         if not query:
             return []
 
+        ibkr_results: list[dict] = []
+        seen_ids: set[str] = set()
+
         # ── Try IBKR Gateway first (live mode only) ─────────────────────
         if not self.paper_mode and getattr(self, "ib", None) and self.ib.isConnected():
             try:
                 symbols = self.ib.reqMatchingSymbols(query)
-                results = []
                 for sym in (symbols or []):
                     contract = sym.contract
                     if not contract or not contract.symbol:
@@ -887,39 +905,51 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                     currency = contract.currency or self._native_currency
                     exchange = contract.primaryExchange or contract.exchange or ""
 
-                    # Build pair ID in internal format (e.g. METSO-EUR)
-                    # For European stocks with exchange suffixes, try to map
+                    # Build pair ID in internal format (e.g. METSO.HE-EUR)
                     yahoo_suffix = self._exchange_to_yahoo_suffix(exchange)
                     if yahoo_suffix:
                         pair_id = f"{symbol}.{yahoo_suffix}-{currency}"
                     else:
                         pair_id = f"{symbol}-{currency}"
 
-                    # Derive display name from derivative sec types
-                    display_name = f"{symbol}"
-                    desc_parts = getattr(sym, "derivativeSecTypes", [])
-                    long_name = getattr(contract, "description", "") or ""
-                    if long_name:
-                        display_name = long_name
+                    if pair_id.upper() in seen_ids:
+                        continue
 
-                    results.append({
+                    long_name = getattr(contract, "description", "") or symbol
+
+                    ibkr_results.append({
                         "id": pair_id,
                         "base": symbol,
                         "quote": currency,
-                        "display_name": display_name,
+                        "display_name": long_name,
                         "exchange": exchange,
                         "volume_24h": 0,
                         "price_change_24h": 0,
                     })
-                if results:
-                    logger.debug(f"IBKR search '{query}' returned {len(results)} results")
-                    return results[:limit]
+                    seen_ids.add(pair_id.upper())
+                logger.debug(
+                    f"IBKR search '{query}' returned {len(ibkr_results)} results"
+                )
             except Exception as e:
                 logger.warning(f"IBKR reqMatchingSymbols failed for '{query}': {e}")
-                # Fall through to Yahoo Finance search
 
-        # ── Fallback: Yahoo Finance search ───────────────────────────────
-        return equity_feed.search_tickers(query, limit=limit)
+        # ── Always also query Yahoo Finance (broader coverage) ──────────
+        # reqMatchingSymbols misses many EU mid/small caps, so we merge
+        # rather than treating Yahoo as a pure fallback.
+        try:
+            yahoo_results = equity_feed.search_tickers(query, limit=limit)
+        except Exception as e:
+            logger.debug(f"Yahoo search failed for '{query}': {e}")
+            yahoo_results = []
+
+        merged = list(ibkr_results)
+        for yr in yahoo_results:
+            yid = (yr.get("id") or "").upper()
+            if yid and yid not in seen_ids:
+                merged.append(yr)
+                seen_ids.add(yid)
+
+        return merged[:limit]
 
     @staticmethod
     def _exchange_to_yahoo_suffix(exchange: str) -> str:

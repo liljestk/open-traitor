@@ -36,6 +36,12 @@ config: dict = {}
 exchange_client = None    # ExchangeClient instance (optional, for price lookups)
 ibkr_exchange_client = None  # IBClient instance (optional, for IBKR price/news)
 
+# IBKR lazy-init failure cache. The dashboard does not own a live IB Gateway
+# connection in production deployments; without this throttle every request
+# triggered another (failing) connect attempt and a warning log line.
+_ibkr_init_last_fail_at: float = 0.0
+_IBKR_INIT_FAIL_TTL: float = 300.0  # 5 min between retry attempts
+
 ws_connections: list = []  # (WebSocket, exchange_filter)
 
 # WebSocket connection limits
@@ -455,14 +461,36 @@ def serialize_event_attrs(event) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def ensure_ibkr_client():
-    """Lazily initialise the IBKR exchange client on first request."""
+    """Lazily initialise the IBKR exchange client on first request.
+
+    The dashboard runs in its own container that does **not** own a live
+    IB Gateway connection (the ``agent-ibkr`` container does). When IB
+    Gateway is unreachable from this container, repeated initialisation
+    attempts spammed the log on every request. We now cache the failure
+    for ``_IBKR_INIT_FAIL_TTL`` seconds and retry quietly thereafter so
+    transient outages still self-heal without flooding the log.
+    """
     import src.dashboard.deps as _self
+    import time as _time
     if _self.ibkr_exchange_client is not None:
         return _self.ibkr_exchange_client
+    last_fail = getattr(_self, "_ibkr_init_last_fail_at", 0.0)
+    if last_fail and (_time.monotonic() - last_fail) < _IBKR_INIT_FAIL_TTL:
+        return None
     try:
         ib_host = os.environ.get("IBKR_HOST", "127.0.0.1")
         ib_port = int(os.environ.get("IBKR_PORT", "4001"))
         ib_client_id = int(os.environ.get("IBKR_CLIENT_ID", "1"))
+        # Bootstrap an event loop in the current (worker) thread BEFORE
+        # importing ib_client. The transitive eventkit dependency calls
+        # ``asyncio.get_event_loop()`` at module-init time, which raises
+        # ``RuntimeError: There is no current event loop in thread …`` on
+        # Python 3.12+ when imported from a non-main thread without one.
+        import asyncio as _asyncio
+        try:
+            _asyncio.get_event_loop()
+        except RuntimeError:
+            _asyncio.set_event_loop(_asyncio.new_event_loop())
         from src.core.ib_client import IBClient
         client = IBClient(
             paper_mode=False,
@@ -471,10 +499,19 @@ def ensure_ibkr_client():
             ib_client_id=ib_client_id + 10,
         )
         _self.ibkr_exchange_client = client
+        _self._ibkr_init_last_fail_at = 0.0
         logger.info("✅ Dashboard lazy-initialised IBKR client")
         return client
     except Exception as e:
-        logger.warning(f"⚠️ Could not initialise IBKR client: {e}")
+        # Log only on the first failure of each retry window so the dashboard
+        # log is not flooded for the (expected) common case where this
+        # container has no direct IB Gateway access.
+        if not last_fail:
+            logger.warning(
+                f"⚠️ Could not initialise IBKR client: {e} "
+                f"(suppressing further warnings for {_IBKR_INIT_FAIL_TTL}s)"
+            )
+        _self._ibkr_init_last_fail_at = _time.monotonic()
         return None
 
 
