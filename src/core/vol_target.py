@@ -41,11 +41,21 @@ def vol_target_multiplier(
     *,
     target_vol: float = 0.01,   # ~1% per period
     min_n: int = 5,
+    forecast_vol: Optional[float] = None,
 ) -> float:
-    """Multiplier in [_MULT_FLOOR, _MULT_CEIL]: target / realised."""
+    """Multiplier in [_MULT_FLOOR, _MULT_CEIL]: target / realised.
+
+    When ``forecast_vol`` is provided (e.g. HAR-RV one-step-ahead
+    forecast), it overrides the trailing realised computation so position
+    sizing reflects *expected* future vol instead of the recent past.
+    """
     if target_vol <= 0:
         return 1.0
-    v = realised_vol(returns, min_n=min_n)
+    v: Optional[float]
+    if forecast_vol is not None and math.isfinite(float(forecast_vol)) and forecast_vol > 0:
+        v = float(forecast_vol)
+    else:
+        v = realised_vol(returns, min_n=min_n)
     if v is None:
         # No history → neutral multiplier; rely on Kelly cap.
         return 1.0

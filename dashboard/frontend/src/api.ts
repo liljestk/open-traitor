@@ -1976,3 +1976,151 @@ export const fetchSmartsShadow = (limit = 200) =>
 
 export const fetchSmartsL2 = (symbol: string, limit = 100) =>
   apiFetch<SmartsResponse>(`/smarts/l2-snapshots/${encodeURIComponent(symbol)}?limit=${limit}`)
+
+// ─── Quant Analytics ───────────────────────────────────────────────────────
+//
+// Read-only views of the rows persisted by QuantAnalyticsManager:
+// factor loadings / HAR-RV forecasts / Granger / slippage model /
+// correlation regime. All hooks must include `profile` in their queryKey
+// (domain-separation rule).
+
+export interface QuantFactorLoadingRow {
+  exchange: string
+  symbol: string
+  factor: string
+  beta: number | null
+  t_stat: number | null
+  r_squared: number | null
+  alpha_annualised: number | null
+  idio_vol: number | null
+  sample_count: number
+  computed_at: string | null
+}
+
+export interface QuantFactorLoadingsResponse {
+  exchange: string
+  rows: QuantFactorLoadingRow[]
+}
+
+export const fetchQuantFactorLoadings = (params: {
+  symbol?: string
+  factor?: string
+  minAbsTStat?: number
+  limit?: number
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.symbol) qs.set('symbol', params.symbol)
+  if (params.factor) qs.set('factor', params.factor)
+  if (params.minAbsTStat != null) qs.set('min_abs_t_stat', String(params.minAbsTStat))
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  return apiFetch<QuantFactorLoadingsResponse>(
+    `/quant/factor-loadings${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface QuantHarRvRow {
+  exchange: string
+  symbol: string
+  horizon_days: number
+  forecast_vol: number | null
+  realized_vol_daily: number | null
+  realized_vol_weekly: number | null
+  realized_vol_monthly: number | null
+  beta_daily: number | null
+  beta_weekly: number | null
+  beta_monthly: number | null
+  intercept: number | null
+  model_r_squared: number | null
+  sample_count: number
+  computed_at: string | null
+}
+
+export interface QuantHarRvResponse {
+  exchange: string
+  horizon_days: number
+  rows: QuantHarRvRow[]
+}
+
+export const fetchQuantHarRv = (params: {
+  symbol?: string
+  horizonDays?: number
+  limit?: number
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.symbol) qs.set('symbol', params.symbol)
+  if (params.horizonDays != null) qs.set('horizon_days', String(params.horizonDays))
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  return apiFetch<QuantHarRvResponse>(
+    `/quant/har-rv${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface QuantGrangerRow {
+  exchange: string
+  leader: string
+  follower: string
+  lag_hours: number
+  f_stat: number | null
+  p_value: number | null
+  sample_count: number
+  computed_at: string | null
+}
+
+export interface QuantGrangerResponse {
+  exchange: string
+  rows: QuantGrangerRow[]
+}
+
+export const fetchQuantGranger = (params: {
+  leader?: string
+  follower?: string
+  maxPValue?: number
+  limit?: number
+} = {}) => {
+  const qs = new URLSearchParams()
+  if (params.leader) qs.set('leader', params.leader)
+  if (params.follower) qs.set('follower', params.follower)
+  if (params.maxPValue != null) qs.set('max_p_value', String(params.maxPValue))
+  if (params.limit != null) qs.set('limit', String(params.limit))
+  return apiFetch<QuantGrangerResponse>(
+    `/quant/granger${qs.toString() ? `?${qs.toString()}` : ''}`,
+  )
+}
+
+export interface QuantSlippageModel {
+  exchange: string
+  alpha: number | null
+  beta_size: number | null
+  beta_vol: number | null
+  r_squared: number | null
+  sample_count: number
+  computed_at: string | null
+}
+
+export interface QuantSlippageModelResponse {
+  exchange: string
+  model: QuantSlippageModel | null
+}
+
+export const fetchQuantSlippageModel = () =>
+  apiFetch<QuantSlippageModelResponse>(`/quant/slippage-model`)
+
+export interface QuantCorrelationRegimeEvent {
+  id: number
+  exchange: string
+  avg_corr: number
+  z_score: number
+  regime: string
+  n_pairs: number
+  history_n: number
+  computed_at: string | null
+}
+
+export interface QuantCorrelationRegimeResponse {
+  exchange: string
+  latest: QuantCorrelationRegimeEvent | null
+  events: QuantCorrelationRegimeEvent[]
+}
+
+export const fetchQuantCorrelationRegime = (limit = 200) =>
+  apiFetch<QuantCorrelationRegimeResponse>(`/quant/correlation-regime?limit=${limit}`)

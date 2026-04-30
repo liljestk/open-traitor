@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, MoreHorizontal, X, Cpu, Sparkles, Brain, Lightbulb } from 'lucide-react'
+import { BarChart2, Activity, BookOpen, List, Terminal, Zap, Radio, FlaskConical, Sliders, TrendingUp, Newspaper, Eye, Shield, MoreHorizontal, X, Cpu, Sparkles, Brain, Lightbulb, Sigma } from 'lucide-react'
 import { useLiveStore, useIsMobile } from '../store'
 import { openLiveSocket, fetchSetupConfig } from '../api'
 import RegimeBadge from './RegimeBadge'
@@ -29,6 +29,7 @@ const NAV = [
       { to: '/analytics', icon: <TrendingUp size={16} />, label: 'Analytics' },
       { to: '/intelligence', icon: <Brain size={16} />, label: 'Model Intelligence' },
       { to: '/smarts', icon: <Sparkles size={16} />, label: 'Advanced Analytics' },
+      { to: '/quant', icon: <Sigma size={16} />, label: 'Quant Analytics' },
       { to: '/recommendations', icon: <Lightbulb size={16} />, label: 'Recommendations' },
       { to: '/watchlist', icon: <Eye size={16} />, label: 'Watchlist' },
       { to: '/simulations', icon: <FlaskConical size={16} />, label: 'Simulate Trade' },
@@ -67,6 +68,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/regression': 'Model Intelligence',
   '/cross-asset': 'Model Intelligence',
   '/smarts': 'Advanced Analytics',
+  '/quant': 'Quant Analytics',
   '/recommendations': 'Recommendations',
   '/watchlist': 'Watchlist',
   '/simulations': 'Simulate Trade',

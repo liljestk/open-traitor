@@ -7,6 +7,7 @@ manages stop-losses, and accounts for portfolio correlation.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
@@ -536,8 +537,23 @@ class RiskManagerAgent(BaseAgent):
             recent_returns = context.get("recent_returns") or []
             if recent_returns:
                 target_vol = float(self.risk_config.get("vol_target", 0.01))
+                # Optional HAR-RV forecast injection — when the pipeline
+                # manager has fetched a fresh forecast for this pair we
+                # let it override the trailing realised vol. Opt-in via
+                # the ``RISK_USE_HAR_RV`` env flag (default off so we
+                # don't change behavior of running deployments without
+                # explicit intent).
+                forecast_vol = None
+                if os.environ.get("RISK_USE_HAR_RV", "").lower() in ("1", "true", "yes"):
+                    try:
+                        forecast_vol = context.get("har_rv_forecast")
+                        if forecast_vol is not None:
+                            forecast_vol = float(forecast_vol)
+                    except (TypeError, ValueError):
+                        forecast_vol = None
                 vt_mult = vol_target_multiplier(
-                    recent_returns, target_vol=target_vol
+                    recent_returns, target_vol=target_vol,
+                    forecast_vol=forecast_vol,
                 )
                 # Clamp upscale: max 1.25x of Kelly-sized notional. Downscale
                 # is unbounded (subject to floor 0.10) so calm regimes shrink

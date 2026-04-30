@@ -1227,6 +1227,15 @@ class PipelineManager:
             # Phase 13: vol-target sizing — pass the recent close-to-close
             # returns so RiskManager can compute target_vol / realised_vol.
             "recent_returns": _candle_returns(candles, lookback=30),
+            # HAR-RV one-step-ahead vol forecast (when available). The
+            # risk manager consumes this only when ``RISK_USE_HAR_RV=1``.
+            "har_rv_forecast": (
+                (orch.stats_db.get_har_rv_forecast_for_symbol(
+                    exchange_name, pair, horizon_days=1,
+                ) or {}).get("forecast_vol")
+                if hasattr(orch.stats_db, "get_har_rv_forecast_for_symbol")
+                else None
+            ),
             # Catalyst Pattern Engine signal — used as an advisory size
             # multiplier (never overrides AbsoluteRules).
             "pattern_signal": pattern_signal,

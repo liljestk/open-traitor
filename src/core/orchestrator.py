@@ -406,6 +406,41 @@ class Orchestrator:
         # ─── Adaptive Learning Engine ───
         self.learning_manager = LearningManager(self)
 
+        # ─── Quant Analytics Manager (factor loadings, HAR-RV, Granger,
+        #     slippage model, correlation regime). Throttled internally;
+        #     opportunistically refreshed each cycle. Failures never
+        #     bubble into the trading loop.
+        try:
+            from src.core.managers.quant_analytics_manager import (
+                QuantAnalyticsManager,
+            )
+            _quant_factors = (
+                config.get("quant", {}).get("factors")
+                or os.environ.get("QUANT_FACTORS", "")
+            )
+            if isinstance(_quant_factors, str):
+                _quant_factors = [
+                    f.strip() for f in _quant_factors.split(",") if f.strip()
+                ]
+            from src.analysis.market_factors import DEFAULT_FACTORS as _DF
+            self.quant_analytics = QuantAnalyticsManager(
+                stats_db=self.stats_db,
+                exchange=self._decision_profile,
+                universe=self.all_tracked_pairs,
+                factors=tuple(_quant_factors) if _quant_factors else _DF,
+                min_interval_seconds=int(
+                    config.get("quant", {}).get("analytics_interval_seconds", 30 * 60)
+                ),
+            )
+            logger.info(
+                "📐 QuantAnalyticsManager online "
+                f"(universe={len(self.all_tracked_pairs)}, "
+                f"factors={list(self.quant_analytics.factors)})"
+            )
+        except Exception as _e:
+            logger.warning(f"⚠️ QuantAnalyticsManager init failed: {_e}")
+            self.quant_analytics = None
+
         # ─── Training Data Collector (for future fine-tuning) ───
         self.training_collector = TrainingDataCollector(config)
         self.executor.training_collector = self.training_collector
@@ -1694,6 +1729,28 @@ class Orchestrator:
                         logger.debug(f"🧠 ALE tick: {list(learning_result.keys())}")
                 except Exception as _ale_err:
                     logger.warning("ALE tick error (non-fatal)", exc_info=True)
+
+                # ─── Quant Analytics tick (throttled internally) ─────
+                if getattr(self, "quant_analytics", None) is not None:
+                    try:
+                        # Refresh universe in case watchlist changed.
+                        self.quant_analytics.universe = list(
+                            dict.fromkeys(self.all_tracked_pairs)
+                        )
+                        report = self.quant_analytics.maybe_run()
+                        if report is not None:
+                            logger.info(
+                                "📐 Quant analytics tick: "
+                                f"factors={report.factor_loadings_written}, "
+                                f"har_rv={report.har_rv_forecasts_written}, "
+                                f"granger={report.granger_significant}, "
+                                f"slip_fit={report.slippage_model_fit}, "
+                                f"corr_regime={report.correlation_regime}"
+                            )
+                    except Exception as _qa_err:
+                        logger.warning(
+                            f"Quant analytics tick error (non-fatal): {_qa_err}"
+                        )
 
                 # Sync state to Redis
                 self.state_manager.sync_to_redis()

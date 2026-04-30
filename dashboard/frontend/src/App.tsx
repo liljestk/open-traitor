@@ -20,6 +20,7 @@ import LLMAnalytics from './pages/LLMAnalytics'
 import Intelligence from './pages/Intelligence'
 import Smarts from './pages/Smarts'
 import RecommendationsPage from './pages/Recommendations'
+import QuantAnalytics from './pages/QuantAnalytics'
 import Login from './pages/Login'
 import { fetchSystemStatus, type SystemStatus } from './api'
 
@@ -95,6 +96,7 @@ function AppRoutes() {
         <Route path="/llm-analytics" element={<LLMAnalytics />} />
         <Route path="/smarts" element={<Smarts />} />
         <Route path="/recommendations" element={<RecommendationsPage />} />
+        <Route path="/quant" element={<QuantAnalytics />} />
       </Route>
     </Routes>
   )

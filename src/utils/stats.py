@@ -39,6 +39,7 @@ from src.utils.stats_recommendations import RecommendationsMixin
 from src.utils.stats_correlations import CorrelationsMixin
 from src.utils.stats_news import NewsMixin
 from src.utils.stats_smarts import SmartsMixin
+from src.utils.stats_quant import QuantAnalyticsMixin
 
 logger = get_logger("stats")
 
@@ -93,6 +94,7 @@ class StatsDB(
     CorrelationsMixin,
     NewsMixin,
     SmartsMixin,
+    QuantAnalyticsMixin,
 ):
     """Thread-safe PostgreSQL statistics database.
 
@@ -406,6 +408,13 @@ class StatsDB(
             self._init_smarts_schema()
         except Exception as _e:
             logger.warning(f"Smarts schema init failed: {_e}")
+
+        # Quantitative analytics (factor loadings, HAR-RV, Granger,
+        # slippage model, correlation regime). Same isolation contract.
+        try:
+            self._init_quant_schema()
+        except Exception as _e:
+            logger.warning(f"Quant schema init failed: {_e}")
 
     # Allowlist for DDL migrations — prevents any interpolation of
     # unexpected identifiers into ALTER TABLE statements (CRIT-2).
