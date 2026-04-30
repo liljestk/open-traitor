@@ -288,27 +288,97 @@ class TraderAgent(BaseAgent):
     @staticmethod
     def _deterministic_fallback(tool_payload: dict) -> dict:
         """If the LLM is unavailable, synthesize a conservative proposal from
-        ensemble + pattern. Never larger than the allocator cap."""
+        ensemble + market analyst + pattern. Never larger than the allocator
+        cap. Promotes a high-conviction analyst signal when the ensemble is
+        inactive (the FIL-EUR regression case), unless the pattern engine
+        actively contradicts it.
+        """
         ensemble = (tool_payload.get("strategy_signals") or {}).get("ensemble") or {}
         pattern = tool_payload.get("pattern") or {}
         market = tool_payload.get("market") or {}
         pair = market.get("pair", "")
-        action = ensemble.get("action", "hold") or "hold"
-        confidence = float(ensemble.get("confidence", 0.0) or 0.0)
-        reason_bits = [f"deterministic fallback: ensemble={action}@{confidence:.2f}"]
-        if pattern.get("available"):
-            reason_bits.append(f"pattern={pattern.get('direction')}")
+
+        ens_action = (ensemble.get("action") or "hold").lower()
+        ens_conf = float(ensemble.get("confidence", 0.0) or 0.0)
+        analyst_action = (market.get("signal_type") or "neutral").lower()
+        analyst_conf = float(market.get("signal_confidence", 0.0) or 0.0)
+        pattern_avail = bool(pattern.get("available"))
+        pattern_dir = (pattern.get("direction") or "").lower()
+        current_price = _optional_float(market.get("current_price"))
+        stop_loss = _optional_float(market.get("suggested_stop_loss"))
+        take_profit = _optional_float(market.get("suggested_take_profit"))
+
+        reason_bits = [
+            f"deterministic fallback: ensemble={ens_action}@{ens_conf:.2f}"
+        ]
+        if pattern_avail:
+            reason_bits.append(f"pattern={pattern_dir or 'unknown'}")
+
+        # Map signal types to trade action.
+        analyst_action_map = {"buy": "buy", "sell": "sell", "strong_buy": "buy",
+                              "strong_sell": "sell"}
+        analyst_trade = analyst_action_map.get(analyst_action)
+
+        # Detect pattern contradiction with the analyst direction.
+        contradicts = False
+        if pattern_avail and analyst_trade:
+            if analyst_trade == "buy" and pattern_dir in ("bearish", "down"):
+                contradicts = True
+            elif analyst_trade == "sell" and pattern_dir in ("bullish", "up"):
+                contradicts = True
+
+        # Default: mirror the ensemble.
+        action = ens_action
+        confidence = ens_conf
+        ensemble_actionable = ens_action in ("buy", "sell") and ens_conf >= 0.55
+
+        if ensemble_actionable:
+            reason_bits.append(f"ensemble={ens_action}@{ens_conf:.2f} actionable")
+        elif analyst_trade and analyst_conf >= 0.70:
+            if contradicts:
+                action = "hold"
+                confidence = 0.0
+                reason_bits.append(
+                    f"analyst={analyst_action}@{analyst_conf:.2f} contradicted by pattern"
+                )
+                stop_loss = None
+                take_profit = None
+            else:
+                action = analyst_trade
+                confidence = analyst_conf
+                reason_bits.append(
+                    f"analyst={analyst_action}@{analyst_conf:.2f} promoted (ensemble inactive)"
+                )
+                # Synthesize a conservative ±3% stop if the analyst did not
+                # supply one and we know the current price.
+                if action == "buy" and stop_loss is None and current_price:
+                    stop_loss = round(current_price * 0.97, 8)
+                    reason_bits.append("synthesized 3% stop")
+                elif action == "sell" and stop_loss is None and current_price:
+                    stop_loss = round(current_price * 1.03, 8)
+                    reason_bits.append("synthesized 3% stop")
+        else:
+            action = "hold"
+            confidence = 0.0
+            stop_loss = None
+            take_profit = None
+
+        # Final safety net for an inherited buy below floor.
         if action == "buy" and confidence < 0.65:
             action = "hold"
+            confidence = 0.0
+            stop_loss = None
+            take_profit = None
             reason_bits.append("confidence below buy floor")
+
         return {
             "action": action,
             "pair": pair,
             "confidence": confidence,
             "quote_amount": None,
             "quantity": None,
-            "stop_loss_price": None,
-            "take_profit_price": None,
+            "stop_loss_price": stop_loss,
+            "take_profit_price": take_profit,
             "strategy": "llm_strategist",
             "reasoning": "; ".join(reason_bits),
         }

@@ -192,7 +192,16 @@ class PipelineManager:
         bandit_weights: dict[str, float] | None = None
         try:
             cfg = getattr(self.orchestrator, "config", {}) or {}
-            if cfg.get("smarts", {}).get("use_bandit", False):
+            # Strict isinstance guard so MagicMock test doubles (whose
+            # ``.get(...)`` returns truthy MagicMocks) don't accidentally
+            # enable the bandit overlay.
+            smarts_cfg = cfg.get("smarts", {}) if isinstance(cfg, dict) else {}
+            use_bandit = (
+                isinstance(smarts_cfg, dict)
+                and bool(smarts_cfg.get("use_bandit", False)) is True
+                and isinstance(smarts_cfg.get("use_bandit"), (bool, int))
+            )
+            if use_bandit:
                 from src.utils.bandit import StrategyBandit
                 exch = cfg.get("trading", {}).get("exchange", "coinbase")
                 regime = (
