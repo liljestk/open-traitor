@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,6 +13,43 @@ from src.utils.pair_format import parse_pair
 logger = get_logger("dashboard.market")
 
 router = APIRouter(tags=["Market"])
+
+# Cache the (relatively expensive) Coinbase product catalog fetch so each
+# keystroke in the watchlist search box doesn't re-hit the REST API.
+_COINBASE_PRODUCTS_CACHE: dict[str, object] = {"ts": 0.0, "items": []}
+_COINBASE_PRODUCTS_TTL = 300.0  # 5 minutes
+
+
+def _fetch_coinbase_products_raw() -> list[dict]:
+    """Fetch the full Coinbase SPOT product catalog with TTL caching.
+
+    Without ``get_all_products=True`` the SDK returns only the subset the
+    authenticated user is currently eligible to trade, which on Coinbase EU
+    can be a fraction of the real universe -- making the watchlist search
+    appear to return very few results.
+    """
+    now = time.time()
+    cached_items = _COINBASE_PRODUCTS_CACHE.get("items") or []
+    if cached_items and (now - float(_COINBASE_PRODUCTS_CACHE.get("ts", 0.0))) < _COINBASE_PRODUCTS_TTL:
+        return cached_items  # type: ignore[return-value]
+
+    client = deps.exchange_client
+    if not getattr(client, "_rest_client", None):
+        return cached_items  # type: ignore[return-value]
+    try:
+        resp = client._rest_client.get_products(
+            limit=1000,
+            product_type="SPOT",
+            get_all_products=True,
+        )
+        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
+        items = list(raw.get("products", []) or [])
+        _COINBASE_PRODUCTS_CACHE["items"] = items
+        _COINBASE_PRODUCTS_CACHE["ts"] = now
+        return items
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to list Coinbase products: {e}")
+        return cached_items  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -53,31 +91,22 @@ def _get_products_for_profile(profile: str) -> list[dict]:
         products.sort(key=lambda x: x["id"])
         return products
 
-    # Coinbase / default: query REST API
-    client = deps.exchange_client
-    if not getattr(client, "_rest_client", None):
-        return []
-    try:
-        resp = client._rest_client.get_products()
-        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
-        items = raw.get("products", [])
-        products = []
-        for p in items:
-            if (
-                not p.get("trading_disabled", True)
-                and not p.get("is_disabled", False)
-                and str(p.get("status", "")).lower() == "online"
-            ):
-                products.append({
-                    "id": p.get("product_id", ""),
-                    "base": p.get("base_currency_id", ""),
-                    "quote": p.get("quote_currency_id", ""),
-                })
-        products.sort(key=lambda x: x["id"])
-        return products
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to list products: {e}")
-        return []
+    # Coinbase / default: query REST API (cached)
+    items = _fetch_coinbase_products_raw()
+    products = []
+    for p in items:
+        if (
+            not p.get("trading_disabled", False)
+            and not p.get("is_disabled", False)
+            and str(p.get("status", "online")).lower() == "online"
+        ):
+            products.append({
+                "id": p.get("product_id", ""),
+                "base": p.get("base_currency_id", ""),
+                "quote": p.get("quote_currency_id", ""),
+            })
+    products.sort(key=lambda x: x["id"])
+    return products
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +166,15 @@ def search_products(
                 })
                 config_ids.add(pid)
 
-        # 2) Live search via IBKR Gateway (or Yahoo Finance fallback)
+        # 2) Live search via IBKR Gateway + Yahoo Finance (merged)
+        # Request more than 25 because the quote-currency filter below can
+        # discard most results (Yahoo returns USD/GBP/JPY tickers that an
+        # EUR-only profile can't actually trade).
         live_results: list[dict] = []
         try:
             client = deps.client_for_profile(profile)
             if client and hasattr(client, "search_symbols"):
-                live_results = client.search_symbols(query, limit=25)
+                live_results = client.search_symbols(query, limit=100)
         except Exception as e:
             logger.debug(f"Live equity search failed: {e}")
 
@@ -159,42 +191,72 @@ def search_products(
             allowed = {c.upper() for c in qc}
             merged = [m for m in merged if m.get("quote", "").upper() in allowed]
 
+        # 5) Rank: exact match → prefix match → substring match
+        def _equity_score(item: dict) -> int:
+            pid = (item.get("id") or "").upper()
+            base = (item.get("base") or "").upper()
+            disp = (item.get("display_name") or "").upper()
+            if base == query or pid == query:
+                return 0
+            if base.startswith(query) or pid.startswith(query) or disp.startswith(query):
+                return 1
+            if query in disp:
+                return 2
+            return 3
+
+        merged.sort(key=_equity_score)
         return {"results": merged[:25], "query": q}
 
-    # Coinbase search
-    client = deps.exchange_client
-    if not getattr(client, "_rest_client", None):
+    # Coinbase search (cached full catalog)
+    items = _fetch_coinbase_products_raw()
+    if not items:
         return {"results": [], "query": q}
 
-    try:
-        resp = client._rest_client.get_products()
-        raw = resp.to_dict() if hasattr(resp, "to_dict") else dict(resp)
-        items = raw.get("products", [])
-        results = []
-        for p in items:
-            if (
-                p.get("trading_disabled", True)
-                or p.get("is_disabled", False)
-                or str(p.get("status", "")).lower() != "online"
-            ):
-                continue
-            pid = (p.get("product_id") or "").upper()
-            base = (p.get("base_currency_id") or "").upper()
-            display_name = (p.get("base_display_symbol") or base)
-            if query in pid or query in base or query in display_name.upper():
-                results.append({
-                    "id": p.get("product_id", ""),
-                    "base": p.get("base_currency_id", ""),
-                    "quote": p.get("quote_currency_id", ""),
-                    "display_name": display_name,
-                    "volume_24h": float(p.get("volume_24h", 0) or 0),
-                    "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
-                })
-        results.sort(key=lambda x: x["volume_24h"], reverse=True)
-        return {"results": results[:25], "query": q}
-    except Exception as e:
-        logger.warning(f"product search error: {e}")
-        return {"results": [], "query": q}
+    qc = deps.quote_currency_for(profile)
+    allowed_quotes = {c.upper() for c in qc} if qc else None
+
+    results = []
+    for p in items:
+        if (
+            p.get("trading_disabled", False)
+            or p.get("is_disabled", False)
+            or str(p.get("status", "online")).lower() != "online"
+        ):
+            continue
+        pid = (p.get("product_id") or "").upper()
+        base = (p.get("base_currency_id") or "").upper()
+        quote = (p.get("quote_currency_id") or "").upper()
+        display_name = (p.get("base_display_symbol") or base)
+        display_up = display_name.upper()
+
+        if allowed_quotes and quote not in allowed_quotes:
+            continue
+        if not (query in pid or query in base or query in display_up):
+            continue
+
+        # Match-quality score: 0=exact base/id, 1=prefix, 2=substring.
+        if base == query or pid == query or display_up == query:
+            score = 0
+        elif base.startswith(query) or pid.startswith(query) or display_up.startswith(query):
+            score = 1
+        else:
+            score = 2
+
+        results.append({
+            "id": p.get("product_id", ""),
+            "base": p.get("base_currency_id", ""),
+            "quote": p.get("quote_currency_id", ""),
+            "display_name": display_name,
+            "volume_24h": float(p.get("volume_24h", 0) or 0),
+            "price_change_24h": float(p.get("price_percentage_change_24h", 0) or 0),
+            "_score": score,
+        })
+
+    # Sort by match quality first, then by 24h volume desc.
+    results.sort(key=lambda x: (x["_score"], -x["volume_24h"]))
+    for r in results:
+        r.pop("_score", None)
+    return {"results": results[:25], "query": q}
 
 
 @router.get("/api/market/price", summary="Live price for a trading pair")
