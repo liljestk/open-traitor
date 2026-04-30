@@ -490,7 +490,16 @@ class ExecutorAgent(BaseAgent):
                 }
             else:
                 trade.status = TradeStatus.FAILED
-                error = result.get("error", "Unknown error")
+                err_resp = result.get("error_response") or {}
+                error = (
+                    result.get("error")
+                    or err_resp.get("message")
+                    or err_resp.get("error")
+                    or err_resp.get("preview_failure_reason")
+                    or err_resp.get("new_order_failure_reason")
+                    or result.get("failure_reason")
+                    or "Unknown error"
+                )
                 self.logger.error(f"❌ Trade failed: {error}")
                 return {"executed": False, "error": error, "trade_id": trade.id}
 

@@ -565,7 +565,7 @@ class CoinbaseClient(
                 logger.error(f"❌ Failed to place buy order: {e}")
                 return {
                     "success": False,
-                    "error": "Order failed — check logs for details",
+                    "error": f"Market buy exception: {e}",
                 }
 
         return {"success": False, "error": "No client available"}
@@ -608,7 +608,7 @@ class CoinbaseClient(
                 logger.error(f"❌ Failed to place sell order: {e}")
                 return {
                     "success": False,
-                    "error": "Order failed — check logs for details",
+                    "error": f"Market sell exception: {e}",
                 }
 
         return {"success": False, "error": "No client available"}
