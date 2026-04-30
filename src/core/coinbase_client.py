@@ -639,17 +639,24 @@ class CoinbaseClient(
                     if hasattr(order, "to_dict")
                     else dict(order)
                 )
-                logger.info(
-                    f"✅ Limit BUY order placed: {product_id} @ {limit_price} | "
-                    f"order_id={result.get('order_id', '?')}"
-                )
+                if result.get("success", True):
+                    logger.info(
+                        f"✅ Limit BUY order placed: {product_id} @ {limit_price} | "
+                        f"order_id={result.get('order_id', '?')}"
+                    )
+                else:
+                    _err = _extract_cb_error(result)
+                    logger.error(
+                        f"❌ Limit BUY rejected by Coinbase: {product_id} @ {limit_price} | {_err}"
+                    )
+                    result.setdefault("error", _err)
                 logger.debug(f"Limit BUY detail: {result}")
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place limit buy order: {e}")
                 return {
                     "success": False,
-                    "error": "Order failed — check logs for details",
+                    "error": f"Limit buy exception: {e}",
                 }
 
         return {"success": False, "error": "No client available"}
@@ -680,17 +687,24 @@ class CoinbaseClient(
                     if hasattr(order, "to_dict")
                     else dict(order)
                 )
-                logger.info(
-                    f"✅ Limit SELL order placed: {product_id} @ {limit_price} | "
-                    f"order_id={result.get('order_id', '?')}"
-                )
+                if result.get("success", True):
+                    logger.info(
+                        f"✅ Limit SELL order placed: {product_id} @ {limit_price} | "
+                        f"order_id={result.get('order_id', '?')}"
+                    )
+                else:
+                    _err = _extract_cb_error(result)
+                    logger.error(
+                        f"❌ Limit SELL rejected by Coinbase: {product_id} @ {limit_price} | {_err}"
+                    )
+                    result.setdefault("error", _err)
                 logger.debug(f"Limit SELL detail: {result}")
                 return result
             except Exception as e:
                 logger.error(f"❌ Failed to place limit sell order: {e}")
                 return {
                     "success": False,
-                    "error": "Order failed — check logs for details",
+                    "error": f"Limit sell exception: {e}",
                 }
 
         return {"success": False, "error": "No client available"}

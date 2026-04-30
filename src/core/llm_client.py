@@ -45,6 +45,186 @@ if TYPE_CHECKING:
 logger = get_logger("core.llm")
 
 
+# ─── JSON repair helpers ───────────────────────────────────────────────────────
+#
+# Cheap LLMs (llama-3.x free, some Gemini fallbacks) routinely emit "JSON-ish"
+# output: line/block comments, trailing commas, and arithmetic expressions
+# (e.g. ``"quantity": 26.21 * 0.2``). The strict ``json.loads`` parser rejects
+# all of those, which previously dropped high-conviction trader signals.
+#
+# These helpers normalise such output into strict JSON so the trading loop is
+# resilient to noisy free-tier providers. Behaviour is pinned by
+# ``tests/test_llm_json_repair.py``.
+
+import ast as _ast
+
+
+# Match // line comments and /* … */ block comments while skipping the
+# contents of string literals. We process character-by-character to preserve
+# comment-like substrings inside JSON string values verbatim.
+def _strip_jsonish_comments(text: str) -> str:
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_str = False
+    str_quote = ""
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == str_quote:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            str_quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "/":
+                # line comment — skip to end of line
+                j = text.find("\n", i + 2)
+                i = n if j == -1 else j
+                continue
+            if nxt == "*":
+                # block comment — skip to closing */
+                j = text.find("*/", i + 2)
+                i = n if j == -1 else j + 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    # Remove ", }" / ", ]" patterns that JS-flavoured outputs leave behind.
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+# AST-based safe evaluator for *purely numeric* arithmetic expressions.
+# Anything referencing names, attributes, calls, or imports returns ``None``
+# so the caller can leave the original text untouched (and ultimately fail
+# the parse rather than execute arbitrary code).
+_ALLOWED_BINOPS = (_ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Mod, _ast.Pow, _ast.FloorDiv)
+_ALLOWED_UNARYOPS = (_ast.UAdd, _ast.USub)
+
+
+def _eval_numeric_expr(expr: str) -> Optional[float]:
+    try:
+        tree = _ast.parse(expr.strip(), mode="eval")
+    except SyntaxError:
+        return None
+
+    def _eval(node: _ast.AST) -> float:
+        if isinstance(node, _ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return float(node.value)
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, _ALLOWED_UNARYOPS):
+            v = _eval(node.operand)
+            return +v if isinstance(node.op, _ast.UAdd) else -v
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ALLOWED_BINOPS):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                return left / right
+            if isinstance(node.op, _ast.Mod):
+                return left % right
+            if isinstance(node.op, _ast.Pow):
+                return left ** right
+            if isinstance(node.op, _ast.FloorDiv):
+                return left // right
+        raise ValueError("disallowed expression node")
+
+    try:
+        return _eval(tree)
+    except Exception:
+        return None
+
+
+# Match a JSON-ish numeric expression as a value: looks like
+#   "key": <expr>,    or    "key": <expr>}
+# where <expr> contains operators (+ - * / % ** //) and digits/decimals/spaces.
+_NUMERIC_EXPR_VALUE_RE = re.compile(
+    r'(?P<prefix>:\s*)(?P<expr>-?\s*\d[\d_.\s]*(?:\s*(?:\*\*|//|[+\-*/%])\s*-?\s*\d[\d_.\s]*)+)(?=\s*[,}\]\n])'
+)
+
+
+def _replace_numeric_exprs(text: str) -> str:
+    def _sub(m: re.Match) -> str:
+        expr = m.group("expr")
+        val = _eval_numeric_expr(expr)
+        if val is None:
+            return m.group(0)
+        # Use repr for floats to keep precision; ints stay clean.
+        if val == int(val) and "." not in expr and "/" not in expr:
+            return f"{m.group('prefix')}{int(val)}"
+        return f"{m.group('prefix')}{val!r}"
+
+    # Scan outside string literals only.
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_str = False
+    str_quote = ""
+    buf_start = 0
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == str_quote:
+                # close string: flush buffered string verbatim
+                out.append(text[buf_start:i + 1])
+                in_str = False
+                buf_start = i + 1
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            # flush non-string segment with substitution applied
+            out.append(_NUMERIC_EXPR_VALUE_RE.sub(_sub, text[buf_start:i]))
+            buf_start = i
+            in_str = True
+            str_quote = ch
+            i += 1
+            continue
+        i += 1
+    # tail
+    if in_str:
+        out.append(text[buf_start:])
+    else:
+        out.append(_NUMERIC_EXPR_VALUE_RE.sub(_sub, text[buf_start:]))
+    return "".join(out)
+
+
+def _sanitize_jsonish(text: str) -> str:
+    """Normalise JSON-ish LLM output into strict JSON.
+
+    Strips // and /* */ comments outside string literals, drops trailing
+    commas, and evaluates simple numeric arithmetic expressions used as
+    values (e.g. ``26.21 * 0.2`` → ``5.242``). String contents are left
+    untouched so reasoning text containing ``//`` survives intact.
+    """
+    if not text:
+        return text
+    out = _strip_jsonish_comments(text)
+    out = _replace_numeric_exprs(out)
+    out = _strip_trailing_commas(out)
+    return out
+
+
 # ─── LLMClient ─────────────────────────────────────────────────────────────────
 
 class LLMClient:
@@ -715,8 +895,18 @@ class LLMClient:
 
     def _extract_json(self, text: str) -> dict:
         """Attempt to extract JSON from text that may contain other content."""
+        # Fast path: clean up common JSON-ish noise (comments, trailing commas,
+        # numeric expressions) and try strict parse first. This handles the
+        # majority of llama-3.x / cheap-tier outputs that previously fell
+        # through to the brace-balanced extractor.
+        sanitized = _sanitize_jsonish(text)
+        try:
+            return json.loads(sanitized)
+        except json.JSONDecodeError:
+            pass
+
         # Try to find JSON in markdown code blocks
-        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", sanitized, re.DOTALL)
         if json_match:
             try:
                 return json.loads(json_match.group(1))
@@ -727,20 +917,20 @@ class LLMClient:
         # Find opening braces and try to parse balanced substrings
         # Limit to first 10 opening braces to avoid O(n²) on malformed output
         brace_attempts = 0
-        for i, ch in enumerate(text):
+        for i, ch in enumerate(sanitized):
             if ch == '{':
                 brace_attempts += 1
                 if brace_attempts > 10:
                     break
                 depth = 0
-                for j in range(i, len(text)):
-                    if text[j] == '{':
+                for j in range(i, len(sanitized)):
+                    if sanitized[j] == '{':
                         depth += 1
-                    elif text[j] == '}':
+                    elif sanitized[j] == '}':
                         depth -= 1
                     if depth == 0:
                         try:
-                            return json.loads(text[i:j+1])
+                            return json.loads(sanitized[i:j+1])
                         except json.JSONDecodeError:
                             break  # try next opening brace
 
