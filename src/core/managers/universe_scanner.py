@@ -22,6 +22,71 @@ if TYPE_CHECKING:
 logger = get_logger("core.universe_scanner")
 
 
+# ---------------------------------------------------------------------------
+# Affordability filter (equity-only, used by the LLM screener).
+# Module-level helpers so they are unit-testable without a full orchestrator.
+# ---------------------------------------------------------------------------
+
+def _effective_buying_power(state) -> float:
+    """Best-effort buying-power estimate from agent state.
+
+    Prefers live aggregated cash balances; falls back to ``state.cash_balance``.
+    Currency mismatches are tolerated — this is a coarse "can a single share
+    plausibly fit in cash" gate, not a precise pre-trade check.
+    """
+    try:
+        live = getattr(state, "live_cash_balances", None)
+        if live:
+            return float(sum(float(v or 0.0) for v in live.values()))
+    except Exception:
+        pass
+    try:
+        return float(getattr(state, "cash_balance", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _affordability_margin() -> float:
+    """Read the ``AUTO_TRAITOR_AFFORDABILITY_MARGIN`` env var (default 1.0)."""
+    try:
+        m = float(os.environ.get("AUTO_TRAITOR_AFFORDABILITY_MARGIN", "1.0"))
+    except Exception:
+        m = 1.0
+    return m if m > 0 else 1.0
+
+
+def filter_unaffordable(
+    ranked: list[tuple[str, dict]],
+    *,
+    buying_power: float,
+    margin: float = 1.0,
+    held: set[str] | None = None,
+) -> tuple[list[tuple[str, dict]], list[tuple[str, float]]]:
+    """Drop ranked entries whose ``current_price`` exceeds ``buying_power*margin``.
+
+    - When ``buying_power <= 0`` the input is returned unchanged (we don't yet
+      know what we can afford, so don't over-prune).
+    - Held positions are always kept so the LLM can still vote to keep/drop them.
+    - Returns ``(kept, dropped)`` where ``dropped`` is ``[(pair, price), ...]``.
+    """
+    held = held or set()
+    if buying_power <= 0:
+        return list(ranked), []
+    threshold = buying_power * margin
+    kept: list[tuple[str, dict]] = []
+    dropped: list[tuple[str, float]] = []
+    for pair, d in ranked:
+        try:
+            price_f = float(d.get("current_price") or 0.0)
+        except Exception:
+            price_f = 0.0
+        if pair in held or price_f <= 0 or price_f <= threshold:
+            kept.append((pair, d))
+        else:
+            dropped.append((pair, price_f))
+    return kept, dropped
+
+
 class UniverseScanner:
     """Handles the 3-stage pair funnel: universe refresh → tech scan → LLM screener."""
 
@@ -245,7 +310,37 @@ class UniverseScanner:
             reverse=True,
         )[:20]  # top 20 for LLM consideration
 
+        # Affordability filter (equities only):
+        # IBKR equities trade in whole shares (see ib_client base_increment="1"),
+        # so a single share priced above our buying power can never be filled.
+        # Drop those candidates from the LLM screener so the system never
+        # auto-follows assets it cannot ever buy. Humans can still follow any
+        # asset manually via the dashboard watchlist.
+        try:
+            asset_class_pre = getattr(orch.exchange, "asset_class", "crypto")
+            if asset_class_pre == "equity":
+                buying_power = _effective_buying_power(orch.state)
+                margin = _affordability_margin()
+                ranked, dropped = filter_unaffordable(
+                    ranked,
+                    buying_power=buying_power,
+                    margin=margin,
+                    held=set(orch.state.open_positions.keys()),
+                )
+                if dropped:
+                    logger.info(
+                        f"💰 Affordability filter dropped {len(dropped)} unaffordable equities "
+                        f"(buying_power={buying_power:.2f}, margin={margin}): "
+                        + ", ".join(f"{p}@{pr:.2f}" for p, pr in dropped[:5])
+                        + (" …" if len(dropped) > 5 else "")
+                    )
+                elif buying_power <= 0:
+                    logger.debug("Affordability filter skipped: buying power unknown (0).")
+        except Exception as aff_err:  # noqa: BLE001
+            logger.debug(f"Affordability filter error (non-fatal): {aff_err}")
+
         if not ranked:
+            logger.info("📭 LLM screener skipped: no affordable candidates after filter.")
             return
 
         # Build compact table for LLM
