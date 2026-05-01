@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_equity_events,
         run_nightly_backtests,
         run_event_regressions,
+        run_regressions_for_followed_assets,
         run_price_backfill,
         run_finetune_export,
         run_taxonomy_seed,
@@ -386,17 +387,32 @@ class EventRegressionWorkflow:
         workflow.logger.info(
             f"EventRegressionWorkflow: starting (profile={profile!r})"
         )
-        result = await workflow.execute_activity(
+        event_result = await workflow.execute_activity(
             run_event_regressions,
             args=[profile],
             start_to_close_timeout=timedelta(minutes=45),
             retry_policy=_RETRY,
         )
-        workflow.logger.info(
-            f"EventRegressionWorkflow: complete — fitted={result.get('fitted')} "
-            f"ok={result.get('ok')}"
+        # Followed-asset coverage step: fits factor regressions for every
+        # human/LLM follow so symbols without catalysts still land a row.
+        followed_result = await workflow.execute_activity(
+            run_regressions_for_followed_assets,
+            args=[profile],
+            start_to_close_timeout=timedelta(minutes=45),
+            retry_policy=_RETRY,
         )
-        return result
+        workflow.logger.info(
+            f"EventRegressionWorkflow: complete — "
+            f"event_fitted={event_result.get('fitted')} "
+            f"event_ok={event_result.get('ok')} "
+            f"followed_symbols={len(followed_result.get('symbols', []))} "
+            f"factor_rows={followed_result.get('factor_rows', 0)}"
+        )
+        return {
+            "profile": profile,
+            "event": event_result,
+            "followed": followed_result,
+        }
 
 
 @workflow.defn

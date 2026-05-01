@@ -1441,6 +1441,53 @@ async def run_event_regressions(profile: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Followed-asset regression coverage activity
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def run_regressions_for_followed_assets(profile: str = "") -> dict:
+    """Guarantee regression coverage for every followed symbol.
+
+    Couples ``ensure_factor_candles`` → ``compute_factor_loadings`` →
+    ``persist_factor_loadings`` with ``run_event_regressions_for_profile``,
+    scoped to the union of human + LLM follows for ``profile``.
+
+    Domain-isolated by exchange. Idempotent. Called by
+    ``EventRegressionWorkflow`` *after* the per-event refit so factor
+    loadings always exist for symbols that lack catalysts (e.g. micro-cap
+    Helsinki equities like ``BIOBV.HE-EUR``).
+    """
+    from src.utils.stats import StatsDB
+    from src.analysis.regression_coverage import refresh_regression_for_followed
+
+    domain = _detect_domain(profile)
+    resolved = (profile or "coinbase").lower()
+    if resolved == "crypto":
+        resolved = "coinbase"
+    exchange = "ibkr" if domain == "equity" else resolved
+
+    db = StatsDB()
+    try:
+        result = refresh_regression_for_followed(
+            stats_db=db,
+            exchange=exchange,
+        )
+    except Exception as e:
+        logger.warning(f"run_regressions_for_followed_assets failed: {e}")
+        return {
+            "profile": profile,
+            "exchange": exchange,
+            "skipped": True,
+            "error": str(e),
+        }
+
+    return {
+        "profile": profile,
+        **result,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Nightly historical-OHLCV backfill activity
 # ---------------------------------------------------------------------------
 

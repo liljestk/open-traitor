@@ -388,6 +388,45 @@ class UniverseScanner:
                             except Exception as bf_err:
                                 logger.debug(f"Backfill schedule failed (non-fatal): {bf_err}")
 
+                            # Regression coverage: refresh factor + event
+                            # regressions for any newly LLM-followed pair so
+                            # the dashboard reflects coverage on next load.
+                            try:
+                                if added:
+                                    import threading
+                                    from src.utils.stats import StatsDB
+                                    from src.analysis.regression_coverage import (
+                                        refresh_regression_for_symbols,
+                                    )
+
+                                    _exch = orch.config.get("trading", {}).get(
+                                        "exchange", "coinbase"
+                                    ).lower()
+                                    _added = list(added)
+
+                                    def _refresh_added():
+                                        try:
+                                            db_local = StatsDB()
+                                            refresh_regression_for_symbols(
+                                                stats_db=db_local,
+                                                exchange=_exch,
+                                                symbols=_added,
+                                            )
+                                        except Exception as exc:  # noqa: BLE001
+                                            logger.debug(
+                                                f"LLM-follow regression refresh failed: {exc}"
+                                            )
+
+                                    threading.Thread(
+                                        target=_refresh_added,
+                                        name=f"llm-regression-refresh",
+                                        daemon=True,
+                                    ).start()
+                            except Exception as rg_err:
+                                logger.debug(
+                                    f"LLM-follow regression refresh schedule failed: {rg_err}"
+                                )
+
                             # Update WebSocket subscriptions
                             try:
                                 if orch.ws_feed:

@@ -208,6 +208,13 @@ def follow_pair(body: _FollowPairBody, profile: str = Query(""), db=Depends(deps
 
     db.follow_pair(pair=pair, followed_by="human", exchange=exchange)
     _notify_orchestrator("add_watchlist_pair", pair, profile=profile)
+    try:
+        from src.dashboard.routes.regression import (
+            trigger_followed_refresh_in_background,
+        )
+        trigger_followed_refresh_in_background(profile, [pair])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"watchlist: regression-refresh hook failed: {exc}")
     return {"ok": True, "pair": pair, "followed_by": "human", "exchange": exchange}
 
 
