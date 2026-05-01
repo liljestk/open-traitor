@@ -1471,6 +1471,7 @@ async def run_regressions_for_followed_assets(profile: str = "") -> dict:
         result = refresh_regression_for_followed(
             stats_db=db,
             exchange=exchange,
+            profile=profile or resolved,
         )
     except Exception as e:
         logger.warning(f"run_regressions_for_followed_assets failed: {e}")

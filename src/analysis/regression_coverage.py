@@ -47,9 +47,31 @@ from src.utils.logger import get_logger
 logger = get_logger("analysis.regression_coverage")
 
 
-def _followed_symbols(stats_db, exchange: str) -> list[str]:
-    """Union of human + LLM follows for the exchange (case-preserved)."""
+def _followed_symbols(stats_db, exchange: str, profile: str = "") -> list[str]:
+    """Union of yaml-configured pairs + human/LLM follows for ``exchange``.
+
+    Yaml pairs are the system's AI-curated baseline; ``pair_follows``
+    contains both human additions and LLM-screener selections.
+    """
     out: set[str] = set()
+    # 1) yaml-configured pairs
+    try:
+        import os
+        import yaml as _yaml
+        safe_profile = "".join(
+            c for c in (profile or exchange or "") if c.isalnum() or c in "-_"
+        )
+        if safe_profile:
+            cfg_path = os.path.join("config", f"{safe_profile}.yaml")
+            if os.path.isfile(cfg_path):
+                with open(cfg_path) as f:
+                    cfg = _yaml.safe_load(f) or {}
+                for p in (cfg.get("trading", {}) or {}).get("pairs", []) or []:
+                    if isinstance(p, str) and p.strip():
+                        out.add(p.strip())
+    except Exception as exc:
+        logger.debug(f"regression_coverage: yaml pair load failed: {exc}")
+    # 2) DB follows (human + LLM)
     try:
         out.update(stats_db.get_followed_pairs_set(exchange=exchange) or set())
     except Exception as exc:
@@ -144,9 +166,10 @@ def refresh_regression_for_followed(
     stats_db,
     exchange: str,
     factors: Sequence[str] = DEFAULT_FACTORS,
+    profile: str = "",
 ) -> dict:
     """Refresh regressions for every symbol currently followed."""
-    symbols = _followed_symbols(stats_db, exchange)
+    symbols = _followed_symbols(stats_db, exchange, profile=profile)
     if not symbols:
         return {
             "exchange": exchange,
@@ -165,7 +188,7 @@ def refresh_regression_for_followed(
     )
 
 
-def compute_coverage_stats(stats_db, exchange: str) -> dict:
+def compute_coverage_stats(stats_db, exchange: str, profile: str = "") -> dict:
     """Coverage summary for the ``/api/regression/coverage`` endpoint.
 
     Returns ``{exchange, followed, modeled, missing[], coverage_pct}``
@@ -173,7 +196,7 @@ def compute_coverage_stats(stats_db, exchange: str) -> dict:
     least one row in *either* ``event_price_regressions`` or
     ``market_factor_loadings``.
     """
-    followed = _followed_symbols(stats_db, exchange)
+    followed = _followed_symbols(stats_db, exchange, profile=profile)
     if not followed:
         return {
             "exchange": exchange,

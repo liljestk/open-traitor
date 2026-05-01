@@ -254,7 +254,8 @@ def test_coverage_excludes_macro_placeholder_from_event_models():
 
 def test_coverage_handles_zero_followed():
     db = _StubDB(followed={})
-    cov = compute_coverage_stats(db, "coinbase")
+    # Pass a profile that doesn't have a yaml config file.
+    cov = compute_coverage_stats(db, "no-such-exchange", profile="no-such-profile")
     assert cov["followed"] == 0
     assert cov["coverage_pct"] == 100.0
     assert cov["missing"] == []

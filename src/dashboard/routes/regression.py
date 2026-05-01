@@ -136,7 +136,7 @@ def get_regression_coverage(
     if not exchange:
         raise HTTPException(status_code=400, detail="profile has no exchange mapping")
     try:
-        stats = compute_coverage_stats(db, exchange)
+        stats = compute_coverage_stats(db, exchange, profile=resolved)
     except Exception as exc:
         logger.warning(f"regression coverage failed: {exc}")
         raise HTTPException(status_code=500, detail="coverage probe failed")
@@ -161,7 +161,9 @@ def refresh_regression_followed(profile: str = Query("")):
     if not exchange:
         raise HTTPException(status_code=400, detail="profile has no exchange mapping")
     try:
-        result = refresh_regression_for_followed(stats_db=db, exchange=exchange)
+        result = refresh_regression_for_followed(
+            stats_db=db, exchange=exchange, profile=resolved,
+        )
     except Exception as exc:
         logger.warning(f"refresh regression failed: {exc}")
         raise HTTPException(status_code=500, detail="refresh failed")
