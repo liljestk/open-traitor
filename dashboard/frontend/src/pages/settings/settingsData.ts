@@ -423,7 +423,7 @@ export const SECTION_SUMMARY: Record<string, Array<{ key: string; label: string 
   dashboard: [{ key: 'enabled', label: 'Enabled' }, { key: 'port', label: 'Port' }],
 }
 
-export function formatSummaryValue(key: string, val: unknown): string {
+export function formatSummaryValue(key: string, val: unknown, currencySymbol = '€'): string {
   if (val === null || val === undefined) return '—'
   if (typeof val === 'boolean') return val ? 'On' : 'Off'
   if (key.endsWith('_pct') && typeof val === 'number') return `${(val * 100).toFixed(1)}%`
@@ -431,7 +431,7 @@ export function formatSummaryValue(key: string, val: unknown): string {
   if (key === 'status_update_interval' && typeof val === 'number') return `${Math.round(val / 60)}m`
   if (typeof val === 'number') {
     if (['max_single_trade', 'max_daily_spend', 'max_daily_loss', 'require_approval_above',
-         'approval_threshold', 'auto_approve_up_to'].includes(key)) return `€${val}`
+         'approval_threshold', 'auto_approve_up_to'].includes(key)) return `${currencySymbol}${val}`
     return String(val)
   }
   return String(val)

@@ -168,7 +168,7 @@ export default function Backtesting() {
 
   return (
     <PageTransition>
-      <div className="p-6" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      <div className="p-4 md:p-6" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
         {/* ── Controls Bar ─────────────────────────────────────── */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
@@ -456,7 +456,7 @@ function RunDetailView({ detail, isLoading, onBack, onDelete }: {
   const costSens = r.cost_sensitivity ?? []
 
   return (
-    <div className="p-6" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+    <div className="p-4 md:p-6" style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
       {/* ── Header ──────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

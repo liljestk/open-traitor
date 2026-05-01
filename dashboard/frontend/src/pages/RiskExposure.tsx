@@ -14,13 +14,17 @@ import {
   YAxis,
   CartesianGrid,
 } from 'recharts'
-import { Shield, AlertTriangle, TrendingDown, Lock, Crosshair } from 'lucide-react'
+import { Shield, AlertTriangle, TrendingDown, Lock, Crosshair, Map as MapIcon } from 'lucide-react'
 import { fetchPortfolioExposure, fetchTrailingStops, fetchAnalytics } from '../api'
 import { useCurrencyFormatter, useLiveStore } from '../store'
 import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import MotionFade from '../components/MotionFade'
+import Treemap from '../components/Treemap'
+import Card from '../components/Card'
+import MetricBadge from '../components/MetricBadge'
 
 const COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#ec4899', '#84cc16']
 
@@ -210,12 +214,42 @@ export default function RiskExposure() {
 
   return (
     <PageTransition>
-      <div className="p-6 space-y-4">
+      <div className="p-4 md:p-6 space-y-4">
         {/* Header */}
         <div className="flex items-center gap-3">
           <Shield size={18} className="text-yellow-400" />
-          <h2 className="text-xl font-bold text-gray-100">Risk & Exposure</h2>
+          <h2 className="t-h1">Risk &amp; Exposure</h2>
         </div>
+
+        {/* Critical stop-loss proximity warnings */}
+        {(() => {
+          const critical = stopsArray.filter((s) => {
+            if (!s.current_price || !s.stop_price) return false
+            const distPct = ((s.current_price - s.stop_price) / s.current_price) * 100
+            return distPct >= 0 && distPct <= 2
+          })
+          if (!critical.length) return null
+          return (
+            <MotionFade>
+              <Card tone="red">
+                <div className="flex items-start gap-3" style={{ marginBottom: 8 }}>
+                  <AlertTriangle size={18} className="text-red-400" style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <h3 className="t-h2" style={{ color: '#fca5a5' }}>Stops near trigger</h3>
+                    <p className="text-xs text-gray-400">{critical.length} position{critical.length > 1 ? 's' : ''} within 2% of stop-loss — review now.</p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {critical.map((s) => (
+                    <MetricBadge key={s.pair} tone="negative">
+                      {s.pair} — {(((s.current_price - s.stop_price) / s.current_price) * 100).toFixed(2)}% away
+                    </MetricBadge>
+                  ))}
+                </div>
+              </Card>
+            </MotionFade>
+          )
+        })()}
 
         {/* Risk KPIs */}
         {isLoading ? (
@@ -249,32 +283,43 @@ export default function RiskExposure() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Exposure chart */}
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 mb-3">Portfolio Concentration</h3>
+          {/* Allocation Treemap */}
+          <Card title={<span className="flex items-center gap-2"><MapIcon size={14} className="text-brand-400" /> Allocation Heatmap</span>}>
+            {expLoading ? (
+              <SkeletonBlock className="h-[280px]" />
+            ) : exposureData.length ? (
+              <Treemap
+                items={exposureData.map((d) => ({ label: d.name, value: d.value, sub: `${d.pct.toFixed(2)}%` }))}
+                width={600}
+                height={280}
+                format={(v) => `${v.toFixed(1)}%`}
+              />
+            ) : (
+              <EmptyState icon="chart" title="No open positions" description="No exposure data to show." />
+            )}
+          </Card>
+
+          {/* Pie + legend */}
+          <Card title="Portfolio Concentration">
             {expLoading ? (
               <SkeletonBlock className="h-[280px]" />
             ) : (
               <ExposurePie data={exposureData} />
             )}
-          </div>
-
-          {/* Trailing stops */}
-          <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-300 mb-3">
-              Active Trailing Stops ({stopsArray.length})
-            </h3>
-            {stopsLoading ? (
-              <SkeletonBlock className="h-[280px]" />
-            ) : (
-              <TrailingStopsPanel stops={stopsArray} fmt={fmtCurrency} />
-            )}
-          </div>
+          </Card>
         </div>
 
+        {/* Trailing stops */}
+        <Card title={`Active Trailing Stops (${stopsArray.length})`}>
+          {stopsLoading ? (
+            <SkeletonBlock className="h-[200px]" />
+          ) : (
+            <TrailingStopsPanel stops={stopsArray} fmt={fmtCurrency} />
+          )}
+        </Card>
+
         {/* Drawdown chart */}
-        <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-gray-300 mb-3">Daily Drawdown (30d)</h3>
+        <Card title="Daily Drawdown (30d)">
           {analyticsLoading ? (
             <SkeletonBlock className="h-[160px]" />
           ) : dailySummaries.length > 0 ? (
@@ -282,7 +327,7 @@ export default function RiskExposure() {
           ) : (
             <EmptyState icon="chart" title="No daily data" description="Need at least 2 days of trading history." />
           )}
-        </div>
+        </Card>
       </div>
     </PageTransition>
   )

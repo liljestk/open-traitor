@@ -5,7 +5,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import relativeTime from 'dayjs/plugin/relativeTime'
 import { ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
+
+dayjs.extend(relativeTime)
 import { useLiveStore } from '../store'
 import {
   fetchStrategic,
@@ -18,6 +21,9 @@ import {
 import { SkeletonCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import MotionFade from '../components/MotionFade'
+import StatCard from '../components/StatCard'
+import KpiHero from '../components/KpiHero'
 
 const HORIZON_COLORS: Record<string, string> = {
   daily: 'bg-brand-900/40 text-brand-400',
@@ -190,9 +196,9 @@ export default function PlanningAudit() {
 
   return (
     <PageTransition>
-    <div className="p-6 space-y-5">
+    <div className="p-4 md:p-6 space-y-5">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold text-gray-100">Planning Audit</h2>
+        <h2 className="t-h1">Planning Audit</h2>
         <div className="flex items-center gap-2">
           <div className="flex bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
             {(['plans', 'temporal'] as const).map((tab) => (
@@ -207,6 +213,36 @@ export default function PlanningAudit() {
           </div>
         </div>
       </div>
+
+      {/* KPI strip */}
+      <MotionFade>
+        <KpiHero>
+          <StatCard
+            label="Daily Plans"
+            value={(plansData?.plans ?? []).filter((p) => p.horizon === 'daily').length}
+            accent="blue"
+            sub="Last 30 days"
+          />
+          <StatCard
+            label="Weekly Plans"
+            value={(plansData?.plans ?? []).filter((p) => p.horizon === 'weekly').length}
+            accent="blue"
+            sub="Last 30 days"
+          />
+          <StatCard
+            label="Monthly Plans"
+            value={(plansData?.plans ?? []).filter((p) => p.horizon === 'monthly').length}
+            accent="blue"
+            sub="Last 30 days"
+          />
+          <StatCard
+            label="Latest Plan"
+            value={plansData?.plans?.[0]?.ts ? dayjs(plansData.plans[0].ts).fromNow() : '—'}
+            accent="gray"
+            sub={plansData?.plans?.[0]?.horizon ?? 'No plans yet'}
+          />
+        </KpiHero>
+      </MotionFade>
 
       {activeTab === 'plans' && (
         <>

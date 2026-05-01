@@ -27,6 +27,7 @@ import {
 } from '../api'
 import { useLiveStore } from '../store'
 import PageTransition from '../components/PageTransition'
+import MotionFade from '../components/MotionFade'
 import { SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 
@@ -86,7 +87,7 @@ export default function RecommendationsPage() {
 
   return (
     <PageTransition>
-      <div className="space-y-4">
+      <div className="p-4 md:p-6 space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -155,10 +156,10 @@ export default function RecommendationsPage() {
           />
         ) : (
           <ul className="space-y-2">
-            {rows.map(row => (
+            {rows.map((row, i) => (
+              <MotionFade key={row.id} delay={Math.min(i * 0.02, 0.18)}>
               <li
-                key={row.id}
-                className="rounded border border-gray-800 bg-gray-900/40 p-3"
+                className="rounded border border-gray-800 bg-gray-900/40 p-3 hover:border-gray-700 transition-colors"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
@@ -223,6 +224,7 @@ export default function RecommendationsPage() {
                   )}
                 </div>
               </li>
+              </MotionFade>
             ))}
           </ul>
         )}

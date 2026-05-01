@@ -24,6 +24,8 @@ import StatCard from '../components/StatCard'
 import { SkeletonStatCards, SkeletonBlock } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import MotionFade from '../components/MotionFade'
+import KpiHero from '../components/KpiHero'
 
 const TIME_RANGES = [
   { label: '24h', hours: 24 },
@@ -242,6 +244,42 @@ export default function Analytics() {
       .map(([date, { open, close }]) => ({ date, pnl: close - open }))
   }, [history])
 
+  // Sparkline series + delta vs start of window for hero KPI strip
+  const portfolioValues = useMemo(
+    () => (history?.history ?? []).map((p) => p.portfolio_value).filter((n) => Number.isFinite(n)),
+    [history],
+  )
+  const portfolioDeltaPct = useMemo(() => {
+    if (portfolioValues.length < 2) return null
+    const a = portfolioValues[0], b = portfolioValues[portfolioValues.length - 1]
+    if (!a) return null
+    return ((b - a) / a) * 100
+  }, [portfolioValues])
+  const dailyPnlSeries = useMemo(() => dailyPnL.map((d) => d.pnl), [dailyPnL])
+
+  // Profit factor + recovery factor (gross profit / gross loss; total return / max DD)
+  const profitFactor = useMemo(() => {
+    if (!hasTrades || !perf) return null
+    const gainSum = perf.best_pnl != null && perf.best_pnl > 0 ? perf.best_pnl : null
+    const lossSum = perf.worst_pnl != null && perf.worst_pnl < 0 ? Math.abs(perf.worst_pnl) : null
+    if (!gainSum || !lossSum) return null
+    return gainSum / lossSum
+  }, [hasTrades, perf])
+
+  const maxDrawdownPct = useMemo(() => {
+    const pts = history?.history ?? []
+    if (pts.length < 2) return null
+    let peak = pts[0].portfolio_value, maxDd = 0
+    for (const p of pts) {
+      if (p.portfolio_value > peak) peak = p.portfolio_value
+      if (peak > 0) {
+        const dd = ((p.portfolio_value - peak) / peak) * 100
+        if (dd < maxDd) maxDd = dd
+      }
+    }
+    return maxDd
+  }, [history])
+
   // Signal distribution for bar chart
   const signalDist = useMemo(() => {
     const bySignal = predStats?.by_signal_type ?? {}
@@ -258,7 +296,7 @@ export default function Analytics() {
 
   return (
     <PageTransition>
-      <div className="p-6 space-y-6">
+      <div className="p-4 md:p-6 space-y-6">
         {/* Header + time range */}
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-bold text-gray-100">Analytics</h2>
@@ -278,12 +316,11 @@ export default function Analytics() {
           </div>
         </div>
 
-        {/* ── Trade performance stat cards ── */}
-        <div>
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Trade Performance</p>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        {/* ── Trade performance KPI hero ── */}
+        <MotionFade>
+          <KpiHero label="Trade Performance">
             {isLoading ? (
-              <SkeletonStatCards count={6} />
+              <SkeletonStatCards count={8} />
             ) : (
               <>
                 <StatCard
@@ -292,6 +329,15 @@ export default function Analytics() {
                   accent={hasTrades ? ((perf?.total_pnl ?? 0) >= 0 ? 'green' : 'red') : 'gray'}
                   icon={<TrendingUp size={14} />}
                   sub={hasTrades ? `${perf?.total_trades ?? 0} trades` : 'No closed trades yet'}
+                  sparkline={dailyPnlSeries.length >= 2 ? dailyPnlSeries : undefined}
+                />
+                <StatCard
+                  label="Portfolio"
+                  value={portfolioValues.length ? fmtCurrency(portfolioValues[portfolioValues.length - 1]) : '—'}
+                  accent={portfolioDeltaPct == null ? 'gray' : portfolioDeltaPct >= 0 ? 'green' : 'red'}
+                  deltaPct={portfolioDeltaPct ?? null}
+                  sparkline={portfolioValues.length >= 2 ? portfolioValues : undefined}
+                  icon={<Activity size={14} />}
                 />
                 <StatCard
                   label="Win Rate"
@@ -301,16 +347,29 @@ export default function Analytics() {
                   sub={hasTrades ? `${wl?.sample_size} samples` : undefined}
                 />
                 <StatCard
+                  label="Sharpe Ratio"
+                  value={sharpeRatio != null ? sharpeRatio.toFixed(2) : '—'}
+                  accent={sharpeRatio != null && sharpeRatio > 0 ? 'green' : 'gray'}
+                  icon={<Activity size={14} />}
+                  sub={sharpeRatio != null ? (sharpeRatio > 1 ? 'Good' : sharpeRatio > 0 ? 'Moderate' : 'Poor') : undefined}
+                />
+                <StatCard
+                  label="Profit Factor"
+                  value={profitFactor != null ? profitFactor.toFixed(2) : '—'}
+                  accent={profitFactor != null && profitFactor >= 1.5 ? 'green' : profitFactor != null && profitFactor < 1 ? 'red' : 'gray'}
+                  sub={profitFactor != null ? (profitFactor >= 2 ? 'Excellent' : profitFactor >= 1.5 ? 'Strong' : profitFactor >= 1 ? 'Marginal' : 'Losing') : undefined}
+                />
+                <StatCard
+                  label="Max Drawdown"
+                  value={maxDrawdownPct != null ? `${maxDrawdownPct.toFixed(2)}%` : '—'}
+                  accent={maxDrawdownPct != null && maxDrawdownPct > -10 ? 'green' : maxDrawdownPct != null && maxDrawdownPct < -25 ? 'red' : 'gray'}
+                  icon={<TrendingDown size={14} />}
+                />
+                <StatCard
                   label="Best Trade"
                   value={hasTrades ? fmtCurrency(perf?.best_pnl) : '—'}
                   accent={hasTrades ? 'green' : 'gray'}
                   icon={<TrendingUp size={14} />}
-                />
-                <StatCard
-                  label="Worst Trade"
-                  value={hasTrades ? fmtCurrency(perf?.worst_pnl) : '—'}
-                  accent={hasTrades ? 'red' : 'gray'}
-                  icon={<TrendingDown size={14} />}
                 />
                 <StatCard
                   label="Avg Win"
@@ -318,17 +377,10 @@ export default function Analytics() {
                   accent={hasTrades ? 'green' : 'gray'}
                   sub={hasTrades ? `Avg Loss: ${fmtCurrency(wl?.avg_loss)}` : undefined}
                 />
-                <StatCard
-                  label="Sharpe Ratio"
-                  value={sharpeRatio != null ? sharpeRatio.toFixed(2) : '—'}
-                  accent={sharpeRatio != null && sharpeRatio > 0 ? 'green' : 'gray'}
-                  icon={<Activity size={14} />}
-                  sub={sharpeRatio != null ? (sharpeRatio > 1 ? 'Good' : sharpeRatio > 0 ? 'Moderate' : 'Poor') : undefined}
-                />
               </>
             )}
-          </div>
-        </div>
+          </KpiHero>
+        </MotionFade>
 
         {/* ── AI Prediction Performance ── */}
         <div>

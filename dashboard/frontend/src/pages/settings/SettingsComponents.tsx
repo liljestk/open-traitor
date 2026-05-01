@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import type { SectionSchema, FieldSchema, RpmBudget, TwoFAStatus, TwoFASetupResult } from '../../api'
 import { fetch2FAStatus, setup2FA, enable2FA, disable2FA, regenerateBackupCodes } from '../../api'
-import { useLiveStore, type Density } from '../../store'
+import { useLiveStore, useCurrencySymbol, type Density } from '../../store'
 import {
   SECTION_ICONS, TIER_COLORS, TIER_LABELS, SECTION_SUMMARY,
   formatKey, getFieldDesc, renderValue, formatSummaryValue,
@@ -140,6 +140,7 @@ export function SectionCard({ name, label, values, schema, telegramTier, onSave,
   onSave: (section: string, updates: Record<string, unknown>) => Promise<void>
   searchQuery: string
 }) {
+  const currencySymbol = useCurrencySymbol()
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Record<string, unknown>>({})
@@ -225,7 +226,7 @@ export function SectionCard({ name, label, values, schema, telegramTier, onSave,
                   display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap',
                 }}>
                   <span style={{ color: '#484f58' }}>{chipLabel}:</span>
-                  <span style={{ color: '#c9d1d9', fontWeight: 500 }}>{formatSummaryValue(key, val)}</span>
+                  <span style={{ color: '#c9d1d9', fontWeight: 500 }}>{formatSummaryValue(key, val, currencySymbol)}</span>
                 </span>
               )
             })}

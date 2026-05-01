@@ -14,6 +14,7 @@ import { fetchNews, type NewsArticle } from '../api'
 import { SkeletonCards } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import MotionFade from '../components/MotionFade'
 import { useLiveStore } from '../store'
 
 dayjs.extend(relativeTime)
@@ -189,11 +190,11 @@ export default function NewsFeed() {
 
   return (
     <PageTransition>
-      <div className="p-6 space-y-4">
+      <div className="p-4 md:p-6 space-y-4">
         {/* Header row */}
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
-            <h2 className="text-xl font-bold text-gray-100">Market Intelligence</h2>
+            <h2 className="t-h1">Market Intelligence</h2>
             <span className="text-xs text-gray-500">
               {articles.length}{rawArticles.length !== articles.length ? ` / ${rawArticles.length}` : ''} articles
             </span>
@@ -312,8 +313,8 @@ export default function NewsFeed() {
         ) : (
           <div className="space-y-2">
             {articles.map((article, i) => (
+              <MotionFade key={article.id || i} delay={Math.min(i * 0.02, 0.2)}>
               <div
-                key={article.id || i}
                 className="bg-gray-900/60 border border-gray-800 rounded-xl px-4 py-3 hover:border-gray-700 transition-colors group"
               >
                 <div className="flex items-start justify-between gap-3">
@@ -371,6 +372,7 @@ export default function NewsFeed() {
                   )}
                 </div>
               </div>
+              </MotionFade>
             ))}
           </div>
         )}

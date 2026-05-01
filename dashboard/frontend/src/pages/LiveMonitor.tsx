@@ -367,7 +367,7 @@ export default function LiveMonitor() {
 
   return (
     <PageTransition>
-    <div className="p-6 flex flex-col h-full">
+    <div className="p-4 md:p-6 flex flex-col h-full">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <h2 className="text-xl font-bold text-gray-100">Live Monitor</h2>

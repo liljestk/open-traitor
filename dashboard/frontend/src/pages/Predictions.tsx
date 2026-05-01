@@ -1825,7 +1825,7 @@ export default function Predictions() {
 
   return (
     <PageTransition>
-      <div className="p-6 space-y-6">
+      <div className="p-4 md:p-6 space-y-6">
         {/* Header + controls */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>

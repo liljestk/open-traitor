@@ -154,7 +154,7 @@ export default function SimulatedTrades() {
 
     return (
         <PageTransition>
-        <div className="p-6 space-y-8 max-w-6xl mx-auto">
+        <div className="p-4 md:p-6 space-y-8 max-w-6xl mx-auto">
             <div className="flex items-center justify-between">
                 <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
                     <Activity className="text-brand-400" />

@@ -12,7 +12,7 @@ import CandlestickChart from '../components/CandlestickChart'
 import SpanWaterfall from '../components/SpanWaterfall'
 import PageTransition from '../components/PageTransition'
 import { SkeletonBlock } from '../components/Skeleton'
-import { useLiveStore } from '../store'
+import { useCurrencyFormatter, useLiveStore } from '../store'
 
 const OUTCOME_CONFIG = {
   executed: { label: 'Executed', icon: CheckCircle2, color: 'text-green-400', bg: 'bg-green-900/30 border-green-800/50' },
@@ -163,6 +163,7 @@ function TradeChartContext({
 export default function CyclePlayback() {
   const { cycleId } = useParams<{ cycleId: string }>()
   const profile = useLiveStore((s) => s.profile)
+  const fmtCurrency = useCurrencyFormatter()
   const { data: cycle, isLoading, error } = useQuery({
     queryKey: ['cycle', cycleId, profile],
     queryFn: () => fetchCycleFull(cycleId!),
@@ -176,7 +177,7 @@ export default function CyclePlayback() {
 
   return (
     <PageTransition>
-    <div className="p-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center gap-4">
         <Link to="/" className="flex items-center gap-1 text-gray-400 hover:text-gray-200 text-sm">
@@ -243,12 +244,12 @@ export default function CyclePlayback() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             {[
               { label: 'Action', value: cycle.trade.action },
-              { label: 'Price', value: `€${cycle.trade.price?.toLocaleString()}` },
-              { label: 'Amount', value: `€${cycle.trade.quote_amount?.toFixed(2)}` },
+              { label: 'Price', value: cycle.trade.price != null ? fmtCurrency(cycle.trade.price) : '—' },
+              { label: 'Amount', value: cycle.trade.quote_amount != null ? fmtCurrency(cycle.trade.quote_amount) : '—' },
               {
                 label: 'PnL',
                 value: cycle.trade.pnl != null
-                  ? `${cycle.trade.pnl >= 0 ? '+' : ''}€${cycle.trade.pnl.toFixed(2)}`
+                  ? `${cycle.trade.pnl >= 0 ? '+' : ''}${fmtCurrency(cycle.trade.pnl)}`
                   : '—',
               },
             ].map(({ label, value }) => (

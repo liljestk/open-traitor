@@ -87,7 +87,7 @@ export default function TradesLog() {
 
     return (
         <PageTransition>
-            <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20, height: '100%', boxSizing: 'border-box' }}>
+            <div style={{ padding: isMobile ? 16 : 24, display: 'flex', flexDirection: 'column', gap: 20, height: '100%', boxSizing: 'border-box' }}>
 
                 {/* Toolbar */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
