@@ -139,3 +139,259 @@ select option {
 .density-compact .text-2xl {
   font-size: 1.125rem !important;
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Design system — typography, motion, surfaces, controls
+   Added 2026-05-01 as part of dashboard makeover.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Motion tokens */
+:root {
+  --ot-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ot-fast: 120ms;
+  --ot-base: 200ms;
+  --ot-slow: 320ms;
+  --ot-glow-green: 0 0 24px rgba(34, 197, 94, 0.18);
+  --ot-glow-red:   0 0 24px rgba(239, 68, 68, 0.18);
+  --ot-glow-blue:  0 0 24px rgba(59, 130, 246, 0.18);
+  --ot-radius-card: 14px;
+  --ot-radius-chip: 999px;
+  --ot-card-bg: linear-gradient(145deg, #0d1117 0%, #161b22 100%);
+  --ot-card-border: 1px solid #21262d;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Typography utilities */
+.t-display {
+  font-size: clamp(1.5rem, 2.4vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--color-gray-100);
+}
+.t-h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--color-gray-100);
+}
+.t-h2 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--color-gray-100);
+}
+.t-label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+}
+.t-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.t-num  { font-variant-numeric: tabular-nums; }
+
+/* Surfaces */
+.ot-card {
+  background: var(--ot-card-bg);
+  border: var(--ot-card-border);
+  border-radius: var(--ot-radius-card);
+  padding: 16px;
+  transition: border-color var(--ot-base) var(--ot-ease), transform var(--ot-base) var(--ot-ease), box-shadow var(--ot-base) var(--ot-ease);
+}
+.ot-card-hover:hover {
+  border-color: #30363d;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.ot-card-glow-green { box-shadow: var(--ot-glow-green); }
+.ot-card-glow-red   { box-shadow: var(--ot-glow-red); }
+.ot-card-glow-blue  { box-shadow: var(--ot-glow-blue); }
+
+/* Buttons */
+.ot-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-gray-200);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--ot-fast) var(--ot-ease),
+              border-color var(--ot-fast) var(--ot-ease),
+              color var(--ot-fast) var(--ot-ease),
+              transform var(--ot-fast) var(--ot-ease);
+  min-height: 40px;
+}
+.ot-btn:hover { background: rgba(255,255,255,0.04); }
+.ot-btn:active { transform: translateY(1px); }
+.ot-btn:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+.ot-btn-primary {
+  background: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-600));
+  color: #03110a;
+  border-color: var(--color-brand-600);
+}
+.ot-btn-primary:hover { filter: brightness(1.08); background: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-600)); }
+.ot-btn-ghost {
+  background: rgba(255,255,255,0.02);
+  border-color: var(--color-surface-700);
+  color: var(--color-gray-200);
+}
+.ot-btn-ghost:hover { border-color: var(--color-surface-600); background: rgba(255,255,255,0.05); }
+.ot-btn-danger {
+  background: rgba(239,68,68,0.10);
+  border-color: rgba(239,68,68,0.4);
+  color: #fca5a5;
+}
+.ot-btn-danger:hover { background: rgba(239,68,68,0.18); }
+.ot-btn-sm {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+
+/* Chips / badges */
+.ot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--ot-radius-chip);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  background: rgba(255,255,255,0.04);
+  color: var(--color-gray-300);
+  white-space: nowrap;
+}
+.ot-chip-positive { color: #4ade80; background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.30); }
+.ot-chip-negative { color: #f87171; background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.30); }
+.ot-chip-warning  { color: #fbbf24; background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.30); }
+.ot-chip-info     { color: #60a5fa; background: rgba(59,130,246,0.10); border-color: rgba(59,130,246,0.30); }
+.ot-chip-neutral  { color: var(--color-gray-400); background: rgba(255,255,255,0.04); border-color: var(--color-surface-700); }
+
+/* Tables — sticky header & row hover lift */
+.ot-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.ot-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #0d1117;
+  border-bottom: 1px solid var(--color-surface-700);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-gray-500);
+  text-align: left;
+  padding: 10px 12px;
+}
+.ot-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(48,54,61,0.4);
+  color: var(--color-gray-200);
+}
+.ot-table tbody tr {
+  transition: background var(--ot-fast) var(--ot-ease), box-shadow var(--ot-fast) var(--ot-ease);
+}
+.ot-table tbody tr:hover {
+  background: rgba(34,197,94,0.04);
+}
+
+/* Mobile responsive helpers */
+.ot-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: var(--ot-radius-card); }
+
+@media (max-width: 767px) {
+  .ot-hide-mobile { display: none !important; }
+}
+@media (min-width: 768px) {
+  .ot-show-mobile { display: none !important; }
+}
+
+/* KPI snap-grid (mobile horizontal scroll) */
+.ot-kpi-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(180px, 1fr);
+  gap: 12px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+}
+.ot-kpi-grid > * {
+  scroll-snap-align: start;
+  min-width: 180px;
+}
+@media (min-width: 768px) {
+  .ot-kpi-grid {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    grid-auto-columns: unset;
+    overflow-x: visible;
+  }
+}
+
+/* Mobile card list — used in place of dense tables on small screens */
+.ot-card-list { display: flex; flex-direction: column; gap: 8px; }
+.ot-card-list-item {
+  background: var(--ot-card-bg);
+  border: var(--ot-card-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: border-color var(--ot-fast) var(--ot-ease);
+}
+.ot-card-list-item:active { border-color: var(--color-brand-600); }
+
+/* Focus-visible polish */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Touch target safety */
+@media (max-width: 767px) {
+  button, a, [role="button"] { min-height: 36px; }
+}
+
+/* Sparkline glow filter (used by Sparkline.tsx) */
+.ot-spark-glow { filter: drop-shadow(0 0 4px currentColor); opacity: 0.85; }
+
+/* Section heading row */
+.ot-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+/* Subtle entrance — used when framer-motion is overkill */
+@keyframes ot-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ot-fade-in { animation: ot-fade-in var(--ot-base) var(--ot-ease) both; }
