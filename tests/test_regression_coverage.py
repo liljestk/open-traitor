@@ -269,6 +269,47 @@ def test_refresh_for_followed_returns_no_followed_when_empty(monkeypatch):
         "src.analysis.regression_coverage.ensure_factor_candles",
         lambda *a, **kw: {f: 0 for f in DEFAULT_FACTORS},
     )
+    # Disable candle-universe inclusion via direct call so the test is
+    # deterministic regardless of stub DB shape.
+    monkeypatch.setattr(
+        "src.analysis.regression_coverage._candle_universe_symbols",
+        lambda *a, **kw: set(),
+    )
     res = refresh_regression_for_followed(stats_db=db, exchange="ibkr")
     assert res["note"] == "no_followed_symbols"
     assert res["symbols"] == []
+
+
+def test_followed_universe_includes_scanned_candle_symbols(monkeypatch):
+    """A symbol with sufficient daily candle history is auto-included
+    in the followed-universe even if it isn't in pair_follows or yaml.
+
+    This is the contract that closes the gap where the LLM screener /
+    universe-scanner has downloaded OHLCV for tradeable pairs that the
+    user hasn't explicitly added — they still must be modeled.
+    """
+    from src.analysis.regression_coverage import _followed_symbols
+
+    db = _StubDB(followed={"coinbase": ["BTC-EUR"]})
+
+    captured: list[tuple] = []
+
+    def fake_universe(stats_db, exchange, *, min_bars=60, granularity="ONE_DAY"):
+        captured.append((exchange, min_bars, granularity))
+        # Simulate scanned-but-unfollowed pairs with ample history.
+        return {"DOGE-EUR", "AVAX-EUR", "BTC-EUR"}  # BTC overlaps with follows
+
+    monkeypatch.setattr(
+        "src.analysis.regression_coverage._candle_universe_symbols", fake_universe,
+    )
+    syms = _followed_symbols(db, "coinbase", profile="no-such-profile")
+    # union: yaml empty (profile missing) + follows {BTC-EUR} + universe {DOGE,AVAX,BTC}
+    assert set(syms) == {"BTC-EUR", "DOGE-EUR", "AVAX-EUR"}
+    assert captured == [("coinbase", 60, "ONE_DAY")]
+
+    # Opt-out path returns only the curated set.
+    syms2 = _followed_symbols(
+        db, "coinbase", profile="no-such-profile",
+        include_candle_universe=False,
+    )
+    assert set(syms2) == {"BTC-EUR"}

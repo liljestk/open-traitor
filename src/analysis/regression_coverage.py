@@ -47,11 +47,56 @@ from src.utils.logger import get_logger
 logger = get_logger("analysis.regression_coverage")
 
 
-def _followed_symbols(stats_db, exchange: str, profile: str = "") -> list[str]:
-    """Union of yaml-configured pairs + human/LLM follows for ``exchange``.
+#: Minimum daily-bar count required for a symbol from the candle universe
+#: to qualify for automatic factor-regression coverage. Below this the OLS
+#: would be too noisy to be useful.
+MIN_BARS_FOR_AUTO_COVERAGE = 60
 
-    Yaml pairs are the system's AI-curated baseline; ``pair_follows``
-    contains both human additions and LLM-screener selections.
+
+def _candle_universe_symbols(
+    stats_db,
+    exchange: str,
+    *,
+    min_bars: int = MIN_BARS_FOR_AUTO_COVERAGE,
+    granularity: str = "ONE_DAY",
+) -> set[str]:
+    """All symbols on ``exchange`` with ≥``min_bars`` daily OHLCV rows.
+
+    Captures the broader **tradeable / scanned universe** that the
+    universe-scanner and price-backfill pipelines have decided is worth
+    tracking — even if it isn't yet in ``pair_follows`` or yaml. We treat
+    "the system bothered to download daily candles for it" as a strong
+    enough signal that we should also fit a factor model.
+    """
+    try:
+        with stats_db._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM historical_candles "
+                "WHERE exchange = %s AND granularity = %s "
+                "GROUP BY symbol HAVING COUNT(*) >= %s",
+                (exchange, granularity, int(min_bars)),
+            ).fetchall()
+        return {r["symbol"] for r in rows if r and r.get("symbol")}
+    except Exception as exc:
+        logger.debug(f"regression_coverage: candle-universe probe failed: {exc}")
+        return set()
+
+
+def _followed_symbols(
+    stats_db,
+    exchange: str,
+    profile: str = "",
+    *,
+    include_candle_universe: bool = True,
+) -> list[str]:
+    """Union of yaml pairs + human/LLM follows + scanned candle universe.
+
+    Sources:
+      1. ``config/{profile}.yaml`` ``trading.pairs`` (AI-curated baseline)
+      2. ``pair_follows`` rows (human + LLM screener)
+      3. Any symbol on ``exchange`` with ≥ ``MIN_BARS_FOR_AUTO_COVERAGE``
+         daily candles (broader tradeable universe — opt-in via
+         ``include_candle_universe``).
     """
     out: set[str] = set()
     # 1) yaml-configured pairs
@@ -76,6 +121,9 @@ def _followed_symbols(stats_db, exchange: str, profile: str = "") -> list[str]:
         out.update(stats_db.get_followed_pairs_set(exchange=exchange) or set())
     except Exception as exc:
         logger.warning(f"regression_coverage: followed-pair load failed: {exc}")
+    # 3) broader scanned/tradeable universe
+    if include_candle_universe:
+        out.update(_candle_universe_symbols(stats_db, exchange))
     return sorted(out)
 
 
