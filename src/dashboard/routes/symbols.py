@@ -171,6 +171,11 @@ def list_symbols(
     pairs = _sym_universe(db, resolved, exchange)
 
     # --- bulk lookups so the picker is one query each, not one-per-symbol ---
+    # ``has_regression`` reflects coverage from EITHER regression family
+    # (event-driven OR macro-factor), matching the product invariant in
+    # ``regression_coverage.py``. The quality label still prefers the
+    # event-regression score when present (since it's catalyst-anchored
+    # and therefore higher-signal), and falls back to the factor R².
     reg_symbols: set[str] = set()
     reg_quality: dict[str, str] = {}
     try:
@@ -188,6 +193,20 @@ def list_symbols(
                 reg_quality[sym] = "strong"
     except Exception as exc:
         logger.debug(f"get_event_regressions(list) failed: {exc}")
+
+    # Macro-factor regression coverage — the universal fallback.
+    try:
+        for r in db.get_market_factor_loadings(exchange=exchange, limit=5000) or []:
+            sym = (r.get("symbol") or "").upper()
+            if not sym:
+                continue
+            reg_symbols.add(sym)
+            if sym not in reg_quality:
+                reg_quality[sym] = _quality_label(
+                    r.get("r_squared"), int(r.get("sample_count") or 0)
+                )
+    except Exception as exc:
+        logger.debug(f"get_market_factor_loadings(list) failed: {exc}")
 
     # Recent trade activity (7d) — cheap join via stats_trades
     traded_symbols: set[str] = set()
@@ -254,6 +273,7 @@ def _build_plain_summary(
     symbol: str,
     domain: str,
     regressions: list[dict],
+    factor_loadings: list[dict],
     upcoming: list[dict],
     trades: list[dict],
     reasoning: list[dict],
@@ -263,6 +283,15 @@ def _build_plain_summary(
     No LLM. No generation. Pure template. Every clause is anchored to a
     countable input — if the inputs are empty the clause is omitted, so
     the operator never sees a sentence not backed by data.
+
+    Coverage is reported across BOTH regression families:
+    * ``event_price_regressions`` (catalyst-driven; sparse — only fires
+      when ``catalyst_events`` exist for the symbol).
+    * ``market_factor_loadings``  (macro-factor; the universal fallback,
+      always present when the symbol has ≥``MIN_BARS_FOR_AUTO_COVERAGE``
+      daily candles). This is the row that satisfies the "every followed
+      symbol must have a regression" invariant for the long tail of
+      non-US equities Yahoo can’t provide catalyst dates for.
     """
     parts: list[str] = []
     asset = "stock" if domain == "equity" else "asset"
@@ -289,7 +318,28 @@ def _build_plain_summary(
                 f"moderate-confidence threshold yet (R² < 10% or N < 10)."
             )
     else:
-        parts.append("No event–price regression has been fitted for this symbol yet.")
+        # No event regression — fall back to the macro-factor regression,
+        # which is the universal coverage path.
+        if factor_loadings:
+            best_factor = max(
+                factor_loadings,
+                key=lambda r: abs(float(r.get("t_stat") or 0.0)),
+            )
+            r2 = best_factor.get("r_squared") or 0
+            n = best_factor.get("sample_count") or 0
+            beta = best_factor.get("beta")
+            t_stat = best_factor.get("t_stat")
+            factor = best_factor.get("factor") or "market"
+            beta_str = f"{beta:+.2f}" if isinstance(beta, (int, float)) and math.isfinite(beta) else "n/a"
+            t_str = f"{t_stat:+.2f}" if isinstance(t_stat, (int, float)) and math.isfinite(t_stat) else "n/a"
+            parts.append(
+                f"No catalyst-driven regression yet (no upcoming/past "
+                f"earnings or dividends recorded). Macro-factor model fitted: "
+                f"strongest loading is {factor} (β={beta_str}, t={t_str}, "
+                f"R²={r2 * 100:.1f}%, N={n})."
+            )
+        else:
+            parts.append("No regression model has been fitted for this symbol yet.")
 
     # Upcoming catalysts
     if upcoming:
@@ -387,6 +437,20 @@ def get_symbol_summary(
         logger.debug(f"get_event_regressions({sym}) failed: {exc}")
         regressions = []
 
+    # --- factor-loading rows (universal coverage fallback) ------------------
+    # The macro-factor regression always produces a row when the symbol
+    # has ≥ MIN_BARS_FOR_AUTO_COVERAGE daily candles. Surfacing it here
+    # ensures the picker / drill-down never lies about "no regression"
+    # for symbols whose catalyst feed is empty (e.g. .DE / .PA / .L
+    # equities Yahoo's free quoteSummary endpoint can't reach).
+    try:
+        factor_loadings = db.get_market_factor_loadings(
+            exchange=exchange, symbol=sym, limit=50,
+        )
+    except Exception as exc:
+        logger.debug(f"get_market_factor_loadings({sym}) failed: {exc}")
+        factor_loadings = []
+
     # --- upcoming catalysts (and per-event pattern outcome if available) ---
     upcoming: list[dict] = []
     try:
@@ -446,6 +510,7 @@ def get_symbol_summary(
         cycles = []
 
     cleaned_regressions = [{k: _clean(v) for k, v in r.items()} for r in regressions]
+    cleaned_factor_loadings = [{k: _clean(v) for k, v in r.items()} for r in factor_loadings]
     cleaned_trades = [{k: _clean(v) for k, v in t.items()} for t in recent_trades]
     cleaned_cycles = [{k: _clean(v) for k, v in c.items()} for c in cycles]
 
@@ -453,6 +518,7 @@ def get_symbol_summary(
         symbol=sym,
         domain=domain,
         regressions=cleaned_regressions,
+        factor_loadings=cleaned_factor_loadings,
         upcoming=upcoming,
         trades=cleaned_trades,
         reasoning=cleaned_cycles,
@@ -467,6 +533,10 @@ def get_symbol_summary(
         "regression": {
             "count": len(cleaned_regressions),
             "rows": cleaned_regressions,
+        },
+        "factor_regression": {
+            "count": len(cleaned_factor_loadings),
+            "rows": cleaned_factor_loadings,
         },
         "patterns": {
             "count": len(upcoming),
