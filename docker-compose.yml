@@ -139,6 +139,7 @@ services:
       - DASHBOARD_COMMAND_SIGNING_KEY=${DASHBOARD_COMMAND_SIGNING_KEY}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - REGRESSION_RISK_FACTOR_MODE=auto
       - TZ=Europe/Helsinki
     volumes:
       - ./config:/app/config:z
@@ -194,6 +195,7 @@ services:
       - DASHBOARD_COMMAND_SIGNING_KEY=${DASHBOARD_COMMAND_SIGNING_KEY}
       - TEMPORAL_HOST=temporal:7233
       - TEMPORAL_NAMESPACE=default
+      - REGRESSION_RISK_FACTOR_MODE=auto
       # Override IBKR_HOST: inside Docker, 127.0.0.1 = container itself.
       # host.docker.internal resolves to the Windows host where IB Gateway runs.
       - IBKR_HOST=host.docker.internal
