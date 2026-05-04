@@ -25,7 +25,7 @@ import time
 from datetime import date as dt_date
 from typing import Any, Optional, TYPE_CHECKING
 
-from openai import AsyncOpenAI, NotFoundError, RateLimitError, APIStatusError
+from openai import AsyncOpenAI, NotFoundError, RateLimitError, APIStatusError, APITimeoutError
 
 from src.utils.logger import get_logger
 
@@ -584,12 +584,18 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
     ) -> Any:
-        """Raw chat completion against a specific provider."""
+        """Raw chat completion against a specific provider.
+
+        Enforces a hard wall-clock cap via asyncio.wait_for so a slow local
+        backend (e.g. Ollama dribbling tokens under load) cannot hang an agent
+        cycle indefinitely — httpx's read timeout resets between chunks and
+        does not bound total request duration.
+        """
         full_system = system_prompt
         if self.persona:
             full_system = f"{self.persona}\n\n{system_prompt}"
 
-        return await provider.client.chat.completions.create(
+        coro = provider.client.chat.completions.create(
             model=provider.model,
             messages=[
                 {"role": "system", "content": full_system},
@@ -598,6 +604,11 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        cap = max(float(provider.request_timeout or 0), 5.0)
+        try:
+            return await asyncio.wait_for(coro, timeout=cap)
+        except asyncio.TimeoutError as e:
+            raise APITimeoutError(request=None) from e
 
     async def _do_chat_with_tools(
         self,
@@ -703,6 +714,18 @@ class LLMClient:
                 last_error = e
                 if self._is_rate_or_quota_error(e):
                     self._activate_cooldown(provider, str(e))
+                    continue
+                # Wall-clock / API timeout: cool the provider down briefly so
+                # subsequent calls in this cycle skip it and fall through to the
+                # next provider in the chain instead of hanging the agent loop.
+                if isinstance(e, APITimeoutError):
+                    elapsed = time.time() - start_time
+                    _agent_label = f" for {agent_name}" if agent_name else ""
+                    logger.warning(
+                        f"⏱️ Provider '{provider.name}' timed out after "
+                        f"{elapsed:.1f}s{_agent_label} — cooling down and trying next"
+                    )
+                    self._activate_cooldown(provider, f"timeout after {elapsed:.1f}s")
                     continue
                 # 404 "No endpoints" from OpenRouter = dead model, rotate it out
                 if (
@@ -844,6 +867,15 @@ class LLMClient:
                 last_error = e
                 if self._is_rate_or_quota_error(e):
                     self._activate_cooldown(provider, str(e))
+                    continue
+                # Wall-clock / API timeout: cool the provider down briefly and
+                # try the next one (same logic as chat()).
+                if isinstance(e, APITimeoutError):
+                    logger.warning(
+                        f"⏱️ Provider '{provider.name}' tool call timed out — "
+                        f"cooling down and trying next"
+                    )
+                    self._activate_cooldown(provider, "tool-call timeout")
                     continue
                 # 404 "No endpoints" from OpenRouter = dead model, rotate it out
                 if (

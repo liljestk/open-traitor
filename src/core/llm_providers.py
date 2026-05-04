@@ -198,6 +198,11 @@ class LLMProvider:
     cooldown_seconds: int = 60
     tier: str = "free"          # "free" or "paid" — controls smart routing
     reserve_for_priority: str = ""  # "" = available for all; "high" = only high-priority calls
+    # Hard wall-clock cap for a single completion call. Distinct from the
+    # AsyncOpenAI httpx `timeout` (which is per-read/idle). Without a hard cap a
+    # slow local Ollama that dribbles tokens never trips httpx and can hang the
+    # whole agent cycle for minutes.
+    request_timeout: float = 60.0
     # Mutable tracking state
     cooldown_until: float = 0.0
     daily_tokens: int = 0
@@ -302,6 +307,7 @@ def build_providers(
             cooldown_seconds=pc.get("cooldown_seconds", 60),
             tier=tier,
             reserve_for_priority=reserve_for,
+            request_timeout=float(timeout),
         ))
 
         logger.info(
