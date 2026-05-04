@@ -71,3 +71,58 @@ def test_requires_exchange():
     import pytest
     with pytest.raises(ValueError):
         StrategyBandit(_FakeStatsDB(), exchange="")
+
+
+# ─── batch update from realised trades ──────────────────────────────────
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+    def execute(self, sql, params):
+        return self
+    def fetchall(self):
+        return list(self._rows)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeTradesDB(_FakeStatsDB):
+    def __init__(self, rows):
+        super().__init__()
+        self._rows = rows
+    def _get_conn(self):
+        return _FakeConn(self._rows)
+
+
+def test_update_bandit_from_recent_trades_populates_state():
+    from src.utils.bandit import update_bandit_from_recent_trades
+    rows = [
+        {"trade_id": 1, "pair": "BTC-EUR", "pnl": 5.0,
+         "reasoning_json": '{"market_condition":"bullish","key_factors":["EMA bullish","MACD bullish"]}'},
+        {"trade_id": 2, "pair": "BTC-EUR", "pnl": -2.0,
+         "reasoning_json": '{"market_condition":"bearish","key_factors":["RSI overbought"]}'},
+        {"trade_id": 3, "pair": "ETH-EUR", "pnl": 1.0,
+         "reasoning_json": '{"market_condition":"neutral","key_factors":["Pattern breakout"]}'},
+    ]
+    db = _FakeTradesDB(rows)
+    res = update_bandit_from_recent_trades(db, exchange="coinbase", lookback_days=30)
+    assert res["trades"] == 3
+    assert res["updates"] >= 3
+    # bullish trade with EMA+MACD → ema_crossover bucket got a win.
+    s_up = db.get_bandit_state("coinbase", "trending_up")
+    assert s_up.get("ema_crossover", {}).get("alpha", 0) > 1.0
+    # bearish RSI loss → bollinger_reversion bucket in trending_down got a loss.
+    s_dn = db.get_bandit_state("coinbase", "trending_down")
+    assert s_dn.get("bollinger_reversion", {}).get("beta", 0) > 1.0
+    # pattern breakout → pattern_engine bucket in ranging.
+    s_n = db.get_bandit_state("coinbase", "ranging")
+    assert s_n.get("pattern_engine", {}).get("alpha", 0) > 1.0
+
+
+def test_update_bandit_from_recent_trades_empty():
+    from src.utils.bandit import update_bandit_from_recent_trades
+    db = _FakeTradesDB([])
+    res = update_bandit_from_recent_trades(db, exchange="coinbase")
+    assert res == {"trades": 0, "updates": 0}

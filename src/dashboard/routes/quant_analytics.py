@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 import src.dashboard.deps as deps
 from src.utils.logger import get_logger
@@ -173,3 +174,139 @@ def get_correlation_regime(
         "latest": _clean(latest) if latest else None,
         "events": [_clean(e) for e in events],
     }
+
+
+# ─── Model card + attribution + export ─────────────────────────────────
+
+
+def _build_model_card_for(profile: str, *, include_attribution: bool = True) -> dict:
+    from src.utils.quant_model_card import build_model_card
+    from src.utils.quant_attribution import attribute_quant_signals
+
+    db, exchange = _resolve_db_exchange(profile)
+    cfg = deps.get_config_for_profile(deps.resolve_profile(profile))
+    universe = (
+        list(cfg.get("trading", {}).get("pairs") or [])
+    )
+    attribution = None
+    if include_attribution:
+        try:
+            attribution = attribute_quant_signals(db, exchange, lookback_days=30)
+        except Exception:
+            attribution = None
+    return build_model_card(
+        db, exchange, universe=universe, attribution=attribution,
+    )
+
+
+@router.get(
+    "/api/quant/model-card",
+    summary="Self-describing JSON model card across all 5 quant analyzers",
+)
+def get_model_card(
+    profile: str = Query(""),
+    include_attribution: bool = Query(True),
+):
+    card = _build_model_card_for(
+        profile, include_attribution=bool(include_attribution),
+    )
+    return _clean(card)
+
+
+@router.get(
+    "/api/quant/model-card.md",
+    summary="Markdown rendering of the quant model card (printable)",
+    response_class=PlainTextResponse,
+)
+def get_model_card_markdown(
+    profile: str = Query(""),
+    include_attribution: bool = Query(True),
+) -> str:
+    from src.utils.quant_model_card import format_markdown
+    card = _build_model_card_for(
+        profile, include_attribution=bool(include_attribution),
+    )
+    return format_markdown(card)
+
+
+@router.get(
+    "/api/quant/attribution",
+    summary=(
+        "Hit-rate / avg-PnL per quant-feature bucket — powers self-learning"
+    ),
+)
+def get_quant_attribution(
+    profile: str = Query(""),
+    lookback_days: int = Query(30, ge=1, le=365),
+):
+    from src.utils.quant_attribution import (
+        attribute_quant_signals,
+        derive_learning_adjustments,
+    )
+    db, exchange = _resolve_db_exchange(profile)
+    attribution = attribute_quant_signals(
+        db, exchange, lookback_days=int(lookback_days),
+    )
+    adjustments = derive_learning_adjustments(attribution)
+    return {
+        "exchange": exchange,
+        "attribution": _clean(attribution),
+        "adjustments": _clean(adjustments),
+    }
+
+
+@router.get(
+    "/api/quant/export",
+    summary="Full quant analytics export bundle (JSON, archivable)",
+)
+def export_quant_bundle(profile: str = Query("")):
+    """One-shot export bundle: model card + raw rows from every quant table.
+
+    Stable format suitable for archival, diffing across deploys, and
+    handing to a third party (auditor, reviewer, paper).
+    """
+    from src.utils.quant_attribution import attribute_quant_signals
+    db, exchange = _resolve_db_exchange(profile)
+    cfg = deps.get_config_for_profile(deps.resolve_profile(profile))
+    universe = list(cfg.get("trading", {}).get("pairs") or [])
+
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    attribution = _safe(
+        lambda: attribute_quant_signals(db, exchange, lookback_days=30), None,
+    )
+    from src.utils.quant_model_card import build_model_card
+    card = build_model_card(
+        db, exchange, universe=universe, attribution=attribution,
+    )
+
+    bundle = {
+        "exchange": exchange,
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "model_card": card,
+        "raw": {
+            "factor_loadings": _safe(
+                lambda: db.get_market_factor_loadings(exchange, limit=5000), [],
+            ),
+            "har_rv_forecasts": _safe(
+                lambda: db.get_har_rv_forecasts(exchange, limit=5000), [],
+            ),
+            "granger_causality": _safe(
+                lambda: db.get_granger_results(exchange, max_p_value=1.0, limit=5000), [],
+            ),
+            "slippage_impact_model": _safe(
+                lambda: db.get_slippage_impact_model(exchange), None,
+            ),
+            "correlation_regime_events": _safe(
+                lambda: db.get_correlation_regime_events(exchange, limit=2000), [],
+            ),
+            "decision_snapshots_recent": _safe(
+                lambda: db.get_quant_decision_snapshots(exchange, limit=2000), [],
+            ),
+        },
+    }
+    return _clean(bundle)

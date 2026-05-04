@@ -1053,6 +1053,29 @@ class PipelineManager:
             if _ens2:
                 strategy_signals["_ensemble"] = _ens2
 
+        # Step 2.7: Quant Analytics context — snapshot the latest rows from
+        # all five quant tables (factor loadings, HAR-RV, Granger, slippage
+        # model, correlation regime) for this pair. Injected into both the
+        # strategist payload and the trader payload so the LLM can reason
+        # over them, and persisted into ``quant_decision_snapshots`` so the
+        # learning loop can later attribute realised PnL back to the quant
+        # signals that were active at decision time.
+        quant_context: dict = {"available": False}
+        try:
+            from src.utils.quant_context import (
+                build_quant_context,
+                format_decision_explanation,
+            )
+            quant_context = build_quant_context(
+                orch.stats_db, exchange_name, pair,
+            )
+            if quant_context.get("available"):
+                quant_context["explanations"] = format_decision_explanation(
+                    quant_context,
+                )
+        except Exception as _qc_e:
+            logger.debug(f"quant_context build failed for {pair}: {_qc_e}")
+
         # Step 3: Strategy Generation
         _step_t = time.monotonic()
         # Apply per-pair confidence adjustment from planning context
@@ -1102,6 +1125,11 @@ class PipelineManager:
             "lead_lag_signals": lead_lag_signals,
             "upcoming_events": upcoming_events,
             "onchain_now": onchain_now,
+            "quant_context": quant_context,
+            "har_rv_forecast": (
+                (quant_context.get("har_rv") or {}).get("forecast_vol")
+                if isinstance(quant_context, dict) else None
+            ),
         }
 
         strategy_result: dict | None = None
@@ -1128,6 +1156,11 @@ class PipelineManager:
                     "lead_lag_signals": lead_lag_signals,
                     "upcoming_events": upcoming_events,
                     "onchain_now": onchain_now,
+                    "quant_context": quant_context,
+                    "har_rv_forecast": (
+                        (quant_context.get("har_rv") or {}).get("forecast_vol")
+                        if isinstance(quant_context, dict) else None
+                    ),
                     "sentiment": sentiment_data,
                     "news_headlines": news_headlines,
                     "fee_context": fee_context,
@@ -1161,6 +1194,49 @@ class PipelineManager:
         # previously ran on every cycle just to be discarded.
         if strategy_result is None:
             strategy_result = await orch.strategist.execute(_strategist_inputs)
+
+        # Persist a point-in-time snapshot of the quant signals that
+        # informed this decision so the self-learning loop can attribute
+        # realised PnL back to each quant feature later. Best-effort.
+        try:
+            if (
+                isinstance(quant_context, dict)
+                and quant_context.get("available")
+                and hasattr(orch.stats_db, "insert_quant_decision_snapshot")
+            ):
+                import json as _json
+                _har = quant_context.get("har_rv") or {}
+                _cr = quant_context.get("correlation_regime") or {}
+                _granger = quant_context.get("granger_leaders") or []
+                orch.stats_db.insert_quant_decision_snapshot({
+                    "exchange": exchange_name,
+                    "cycle_id": cycle_id,
+                    "pair": pair,
+                    "har_rv_forecast": _har.get("forecast_vol"),
+                    "har_rv_realized": _har.get("realized_vol_daily"),
+                    "factor_alpha": quant_context.get("factor_alpha_annualised"),
+                    "idio_vol": quant_context.get("idio_vol"),
+                    "granger_leader_count": len(_granger),
+                    "slippage_bps_pred": None,  # filled in by executor when available
+                    "corr_regime": _cr.get("regime"),
+                    "corr_z_score": _cr.get("z_score"),
+                    "action": (strategy_result or {}).get("action"),
+                    "confidence": (strategy_result or {}).get("confidence"),
+                    "quant_context_json": _json.dumps(quant_context, default=str),
+                })
+        except Exception as _qs_e:
+            logger.debug(f"quant_decision_snapshot persist failed: {_qs_e}")
+
+        # Surface quant explanations in the decision output so the
+        # downstream audit log + dashboard reasoning view can show the
+        # "why" alongside the action.
+        try:
+            if isinstance(strategy_result, dict) and isinstance(quant_context, dict):
+                _exps = quant_context.get("explanations") or []
+                if _exps:
+                    strategy_result.setdefault("quant_explanations", list(_exps))
+        except Exception:
+            pass
 
         # Phase 8: shadow strategist — fire-and-forget variant logging.
         # Never blocks the live decision and never executes a trade.
@@ -1236,15 +1312,6 @@ class PipelineManager:
             # Phase 13: vol-target sizing — pass the recent close-to-close
             # returns so RiskManager can compute target_vol / realised_vol.
             "recent_returns": _candle_returns(candles, lookback=30),
-            # HAR-RV one-step-ahead vol forecast (when available). The
-            # risk manager consumes this only when ``RISK_USE_HAR_RV=1``.
-            "har_rv_forecast": (
-                (orch.stats_db.get_har_rv_forecast_for_symbol(
-                    exchange_name, pair, horizon_days=1,
-                ) or {}).get("forecast_vol")
-                if hasattr(orch.stats_db, "get_har_rv_forecast_for_symbol")
-                else None
-            ),
             # Catalyst Pattern Engine signal — used as an advisory size
             # multiplier (never overrides AbsoluteRules).
             "pattern_signal": pattern_signal,

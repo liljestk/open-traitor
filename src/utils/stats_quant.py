@@ -133,6 +133,38 @@ class QuantAnalyticsMixin:
         """,
         "CREATE INDEX IF NOT EXISTS idx_cre_exchange_computed "
         "ON correlation_regime_events(exchange, computed_at DESC)",
+        # ── quant_decision_snapshots ────────────────────────────────────
+        # Point-in-time snapshot of the quant_context that informed each
+        # trading decision. Joined later with ``signal_scores`` and
+        # ``trades`` to attribute realised PnL back to the quant signals
+        # that were active at decision time. Append-only.
+        """
+        CREATE TABLE IF NOT EXISTS quant_decision_snapshots (
+            id                BIGSERIAL PRIMARY KEY,
+            exchange          TEXT NOT NULL,
+            cycle_id          TEXT NOT NULL,
+            pair              TEXT NOT NULL,
+            reasoning_id      INTEGER,
+            har_rv_forecast   DOUBLE PRECISION,
+            har_rv_realized   DOUBLE PRECISION,
+            factor_alpha      DOUBLE PRECISION,
+            idio_vol          DOUBLE PRECISION,
+            granger_leader_count INTEGER NOT NULL DEFAULT 0,
+            slippage_bps_pred DOUBLE PRECISION,
+            corr_regime       TEXT,
+            corr_z_score      DOUBLE PRECISION,
+            action            TEXT,
+            confidence        DOUBLE PRECISION,
+            quant_context_json TEXT,
+            recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_qds_exchange_cycle "
+        "ON quant_decision_snapshots(exchange, cycle_id, pair)",
+        "CREATE INDEX IF NOT EXISTS idx_qds_exchange_recorded "
+        "ON quant_decision_snapshots(exchange, recorded_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_qds_reasoning "
+        "ON quant_decision_snapshots(reasoning_id)",
     )
 
     def _init_quant_schema(self) -> None:
@@ -487,3 +519,78 @@ class QuantAnalyticsMixin:
             rows = conn.execute(sql, (exchange, int(window))).fetchall()
         # Reverse so caller gets oldest → newest.
         return [float(r["avg_corr"]) for r in reversed(rows)]
+
+    # ─── quant_decision_snapshots ───────────────────────────────────────
+
+    def insert_quant_decision_snapshot(self, row: dict[str, Any]) -> int:
+        """Persist one quant_context snapshot. Returns inserted id (or 0)."""
+        try:
+            tup = (
+                str(row["exchange"]).lower(),
+                str(row.get("cycle_id") or ""),
+                str(row.get("pair") or ""),
+                int(row["reasoning_id"]) if row.get("reasoning_id") is not None else None,
+                _opt_float(row.get("har_rv_forecast")),
+                _opt_float(row.get("har_rv_realized")),
+                _opt_float(row.get("factor_alpha")),
+                _opt_float(row.get("idio_vol")),
+                int(row.get("granger_leader_count") or 0),
+                _opt_float(row.get("slippage_bps_pred")),
+                (str(row.get("corr_regime")) if row.get("corr_regime") else None),
+                _opt_float(row.get("corr_z_score")),
+                (str(row.get("action")) if row.get("action") else None),
+                _opt_float(row.get("confidence")),
+                (
+                    row["quant_context_json"]
+                    if isinstance(row.get("quant_context_json"), str)
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return 0
+        sql = (
+            "INSERT INTO quant_decision_snapshots "
+            "(exchange, cycle_id, pair, reasoning_id, har_rv_forecast, "
+            " har_rv_realized, factor_alpha, idio_vol, granger_leader_count, "
+            " slippage_bps_pred, corr_regime, corr_z_score, action, "
+            " confidence, quant_context_json) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id"
+        )
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tup)
+                rid = cur.fetchone()
+            conn.commit()
+        try:
+            return int(rid["id"]) if rid else 0
+        except (TypeError, KeyError):
+            return 0
+
+    def get_quant_decision_snapshots(
+        self,
+        exchange: str,
+        *,
+        since: Optional[datetime] = None,
+        pair: Optional[str] = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        clauses = ["exchange = %s"]
+        params: list = [exchange]
+        if since is not None:
+            clauses.append("recorded_at >= %s"); params.append(since)
+        if pair:
+            clauses.append("pair = %s"); params.append(pair)
+        sql = (
+            "SELECT id, exchange, cycle_id, pair, reasoning_id, "
+            "har_rv_forecast, har_rv_realized, factor_alpha, idio_vol, "
+            "granger_leader_count, slippage_bps_pred, corr_regime, "
+            "corr_z_score, action, confidence, quant_context_json, recorded_at "
+            "FROM quant_decision_snapshots "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY recorded_at DESC LIMIT %s"
+        )
+        params.append(int(limit))
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [dict(r) for r in rows]

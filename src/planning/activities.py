@@ -1917,8 +1917,13 @@ async def run_outcome_attribution(profile: str = "") -> dict:
     exch = _smart_exchange(profile)
     db = StatsDB()
     try:
-        n = compute_attribution(db, exchange=exch, lookback_days=30)
-        return {"profile": profile, "exchange": exch, "rows_written": int(n)}
+        result = compute_attribution(db, exchange=exch, lookback_days=30)
+        # ``compute_attribution`` returns ``{trades, rows}``; surface both.
+        if isinstance(result, dict):
+            return {"profile": profile, "exchange": exch,
+                    "trades": int(result.get("trades", 0)),
+                    "rows_written": int(result.get("rows", 0))}
+        return {"profile": profile, "exchange": exch, "rows_written": int(result or 0)}
     except Exception as e:
         logger.warning(f"run_outcome_attribution failed: {e}")
         return {"profile": profile, "exchange": exch, "error": str(e)}
@@ -1933,10 +1938,36 @@ async def run_counterfactual_replay(profile: str = "") -> dict:
     db = StatsDB()
     try:
         llm = _get_llm_client()
-        n = await replay_strategist(db, llm, exchange=exch, lookback_days=7, sample_size=30)
-        return {"profile": profile, "exchange": exch, "replays": int(n)}
+        result = await replay_strategist(db, llm, exchange=exch, lookback_days=7, sample_size=30)
+        if isinstance(result, dict):
+            return {"profile": profile, "exchange": exch,
+                    "replays": int(result.get("sampled", 0)),
+                    **{k: v for k, v in result.items() if k not in ("sampled",)}}
+        return {"profile": profile, "exchange": exch, "replays": int(result or 0)}
     except Exception as e:
         logger.warning(f"run_counterfactual_replay failed: {e}")
+        return {"profile": profile, "exchange": exch, "error": str(e)}
+
+
+@activity.defn
+async def run_bandit_update(profile: str = "") -> dict:
+    """Phase 1: replay closed trades into Thompson-sampling posteriors.
+
+    Updates ``bandit_state`` per (regime, strategy) so that the live
+    pipeline overlay (``smarts.use_bandit``) has data to sample from.
+    Best-effort — never raises.
+    """
+    from src.utils.stats import StatsDB
+    from src.utils.bandit import update_bandit_from_recent_trades
+    exch = _smart_exchange(profile)
+    db = StatsDB()
+    try:
+        result = update_bandit_from_recent_trades(
+            db, exchange=exch, lookback_days=30
+        )
+        return {"profile": profile, "exchange": exch, **(result or {})}
+    except Exception as e:
+        logger.warning(f"run_bandit_update failed: {e}")
         return {"profile": profile, "exchange": exch, "error": str(e)}
 
 

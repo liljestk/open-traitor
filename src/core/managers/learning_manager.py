@@ -34,6 +34,7 @@ _ENSEMBLE_INTERVAL = 7 * 24 * 3600     # weekly
 _PROMPT_INTERVAL = 7 * 24 * 3600       # weekly
 _WFO_INTERVAL = 7 * 24 * 3600          # weekly
 _FINETUNE_INTERVAL = 30 * 24 * 3600    # monthly
+_QUANT_ATTRIBUTION_INTERVAL = 24 * 3600  # daily — cheap pure-SQL pass
 
 # How often the heartbeat-pump thread bumps the orchestrator watchdog
 # while a learning subsystem is running. Module-level so tests can patch.
@@ -72,7 +73,13 @@ class LearningManager:
             "prompt_evolver": 0.0,
             "auto_wfo": 0.0,
             "finetune": 0.0,
+            "quant_attribution": 0.0,
         }
+
+        # Latest quant-attribution snapshot (consumed by the model card +
+        # by adaptive overlays). Populated by ``_run_quant_attribution``.
+        self._latest_quant_attribution: Optional[dict[str, Any]] = None
+        self._latest_quant_adjustments: Optional[dict[str, Any]] = None
 
         # ── DB table creation ─────────────────────────────────────────────
         self._ensure_tables()
@@ -249,6 +256,14 @@ class LearningManager:
                 "finetune", cycle_count, self._run_finetune
             )
 
+        # ── Quant Attribution (daily) ─────────────────────────────────────
+        # Joins decision-time quant snapshots with realised outcomes and
+        # turns the result into bounded confidence/sizing adjustments.
+        if self._due("quant_attribution", now, _QUANT_ATTRIBUTION_INTERVAL):
+            summary["quant_attribution"] = await self._run_subsystem(
+                "quant_attribution", cycle_count, self._run_quant_attribution
+            )
+
         return summary
 
     # ------------------------------------------------------------------
@@ -348,6 +363,83 @@ class LearningManager:
         min_examples = settings.get("finetune_min_examples", 50)
         result = self._finetune.curate_and_export(window_days=90)
         return result
+
+    async def _run_quant_attribution(self) -> dict:
+        """Run quant-feature attribution + persist a model card export.
+
+        Scope:
+          * Joins ``quant_decision_snapshots`` with ``signal_scores`` to
+            compute hit-rate / avg-pnl per quant-feature bucket.
+          * Translates the result into bounded multiplicative
+            adjustments (``derive_learning_adjustments``) that the
+            pipeline can consume to adaptively size into / out of
+            quant-favoured regimes.
+          * Exports the latest QuantAnalytics ModelCard JSON to
+            ``data/<exchange>/quant_model_card.json`` so it can be
+            archived, diffed and shipped alongside the trained agent.
+        Pure read of quant tables; never raises.
+        """
+        try:
+            from src.utils.quant_attribution import (
+                attribute_quant_signals,
+                derive_learning_adjustments,
+            )
+            from src.utils.quant_model_card import (
+                build_model_card,
+                export_to_disk,
+            )
+        except Exception as e:
+            return {"skipped": True, "reason": f"import_failed: {e}"}
+
+        exchange = (
+            self._config.get("trading", {}).get("exchange", "") or ""
+        ).lower()
+        if not exchange:
+            return {"skipped": True, "reason": "no_exchange"}
+
+        attribution = attribute_quant_signals(
+            self._stats_db, exchange, lookback_days=30,
+        )
+        adjustments = derive_learning_adjustments(attribution)
+        self._latest_quant_attribution = attribution
+        self._latest_quant_adjustments = adjustments
+
+        # Export the model card so the artifact is exportable + diffable.
+        try:
+            import os
+            from pathlib import Path
+            universe = (
+                list(getattr(self.orch, "all_tracked_pairs", []))
+                or list(getattr(self.orch, "pairs", []))
+            )
+            card = build_model_card(
+                self._stats_db, exchange, universe=universe,
+                attribution=attribution,
+            )
+            out_dir = Path("data") / exchange
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / "quant_model_card.json"
+            export_to_disk(card, str(out_path))
+            export_size = os.path.getsize(out_path)
+        except Exception as e:
+            logger.debug(f"model card export failed: {e}")
+            export_size = 0
+
+        return {
+            "decisions_total": attribution.get("decisions_total", 0),
+            "outcomes_total": attribution.get("outcomes_total", 0),
+            "feature_signal_strength": attribution.get("feature_signal_strength", 0.0),
+            "adjustments": adjustments,
+            "model_card_bytes": export_size,
+        }
+
+    @property
+    def latest_quant_attribution(self) -> Optional[dict[str, Any]]:
+        return self._latest_quant_attribution
+
+    @property
+    def latest_quant_adjustments(self) -> Optional[dict[str, Any]]:
+        return self._latest_quant_adjustments
 
     # ------------------------------------------------------------------
     # Internal helpers

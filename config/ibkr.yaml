@@ -54,14 +54,12 @@ fees:
   safety_margin: 1.5
   swap_cooldown_seconds: 0
 execution:
-  # P1: maker-only forces crypto buys to post-only limit orders.
   maker_only: false
   use_limit_orders: true
   limit_price_offset_pct: 0.001
   replace_on_drift_pct: 0.003
   limit_order_ttl_seconds: 900
   urgency_confidence_threshold: 0.8
-
 health:
   port: 8082
 high_stakes:
@@ -178,7 +176,6 @@ risk:
   stop_loss_pct: 0.02
   take_profit_pct: 0.1
   trailing_stop_pct: 0.05
-  # P2: ATR-scaled stops.
   atr_stop_mult: 2.0
   atr_tp_mult: 3.0
   atr_stop_floor_pct: 0.008
@@ -217,7 +214,7 @@ trading:
   live_holdings_sync: true
   max_active_pairs: 10
   max_open_positions: 8
-  min_confidence: 0.65
+  min_confidence: 0.55
   min_hold_minutes: 60
   mode: live
   pair_discovery: all

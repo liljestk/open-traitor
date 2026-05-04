@@ -52,6 +52,7 @@ with workflow.unsafe.imports_passed_through():
         run_cross_event_regressions,
         run_outcome_attribution,
         run_counterfactual_replay,
+        run_bandit_update,
         run_lead_lag_matrix,
         run_event_calendar_sync,
         run_decision_drift,
@@ -547,6 +548,10 @@ class SmartsNightlyWorkflow:
             run_counterfactual_replay, args=[profile],
             start_to_close_timeout=timedelta(minutes=30), retry_policy=_RETRY,
         )
+        bandit = await workflow.execute_activity(
+            run_bandit_update, args=[profile],
+            start_to_close_timeout=timedelta(minutes=10), retry_policy=_RETRY,
+        )
         lead_lag = await workflow.execute_activity(
             run_lead_lag_matrix, args=[profile],
             start_to_close_timeout=timedelta(minutes=20), retry_policy=_RETRY,
@@ -556,7 +561,7 @@ class SmartsNightlyWorkflow:
             start_to_close_timeout=timedelta(minutes=10), retry_policy=_RETRY,
         )
         return {"profile": profile, "attribution": attribution, "replay": replay,
-                "lead_lag": lead_lag, "drift": drift}
+                "bandit": bandit, "lead_lag": lead_lag, "drift": drift}
 
 
 @workflow.defn
