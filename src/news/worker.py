@@ -152,18 +152,20 @@ def main():
 
     # Merge all trading pairs into config so aggregator builds dynamic ticker set
     merged_config["trading"] = {"pairs": all_trading_pairs}
+    # Domain-separation: always publish an explicit IBKR pair allowlist
+    # (even if empty) so ``fetch_ibkr_news`` never falls back to the merged
+    # multi-profile pairs list and starts looking up crypto symbols (LINK,
+    # ADA, ...) against the IBKR Stock catalogue.
+    if "ibkr" in profile_configs:
+        merged_config["trading"]["ibkr_pairs"] = list(
+            ibkr_full_config.get("trading", {}).get("pairs", []) or []
+        )
     if ibkr_full_config.get("trading", {}).get("pairs"):
         # Keep full IBKR trading config for fetch_ibkr_news
         merged_config["trading"].update({
             k: v for k, v in ibkr_full_config.get("trading", {}).items()
             if k != "pairs"
         })
-        # Domain-separation: keep IBKR pairs separately so fetch_ibkr_news
-        # never tries to look up crypto symbols (LINK, ADA, ...) against
-        # the IBKR Stock catalogue.
-        merged_config["trading"]["ibkr_pairs"] = list(
-            ibkr_full_config.get("trading", {}).get("pairs", [])
-        )
 
     # Single aggregator with merged sources (avoids duplicate HTTP requests)
     aggregator = NewsAggregator(

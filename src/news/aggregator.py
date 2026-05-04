@@ -562,10 +562,15 @@ class NewsAggregator:
             # ``trading.pairs`` for ticker discovery, but the IBKR catalogue
             # only knows equities — looking up crypto symbols here triggers
             # a flood of "No security definition" errors. So we prefer the
-            # explicit ``trading.ibkr_pairs`` allowlist when present and
-            # fall back to ``trading.pairs`` only for single-profile setups.
+            # explicit ``trading.ibkr_pairs`` allowlist when present (even
+            # if empty — empty means "this profile owns no equity pairs
+            # right now"), and fall back to ``trading.pairs`` only when the
+            # allowlist is absent (single-profile setups).
             trading_cfg = self.config.get("trading", {}) or {}
-            pairs = trading_cfg.get("ibkr_pairs") or trading_cfg.get("pairs", [])
+            if "ibkr_pairs" in trading_cfg:
+                pairs = trading_cfg.get("ibkr_pairs") or []
+            else:
+                pairs = trading_cfg.get("pairs", [])
             for pair in pairs:
                 ib_news = self.exchange_client.get_news(pair, limit=3)
                 for n in ib_news:
