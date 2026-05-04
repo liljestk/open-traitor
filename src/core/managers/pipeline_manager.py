@@ -1441,11 +1441,21 @@ class PipelineManager:
                     expected_gain_pct = None
 
             if expected_gain_pct is not None:
+                # Use maker fee tier for the gate when execution is
+                # configured maker-only (limit orders). Halves the assumed
+                # round-trip cost (0.40% × 2 vs 0.60% × 2 on Coinbase),
+                # which matches what we actually pay.
+                _exec_cfg = orch.config.get("execution", {})
+                _is_maker = bool(
+                    _exec_cfg.get("maker_only", False)
+                    or _exec_cfg.get("use_limit_orders", False)
+                )
                 worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
                     quote_amount=trade_amount,
                     expected_gain_pct=expected_gain_pct,
                     is_swap=False,
                     portfolio_value=_portfolio_value,
+                    is_maker=_is_maker,
                 )
                 if not worthwhile:
                     # ─── Auto-bump: try increasing amount to minimum viable ───
@@ -1467,6 +1477,7 @@ class PipelineManager:
                                 expected_gain_pct=expected_gain_pct,
                                 is_swap=False,
                                 portfolio_value=_portfolio_value,
+                                is_maker=_is_maker,
                             )
                             if worthwhile:
                                 logger.info(

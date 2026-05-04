@@ -292,6 +292,7 @@ class FeeManager:
         is_swap: bool = False,
         n_legs: int | None = None,
         portfolio_value: float = 0.0,
+        is_maker: bool = False,
     ) -> tuple[bool, FeeEstimate]:
         """
         Determine if a trade is worth executing after fees.
@@ -302,6 +303,9 @@ class FeeManager:
             is_swap: Whether this is a swap (2x fees)
             n_legs: Override leg count for route-aware fee calc (None = auto)
             portfolio_value: Current portfolio value for dynamic min trade calc
+            is_maker: Whether the order will execute at maker fees (limit
+                orders that rest in the book). Halves the assumed
+                round-trip cost on most exchanges.
 
         Returns:
             (is_worthwhile, fee_estimate)
@@ -328,15 +332,15 @@ class FeeManager:
 
         if is_swap:
             swap_legs = n_legs if n_legs is not None else 2
-            estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs)
+            estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs, is_maker=is_maker)
         else:
             # Round-trip fee: a buy must eventually be sold.
             # Total cost = buy fee + sell fee = 2 × one-way fee.
-            buy_fee_quote = self.estimate_trade_fees(quote_amount)
-            sell_fee_quote = self.estimate_trade_fees(quote_amount)
+            buy_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
+            sell_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
             total_fee_quote = buy_fee_quote + sell_fee_quote
-            buy_fee_pct = self._fee_model.effective_fee_pct(quote_amount)
-            sell_fee_pct = self._fee_model.effective_fee_pct(quote_amount)
+            buy_fee_pct = buy_fee_quote / quote_amount if quote_amount > 0 else 0.0
+            sell_fee_pct = sell_fee_quote / quote_amount if quote_amount > 0 else 0.0
             total_fee_pct = buy_fee_pct + sell_fee_pct
             estimate = FeeEstimate(
                 sell_fee_pct=sell_fee_pct,

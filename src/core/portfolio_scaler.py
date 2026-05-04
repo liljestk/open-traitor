@@ -63,7 +63,12 @@ _TIERS: list[tuple[float, Tier]] = [
         # bot out of new buys (audit 2026-04-30→05-04: 1,425 'max open'
         # rejections vs only 24 trades).
         max_open_positions=4,
-        min_gain_after_fees_pct=0.015,
+        # Lowered 0.015 → 0.003: at MICRO scale (€<50) demanding 1.5% net
+        # gain after fees blocked nearly every approved buy (audit
+        # 2026-05-04: 'Fees > expected gain' on AAVE/ADA/LINK with 1.0-1.4%
+        # expected). 0.3% net floor + 1.1× safety margin still blocks
+        # genuine money-losers but lets the LLM trade.
+        min_gain_after_fees_pct=0.003,
         take_profit_pct=0.05,   # 5% — more achievable on crypto; captures quick moves
         stop_loss_pct=0.03,     # 3% — tighter SL gives better risk-reward (5:3 = 1.67:1)
     )),
@@ -76,7 +81,8 @@ _TIERS: list[tuple[float, Tier]] = [
         # Bumped 3 → 5: more diversification headroom while still well below
         # MEDIUM-tier risk concentration.
         max_open_positions=5,
-        min_gain_after_fees_pct=0.010,
+        # Lowered 0.010 → 0.004 (see MICRO comment).
+        min_gain_after_fees_pct=0.004,
         take_profit_pct=0.07,
         stop_loss_pct=0.05,
     )),

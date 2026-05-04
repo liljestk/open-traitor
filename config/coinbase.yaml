@@ -46,11 +46,16 @@ fear_greed:
   enabled: true
 fees:
   maker_fee_pct: 0.004
-  min_gain_after_fees_pct: 0.005
+  min_gain_after_fees_pct: 0.003
   min_trade_pct: 0.01
   min_trade_quote: 1.0
   model_type: crypto_percentage
-  safety_margin: 1.5
+  # Lowered 1.5 → 1.1: 1.5× margin pushed effective breakeven to 1.80%
+  # round-trip; combined with maker_only execution (0.40% per leg) the
+  # real round-trip is 0.80%. 1.1× safety = 0.88% breakeven, still
+  # covers slippage on EUR pairs without nuking 1-1.5% expected-gain
+  # signals (the bulk of MICRO-tier opportunities).
+  safety_margin: 1.1
   swap_cooldown_seconds: 3600
   trade_fee_pct: 0.006
 execution:
