@@ -26,6 +26,7 @@ ibkr → equity sources only; coinbase → crypto sources only.
 from __future__ import annotations
 
 import io
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -288,8 +289,37 @@ class YahooFinanceSource:
     name = "yfinance"
     domain = "equity"
 
+    # Process-wide reachability cache for ``fc.yahoo.com`` (yfinance's
+    # cookie/crumb endpoint). When this host is blocked — common in
+    # container egress policies — every ``yfinance.download`` call fails
+    # with a curl error, which yfinance logs as ERROR per ticker. We
+    # probe once and short-circuit further calls when unreachable.
+    _fc_reachable: bool | None = None
+    _fc_lock = threading.Lock()
+
     def __init__(self, rate_per_sec: float = 2.0) -> None:
         self._bucket = TokenBucket(rate_per_sec=rate_per_sec, capacity=4)
+
+    @classmethod
+    def _fc_yahoo_reachable(cls) -> bool:
+        """Cached probe: is ``fc.yahoo.com:443`` reachable from this process?"""
+        if cls._fc_reachable is not None:
+            return cls._fc_reachable
+        with cls._fc_lock:
+            if cls._fc_reachable is not None:
+                return cls._fc_reachable
+            import socket
+            try:
+                with socket.create_connection(("fc.yahoo.com", 443), timeout=2.0):
+                    cls._fc_reachable = True
+            except OSError:
+                cls._fc_reachable = False
+                logger.info(
+                    "YahooFinanceSource: fc.yahoo.com unreachable — "
+                    "disabling yfinance fallback for this process "
+                    "(YahooChartSource + StooqSource still active)"
+                )
+            return cls._fc_reachable
 
     @staticmethod
     def _normalise_symbol(symbol: str) -> str:
@@ -308,6 +338,8 @@ class YahooFinanceSource:
     def fetch(
         self, symbol: str, granularity: str, start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
+        if not self._fc_yahoo_reachable():
+            return []
         try:
             import yfinance  # type: ignore
         except ImportError:

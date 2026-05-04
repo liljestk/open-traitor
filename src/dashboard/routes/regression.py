@@ -170,6 +170,51 @@ def refresh_regression_followed(profile: str = Query("")):
     return {"profile": resolved, **result}
 
 
+@router.post(
+    "/api/regression/trigger",
+    summary="Start an out-of-schedule EventRegressionWorkflow run",
+)
+async def trigger_regression_workflow(profile: str = Query("")):
+    """Kick off a fresh EventRegressionWorkflow execution for the active profile.
+
+    The workflow is normally cron-scheduled (02:30 UTC). This lets operators
+    force a refit from the dashboard "Trigger Now" button without waiting.
+    The new run is started on the ``planning`` task queue with a unique
+    workflow id so it never collides with the scheduled run.
+    """
+    resolved = deps.resolve_profile(profile)
+    exchange = _profile_to_exchange(resolved)
+    if not exchange:
+        raise HTTPException(status_code=400, detail="profile has no exchange mapping")
+
+    if deps.temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal client not available")
+
+    import uuid
+
+    from src.planning.workflows import EventRegressionWorkflow
+
+    new_wf_id = f"manual-EventRegressionWorkflow-{resolved}-{uuid.uuid4().hex[:8]}"
+    try:
+        handle = await deps.temporal_client.start_workflow(
+            EventRegressionWorkflow.run,
+            resolved,
+            id=new_wf_id,
+            task_queue="planning",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("regression/trigger failed")
+        raise HTTPException(status_code=500, detail=f"start_workflow failed: {exc}")
+
+    return {
+        "status": "started",
+        "workflow_id": new_wf_id,
+        "run_id": handle.first_execution_run_id,
+        "profile": resolved,
+        "exchange": exchange,
+    }
+
+
 def trigger_followed_refresh_in_background(profile: str, symbols: list[str]) -> None:
     """Best-effort background regression refresh for ``symbols``.
 

@@ -8,7 +8,12 @@ absolute_rules:
   max_single_trade: 500
   max_stop_loss_pct: 0.08
   max_trades_per_day: 50
-  min_trade_interval_seconds: 60
+  # Lowered 60 -> 5: this is a GLOBAL throttle (not per-pair), so a 60s
+  # gap caps the bot to ~1 trade/min when it processes 35 pairs per cycle.
+  # Live audit 2026-05-04 showed 3 'min_trade_interval' rejections in 21s
+  # immediately after an ETC-EUR fill. 5s still blocks accidental
+  # double-fires from glitches but lets independent signals execute.
+  min_trade_interval_seconds: 5
   never_trade_pairs: []
   only_trade_pairs: []
   portfolio_drawdown_halt_pct: 0.15

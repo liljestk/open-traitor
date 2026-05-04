@@ -422,9 +422,27 @@ if _STATIC_DIR.is_dir():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        """Catch-all: fall back to index.html for SPA client-side routing."""
+        """Catch-all: serve real static files at root, else fall back to
+        index.html for SPA client-side routing.
+
+        Without the static-file probe, requests like /site.webmanifest or
+        /favicon.ico would return index.html, which the browser then tries
+        to parse as a manifest/icon and fails ("Manifest: Line 1, column
+        1, Syntax error.").
+        """
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
+        # Serve real top-level static files (manifest, icons, logo, etc.)
+        # but ONLY if the resolved path stays inside _STATIC_DIR (no
+        # path traversal) and is a regular file.
+        if full_path:
+            candidate = (_STATIC_DIR / full_path).resolve()
+            try:
+                candidate.relative_to(_STATIC_DIR.resolve())
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Not found")
+            if candidate.is_file():
+                return FileResponse(str(candidate))
         index = _STATIC_DIR / "index.html"
         if index.is_file():
             return FileResponse(str(index))

@@ -152,6 +152,8 @@ def test_yahoo_normalise_strips_currency_suffix():
 def test_yahoo_fetch_uses_normalised_ticker():
     """The download must be issued for the normalised ticker, not the raw pair."""
     src = YahooFinanceSource()
+    # Bypass the fc.yahoo.com reachability probe (test runs offline / in CI).
+    YahooFinanceSource._fc_reachable = True
     with patch("yfinance.download") as mock_dl:
         mock_dl.return_value = None  # treat as empty
         src.fetch(

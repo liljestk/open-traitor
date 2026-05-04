@@ -62,24 +62,73 @@ def _clean(value: Any) -> Any:
 
 
 def _sym_universe(db, profile: str, exchange: str) -> list[str]:
-    """Return the union of (configured pairs + followed pairs) for the profile.
+    """Return the full picker universe for ``profile`` / ``exchange``.
 
-    This is the picker's source of truth — every symbol the operator is
-    actively trading or watching, with no live REST calls (the picker
-    must remain snappy and offline-tolerant).
+    The picker is the source of truth for "what does the system know about?"
+    so it must mirror the *exact* universe the regression-coverage worker
+    treats as in-scope. That means the union of:
+
+        1. ``config/{profile}.yaml`` ``trading.pairs`` (yaml-curated baseline)
+        2. ``pair_follows`` rows (human + LLM screener)
+        3. The broader scanned candle universe — every symbol on
+           ``exchange`` with ≥ ``MIN_BARS_FOR_AUTO_COVERAGE`` daily bars,
+           because the universe-scanner has decided it's worth tracking
+           and the regression worker will fit a model for it.
+        4. Symbols that already have ``event_price_regressions`` rows
+           (defensive: a model was fitted for them so the picker must
+           expose them even if (1)–(3) miss).
+
+    Domain isolation is enforced upstream — every query filters by
+    ``exchange``. No REST calls; the picker must remain snappy.
     """
     cfg = deps.get_config_for_profile(profile)
     pairs: list[str] = list(cfg.get("trading", {}).get("pairs", []) or [])
     seen = {p.upper() for p in pairs}
+
+    def _add(value: Any) -> None:
+        up = (value or "").upper().strip() if isinstance(value, str) else ""
+        if up and up not in seen and up != "_MACRO_":
+            pairs.append(up)
+            seen.add(up)
+
+    # 2) human + LLM follows
     try:
         followed: Iterable[str] = db.get_followed_pairs_set(exchange=exchange) or set()
         for p in followed:
-            up = (p or "").upper()
-            if up and up not in seen:
-                pairs.append(up)
-                seen.add(up)
+            _add(p)
     except Exception as exc:  # pragma: no cover — degraded path
         logger.debug(f"get_followed_pairs_set failed: {exc}")
+
+    # 3) broader scanned/tradeable universe (same heuristic as
+    #    regression_coverage._candle_universe_symbols, kept inline so the
+    #    dashboard route stays decoupled from the worker package).
+    try:
+        from src.analysis.regression_coverage import (
+            MIN_BARS_FOR_AUTO_COVERAGE,
+            _candle_universe_symbols,
+        )
+
+        for sym in _candle_universe_symbols(
+            db, exchange, min_bars=MIN_BARS_FOR_AUTO_COVERAGE
+        ):
+            _add(sym)
+    except Exception as exc:  # pragma: no cover — degraded path
+        logger.debug(f"candle-universe probe failed: {exc}")
+
+    # 4) anything already modeled — picker must surface it even if the
+    #    follows/yaml/candle sources have churned away from it.
+    try:
+        for r in db.get_event_regressions(exchange=exchange, limit=2000) or []:
+            _add(r.get("symbol"))
+    except Exception as exc:  # pragma: no cover — degraded path
+        logger.debug(f"get_event_regressions(universe) failed: {exc}")
+
+    try:
+        for r in db.get_market_factor_loadings(exchange=exchange, limit=2000) or []:
+            _add(r.get("symbol"))
+    except Exception as exc:  # pragma: no cover — degraded path
+        logger.debug(f"get_market_factor_loadings(universe) failed: {exc}")
+
     return sorted(pairs)
 
 
@@ -151,20 +200,16 @@ def list_symbols(
     except Exception as exc:
         logger.debug(f"get_trades(list) failed: {exc}")
 
-    # Upcoming catalysts (30d) — symbol-scoped flag only.
+    # Upcoming catalysts (30d) — symbol-scoped flag only. One bulk fetch
+    # so the picker stays O(1) DB calls regardless of universe size.
     pattern_symbols: set[str] = set()
     try:
-        for sym in pairs:
-            try:
-                up = db.get_upcoming_catalysts(
-                    exchange=exchange, horizon_days=30, symbol=sym
-                )
-                if up:
-                    pattern_symbols.add(sym.upper())
-            except Exception:
-                continue
-    except Exception:
-        pass
+        for ev in db.get_upcoming_catalysts(exchange=exchange, horizon_days=30) or []:
+            sym = (ev.get("symbol") or "").upper()
+            if sym:
+                pattern_symbols.add(sym)
+    except Exception as exc:
+        logger.debug(f"get_upcoming_catalysts(list) failed: {exc}")
 
     needle = q.strip().upper()
     items: list[dict] = []

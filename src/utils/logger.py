@@ -96,6 +96,15 @@ def setup_logger(
             trade_logger = logging.getLogger("auto_traitor.trades")
             trade_logger.addHandler(trade_handler)
 
+        # Silence noisy 3rd-party loggers that propagate to root.
+        # ``yfinance`` in particular emits one ERROR per ticker whenever
+        # ``fc.yahoo.com`` (its cookie/crumb endpoint) is unreachable
+        # — a common state in containerised egress — which floods the
+        # console with "Failed to get ticker 'X' reason: ... fc.yahoo.com"
+        # and "$X: possibly delisted" lines on every backfill cycle.
+        for _noisy in ("yfinance", "peewee", "urllib3", "asyncio"):
+            logging.getLogger(_noisy).setLevel(logging.CRITICAL)
+
         _initialized = True
 
 

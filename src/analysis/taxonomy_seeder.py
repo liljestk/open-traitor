@@ -187,6 +187,7 @@ def seed_equity_taxonomy(
     except Exception:
         yf = None
         logger.warning("yfinance unavailable — equity taxonomy will be coarse")
+    consecutive_failures = 0
     for sym in symbols:
         sector: Optional[str] = None
         industry: Optional[str] = None
@@ -198,8 +199,20 @@ def seed_equity_taxonomy(
                 industry = info.get("industry") or None
                 if sector:
                     ecosystem = f"equity-{sector.lower().replace(' ', '-')}"
+                consecutive_failures = 0
             except Exception as e:
                 logger.debug(f"yfinance({sym}) failed: {e}")
+                consecutive_failures += 1
+                # If the cookie/crumb endpoint (fc.yahoo.com) is blocked,
+                # every subsequent ``.info`` call will fail the same way.
+                # Bail out after a few consecutive failures and degrade
+                # gracefully (ecosystem stays as the coarse "equity" tag).
+                if consecutive_failures >= 3:
+                    logger.warning(
+                        "yfinance taxonomy lookup failing repeatedly — "
+                        "degrading remaining symbols to coarse 'equity' tag"
+                    )
+                    yf = None
         rows.append({
             "exchange": exchange,
             "symbol": sym,
