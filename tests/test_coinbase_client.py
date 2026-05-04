@@ -89,6 +89,88 @@ class TestFormatBaseSize:
         assert result == "1.99"
 
 
+# ── _format_limit_price ──────────────────────────────────────────────────
+
+class TestFormatLimitPrice:
+    def setup_method(self):
+        self.client = CoinbaseClient(paper_mode=True)
+        self.client._product_cache = [
+            {"product_id": "1INCH-EUR", "quote_increment": "0.0001"},
+            {"product_id": "BTC-EUR", "quote_increment": "0.01"},
+            {"product_id": "DOGE-EUR", "quote_increment": "0.00001"},
+        ]
+
+    def test_buy_floors_to_quote_increment(self):
+        # Mirrors the production failure: 0.081918 has 6dp, must round to 4dp.
+        assert self.client._format_limit_price("1INCH-EUR", 0.081918, "BUY") == "0.0819"
+
+    def test_sell_ceils_to_quote_increment(self):
+        # Sell-side post-only must stay above bid → ceil.
+        assert self.client._format_limit_price("1INCH-EUR", 0.081911, "SELL") == "0.0820"
+
+    def test_btc_two_decimals(self):
+        assert self.client._format_limit_price("BTC-EUR", 38123.4567, "BUY") == "38123.45"
+        assert self.client._format_limit_price("BTC-EUR", 38123.4501, "SELL") == "38123.46"
+
+    def test_unknown_product_falls_back_to_8dp(self):
+        out = self.client._format_limit_price("FAKE-EUR", 1.234567899, "BUY")
+        assert out == "1.23456789"
+
+    def test_already_aligned_unchanged(self):
+        assert self.client._format_limit_price("BTC-EUR", 100.00, "BUY") == "100.00"
+
+    def test_place_limit_order_normalises_price(self):
+        # Verifies the public ExchangeClient entry point applies the rounding
+        # before delegating to limit_order_buy.
+        captured = {}
+
+        def fake_buy(product_id, base_size, limit_price, post_only=True):
+            captured["price"] = limit_price
+            captured["size"] = base_size
+            return {"success": True, "order_id": "OID"}
+
+        self.client.limit_order_buy = fake_buy  # type: ignore[assignment]
+        self.client._product_cache.append({"product_id": "1INCH-EUR", "base_increment": "1"})
+        res = self.client.place_limit_order(
+            pair="1INCH-EUR", side="BUY", price=0.081918, size=1.07
+        )
+        assert res["success"] is True
+        assert captured["price"] == "0.0819"
+
+
+# ── _extract_cb_error: UNKNOWN_FAILURE_REASON enrichment ────────────────
+
+class TestExtractCbErrorEnrichment:
+    def test_unknown_failure_reason_appends_extras(self):
+        # Production-shape payload: error_response.error is the bare
+        # "UNKNOWN_FAILURE_REASON" sentinel with diagnostic fields alongside.
+        result = {
+            "error_response": {
+                "error": "UNKNOWN_FAILURE_REASON",
+                "preview_failure_reason": "PREVIEW_INSUFFICIENT_FUND",
+                "error_details": "quote_size below MIN_FUNDS",
+            }
+        }
+        out = _extract_cb_error(result)
+        assert out.startswith("UNKNOWN_FAILURE_REASON (")
+        assert "preview_failure_reason=PREVIEW_INSUFFICIENT_FUND" in out
+        assert "error_details=quote_size below MIN_FUNDS" in out
+
+    def test_unknown_failure_reason_no_extras_unchanged(self):
+        result = {"error_response": {"error": "UNKNOWN_FAILURE_REASON"}}
+        assert _extract_cb_error(result) == "UNKNOWN_FAILURE_REASON"
+
+    def test_known_error_not_enriched(self):
+        # A real, descriptive error should pass through verbatim.
+        result = {
+            "error_response": {
+                "error": "INSUFFICIENT_FUND",
+                "message": "Not enough USD",
+            }
+        }
+        assert _extract_cb_error(result) == "Not enough USD"
+
+
 # ── Market data (paper mode mock data) ──────────────────────────────────
 
 class TestMarketDataPaper:

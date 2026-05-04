@@ -37,7 +37,7 @@ logger = get_logger("core.coinbase")
 def _extract_cb_error(result: dict) -> str:
     """Extract a human-readable error from a Coinbase CreateOrderResponse dict."""
     err_resp = result.get("error_response") or {}
-    return (
+    primary = (
         result.get("error")
         or err_resp.get("message")
         or err_resp.get("error")
@@ -46,6 +46,25 @@ def _extract_cb_error(result: dict) -> str:
         or result.get("failure_reason")
         or "Unknown error"
     )
+    # Coinbase often returns the literal string "UNKNOWN_FAILURE_REASON" with
+    # zero context. Surface anything else we can find so operators have a clue.
+    if primary in {"UNKNOWN_FAILURE_REASON", "Unknown error"}:
+        extras = []
+        for key in (
+            "message",
+            "error_details",
+            "preview_failure_reason",
+            "new_order_failure_reason",
+        ):
+            val = err_resp.get(key)
+            if val and val != primary:
+                extras.append(f"{key}={val}")
+        prev = result.get("order_configuration") or err_resp.get("order_configuration")
+        if prev:
+            extras.append(f"order_configuration={prev}")
+        if extras:
+            return f"{primary} ({'; '.join(extras)})"
+    return primary
 
 
 # Make re-exports visible to star-imports and static analysis
@@ -483,6 +502,41 @@ class CoinbaseClient(
         except Exception:
             return f"{amount:.8f}"
 
+    def _format_limit_price(self, pair: str, price: float, side: str = "BUY") -> str:
+        """Round *price* to the product's quote_increment precision.
+
+        Coinbase rejects limit orders whose price has more decimals than the
+        product's quote_increment with "Too many decimals in order price".
+        Uses the cached product catalogue — no extra API call.
+
+        Rounding direction preserves the post-only intent:
+          • BUY  → floor (price ≤ requested, stays below the ask)
+          • SELL → ceil  (price ≥ requested, stays above the bid)
+
+        Falls back to 8 decimal places when the product or increment is unknown.
+        """
+        import math
+
+        increment_str = "0.00000001"  # safe default (8 dp)
+        for prod in self._product_cache:
+            if prod.get("product_id") == pair:
+                increment_str = prod.get("quote_increment") or increment_str
+                break
+
+        try:
+            if "." in increment_str:
+                decimals = len(increment_str.rstrip("0").split(".")[1])
+            else:
+                decimals = 0
+            factor = 10 ** decimals
+            if side.upper() == "SELL":
+                rounded = math.ceil(price * factor) / factor
+            else:
+                rounded = math.floor(price * factor) / factor
+            return f"{rounded:.{decimals}f}"
+        except Exception:
+            return f"{price:.8f}"
+
     def place_market_order(
         self,
         pair: str,
@@ -512,11 +566,15 @@ class CoinbaseClient(
         """Place a limit order (ExchangeClient abstract method implementation)."""
         if side.upper() == "BUY":
             return self.limit_order_buy(
-                pair, base_size=self._format_base_size(pair, size), limit_price=str(price)
+                pair,
+                base_size=self._format_base_size(pair, size),
+                limit_price=self._format_limit_price(pair, price, "BUY"),
             )
         elif side.upper() == "SELL":
             return self.limit_order_sell(
-                pair, base_size=self._format_base_size(pair, size), limit_price=str(price)
+                pair,
+                base_size=self._format_base_size(pair, size),
+                limit_price=self._format_limit_price(pair, price, "SELL"),
             )
         return {"success": False, "error": f"Invalid side: {side}"}
 
@@ -621,6 +679,11 @@ class CoinbaseClient(
         post_only: bool = True,
     ) -> dict:
         """Place a limit buy order (maker order for lower fees)."""
+        # Normalise precision to avoid "Too many decimals in order price" rejection
+        try:
+            limit_price = self._format_limit_price(product_id, float(limit_price), "BUY")
+        except (TypeError, ValueError):
+            pass
         if self.paper_mode:
             return self._paper_limit_buy(product_id, base_size, limit_price)
 
@@ -669,6 +732,11 @@ class CoinbaseClient(
         post_only: bool = True,
     ) -> dict:
         """Place a limit sell order (maker order for lower fees)."""
+        # Normalise precision to avoid "Too many decimals in order price" rejection
+        try:
+            limit_price = self._format_limit_price(product_id, float(limit_price), "SELL")
+        except (TypeError, ValueError):
+            pass
         if self.paper_mode:
             return self._paper_limit_sell(product_id, base_size, limit_price)
 
