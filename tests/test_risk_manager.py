@@ -184,7 +184,10 @@ class TestRiskManagerRun:
         assert result["stop_loss"] is not None
         assert result["take_profit"] is not None
 
-    def test_no_amount_rejected(self):
+    def test_no_amount_auto_filled_when_cash_present(self):
+        # Updated 2026-05-04: risk_manager now auto-sizes buys with no
+        # explicit amount instead of rejecting (was the #3 silent reject in
+        # production audits).
         rm = _make_rm()
         result = _run(rm.run({
             "proposal": {
@@ -196,13 +199,34 @@ class TestRiskManagerRun:
             },
             "portfolio_value": 10000,
             "cash_balance": 5000,
+            "signal_type": "buy",
+        }))
+        assert result["approved"] is True
+        assert result["quote_amount"] > 0
+
+    def test_no_amount_no_cash_still_rejected(self):
+        rm = _make_rm()
+        result = _run(rm.run({
+            "proposal": {
+                "action": "buy",
+                "pair": "BTC-EUR",
+                "confidence": 0.9,
+                "quote_amount": 0,
+                "current_price": 50000,
+            },
+            "portfolio_value": 0,
+            "cash_balance": 0,
         }))
         assert result["approved"] is False
         assert "amount" in result["reason"].lower()
 
     def test_max_positions_enforced(self):
+        # MICRO tier now caps at 4 open positions (was 2). Use 4 open positions
+        # to verify the cap is still enforced after the 2026-05-04 bump.
         rm = _make_rm(max_open=2, portfolio_value=30)
-        rm.state.open_positions = {"BTC-EUR": 0.1, "ETH-EUR": 0.5}
+        rm.state.open_positions = {
+            "BTC-EUR": 0.1, "ETH-EUR": 0.5, "ADA-EUR": 100, "XRP-EUR": 200,
+        }
         result = _run(rm.run({
             "proposal": {
                 "action": "buy",

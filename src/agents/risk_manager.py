@@ -281,7 +281,15 @@ class RiskManagerAgent(BaseAgent):
         # ─── Minimum confidence gate ─────────────────────────────
         # Reject low-confidence proposals (e.g. weak_buy at 62%)
         # before spending resources on position sizing.
-        min_signal_confidence = self.trading_config.get("min_signal_confidence", 0.65)
+        # NOTE: read both ``min_signal_confidence`` (legacy) and ``min_confidence``
+        # (the actual key in coinbase.yaml / ibkr.yaml). Earlier versions defaulted
+        # silently to 0.65 when only ``min_confidence`` was present, which blocked
+        # ~40% of all proposals (see audit logs 2026-04-30 → 2026-05-04).
+        min_signal_confidence = float(
+            self.trading_config.get("min_signal_confidence")
+            or self.trading_config.get("min_confidence")
+            or 0.55
+        )
         proposal_confidence = float(proposal.get("confidence", 0))
         if proposal_confidence < min_signal_confidence and action == "buy":
             self.logger.info(
@@ -352,7 +360,28 @@ class RiskManagerAgent(BaseAgent):
         if quote_amount <= 0 and quantity > 0 and price > 0:
             quote_amount = quantity * price
 
-        # If still no amount, reject
+        # If still no amount, fall back to a tier-aware default rather than
+        # rejecting outright. The trader/strategist routinely returns
+        # ``quote_amount=null`` for buy actions when it wants the risk layer
+        # to size the trade (audit logs show ~800 silent rejections in the
+        # last week alone). Default sizing = min(cash * tier.cash_pct,
+        # max_single_trade ceiling). Sells with no amount still reject
+        # because we cannot guess the position quantity to liquidate.
+        if quote_amount <= 0 and action == "buy" and cash_balance > 0:
+            tier_cash_pct = (
+                self.scaler.tier.max_cash_per_trade_pct
+                if self.scaler
+                else self.rules.max_cash_per_trade_pct
+            )
+            fallback = cash_balance * tier_cash_pct
+            ceiling = float(self.rules.max_single_trade)
+            quote_amount = max(0.0, min(fallback, ceiling))
+            self.logger.info(
+                f"💡 Auto-sized {pair} buy: trader returned no amount, "
+                f"defaulting to €{quote_amount:.2f} "
+                f"({tier_cash_pct:.0%} of €{cash_balance:.2f} cash)"
+            )
+
         if quote_amount <= 0:
             return _reject({
                 "approved": False,
@@ -363,6 +392,33 @@ class RiskManagerAgent(BaseAgent):
                     "(strategist/trader returned quote_amount=null and quantity=0)"
                 ),
             })
+
+        # ─── Clamp oversized buy proposals before AbsoluteRules ─────────
+        # The trader sometimes proposes a notional larger than available cash
+        # (audit logs show 75 EUR proposed against 27 EUR cash, etc.). Rather
+        # than reject and lose the signal, clamp to the tier-aware ceiling so
+        # AbsoluteRules sees a feasible amount.
+        if action == "buy" and cash_balance > 0:
+            tier_cash_pct = (
+                self.scaler.tier.max_cash_per_trade_pct
+                if self.scaler
+                else self.rules.max_cash_per_trade_pct
+            )
+            cash_ceiling = cash_balance * tier_cash_pct
+            single_ceiling = float(self.rules.max_single_trade)
+            if portfolio_value > 0:
+                # Honour AbsoluteRules' dynamic per-trade cap
+                single_ceiling = min(
+                    single_ceiling, portfolio_value * tier_cash_pct
+                )
+            ceiling = min(cash_ceiling, single_ceiling)
+            if ceiling > 0 and quote_amount > ceiling:
+                self.logger.info(
+                    f"🪚 Clamped {pair} buy from €{quote_amount:.2f} → "
+                    f"€{ceiling:.2f} (cash €{cash_balance:.2f}, "
+                    f"tier {tier_cash_pct:.0%})"
+                )
+                quote_amount = ceiling
 
         # Enforce max_open_positions for buy orders (tier-scaled)
         if action == "buy":

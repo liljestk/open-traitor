@@ -348,8 +348,12 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "max_stop_loss_pct":          {},              # free to adjust
     },
     "trading": {
-        "min_confidence":              {"min": 0.3, "max": 0.95},  # can't set >0.95 (effective disable)
-        "max_open_positions":          {"min": 1},                  # can't zero out
+        # Lowered floor 0.30 → 0.25 and tightened ceiling 0.95 → 0.85 so the
+        # LLM can dial in a more permissive entry filter (the runtime gate
+        # in risk_manager defaults to 0.55) without ever effectively
+        # disabling trading by setting it absurdly high.
+        "min_confidence":              {"min": 0.25, "max": 0.85},
+        "max_open_positions":          {"min": 1, "max": 20},        # cap at 20 to bound risk concentration
         "paper_slippage_pct":          {},
         "interval":                    {"min": 30, "max": 3600},
         "pairs":                       {},                            # LLM can add/remove pairs
@@ -364,10 +368,14 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
         "stop_loss_pct":           {"min": 0.005, "max": 0.20},
         "take_profit_pct":         {"min": 0.01, "max": 0.50},
         "trailing_stop_pct":       {"min": 0.005, "max": 0.20},
-        "max_position_pct":        {"min": 0.01},
-        "max_total_exposure_pct":  {"min": 0.05},
-        "max_drawdown_pct":        {"min": 0.02},
-        "max_trades_per_hour":     {"min": 1},
+        # Added explicit ceiling so the LLM has a clear upper bound when it
+        # wants to grow per-trade size on high-conviction setups.
+        "max_position_pct":        {"min": 0.01, "max": 0.50},
+        "max_total_exposure_pct":  {"min": 0.05, "max": 1.00},
+        "max_drawdown_pct":        {"min": 0.02, "max": 0.50},
+        # Raised ceiling so the LLM can boost trade frequency in trending
+        # regimes (was implicitly capped by schema, now explicit at 30/h).
+        "max_trades_per_hour":     {"min": 1, "max": 30},
         "loss_cooldown_seconds":   {"max": 7200},
     },
     "rotation": {
@@ -395,10 +403,13 @@ AUTONOMOUS_FIELD_GUARDS: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 # List-type fields where the autonomous LLM can only ADD items, never remove.
-# This prevents the LLM from clearing safety-critical blacklists/whitelists.
+# This prevents the LLM from clearing safety-critical blacklists.
+# NOTE: ``only_trade_pairs`` was removed from this set on 2026-05-04 — it is a
+# *whitelist* (empty = trade everything), so making it append-only locked the
+# LLM into an ever-growing universe with no way to refocus. ``never_trade_pairs``
+# remains append-only as the genuine safety blacklist.
 _AUTONOMOUS_APPEND_ONLY_LISTS = frozenset({
     "never_trade_pairs",
-    "only_trade_pairs",
 })
 
 # Fields the autonomous LLM may NOT touch even within allowed sections

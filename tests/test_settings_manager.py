@@ -302,14 +302,14 @@ class TestAutonomousUpdates:
             "trading", {"min_confidence": 0.1}
         )
         assert ok
-        assert clamped["min_confidence"] >= 0.3  # autonomous floor
+        assert clamped["min_confidence"] >= 0.25  # autonomous floor (lowered 2026-05-04)
 
     def test_clamping_max(self):
         ok, errs, clamped = sm.validate_autonomous_update(
             "trading", {"min_confidence": 0.99}
         )
         assert ok
-        assert clamped["min_confidence"] <= 0.95  # autonomous ceiling
+        assert clamped["min_confidence"] <= 0.85  # autonomous ceiling (tightened 2026-05-04)
 
     def test_unknown_field_rejected(self):
         ok, errs, _ = sm.validate_autonomous_update(

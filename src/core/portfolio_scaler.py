@@ -59,7 +59,10 @@ _TIERS: list[tuple[float, Tier]] = [
         max_cash_per_trade_pct=0.50,
         max_portfolio_risk_pct=0.50,
         max_active_pairs=6,     # scan 6 candidates; risk_manager gates on max_open_positions
-        max_open_positions=2,
+        # Bumped 2 → 4: at <€50 the 2-position cap permanently locked the
+        # bot out of new buys (audit 2026-04-30→05-04: 1,425 'max open'
+        # rejections vs only 24 trades).
+        max_open_positions=4,
         min_gain_after_fees_pct=0.015,
         take_profit_pct=0.05,   # 5% — more achievable on crypto; captures quick moves
         stop_loss_pct=0.03,     # 3% — tighter SL gives better risk-reward (5:3 = 1.67:1)
@@ -69,8 +72,10 @@ _TIERS: list[tuple[float, Tier]] = [
         max_position_pct=0.25,
         max_cash_per_trade_pct=0.35,
         max_portfolio_risk_pct=0.35,
-        max_active_pairs=8,     # scan 8 candidates; hold at most 3
-        max_open_positions=3,
+        max_active_pairs=8,     # scan 8 candidates; hold at most 5
+        # Bumped 3 → 5: more diversification headroom while still well below
+        # MEDIUM-tier risk concentration.
+        max_open_positions=5,
         min_gain_after_fees_pct=0.010,
         take_profit_pct=0.07,
         stop_loss_pct=0.05,
