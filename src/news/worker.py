@@ -158,6 +158,12 @@ def main():
             k: v for k, v in ibkr_full_config.get("trading", {}).items()
             if k != "pairs"
         })
+        # Domain-separation: keep IBKR pairs separately so fetch_ibkr_news
+        # never tries to look up crypto symbols (LINK, ADA, ...) against
+        # the IBKR Stock catalogue.
+        merged_config["trading"]["ibkr_pairs"] = list(
+            ibkr_full_config.get("trading", {}).get("pairs", [])
+        )
 
     # Single aggregator with merged sources (avoids duplicate HTTP requests)
     aggregator = NewsAggregator(

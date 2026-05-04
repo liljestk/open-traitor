@@ -557,8 +557,15 @@ class NewsAggregator:
             return articles
             
         try:
-            # We fetch news for configured trading pairs
-            pairs = self.config.get("trading", {}).get("pairs", [])
+            # We fetch news for configured trading pairs. IMPORTANT: when
+            # the news worker is multi-profile it merges all pairs into
+            # ``trading.pairs`` for ticker discovery, but the IBKR catalogue
+            # only knows equities — looking up crypto symbols here triggers
+            # a flood of "No security definition" errors. So we prefer the
+            # explicit ``trading.ibkr_pairs`` allowlist when present and
+            # fall back to ``trading.pairs`` only for single-profile setups.
+            trading_cfg = self.config.get("trading", {}) or {}
+            pairs = trading_cfg.get("ibkr_pairs") or trading_cfg.get("pairs", [])
             for pair in pairs:
                 ib_news = self.exchange_client.get_news(pair, limit=3)
                 for n in ib_news:
