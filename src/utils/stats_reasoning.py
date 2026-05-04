@@ -123,16 +123,28 @@ class ReasoningMixin:
         Used by the dashboard Cycle Explorer page.
         """
         with self._get_conn() as conn:
+            # ``signal_type`` is taken from market_analyst when present and
+            # falls back to the ``trader`` span (the autonomous LLM operator
+            # that replaced ``strategist`` in the live path) so the dashboard
+            # never renders "?" when an agent did emit a verdict.
+            # ``action`` is the strategist's JSON action, falling back to the
+            # trader's signal_type for the same reason.
             _select = """SELECT
                         ar.cycle_id,
                         ar.pair,
                         MIN(ar.ts) as started_at,
                         MAX(ar.ts) as finished_at,
                         COUNT(DISTINCT ar.agent_name) as agent_count,
-                        MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.signal_type END) as signal_type,
+                        COALESCE(
+                            NULLIF(MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.signal_type END), ''),
+                            NULLIF(MAX(CASE WHEN ar.agent_name='trader'         THEN ar.signal_type END), '')
+                        ) as signal_type,
                         MAX(CASE WHEN ar.agent_name='market_analyst' THEN ar.confidence END) as confidence,
-                        MAX(CASE WHEN ar.agent_name='strategist' THEN
-                            ar.reasoning_json::json->>'action' END) as action,
+                        COALESCE(
+                            NULLIF(MAX(CASE WHEN ar.agent_name='strategist' THEN
+                                ar.reasoning_json::json->>'action' END), ''),
+                            NULLIF(MAX(CASE WHEN ar.agent_name='trader'     THEN ar.signal_type END), '')
+                        ) as action,
                         t.id as trade_id,
                         t.pnl,
                         t.quote_amount,

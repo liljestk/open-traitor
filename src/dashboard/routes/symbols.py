@@ -310,11 +310,14 @@ def _build_plain_summary(
     else:
         parts.append("No trades executed in the last 7d.")
 
-    # Reasoning activity
+    # Reasoning activity. Treat empty strings as missing so the summary
+    # never renders the meaningless "Most recent agent signal: ?" sentence
+    # — if no agent in the latest cycle produced a verdict, omit the clause.
     if reasoning:
         latest = reasoning[0]
-        sig = latest.get("signal_type") or latest.get("action") or "?"
-        parts.append(f"Most recent agent signal: {sig}.")
+        sig = (latest.get("signal_type") or "").strip() or (latest.get("action") or "").strip()
+        if sig:
+            parts.append(f"Most recent agent signal: {sig}.")
 
     return " ".join(parts)
 
