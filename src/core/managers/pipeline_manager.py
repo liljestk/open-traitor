@@ -1002,10 +1002,13 @@ class PipelineManager:
             logger.debug(f"onchain fetch failed: {_oc_e}")
 
         # Step 2.6: Regression factor — turns nightly OLS fits into a real
-        # bounded sizing multiplier (formerly observational only). Strict
-        # opt-in via REGRESSION_RISK_FACTOR_ENABLED env or per-profile
-        # ``risk.use_regression_factor: true``. The payload is shaped so
-        # ``risk_manager`` can apply it without re-querying the DB.
+        # bounded sizing multiplier (formerly observational only). Tri-state
+        # mode resolved from REGRESSION_RISK_FACTOR_MODE env / yaml
+        # ``risk.regression_factor_mode`` (off|on|auto). In ``auto`` the
+        # system flips the factor on per-symbol once the model has proven
+        # directional accuracy (hit_rate ≥ 0.55, N ≥ 30, R² ≥ 0.15) — no
+        # manual flag flip required. Payload shape is stable across modes
+        # so ``risk_manager`` can apply it without re-querying the DB.
         regression_factor: dict = {
             "available": False, "applied": False, "factor": 1.0,
             "direction": "neutral", "reason": "not_run",

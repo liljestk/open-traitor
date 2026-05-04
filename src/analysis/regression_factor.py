@@ -13,8 +13,22 @@ the "no hallucinations" directive — every active multiplier is anchored
 to a real DB row reference returned in the payload so the dashboard can
 show *which* regression and *which* upcoming event drove the change.
 
-Disabled by default behind the ``REGRESSION_RISK_FACTOR_ENABLED`` env
-flag; profile YAML can also set ``risk.use_regression_factor`` to opt in.
+Three modes (resolved from env or profile yaml):
+
+* ``off``  — default. Factor is always 1.0 (model is fitted nightly but
+  not applied to sizing). Existing behaviour, no surprises.
+* ``on``   — manual override. Factor moves size whenever the model
+  clears the standard quality gate (R² ≥ 0.10, N ≥ 10).
+* ``auto`` — system-driven. Same as ``on`` *plus* a per-symbol
+  promotion bar: the regression must have demonstrated directional
+  accuracy (hit_rate ≥ 0.55, N ≥ 30, R² ≥ 0.15) before the factor
+  goes live for that symbol. This is what flips the regression "on"
+  automatically based on its own measured performance.
+
+Resolution: ``REGRESSION_RISK_FACTOR_MODE`` env (off/on/auto) →
+``REGRESSION_RISK_FACTOR_ENABLED`` env (legacy bool) →
+``risk.regression_factor_mode`` yaml → ``risk.use_regression_factor``
+yaml (legacy bool) → default ``off``.
 """
 
 from __future__ import annotations
@@ -38,15 +52,76 @@ _MIN_SAMPLES = 10
 # already in the rear-view mirror are noise.
 _CATALYST_HORIZON_HOURS = 72
 
+# Auto-mode promotion bar — strictly tougher than the always-on quality
+# gate so a model has to *prove itself* on out-of-sample directional
+# accuracy before the factor starts moving size autonomously.
+_AUTO_MIN_HIT_RATE = 0.55   # >50% directional accuracy on forward returns
+_AUTO_MIN_SAMPLES = 30      # 3× the manual-mode floor
+_AUTO_MIN_R_SQUARED = 0.15  # 1.5× the manual-mode floor
+
+
+def _resolve_mode(risk_config: dict | None) -> str:
+    """Return tri-state mode: ``on`` | ``off`` | ``auto``.
+
+    Resolution order (first match wins):
+      1. ``REGRESSION_RISK_FACTOR_MODE`` env (off/on/auto)
+      2. ``REGRESSION_RISK_FACTOR_ENABLED`` env (legacy bool)
+      3. ``risk.regression_factor_mode`` yaml (off/on/auto)
+      4. ``risk.use_regression_factor`` yaml (legacy bool)
+      5. default → ``off`` (safe; no behaviour change for unconfigured profiles)
+    """
+    mode_env = os.environ.get("REGRESSION_RISK_FACTOR_MODE", "").strip().lower()
+    if mode_env in {"off", "on", "auto"}:
+        return mode_env
+
+    bool_env = os.environ.get("REGRESSION_RISK_FACTOR_ENABLED", "").strip().lower()
+    if bool_env in {"1", "true", "yes", "on"}:
+        return "on"
+    if bool_env in {"0", "false", "no", "off"}:
+        return "off"
+
+    cfg = risk_config or {}
+    mode_yaml = str(cfg.get("regression_factor_mode", "")).strip().lower()
+    if mode_yaml in {"off", "on", "auto"}:
+        return mode_yaml
+
+    if bool(cfg.get("use_regression_factor", False)):
+        return "on"
+    return "off"
+
 
 def _is_enabled(risk_config: dict | None) -> bool:
-    """Strict opt-in. Env flag wins; profile yaml can also enable."""
-    env = os.environ.get("REGRESSION_RISK_FACTOR_ENABLED", "").strip().lower()
-    if env in {"1", "true", "yes", "on"}:
-        return True
-    if env in {"0", "false", "no", "off"}:
-        return False
-    return bool((risk_config or {}).get("use_regression_factor", False))
+    """Back-compat shim — returns True when mode is ``on``.
+
+    ``auto`` mode is treated as enabled at the *gate* level (we proceed to
+    fetch the model) but the final ``applied`` decision additionally
+    requires the model to clear the auto-promotion bar — see the
+    ``_meets_auto_bar`` check inside :func:`build_regression_factor`.
+    """
+    return _resolve_mode(risk_config) in {"on", "auto"}
+
+
+def _meets_auto_bar(model: dict) -> tuple[bool, str]:
+    """Per-symbol auto-promotion check.
+
+    Returns ``(passed, reason)``. The reason is surfaced in the payload
+    so the dashboard / logs can show *why* a fitted model is or isn't
+    being trusted to move size yet.
+    """
+    hit = model.get("hit_rate")
+    n = int(model.get("sample_count") or 0)
+    r2 = model.get("r_squared")
+    if not isinstance(hit, (int, float)) or not math.isfinite(float(hit)):
+        return False, "auto_gate:hit_rate_unknown"
+    if hit < _AUTO_MIN_HIT_RATE:
+        return False, f"auto_gate:hit_rate {hit:.2f} < {_AUTO_MIN_HIT_RATE}"
+    if n < _AUTO_MIN_SAMPLES:
+        return False, f"auto_gate:N {n} < {_AUTO_MIN_SAMPLES}"
+    if not isinstance(r2, (int, float)) or not math.isfinite(float(r2)):
+        return False, "auto_gate:r_squared_invalid"
+    if r2 < _AUTO_MIN_R_SQUARED:
+        return False, f"auto_gate:R² {r2:.2f} < {_AUTO_MIN_R_SQUARED}"
+    return True, "auto_gate:passed"
 
 
 def _clip(v: float, lo: float, hi: float) -> float:
@@ -86,7 +161,9 @@ def build_regression_factor(
         "upcoming_event": None,
     }
 
-    if not _is_enabled(risk_config):
+    mode = _resolve_mode(risk_config)
+    payload["mode"] = mode
+    if mode == "off":
         return payload
 
     if db is None or not symbol or not exchange:
@@ -189,6 +266,19 @@ def build_regression_factor(
         payload["reason"] = "mean_forward_return_unknown"
         return payload
 
+    # Auto mode: model has cleared the always-on quality gate above, but
+    # to *autonomously* move size we additionally require proven
+    # directional accuracy. Run before computing the multiplier so the
+    # rejection reason reflects the gate, not a downstream "too small"
+    # heuristic. Manual ``on`` mode skips this bar — the operator has
+    # explicitly accepted the weaker quality threshold.
+    if mode == "auto":
+        ok, reason = _meets_auto_bar(model)
+        payload["auto_gate"] = {"passed": ok, "detail": reason}
+        if not ok:
+            payload["reason"] = reason
+            return payload
+
     # 4) Compute direction + magnitude.
     # Map mean forward return to a bounded multiplier:
     #   - sign drives direction (bullish/bearish)
@@ -207,7 +297,7 @@ def build_regression_factor(
     payload["factor"] = factor
     payload["applied"] = True
     payload["direction"] = "bullish" if factor > 1.0 else "bearish"
-    payload["reason"] = "ok"
+    payload["reason"] = "ok" if mode == "on" else "ok:auto"
     return payload
 
 

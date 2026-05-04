@@ -386,9 +386,21 @@ def _live_impact_block() -> dict:
             "where": "risk_manager.py:513 (confidence multiplier), trader.py:104 (LLM context)",
         },
         "regressions": {
-            "in_decision_loop": True,  # wired in this commit; gated by REGRESSION_RISK_FACTOR_ENABLED
+            "in_decision_loop": True,
             "where": "pipeline_manager.py (regression_factor build), risk_manager.py:Step 4d (bounded multiplier)",
-            "feature_flag": "REGRESSION_RISK_FACTOR_ENABLED env or risk.use_regression_factor in profile yaml (default off)",
+            "mode_resolution": (
+                "REGRESSION_RISK_FACTOR_MODE env (off/on/auto) → "
+                "REGRESSION_RISK_FACTOR_ENABLED env (legacy bool) → "
+                "risk.regression_factor_mode yaml (off/on/auto) → "
+                "risk.use_regression_factor yaml (legacy bool) → default off"
+            ),
+            "modes": {
+                "off": "factor always 1.0 (model fitted nightly, not applied to sizing)",
+                "on": "manual override; applied whenever quality gate passes (R² ≥ 0.10, N ≥ 10)",
+                "auto": "system flips factor on per-symbol once the model proves itself "
+                        "(hit_rate ≥ 0.55, N ≥ 30, R² ≥ 0.15) — the regression's own "
+                        "directional accuracy is the on-switch",
+            },
             "bounds": [0.9, 1.1],
             "quality_gate": "R² ≥ 0.10 and N ≥ 10 and matching catalyst within 72h",
         },

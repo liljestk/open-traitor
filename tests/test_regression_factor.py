@@ -253,3 +253,92 @@ def test_iso_string_event_ts_supported(monkeypatch):
     )
     out = build_regression_factor(db=db, exchange="coinbase", symbol="BTC-USD")
     assert out["applied"] is True
+
+
+# ---------------------------------------------------------------------------
+# Contract 4 — auto mode (system flips factor on based on model performance)
+# ---------------------------------------------------------------------------
+
+def _strong_model_db(*, hit_rate=0.7, n=50, r2=0.45, mfr=0.02):
+    soon = datetime.now(timezone.utc) + timedelta(hours=12)
+    return _StubDB(
+        upcoming=[{"event_type": "CPI", "event_ts": soon}],
+        regressions=[{
+            "symbol": "BTC-USD", "event_type": "CPI", "horizon_days": 5,
+            "sample_count": n, "r_squared": r2,
+            "mean_forward_return": mfr, "hit_rate": hit_rate,
+        }],
+    )
+
+
+def test_auto_mode_promotes_proven_model(monkeypatch):
+    """auto mode + model that has demonstrated directional accuracy → applied."""
+    monkeypatch.setenv("REGRESSION_RISK_FACTOR_MODE", "auto")
+    out = build_regression_factor(
+        db=_strong_model_db(hit_rate=0.62, n=40, r2=0.20, mfr=0.05),
+        exchange="coinbase", symbol="BTC-USD",
+    )
+    assert out["mode"] == "auto"
+    assert out["applied"] is True
+    assert out["reason"] == "ok:auto"
+    assert out["auto_gate"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    "hit_rate,n,r2,reason_token",
+    [
+        (0.51, 50, 0.20, "hit_rate"),     # below 0.55 directional
+        (0.65, 20, 0.20, "N "),            # below 30 samples
+        (0.65, 50, 0.12, "R\u00b2"),       # below 0.15 r²
+    ],
+)
+def test_auto_mode_rejects_unproven_model(monkeypatch, hit_rate, n, r2, reason_token):
+    """auto mode must not move size on a model that hasn't proven itself."""
+    monkeypatch.setenv("REGRESSION_RISK_FACTOR_MODE", "auto")
+    out = build_regression_factor(
+        db=_strong_model_db(hit_rate=hit_rate, n=n, r2=r2),
+        exchange="coinbase", symbol="BTC-USD",
+    )
+    assert out["mode"] == "auto"
+    assert out["applied"] is False
+    assert out["factor"] == 1.0
+    assert reason_token in out["reason"]
+    assert out["auto_gate"]["passed"] is False
+
+
+def test_auto_mode_yaml_setting(monkeypatch):
+    """Profile yaml ``risk.regression_factor_mode: auto`` enables auto mode."""
+    monkeypatch.delenv("REGRESSION_RISK_FACTOR_MODE", raising=False)
+    out = build_regression_factor(
+        db=_strong_model_db(hit_rate=0.62, n=40, r2=0.20, mfr=0.05),
+        exchange="coinbase", symbol="BTC-USD",
+        risk_config={"regression_factor_mode": "auto"},
+    )
+    assert out["mode"] == "auto"
+    assert out["applied"] is True
+
+
+def test_off_mode_kills_auto_yaml(monkeypatch):
+    """Env ``off`` is a kill-switch — overrides any yaml auto/on setting."""
+    monkeypatch.setenv("REGRESSION_RISK_FACTOR_MODE", "off")
+    out = build_regression_factor(
+        db=_strong_model_db(),
+        exchange="coinbase", symbol="BTC-USD",
+        risk_config={"regression_factor_mode": "auto"},
+    )
+    assert out["mode"] == "off"
+    assert out["applied"] is False
+    assert out["reason"] == "disabled"
+
+
+def test_manual_on_mode_skips_auto_bar(monkeypatch):
+    """Manual ``on`` honours operator override even when hit_rate is borderline."""
+    monkeypatch.setenv("REGRESSION_RISK_FACTOR_MODE", "on")
+    # Hit rate 0.51 would fail auto bar; manual override accepts it.
+    out = build_regression_factor(
+        db=_strong_model_db(hit_rate=0.51, n=50, r2=0.45),
+        exchange="coinbase", symbol="BTC-USD",
+    )
+    assert out["mode"] == "on"
+    assert out["applied"] is True
+    assert out["reason"] == "ok"
