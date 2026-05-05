@@ -693,7 +693,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
                     saved_providers,
                     fallback_base_url=ollama_url,
                     fallback_model=fallback_model,
-                    fallback_timeout=llm_config.get("timeout", 60),
+                    fallback_timeout=llm_config.get("timeout", 90),
                     fallback_max_retries=llm_config.get("max_retries", 3),
                 )
                 deps.llm_client.reload_providers(new_providers)
@@ -702,7 +702,7 @@ def setup_config(body: _SetupConfigBody, request: Request):
                     saved_providers,
                     fallback_base_url=ollama_url,
                     fallback_model=fallback_model,
-                    fallback_timeout=llm_config.get("timeout", 60),
+                    fallback_timeout=llm_config.get("timeout", 90),
                     fallback_max_retries=llm_config.get("max_retries", 3),
                 )
                 llm_reloaded = True
@@ -1060,7 +1060,7 @@ def update_llm_providers(body: _ProvidersUpdateBody):
                 saved,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_timeout=llm_config.get("timeout", 90),
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
             deps.llm_client.reload_providers(new_providers)
@@ -1068,7 +1068,7 @@ def update_llm_providers(body: _ProvidersUpdateBody):
                 saved,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_timeout=llm_config.get("timeout", 90),
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
 
@@ -1164,7 +1164,7 @@ def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
                 saved_providers,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_timeout=llm_config.get("timeout", 90),
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
             deps.llm_client.reload_providers(new_providers)
@@ -1172,7 +1172,7 @@ def update_api_keys(body: _ApiKeysUpdateBody, request: Request):
                 saved_providers,
                 fallback_base_url=ollama_url,
                 fallback_model=fallback_model,
-                fallback_timeout=llm_config.get("timeout", 60),
+                fallback_timeout=llm_config.get("timeout", 90),
                 fallback_max_retries=llm_config.get("max_retries", 3),
             )
 

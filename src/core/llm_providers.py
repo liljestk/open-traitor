@@ -8,7 +8,8 @@ Provides:
   - check_openrouter_credits          – OpenRouter free-tier credit check
   - LLMProvider                       – dataclass for a single provider
   - build_providers                   – config list → provider chain
-  - OPENROUTER_FREE_MODELS            – live list of free model slugs (auto-refreshed)
+    - OPENROUTER_FREE_MODELS            – live list of free model slugs (auto-refreshed)
+    - block_openrouter_free_model       – remove incompatible/dead free models
   - refresh_free_models               – fetch + update the list from OpenRouter API
 """
 
@@ -88,13 +89,49 @@ _OPENROUTER_HEADERS = {
     "X-Title": "opentraitor",
 }
 
+OPENROUTER_FREE_MODEL_BLOCKLIST: set[str] = {
+    # Routed by OpenRouter to Google AI Studio, which currently rejects the
+    # OpenAI-compatible system/developer instruction used by every agent call.
+    "google/gemma-3-27b-it:free",
+}
+
+
+def _canonical_openrouter_free_model_id(model_id: str) -> str:
+    model_id = (model_id or "").strip()
+    if not model_id or model_id.endswith(":free"):
+        return model_id
+    return f"{model_id}:free"
+
+
+def is_openrouter_free_model_supported(model_id: str) -> bool:
+    """Return False for free OpenRouter models known to reject our prompt shape."""
+    canonical = _canonical_openrouter_free_model_id(model_id)
+    return bool(canonical) and canonical not in OPENROUTER_FREE_MODEL_BLOCKLIST
+
+
+def block_openrouter_free_model(model_id: str) -> None:
+    """Persistently remove a free model from runtime rotation and future refreshes."""
+    canonical = _canonical_openrouter_free_model_id(model_id)
+    if not canonical:
+        return
+    OPENROUTER_FREE_MODEL_BLOCKLIST.add(canonical)
+    OPENROUTER_FREE_MODELS[:] = [
+        model for model in OPENROUTER_FREE_MODELS
+        if _canonical_openrouter_free_model_id(model) != canonical
+    ]
+
+
 # Fallback list used when the OpenRouter API is unreachable.
-_FALLBACK_FREE_MODELS: list[str] = [
+_FALLBACK_FREE_MODEL_CANDIDATES: list[str] = [
     "meta-llama/llama-3.3-70b-instruct:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "google/gemma-3-27b-it:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
     "qwen/qwen3-coder:free",
+]
+_FALLBACK_FREE_MODELS: list[str] = [
+    model for model in _FALLBACK_FREE_MODEL_CANDIDATES
+    if is_openrouter_free_model_supported(model)
 ]
 
 # Live list — mutated in-place by refresh_free_models() so existing
@@ -135,6 +172,7 @@ async def refresh_free_models() -> bool:
             m["id"] for m in models
             if isinstance(m.get("id"), str)
             and m["id"].endswith(":free")
+            and is_openrouter_free_model_supported(m["id"])
             and str(m.get("pricing", {}).get("prompt", "1")) == "0"
         )
         if not free:
@@ -202,7 +240,7 @@ class LLMProvider:
     # AsyncOpenAI httpx `timeout` (which is per-read/idle). Without a hard cap a
     # slow local Ollama that dribbles tokens never trips httpx and can hang the
     # whole agent cycle for minutes.
-    request_timeout: float = 60.0
+    request_timeout: float = 90.0
     # Mutable tracking state
     cooldown_until: float = 0.0
     daily_tokens: int = 0
@@ -223,7 +261,7 @@ def build_providers(
     providers_config: list[dict],
     fallback_base_url: str = "http://localhost:11434",
     fallback_model: str = "llama3.1:8b",
-    fallback_timeout: int = 60,
+    fallback_timeout: int = 90,
     fallback_max_retries: int = 1,
 ) -> list[LLMProvider]:
     """
@@ -311,7 +349,8 @@ def build_providers(
         ))
 
         logger.info(
-            f"  Provider '{name}' ready | model={model} | local={is_local} | tier={tier}"
+            f"  Provider '{name}' ready | model={model} | local={is_local} | "
+            f"tier={tier} | timeout={timeout}s"
             + (f" | reserved={reserve_for}" if reserve_for else "")
         )
 

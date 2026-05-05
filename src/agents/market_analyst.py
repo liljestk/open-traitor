@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
 from src.agents.base_agent import BaseAgent
 from src.analysis.technical import TechnicalAnalyzer
 from src.models.llm_responses import validate_market_analyst
@@ -22,6 +24,15 @@ from src.utils.logger import get_logger
 from src.utils import llm_optimizer
 
 logger = get_logger("agent.market_analyst")
+
+
+_LLM_FALLBACK_EXCEPTIONS = (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
+    TimeoutError,
+)
 
 
 MARKET_ANALYSIS_SYSTEM_PROMPT = """You are a market analyst. Analyze indicators and news, return JSON:
@@ -128,13 +139,27 @@ class MarketAnalystAgent(BaseAgent):
                 model=self.llm.model,
             )
 
-        llm_response = await self.llm.chat_json(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            max_tokens=800,
-            span=span,
-            agent_name=self.name,
-        )
+        try:
+            llm_response = await self.llm.chat_json(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                max_tokens=800,
+                span=span,
+                agent_name=self.name,
+            )
+        except _LLM_FALLBACK_EXCEPTIONS as e:
+            self.logger.warning(
+                f"LLM analysis unavailable for {pair}: {type(e).__name__}: {e} "
+                "— falling back to technical-only"
+            )
+            return self._technical_only_signal(pair, current_price, indicators)
+        except RuntimeError as e:
+            if "LLM provider" not in str(e) and "All providers exhausted" not in str(e):
+                raise
+            self.logger.warning(
+                f"LLM analysis unavailable for {pair}: {e} — falling back to technical-only"
+            )
+            return self._technical_only_signal(pair, current_price, indicators)
 
         if "error" in llm_response:
             self.logger.warning(f"LLM analysis failed: {llm_response['error']}")

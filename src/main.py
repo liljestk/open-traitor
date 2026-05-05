@@ -191,7 +191,7 @@ def main():
             providers_config,
             fallback_base_url=ollama_url,
             fallback_model=fallback_model,
-            fallback_timeout=llm_config.get("timeout", 60),
+            fallback_timeout=llm_config.get("timeout", 90),
             fallback_max_retries=llm_config.get("max_retries", 3),
         )
     else:
@@ -203,7 +203,7 @@ def main():
         temperature=llm_config.get("temperature", 0.2),
         max_tokens=llm_config.get("max_tokens", 2000),
         max_retries=llm_config.get("max_retries", 3),
-        timeout=llm_config.get("timeout", 60),
+        timeout=llm_config.get("timeout", 90),
         persona=llm_config.get("persona", ""),
         providers=providers,
     )
@@ -214,7 +214,7 @@ def main():
             providers_config,
             fallback_base_url=ollama_url,
             fallback_model=fallback_model,
-            fallback_timeout=llm_config.get("timeout", 60),
+            fallback_timeout=llm_config.get("timeout", 90),
             fallback_max_retries=llm_config.get("max_retries", 3),
         )
 

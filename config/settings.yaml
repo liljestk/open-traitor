@@ -51,7 +51,7 @@ llm:
   temperature: 0.2
   max_tokens: 2000
   max_retries: 3
-  timeout: 60
+  timeout: 90
   recovery_check_interval: 120
   providers:
   - name: openrouter
@@ -125,7 +125,7 @@ llm:
     base_url_env: OLLAMA_BASE_URL
     model_env: OLLAMA_MODEL
     model: llama3.1:8b
-    timeout: 60
+    timeout: 90
     is_local: true
 analysis:
   technical:

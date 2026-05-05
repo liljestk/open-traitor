@@ -14,7 +14,9 @@ services:
       # Use most of 11GB VRAM (RTX 2080 Ti), leave ~1GB for system
       - OLLAMA_GPU_MEMORY=10GiB
       # Allow parallel requests for speed
-      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_NUM_PARALLEL=4
+      # Bound queued completions so overloaded agents fail over instead of waiting indefinitely
+      - OLLAMA_MAX_QUEUE=16
       # Keep model loaded in memory for fast inference
       - OLLAMA_KEEP_ALIVE=24h
     # NVIDIA GPU support (CDI + rootless podman)

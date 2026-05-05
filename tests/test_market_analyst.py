@@ -4,6 +4,7 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openai import APITimeoutError
 
 
 def _import_market_analyst():
@@ -322,6 +323,17 @@ class TestMarketAnalystRun:
         ]
         result = self._run({"pair": "BTC-USD", "candles": candles})
         assert result.get("fallback") is True
+
+    @patch("src.utils.llm_optimizer.get", side_effect=lambda k, default=None: default)
+    def test_llm_timeout_exception_fallback(self, mock_opt):
+        self.llm.chat_json = AsyncMock(side_effect=APITimeoutError(request=None))
+        candles = [
+            {"open": 100 + i, "high": 105 + i, "low": 95 + i, "close": 102 + i, "volume": 1000}
+            for i in range(220)
+        ]
+        result = self._run({"pair": "BTC-USD", "candles": candles})
+        assert result.get("fallback") is True
+        self.state.add_signal.assert_called_once()
 
     def test_technical_analysis_error(self):
         # Empty candles → technical analysis error

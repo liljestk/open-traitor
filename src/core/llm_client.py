@@ -32,6 +32,7 @@ from src.utils.logger import get_logger
 # Re-export provider infrastructure for backward compatibility
 from src.core.llm_providers import (  # noqa: F401
     LLMProvider,
+    block_openrouter_free_model,
     build_providers,
     check_openrouter_credits,
     OPENROUTER_FREE_MODELS,
@@ -260,7 +261,7 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 2000,
         max_retries: int = 1,
-        timeout: int = 45,
+        timeout: int = 90,
         persona: str = "",
         providers: Optional[list[LLMProvider]] = None,
     ):
@@ -446,11 +447,12 @@ class LLMClient:
         with p._lock:
             old_model = p.model
             if old_model.endswith(":free") or old_model in OPENROUTER_FREE_MODELS:
-                # Blacklist models that are listed but have no endpoints (404)
-                if blacklist_current and old_model in OPENROUTER_FREE_MODELS:
-                    OPENROUTER_FREE_MODELS.remove(old_model)
+                # Blacklist models that have no endpoints (404) or reject our
+                # OpenAI-compatible system/developer instruction shape (400).
+                if blacklist_current:
+                    block_openrouter_free_model(old_model)
                     logger.warning(
-                        f"🚫 OpenRouter: blacklisted dead model {old_model} "
+                        f"🚫 OpenRouter: blacklisted model {old_model} "
                         f"({len(OPENROUTER_FREE_MODELS)} free models remaining)"
                     )
                 if not OPENROUTER_FREE_MODELS:
@@ -573,6 +575,44 @@ class LLMClient:
                 if any(kw in msg for kw in ("quota", "resource", "exhausted", "billing")):
                     return True
         return False
+
+    @staticmethod
+    def _is_openrouter_free_model_incompatible(p: LLMProvider, exc: Exception) -> bool:
+        """Detect OpenRouter free models that reject agent system instructions."""
+        if not p.name.startswith("openrouter") or p.tier != "free":
+            return False
+        if not isinstance(exc, APIStatusError) or getattr(exc, "status_code", 0) != 400:
+            return False
+        body = getattr(exc, "body", None)
+        msg = f"{exc} {body}".lower()
+        return any(
+            marker in msg
+            for marker in (
+                "developer instruction is not enabled",
+                "system instruction is not enabled",
+                "system role is not supported",
+                "unsupported role",
+            )
+        )
+
+    def _blacklist_openrouter_model_if_incompatible(
+        self,
+        p: LLMProvider,
+        exc: Exception,
+        *,
+        context: str = "",
+    ) -> bool:
+        """Blacklist incompatible OpenRouter free models and rotate to the next one."""
+        if not self._is_openrouter_free_model_incompatible(p, exc):
+            return False
+        old_model = p.model
+        self._rotate_openrouter_model(p, str(exc), blacklist_current=True)
+        context_msg = f" {context}" if context else ""
+        logger.warning(
+            f"🚫 OpenRouter free model '{old_model}'{context_msg} rejected "
+            f"system/developer instructions; rotated to '{p.model}' — trying next"
+        )
+        return True
 
     # ── Raw API calls ─────────────────────────────────────────────────────
 
@@ -727,6 +767,12 @@ class LLMClient:
                     )
                     self._activate_cooldown(provider, f"timeout after {elapsed:.1f}s")
                     continue
+                if self._blacklist_openrouter_model_if_incompatible(
+                    provider,
+                    e,
+                    context=f"for {agent_name}" if agent_name else "",
+                ):
+                    continue
                 # 404 "No endpoints" from OpenRouter = dead model, rotate it out
                 if (
                     isinstance(e, (NotFoundError, APIStatusError))
@@ -876,6 +922,12 @@ class LLMClient:
                         f"cooling down and trying next"
                     )
                     self._activate_cooldown(provider, "tool-call timeout")
+                    continue
+                if self._blacklist_openrouter_model_if_incompatible(
+                    provider,
+                    e,
+                    context="during tool call",
+                ):
                     continue
                 # 404 "No endpoints" from OpenRouter = dead model, rotate it out
                 if (
@@ -1031,7 +1083,7 @@ class LLMClient:
         providers_config: list[dict],
         fallback_base_url: str = "http://localhost:11434",
         fallback_model: str = "llama3.1:8b",
-        fallback_timeout: int = 60,
+        fallback_timeout: int = 90,
         fallback_max_retries: int = 1,
     ) -> None:
         """Store the raw provider config for use by rescan_and_reload()."""
