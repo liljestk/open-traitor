@@ -1463,15 +1463,32 @@ class PipelineManager:
                 if not worthwhile:
                     # ─── Auto-bump: try increasing amount to minimum viable ───
                     bumped = False
+                    fee_bump_meta: dict[str, float | None] = {}
                     if _trade_action == "buy":
-                        min_viable = orch.fee_manager.get_dynamic_min_trade(_portfolio_value)
-                        bumped_amount = max(trade_amount, min_viable)
-
-                        # Cap at available cash and risk-manager position limits
                         _rm_max_pct = orch.risk_manager.risk_config.get("max_position_pct", 0.05)
                         if orch.risk_manager.scaler and _portfolio_value > 0:
                             _rm_max_pct = max(_rm_max_pct, orch.risk_manager.scaler.tier.max_position_pct)
                         _max_position = _portfolio_value * _rm_max_pct
+                        _max_fee_bump = min(_cash_balance, _max_position)
+                        fee_min_viable = orch.fee_manager.get_minimum_worthwhile_quote(
+                            expected_gain_pct=expected_gain_pct,
+                            is_swap=False,
+                            portfolio_value=_portfolio_value,
+                            is_maker=_is_maker,
+                            max_quote_amount=_max_fee_bump,
+                        )
+                        floor_min = orch.fee_manager.get_dynamic_min_trade(_portfolio_value)
+                        min_viable = max(floor_min, fee_min_viable or 0.0)
+                        fee_bump_meta = {
+                            "fee_min_viable": fee_min_viable,
+                            "floor_min_trade": floor_min,
+                            "cash_balance": _cash_balance,
+                            "max_position": _max_position,
+                            "max_fee_bump": _max_fee_bump,
+                        }
+                        bumped_amount = max(trade_amount, min_viable)
+
+                        # Cap at available cash and risk-manager position limits
                         bumped_amount = min(bumped_amount, _cash_balance, _max_position)
 
                         if bumped_amount > trade_amount:
@@ -1501,6 +1518,20 @@ class PipelineManager:
                             f"Fees > expected gain (expected={expected_gain_pct*100:.2f}%, "
                             f"breakeven={fee_est.breakeven_move_pct*100:.2f}%)"
                         )
+                        if _trade_action == "buy" and fee_bump_meta:
+                            _fee_min = fee_bump_meta.get("fee_min_viable")
+                            if _fee_min:
+                                _fg_reason += (
+                                    f"; min_viable={_fee_min:.2f}, "
+                                    f"cash={fee_bump_meta['cash_balance']:.2f}, "
+                                    f"max_pos={fee_bump_meta['max_position']:.2f}"
+                                )
+                            else:
+                                _fg_reason += (
+                                    "; no fee-viable size within caps "
+                                    f"(cash={fee_bump_meta['cash_balance']:.2f}, "
+                                    f"max_pos={fee_bump_meta['max_position']:.2f})"
+                                )
                         if _trade_action == "buy":
                             logger.warning(
                                 f"🚫 BUY_DROPPED [fee_gate] {pair}: {_fg_reason} | "
@@ -1514,6 +1545,7 @@ class PipelineManager:
                                     details={
                                         "expected_gain_pct": expected_gain_pct,
                                         "breakeven_pct": fee_est.breakeven_move_pct,
+                                        **fee_bump_meta,
                                     },
                                 )
                             except Exception:
@@ -1542,6 +1574,7 @@ class PipelineManager:
                                 "trade_amount": float(trade_amount),
                                 "expected_gain_pct": float(expected_gain_pct),
                                 "breakeven_pct": float(fee_est.breakeven_move_pct),
+                                **fee_bump_meta,
                             },
                         )
                         if trace_ctx is not None:

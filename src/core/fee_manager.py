@@ -285,6 +285,112 @@ class FeeManager:
             is_profitable=False,  # Caller sets after comparing to expected gain
         )
 
+    def _estimate_round_trip_fees(
+        self,
+        quote_amount: float,
+        is_maker: bool = False,
+    ) -> FeeEstimate:
+        """Estimate buy + eventual sell fees for a direct trade."""
+        buy_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
+        sell_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
+        total_fee_quote = buy_fee_quote + sell_fee_quote
+        buy_fee_pct = buy_fee_quote / quote_amount if quote_amount > 0 else 0.0
+        sell_fee_pct = sell_fee_quote / quote_amount if quote_amount > 0 else 0.0
+        total_fee_pct = buy_fee_pct + sell_fee_pct
+        return FeeEstimate(
+            sell_fee_pct=sell_fee_pct,
+            buy_fee_pct=buy_fee_pct,
+            total_fee_pct=total_fee_pct,
+            sell_fee_quote=sell_fee_quote,
+            buy_fee_quote=buy_fee_quote,
+            total_fee_quote=total_fee_quote,
+            breakeven_move_pct=total_fee_pct * self.fee_safety_margin,
+            is_profitable=False,
+        )
+
+    def _estimate_execution_fees(
+        self,
+        quote_amount: float,
+        is_swap: bool = False,
+        n_legs: int | None = None,
+        is_maker: bool = False,
+    ) -> FeeEstimate:
+        """Estimate fees for the execution path used by the fee gate."""
+        if is_swap:
+            swap_legs = n_legs if n_legs is not None else 2
+            return self.estimate_swap_fees(quote_amount, n_legs=swap_legs, is_maker=is_maker)
+        return self._estimate_round_trip_fees(quote_amount, is_maker=is_maker)
+
+    def _estimate_is_worthwhile(
+        self,
+        estimate: FeeEstimate,
+        expected_gain_pct: float,
+    ) -> bool:
+        gain_after_fees = expected_gain_pct - estimate.total_fee_pct
+        return (
+            expected_gain_pct >= estimate.breakeven_move_pct
+            and gain_after_fees >= self.min_gain_after_fees_pct
+        )
+
+    def get_minimum_worthwhile_quote(
+        self,
+        expected_gain_pct: float,
+        is_swap: bool = False,
+        n_legs: int | None = None,
+        portfolio_value: float = 0.0,
+        is_maker: bool = False,
+        max_quote_amount: float | None = None,
+    ) -> float | None:
+        """Return the smallest quote amount that can beat fees, or None.
+
+        This is especially important for fixed-minimum commission models such
+        as IBKR equities: a EUR 17 order can have a 6% effective breakeven,
+        while the same signal may become fee-viable at EUR 27.
+        """
+        if expected_gain_pct <= self.min_gain_after_fees_pct:
+            return None
+
+        floor = self.get_dynamic_min_trade(portfolio_value)
+        if max_quote_amount is not None and max_quote_amount < floor:
+            return None
+
+        def worthwhile(amount: float) -> bool:
+            if amount <= 0:
+                return False
+            estimate = self._estimate_execution_fees(
+                amount,
+                is_swap=is_swap,
+                n_legs=n_legs,
+                is_maker=is_maker,
+            )
+            return self._estimate_is_worthwhile(estimate, expected_gain_pct)
+
+        if worthwhile(floor):
+            return floor
+
+        if max_quote_amount is not None:
+            if not worthwhile(max_quote_amount):
+                return None
+            low = floor
+            high = max_quote_amount
+        else:
+            low = floor
+            high = max(floor, self.min_trade_quote, 1.0)
+            for _ in range(64):
+                high *= 2.0
+                if worthwhile(high):
+                    break
+            else:
+                return None
+
+        for _ in range(40):
+            mid = (low + high) / 2.0
+            if worthwhile(mid):
+                high = mid
+            else:
+                low = mid
+        return high
+
     def is_trade_worthwhile(
         self,
         quote_amount: float,
@@ -330,37 +436,17 @@ class FeeManager:
             )
             return False, estimate
 
-        if is_swap:
-            swap_legs = n_legs if n_legs is not None else 2
-            estimate = self.estimate_swap_fees(quote_amount, n_legs=swap_legs, is_maker=is_maker)
-        else:
-            # Round-trip fee: a buy must eventually be sold.
-            # Total cost = buy fee + sell fee = 2 × one-way fee.
-            buy_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
-            sell_fee_quote = self.estimate_trade_fees(quote_amount, is_maker=is_maker)
-            total_fee_quote = buy_fee_quote + sell_fee_quote
-            buy_fee_pct = buy_fee_quote / quote_amount if quote_amount > 0 else 0.0
-            sell_fee_pct = sell_fee_quote / quote_amount if quote_amount > 0 else 0.0
-            total_fee_pct = buy_fee_pct + sell_fee_pct
-            estimate = FeeEstimate(
-                sell_fee_pct=sell_fee_pct,
-                buy_fee_pct=buy_fee_pct,
-                total_fee_pct=total_fee_pct,
-                sell_fee_quote=sell_fee_quote,
-                buy_fee_quote=buy_fee_quote,
-                total_fee_quote=total_fee_quote,
-                breakeven_move_pct=total_fee_pct * self.fee_safety_margin,
-                is_profitable=False,
-            )
+        estimate = self._estimate_execution_fees(
+            quote_amount,
+            is_swap=is_swap,
+            n_legs=n_legs,
+            is_maker=is_maker,
+        )
 
         # Check if expected gain exceeds fees with safety margin
         min_required = estimate.breakeven_move_pct
         gain_after_fees = expected_gain_pct - estimate.total_fee_pct
-
-        is_worthwhile = (
-            expected_gain_pct >= min_required
-            and gain_after_fees >= self.min_gain_after_fees_pct
-        )
+        is_worthwhile = self._estimate_is_worthwhile(estimate, expected_gain_pct)
 
         estimate.is_profitable = is_worthwhile
 

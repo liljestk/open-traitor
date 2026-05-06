@@ -149,3 +149,40 @@ class TestFeeManager:
             1000, expected_gain_pct=0.10, is_swap=True, n_legs=2,
         )
         assert ok is True
+
+    def test_equity_min_fee_needs_larger_trade_to_clear_breakeven(self):
+        fm = self._make_fm({
+            "model_type": "equity_per_share",
+            "min_fee": 0.35,
+            "per_share_fee": 0.0035,
+            "max_fee_pct": 0.02,
+            "safety_margin": 1.5,
+            "min_gain_after_fees_pct": 0.005,
+        })
+
+        ok, est = fm.is_trade_worthwhile(17.5, expected_gain_pct=0.0391)
+        assert ok is False
+        assert est.breakeven_move_pct == pytest.approx(0.06)
+
+        minimum = fm.get_minimum_worthwhile_quote(
+            expected_gain_pct=0.0391,
+            max_quote_amount=100.0,
+        )
+        assert minimum == pytest.approx(26.8542, rel=1e-3)
+
+        ok, _ = fm.is_trade_worthwhile(minimum, expected_gain_pct=0.0391)
+        assert ok is True
+
+    def test_minimum_worthwhile_quote_respects_max_cap(self):
+        fm = self._make_fm({
+            "model_type": "equity_per_share",
+            "min_fee": 0.35,
+            "per_share_fee": 0.0035,
+            "max_fee_pct": 0.02,
+            "safety_margin": 1.5,
+        })
+
+        assert fm.get_minimum_worthwhile_quote(
+            expected_gain_pct=0.0391,
+            max_quote_amount=20.0,
+        ) is None
