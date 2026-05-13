@@ -190,6 +190,60 @@ class TestGetBacktestKellyStats:
         assert result["avg_loss"] == 1.2  # absolute value
         assert result["sample_size"] == 50
 
+    def test_fractional_backtest_win_rate_is_not_divided_again(self):
+        """BacktestEngine stores win_rate as 0..1; keep that scale intact."""
+        from src.utils.stats_trades import TradesMixin
+
+        result_json = json.dumps({"avg_win": 2.5, "avg_loss": 1.2})
+        mock_row = {"result_json": result_json, "win_rate": 0.62, "total_trades": 50}
+
+        mock_conn = MagicMock()
+        exists_cursor = MagicMock()
+        exists_cursor.fetchone.return_value = {"exists": True}
+        data_cursor = MagicMock()
+        data_cursor.fetchone.return_value = mock_row
+
+        mock_conn.execute.side_effect = [exists_cursor, data_cursor]
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        db = TradesMixin.__new__(TradesMixin)
+        db._get_conn = MagicMock(return_value=mock_conn)
+
+        result = db.get_backtest_kelly_stats("BTC-EUR", exchange="coinbase")
+        assert result["win_rate"] == pytest.approx(0.62, abs=0.001)
+
+    def test_derives_payoff_stats_from_stored_trades(self):
+        """Older on-demand runs can still provide Kelly payoff stats from trades."""
+        from src.utils.stats_trades import TradesMixin
+
+        result_json = json.dumps({
+            "trades": [
+                {"pnl": 3.0},
+                {"pnl": 1.0},
+                {"pnl": -2.0},
+                {"pnl": -4.0},
+            ]
+        })
+        mock_row = {"result_json": result_json, "win_rate": 0.5, "total_trades": 4}
+
+        mock_conn = MagicMock()
+        exists_cursor = MagicMock()
+        exists_cursor.fetchone.return_value = {"exists": True}
+        data_cursor = MagicMock()
+        data_cursor.fetchone.return_value = mock_row
+
+        mock_conn.execute.side_effect = [exists_cursor, data_cursor]
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        db = TradesMixin.__new__(TradesMixin)
+        db._get_conn = MagicMock(return_value=mock_conn)
+
+        result = db.get_backtest_kelly_stats("BTC-EUR", exchange="coinbase")
+        assert result["avg_win"] == pytest.approx(2.0, abs=0.001)
+        assert result["avg_loss"] == pytest.approx(3.0, abs=0.001)
+
     def test_no_matching_pair(self):
         """Returns zeros when no backtest run found for pair."""
         from src.utils.stats_trades import TradesMixin

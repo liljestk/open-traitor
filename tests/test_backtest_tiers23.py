@@ -199,6 +199,8 @@ class TestRunNightlyBacktests:
         result.total_return_pct = 5.0
         result.sharpe_ratio = 1.5
         result.win_rate = 60.0
+        result.avg_win = 2.5
+        result.avg_loss = 1.2
         result.total_trades = 10
         result.max_drawdown_pct = 3.0
         result.alpha = 2.0
@@ -231,6 +233,52 @@ class TestRunNightlyBacktests:
 
         assert out["ran"] == 2
         assert out["saved"] == 2
+
+    @pytest.mark.asyncio
+    async def test_persists_payoff_stats_for_kelly_supplement(self):
+        from src.planning.activities import run_nightly_backtests
+
+        result = MagicMock()
+        result.total_return_pct = 5.0
+        result.sharpe_ratio = 1.5
+        result.win_rate = 0.6
+        result.avg_win = 2.5
+        result.avg_loss = 1.2
+        result.total_trades = 10
+        result.max_drawdown_pct = 3.0
+        result.alpha = 2.0
+        result.sortino_ratio = 1.8
+
+        mock_engine = MagicMock()
+        mock_engine.return_value.run.return_value = result
+
+        candles = [{"close": i} for i in range(200)]
+
+        conn = MagicMock()
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+
+        import io, yaml
+        config_content = yaml.dump({"trading": {"pairs": ["BTC-USD"]}})
+
+        def fake_open(path, *a, **kw):
+            return io.StringIO(config_content)
+
+        with patch("src.planning.activities._detect_domain", return_value="crypto"), \
+             patch("src.planning.activities.os.path.exists", return_value=True), \
+             patch("builtins.open", side_effect=fake_open), \
+             patch("src.backtesting.engine.BacktestEngine", mock_engine), \
+             patch("src.backtesting.candle_fetch.fetch_candles", return_value=candles), \
+             patch("src.planning.activities._get_conn", return_value=conn), \
+             patch("src.planning.activities._execute") as mock_execute, \
+             patch("src.utils.settings_manager.get_settings_path", return_value="config/coinbase.yaml"):
+            out = await run_nightly_backtests("coinbase")
+
+        assert out["saved"] == 1
+        params = mock_execute.call_args[0][2]
+        persisted = json.loads(params[4])
+        assert persisted["avg_win"] == 2.5
+        assert persisted["avg_loss"] == 1.2
 
     @pytest.mark.asyncio
     async def test_no_pairs_returns_empty(self):

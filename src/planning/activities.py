@@ -1203,12 +1203,20 @@ async def run_nightly_backtests(profile: str = "") -> dict:
             engine = BacktestEngine(full_config)
             result = engine.run(candles, pair=pair)
 
+            def _safe_result_number(name: str, default: float = 0.0) -> float:
+                value = getattr(result, name, default)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return default
+                return float(value)
+
             # Save to backtest_runs
             params_dict = {"source": "nightly_auto", "days": 30}
             result_dict = {
                 "total_return_pct": result.total_return_pct,
                 "sharpe_ratio": result.sharpe_ratio,
                 "win_rate": result.win_rate,
+                "avg_win": _safe_result_number("avg_win"),
+                "avg_loss": _safe_result_number("avg_loss"),
                 "total_trades": result.total_trades,
                 "max_drawdown_pct": result.max_drawdown_pct,
                 "alpha": result.alpha,

@@ -7,6 +7,78 @@ from typing import Optional
 from src.utils.qc_filter import qc_where
 
 
+def _empty_backtest_kelly_stats() -> dict:
+    return {
+        "win_rate": 0,
+        "avg_win": 0,
+        "avg_loss": 0,
+        "sample_size": 0,
+        "source": "backtest",
+    }
+
+
+def _row_value(row, key: str, default=None):
+    if not row:
+        return default
+    if isinstance(row, dict):
+        if key in row:
+            return row[key]
+        values = list(row.values())
+        return values[0] if values else default
+    try:
+        return row[0]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _normalise_win_rate(value) -> float:
+    try:
+        win_rate = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if win_rate > 1.0:
+        win_rate /= 100.0
+    return max(0.0, min(1.0, win_rate))
+
+
+def _backtest_avg_win_loss(result: dict) -> tuple[float, float]:
+    if not isinstance(result, dict):
+        return 0.0, 0.0
+
+    try:
+        avg_win = float(result.get("avg_win") or 0)
+    except (TypeError, ValueError):
+        avg_win = 0.0
+    try:
+        avg_loss = abs(float(result.get("avg_loss") or 0))
+    except (TypeError, ValueError):
+        avg_loss = 0.0
+
+    if avg_win > 0 and avg_loss > 0:
+        return avg_win, avg_loss
+
+    trades = result.get("trades") if isinstance(result, dict) else None
+    if not isinstance(trades, list):
+        return max(0.0, avg_win), max(0.0, avg_loss)
+
+    pnls: list[float] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        try:
+            pnls.append(float(trade.get("pnl") or 0))
+        except (TypeError, ValueError):
+            continue
+
+    if avg_win <= 0:
+        wins = [pnl for pnl in pnls if pnl > 0]
+        avg_win = sum(wins) / len(wins) if wins else 0.0
+    if avg_loss <= 0:
+        losses = [abs(pnl) for pnl in pnls if pnl < 0]
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
+    return max(0.0, avg_win), max(0.0, avg_loss)
+
+
 class TradesMixin:
     """Mixin providing trade, event, and scheduled-report persistence."""
 
@@ -184,11 +256,11 @@ class TradesMixin:
         """
         with self._get_conn() as conn:
             # Check table exists
-            exists = conn.execute(
+            exists_row = conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'backtest_runs')"
             ).fetchone()
-            if not exists or not exists[0]:
-                return {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0, "source": "backtest"}
+            if not _row_value(exists_row, "exists", False):
+                return _empty_backtest_kelly_stats()
 
             exch_frag = " AND exchange = %s" if exchange else ""
             exch_params = [exchange] if exchange else []
@@ -199,21 +271,24 @@ class TradesMixin:
                     ORDER BY run_ts DESC LIMIT 1""",
                 (pair, *exch_params),
             ).fetchone()
-            if not row or not row["total_trades"]:
-                return {"win_rate": 0, "avg_win": 0, "avg_loss": 0, "sample_size": 0, "source": "backtest"}
+            total_trades = int(_row_value(row, "total_trades", 0) or 0)
+            if not row or total_trades <= 0:
+                return _empty_backtest_kelly_stats()
 
             # Parse avg_win/avg_loss from result_json
-            import json
             try:
-                result = json.loads(row["result_json"]) if row["result_json"] else {}
+                raw_result = _row_value(row, "result_json", "{}")
+                result = json.loads(raw_result) if raw_result else {}
             except (json.JSONDecodeError, TypeError):
                 result = {}
 
+            avg_win, avg_loss = _backtest_avg_win_loss(result)
+
             return {
-                "win_rate": (row["win_rate"] or 0) / 100.0,  # stored as percentage
-                "avg_win": result.get("avg_win", 0),
-                "avg_loss": abs(result.get("avg_loss", 0)),
-                "sample_size": row["total_trades"],
+                "win_rate": _normalise_win_rate(_row_value(row, "win_rate", 0)),
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+                "sample_size": total_trades,
                 "source": "backtest",
             }
 
