@@ -51,6 +51,7 @@ DECISION RULES:
 - If edge stats show no edge in the current regime (sharpe < 0.10 with >=30 samples), do not buy unless pattern engine strongly confirms.
 - If allocator assigns ~0% to your strategy, do not propose a buy.
 - Always set a stop-loss for buys.
+- For sells, use the exact quantity from portfolio.open_positions for the pair.
 - Honour fee context: do not propose a trade that cannot exceed the breakeven fee with reasonable probability.
 - Sizes must be positive and within ``allocator_budget_cap``.
 
@@ -237,18 +238,40 @@ class TraderAgent(BaseAgent):
         # Sizing fallback: an LLM proposal that omits quote_amount/quantity
         # would otherwise be silently rejected downstream by RiskManager
         # ("No valid trade amount specified"). The DecisionEngine has already
-        # computed the allocator-bounded ceiling — use it as the size when
-        # the LLM left sizing to the toolkit. Risk manager will re-clamp.
+        # computed the allocator-bounded ceiling for buys; sells can use the
+        # live position quantity from the toolkit snapshot.
+        quote_amount_value = None
+        quantity_value = None
+        if verdict["approved"]:
+            quote_amount_value = _optional_float(result.get("quote_amount"))
+            quantity_value = _optional_float(result.get("quantity"))
+
         if verdict["approved"] and result.get("action") == "buy":
-            qa = _optional_float(result.get("quote_amount"))
-            qty = _optional_float(result.get("quantity"))
-            if (qa is None or qa <= 0) and (qty is None or qty <= 0):
+            if (
+                (quote_amount_value is None or quote_amount_value <= 0)
+                and (quantity_value is None or quantity_value <= 0)
+            ):
                 cap = _optional_float(verdict.get("quote_amount_max"))
                 if cap is not None and cap > 0:
                     result["quote_amount"] = cap
                     self.logger.info(
                         f"Trader sizing fallback: quote_amount=null → "
                         f"allocator_cap {cap:.2f} for {ctx.pair}"
+                    )
+        elif verdict["approved"] and result.get("action") == "sell":
+            if (
+                (quote_amount_value is None or quote_amount_value <= 0)
+                and (quantity_value is None or quantity_value <= 0)
+            ):
+                result_pair = str(result.get("pair") or ctx.pair)
+                held_quantity = _position_quantity(ctx.open_positions, result_pair)
+                price = _optional_float(result.get("current_price")) or ctx.current_price
+                if held_quantity is not None and held_quantity > 0 and price > 0:
+                    result["quantity"] = held_quantity
+                    result["quote_amount"] = held_quantity * price
+                    self.logger.info(
+                        f"Trader sell sizing fallback: quantity=null → "
+                        f"held_quantity {held_quantity:.8f} for {result_pair}"
                     )
 
         if not verdict["approved"]:
@@ -496,6 +519,17 @@ def _optional_float(v: Any) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _position_quantity(positions: dict, pair: str) -> Optional[float]:
+    if not isinstance(positions, dict) or not pair:
+        return None
+    raw_position = positions.get(pair)
+    if isinstance(raw_position, dict):
+        raw_position = raw_position.get("quantity", raw_position.get("amount"))
+    elif hasattr(raw_position, "quantity"):
+        raw_position = getattr(raw_position, "quantity")
+    return _optional_float(raw_position)
 
 
 def _ensemble_actionable(ensemble: Optional[dict]) -> bool:

@@ -143,6 +143,14 @@ services:
       - TEMPORAL_NAMESPACE=default
       - REGRESSION_RISK_FACTOR_MODE=auto
       - TZ=Europe/Helsinki
+      - AUTO_TRAITOR_ASYNC_WORKERS=8
+      - MALLOC_ARENA_MAX=2
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - VECLIB_MAXIMUM_THREADS=1
+      - BLIS_NUM_THREADS=1
     volumes:
       - ./config:/app/config:z
       - ./data:/app/data:z
@@ -202,6 +210,14 @@ services:
       # host.docker.internal resolves to the Windows host where IB Gateway runs.
       - IBKR_HOST=host.docker.internal
       - TZ=Europe/Helsinki
+      - AUTO_TRAITOR_ASYNC_WORKERS=8
+      - MALLOC_ARENA_MAX=2
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - VECLIB_MAXIMUM_THREADS=1
+      - BLIS_NUM_THREADS=1
     # Allow container to reach IB Gateway on the host machine
     extra_hosts:
       - "host.docker.internal:host-gateway"

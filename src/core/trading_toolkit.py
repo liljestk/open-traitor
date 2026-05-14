@@ -224,7 +224,10 @@ class TradingToolkit:
             "kelly_win_rate": c.kelly_stats.get("win_rate", 0.0),
             "kelly_sample_size": c.kelly_stats.get("sample_size", 0),
             "fee_round_trip_pct": c.fee_context.get("round_trip_fee_pct", 0.0),
+            "fee_breakeven_pct": c.fee_context.get("breakeven_pct", 0.0),
             "fee_min_gain_pct": c.fee_context.get("min_gain_pct", 0.0),
+            "fee_estimate_quote_amount": c.fee_context.get("quote_amount", 0.0),
+            "max_buy_quote": c.fee_context.get("max_buy_quote", 0.0),
             "recent_outcomes_excerpt": _cap_text(c.recent_outcomes, outcomes_cap),
             "strategic_context_excerpt": _cap_text(c.strategic_context, context_cap),
         }
@@ -265,6 +268,7 @@ class TradingToolkit:
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
             current_price=c.current_price,
+            fee_context=c.fee_context,
             reasoning=reasoning,
         )
         verdict = self.decision_engine.evaluate(

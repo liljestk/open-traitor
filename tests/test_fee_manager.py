@@ -129,6 +129,12 @@ class TestFeeManager:
         assert ok is True
         assert est.is_profitable is True
 
+    def test_estimate_execution_fees_matches_round_trip_gate(self):
+        fm = self._make_fm()
+        est = fm.estimate_execution_fees(1000, is_swap=False)
+        assert est.total_fee_pct == pytest.approx(0.012)
+        assert est.breakeven_move_pct == pytest.approx(0.018)
+
     def test_trade_not_worthwhile_low_gain(self):
         fm = self._make_fm({"safety_margin": 5.0, "min_gain_after_fees_pct": 0.10})
         ok, est = fm.is_trade_worthwhile(1000, expected_gain_pct=0.001)

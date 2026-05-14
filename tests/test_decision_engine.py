@@ -109,3 +109,15 @@ def test_approved_proposal_carries_allocator_budget_cap():
     assert v.approved
     assert v.proposal["allocator_budget_cap"] > 0
     assert v.allocator_weight is not None
+
+
+def test_fee_hurdle_vetoes_tight_take_profit():
+    eng, _, _ = _engine()
+    proposal = _make_proposal()
+    proposal.take_profit_price = 100.8
+    proposal.fee_context = {"breakeven_pct": 0.05, "min_gain_pct": 0.05}
+
+    v = eng.evaluate(proposal, portfolio_value=1000, cash_balance=1000)
+
+    assert not v.approved
+    assert v.veto == "fee_hurdle"

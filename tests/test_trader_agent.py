@@ -114,6 +114,36 @@ def test_trader_proposal_routed_through_engine_records_verdict():
     assert "decision_engine_verdict" in result
 
 
+def test_trader_autosizes_sell_from_open_position_when_llm_omits_amount():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+
+    async def _ok(*a, **kw):
+        return {
+            "action": "sell",
+            "pair": "BTC-USD",
+            "confidence": 0.75,
+            "strategy": "llm_strategist",
+            "reasoning": "test sell",
+            "quote_amount": None,
+            "quantity": None,
+        }
+
+    llm.chat_json = _ok
+    state = MagicMock()
+    state.save_state = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="sell", confidence=0.75)
+    ctx["open_positions"] = {"BTC-USD": 0.01}
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "sell"
+    assert result["quantity"] == pytest.approx(0.01)
+    assert result["quote_amount"] == pytest.approx(500.0)
+
+
 def test_trader_persists_llm_token_metrics():
     eng, _, _ = _make_engine_kit()
     llm = MagicMock()

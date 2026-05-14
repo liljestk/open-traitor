@@ -186,6 +186,17 @@ class StrategistAgent(BaseAgent):
             }
         llm_response = sanitized
 
+        fee_reject_reason = _fee_hurdle_reason(llm_response, price, fee_context)
+        if fee_reject_reason:
+            self.logger.info(f"📋 Strategy: HOLD {pair} | {fee_reject_reason}")
+            return {
+                "action": "hold",
+                "pair": pair,
+                "confidence": 0.0,
+                "reason": fee_reject_reason,
+                "reasoning": fee_reject_reason,
+            }
+
         # Persist reasoning trace
         if stats_db and cycle_id:
             try:
@@ -432,3 +443,29 @@ What action should we take? Respond with JSON."""
             parts.append("\n".join(lines))
 
         return "\n\n".join(parts)
+
+
+def _fee_hurdle_reason(proposal: dict, current_price: float, fee_context: dict | None) -> str:
+    if not isinstance(proposal, dict) or proposal.get("action") != "buy":
+        return ""
+    if not isinstance(fee_context, dict):
+        return ""
+    take_profit = proposal.get("take_profit_price")
+    if not take_profit or not current_price or current_price <= 0:
+        return ""
+    required_gain = max(
+        float(fee_context.get("min_gain_pct") or 0.0),
+        float(fee_context.get("breakeven_pct") or 0.0),
+    )
+    if required_gain <= 0:
+        return ""
+    try:
+        expected_gain = (float(take_profit) - float(current_price)) / float(current_price)
+    except (TypeError, ValueError):
+        return ""
+    if expected_gain >= required_gain:
+        return ""
+    return (
+        f"take-profit implies {expected_gain:.2%} expected gain, below "
+        f"fee hurdle {required_gain:.2%}"
+    )

@@ -59,6 +59,7 @@ class TradeProposal:
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     current_price: Optional[float] = None
+    fee_context: Optional[dict] = None
     reasoning: str = ""
 
     def to_proposal_dict(self) -> dict:
@@ -186,6 +187,11 @@ class DecisionEngine:
                     f"engine minimum {self.min_confidence:.2f}"
                 ],
             )
+
+        if action == "buy":
+            fee_reason = self._fee_hurdle_reason(proposal)
+            if fee_reason:
+                return self._veto(proposal, "fee_hurdle", [fee_reason])
 
         # ---- 2. Edge-library veto (buy side only) ------------------- #
         edge_dict: Optional[dict] = None
@@ -361,6 +367,29 @@ class DecisionEngine:
             veto=veto,
             edge_stats=edge_stats,
             allocator_weight=allocator_weight,
+        )
+
+    @staticmethod
+    def _fee_hurdle_reason(proposal: TradeProposal) -> str:
+        fee_context = proposal.fee_context or {}
+        if not isinstance(fee_context, dict):
+            return ""
+        current_price = proposal.current_price or 0.0
+        take_profit = proposal.take_profit_price or 0.0
+        if current_price <= 0 or take_profit <= 0:
+            return ""
+        required_gain = max(
+            float(fee_context.get("min_gain_pct") or 0.0),
+            float(fee_context.get("breakeven_pct") or 0.0),
+        )
+        if required_gain <= 0:
+            return ""
+        expected_gain = (float(take_profit) - float(current_price)) / float(current_price)
+        if expected_gain >= required_gain:
+            return ""
+        return (
+            f"take-profit implies {expected_gain:.2%} expected gain, below "
+            f"fee hurdle {required_gain:.2%}"
         )
 
 

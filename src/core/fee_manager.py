@@ -186,6 +186,7 @@ class FeeManager:
 
     def __init__(self, config: dict):
         self.config = config.get("fees", {})
+        self.model_type = self.config.get("model_type", "crypto_percentage")
 
         # Build the pluggable fee model
         self._fee_model: BaseFeeModel = _build_fee_model(self.config)
@@ -212,8 +213,22 @@ class FeeManager:
         # Cooldown period after a swap to prevent churn (seconds)
         self.swap_cooldown_seconds = self.config.get("swap_cooldown_seconds", 3600)
 
+        fee_model_summary = f"model={self.model_type}"
+        if self.model_type == "equity_per_share":
+            fee_model_summary += (
+                f", min fee={self.config.get('min_fee', 0.35):.2f}, "
+                f"per share={self.config.get('per_share_fee', 0.0035):.4f}"
+            )
+        elif self.model_type == "equity_flat_plus_pct":
+            fee_model_summary += (
+                f", min fee={self.config.get('flat_fee_min', 39.0):.2f}, "
+                f"pct={self.config.get('percent_fee', 0.0015)*100:.3f}%"
+            )
+        else:
+            fee_model_summary += f", trade fee={self.trade_fee_pct*100:.2f}%"
+
         logger.info(
-            f"💰 Fee Manager: trade fee={self.trade_fee_pct*100:.2f}%, "
+            f"💰 Fee Manager: {fee_model_summary}, "
             f"safety margin={self.fee_safety_margin}x, "
             f"min gain after fees={self.min_gain_after_fees_pct*100:.2f}%, "
             f"min trade floor={self.min_trade_quote:.2f}, "
@@ -320,6 +335,21 @@ class FeeManager:
             swap_legs = n_legs if n_legs is not None else 2
             return self.estimate_swap_fees(quote_amount, n_legs=swap_legs, is_maker=is_maker)
         return self._estimate_round_trip_fees(quote_amount, is_maker=is_maker)
+
+    def estimate_execution_fees(
+        self,
+        quote_amount: float,
+        is_swap: bool = False,
+        n_legs: int | None = None,
+        is_maker: bool = False,
+    ) -> FeeEstimate:
+        """Estimate buy/sell fees for the same execution path as the fee gate."""
+        return self._estimate_execution_fees(
+            quote_amount,
+            is_swap=is_swap,
+            n_legs=n_legs,
+            is_maker=is_maker,
+        )
 
     def _estimate_is_worthwhile(
         self,

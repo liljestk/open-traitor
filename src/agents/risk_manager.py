@@ -355,8 +355,29 @@ class RiskManagerAgent(BaseAgent):
         # Get ATR from pipeline context (computed by TechnicalAnalyzer)
         atr = context.get("atr")
 
-        # If no amount specified, use quantity * price
         quantity = float(proposal.get("quantity", 0) or 0)
+
+        if action == "sell":
+            held_quantity = self._held_quantity_for_pair(pair)
+            if quantity <= 0 and quote_amount > 0 and price > 0:
+                quantity = quote_amount / price
+            if held_quantity > 0:
+                if quantity <= 0:
+                    quantity = held_quantity
+                    self.logger.info(
+                        f"💡 Auto-sized {pair} sell: trader returned no amount, "
+                        f"using held quantity {quantity:.8f}"
+                    )
+                elif quantity > held_quantity:
+                    self.logger.info(
+                        f"🪚 Clamped {pair} sell quantity from {quantity:.8f} → "
+                        f"{held_quantity:.8f} (held quantity)"
+                    )
+                    quantity = held_quantity
+                if price > 0:
+                    quote_amount = quantity * price
+
+        # If no amount specified, use quantity * price
         if quote_amount <= 0 and quantity > 0 and price > 0:
             quote_amount = quantity * price
 
@@ -365,8 +386,8 @@ class RiskManagerAgent(BaseAgent):
         # ``quote_amount=null`` for buy actions when it wants the risk layer
         # to size the trade (audit logs show ~800 silent rejections in the
         # last week alone). Default sizing = min(cash * tier.cash_pct,
-        # max_single_trade ceiling). Sells with no amount still reject
-        # because we cannot guess the position quantity to liquidate.
+        # max_single_trade ceiling). Sells are sized from live holdings above
+        # when available; otherwise they still reject.
         if quote_amount <= 0 and action == "buy" and cash_balance > 0:
             tier_cash_pct = (
                 self.scaler.tier.max_cash_per_trade_pct
@@ -729,7 +750,7 @@ class RiskManagerAgent(BaseAgent):
                     f"of portfolio ({floor:,.2f})"
                 )
 
-        if quote_amount > max_position:
+        if action == "buy" and quote_amount > max_position:
             original = quote_amount
             quote_amount = max_position
             self.logger.info(
@@ -855,3 +876,24 @@ class RiskManagerAgent(BaseAgent):
                 self.logger.debug(f"Failed to save risk_manager trace: {e}")
 
         return result
+
+    def _held_quantity_for_pair(self, pair: str) -> float:
+        for attr_name in ("open_positions", "positions"):
+            try:
+                positions = getattr(self.state, attr_name, {}) or {}
+            except Exception:
+                continue
+            if not isinstance(positions, dict) or pair not in positions:
+                continue
+            raw_position = positions.get(pair)
+            if isinstance(raw_position, dict):
+                raw_position = raw_position.get("quantity", raw_position.get("amount"))
+            elif hasattr(raw_position, "quantity"):
+                raw_position = getattr(raw_position, "quantity")
+            try:
+                quantity = float(raw_position or 0)
+            except (TypeError, ValueError):
+                quantity = 0.0
+            if quantity > 0:
+                return quantity
+        return 0.0

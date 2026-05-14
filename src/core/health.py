@@ -32,6 +32,33 @@ _cycle_interval: int = 120  # default; updated by orchestrator
 _lock = threading.Lock()
 
 
+def _read_process_metrics() -> dict[str, int]:
+    """Read lightweight process memory/thread metrics from procfs."""
+    fields = {
+        "VmRSS": "rss_bytes",
+        "VmSize": "virtual_bytes",
+        "VmSwap": "swap_bytes",
+        "VmData": "data_bytes",
+        "Threads": "threads",
+    }
+    metrics: dict[str, int] = {}
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                key, _, raw = line.partition(":")
+                name = fields.get(key)
+                if not name:
+                    continue
+                parts = raw.strip().split()
+                if not parts:
+                    continue
+                value = int(parts[0])
+                metrics[name] = value if key == "Threads" else value * 1024
+    except Exception:
+        return {}
+    return metrics
+
+
 def update_health(
     status: str = "ok",
     cycle_count: int = 0,
@@ -108,6 +135,10 @@ def health():
             is_healthy = False
             state["status"] = "stale"
 
+    process_metrics = _read_process_metrics()
+    if process_metrics:
+        state["process"] = process_metrics
+
     status_code = 200 if is_healthy else 503
     return jsonify(state), status_code
 
@@ -153,6 +184,24 @@ def metrics():
             "# TYPE autotraitor_cycle_duration_seconds gauge",
             f"autotraitor_cycle_duration_seconds {cd}",
         ])
+
+    process_metrics = _read_process_metrics()
+    if process_metrics:
+        metric_names = {
+            "rss_bytes": "process_resident_memory_bytes",
+            "virtual_bytes": "process_virtual_memory_bytes",
+            "swap_bytes": "process_swap_bytes",
+            "data_bytes": "process_data_memory_bytes",
+            "threads": "process_threads",
+        }
+        lines.append("")
+        for key, metric_name in metric_names.items():
+            value = process_metrics.get(key)
+            if value is not None:
+                lines.extend([
+                    f"# TYPE {metric_name} gauge",
+                    f"{metric_name} {value}",
+                ])
 
     return "\n".join(lines) + "\n", 200, {"Content-Type": "text/plain"}
 

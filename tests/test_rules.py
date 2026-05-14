@@ -321,6 +321,19 @@ class TestTierScaling:
         # Should be min(500, 10000 * tier_cash_pct)
         assert max_trade <= 500
 
+    def test_effective_buy_caps_mirror_cash_and_risk_limits(self):
+        from src.core.portfolio_scaler import PortfolioScaler
+        r = _make_rules({"max_single_trade": 500})
+        scaler = PortfolioScaler({"trading": {"portfolio_scaling": True}})
+        scaler.update(55)
+        r.set_portfolio_scaler(scaler)
+
+        caps = r.get_effective_buy_caps(portfolio_value=55, cash_balance=55)
+
+        assert caps["max_quote"] == pytest.approx(19.25)
+        assert caps["cash_cap"] == pytest.approx(19.25)
+        assert caps["risk_cap"] == pytest.approx(19.25)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # RuleViolation

@@ -258,6 +258,26 @@ class TestRiskManagerRun:
         }))
         assert result["approved"] is True
 
+    def test_sell_without_amount_uses_open_position_quantity(self):
+        rm = _make_rm(max_open=1)
+        rm.state.open_positions = {"BTC-EUR": 0.1}
+        result = _run(rm.run({
+            "proposal": {
+                "action": "sell",
+                "pair": "BTC-EUR",
+                "confidence": 0.8,
+                "quote_amount": None,
+                "quantity": None,
+                "current_price": 50000,
+            },
+            "portfolio_value": 10000,
+            "cash_balance": 5000,
+        }))
+
+        assert result["approved"] is True
+        assert result["quantity"] == pytest.approx(0.1)
+        assert result["quote_amount"] == pytest.approx(5000.0)
+
     def test_atr_stop_loss(self):
         rm = _make_rm()
         result = _run(rm.run({

@@ -96,6 +96,38 @@ class AbsoluteRules:
         """Attach a PortfolioScaler so tier-aware limits are used."""
         self._portfolio_scaler = scaler
 
+    def get_effective_buy_caps(
+        self,
+        portfolio_value: float,
+        cash_balance: float,
+    ) -> dict[str, float]:
+        """Return the current BUY notional caps after tier scaling.
+
+        This mirrors the hard caps enforced by ``check_trade`` so upstream
+        sizing and fee estimation cannot assume a larger order than
+        AbsoluteRules would permit.
+        """
+        with self._lock:
+            eff_cash_pct, eff_risk_pct, _eff_emerg, eff_max_trade = self._get_effective_limits(
+                portfolio_value
+            )
+
+        cash_cap = cash_balance * eff_cash_pct if cash_balance > 0 else eff_max_trade
+        risk_cap = portfolio_value * eff_risk_pct if portfolio_value > 0 else eff_max_trade
+        available_cash_cap = cash_balance if cash_balance > 0 else eff_max_trade
+        max_quote = max(
+            0.0,
+            min(eff_max_trade, cash_cap, risk_cap, available_cash_cap),
+        )
+        return {
+            "max_quote": max_quote,
+            "cash_cap": max(0.0, cash_cap),
+            "risk_cap": max(0.0, risk_cap),
+            "single_trade_cap": max(0.0, eff_max_trade),
+            "cash_pct": float(eff_cash_pct),
+            "risk_pct": float(eff_risk_pct),
+        }
+
     def _get_effective_limits(self, portfolio_value: float) -> tuple[float, float, float, float]:
         """Return (max_cash_per_trade_pct, max_portfolio_risk_pct, emergency_stop, max_single_trade).
 

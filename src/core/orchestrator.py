@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -147,6 +148,23 @@ class Orchestrator:
         # Avoids repeatedly creating/destroying event loops via asyncio.run().
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)  # M5 fix: register as thread-current loop
+        _default_workers = min(8, max(2, os.cpu_count() or 2))
+        try:
+            _configured_workers = int(
+                os.environ.get(
+                    "AUTO_TRAITOR_ASYNC_WORKERS",
+                    config.get("runtime", {}).get("async_workers", _default_workers),
+                )
+            )
+        except (TypeError, ValueError):
+            _configured_workers = _default_workers
+        self._async_executor_workers = max(2, min(_configured_workers, 16))
+        self._async_executor = ThreadPoolExecutor(
+            max_workers=self._async_executor_workers,
+            thread_name_prefix="agent-io",
+        )
+        self._loop.set_default_executor(self._async_executor)
+        logger.info(f"🧵 Async worker pool capped at {self._async_executor_workers} workers")
 
         # Trading state
         if getattr(exchange, "paper_mode", False):
@@ -2004,6 +2022,11 @@ class Orchestrator:
                 task.cancel()
             if pending:
                 self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+
+        try:
+            self._async_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
 

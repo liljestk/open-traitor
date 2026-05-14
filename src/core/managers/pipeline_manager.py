@@ -1084,13 +1084,40 @@ class PipelineManager:
         # Apply per-pair confidence adjustment from planning context
         pair_confidence_adj = orch.context_manager.get_pair_confidence_adjustment(pair)
 
-        # Build fee context so the LLM knows about trading costs
-        _rt_fee = orch.fee_manager.trade_fee_pct * 2  # round-trip
-        _be_fee = _rt_fee * orch.fee_manager.fee_safety_margin
+        # Build size-aware fee context so the LLM sees the true hurdle for
+        # the order size AbsoluteRules currently permits. Fixed-minimum equity
+        # commissions make this materially different from a flat percentage.
+        _exec_cfg = orch.config.get("execution", {})
+        _is_maker = bool(
+            _exec_cfg.get("maker_only", False)
+            or _exec_cfg.get("use_limit_orders", False)
+        )
+        try:
+            _buy_caps = orch.rules.get_effective_buy_caps(_portfolio_value, _cash_balance)
+        except Exception:
+            _buy_caps = {"max_quote": min(_cash_balance, _portfolio_value) if _cash_balance else 0.0}
+        _fee_quote_amount = float(_buy_caps.get("max_quote") or 0.0)
+        if _fee_quote_amount <= 0:
+            _fee_quote_amount = orch.fee_manager.get_dynamic_min_trade(_portfolio_value)
+        _fee_ctx_est = orch.fee_manager.estimate_execution_fees(
+            _fee_quote_amount,
+            is_swap=False,
+            is_maker=_is_maker,
+        )
+        _min_expected_gain = max(
+            _fee_ctx_est.breakeven_move_pct,
+            _fee_ctx_est.total_fee_pct + orch.fee_manager.min_gain_after_fees_pct,
+        )
         fee_context = {
-            "round_trip_fee_pct": _rt_fee,
-            "breakeven_pct": _be_fee,
-            "min_gain_pct": orch.fee_manager.min_gain_after_fees_pct + _rt_fee,
+            "round_trip_fee_pct": _fee_ctx_est.total_fee_pct,
+            "breakeven_pct": _fee_ctx_est.breakeven_move_pct,
+            "min_gain_pct": _min_expected_gain,
+            "quote_amount": _fee_quote_amount,
+            "total_fee_quote": _fee_ctx_est.total_fee_quote,
+            "max_buy_quote": float(_buy_caps.get("max_quote") or 0.0),
+            "cash_cap": float(_buy_caps.get("cash_cap") or 0.0),
+            "risk_cap": float(_buy_caps.get("risk_cap") or 0.0),
+            "single_trade_cap": float(_buy_caps.get("single_trade_cap") or 0.0),
         }
 
         # Build strategist payload up front but defer the call. When the
@@ -1448,11 +1475,6 @@ class PipelineManager:
                 # configured maker-only (limit orders). Halves the assumed
                 # round-trip cost (0.40% × 2 vs 0.60% × 2 on Coinbase),
                 # which matches what we actually pay.
-                _exec_cfg = orch.config.get("execution", {})
-                _is_maker = bool(
-                    _exec_cfg.get("maker_only", False)
-                    or _exec_cfg.get("use_limit_orders", False)
-                )
                 worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
                     quote_amount=trade_amount,
                     expected_gain_pct=expected_gain_pct,
@@ -1469,7 +1491,23 @@ class PipelineManager:
                         if orch.risk_manager.scaler and _portfolio_value > 0:
                             _rm_max_pct = max(_rm_max_pct, orch.risk_manager.scaler.tier.max_position_pct)
                         _max_position = _portfolio_value * _rm_max_pct
-                        _max_fee_bump = min(_cash_balance, _max_position)
+                        try:
+                            _rule_caps = orch.rules.get_effective_buy_caps(_portfolio_value, _cash_balance)
+                        except Exception:
+                            _rule_caps = {"max_quote": min(_cash_balance, _max_position)}
+                        _allocator_cap = strategy_result.get("allocator_budget_cap")
+                        try:
+                            _allocator_cap = float(_allocator_cap) if _allocator_cap is not None else None
+                        except (TypeError, ValueError):
+                            _allocator_cap = None
+                        _cap_candidates = [
+                            _cash_balance,
+                            _max_position,
+                            float(_rule_caps.get("max_quote") or 0.0),
+                        ]
+                        if _allocator_cap is not None and _allocator_cap > 0:
+                            _cap_candidates.append(_allocator_cap)
+                        _max_fee_bump = min(v for v in _cap_candidates if v >= 0)
                         fee_min_viable = orch.fee_manager.get_minimum_worthwhile_quote(
                             expected_gain_pct=expected_gain_pct,
                             is_swap=False,
@@ -1484,12 +1522,15 @@ class PipelineManager:
                             "floor_min_trade": floor_min,
                             "cash_balance": _cash_balance,
                             "max_position": _max_position,
+                            "absolute_max_quote": float(_rule_caps.get("max_quote") or 0.0),
+                            "allocator_cap": _allocator_cap,
                             "max_fee_bump": _max_fee_bump,
                         }
                         bumped_amount = max(trade_amount, min_viable)
 
-                        # Cap at available cash and risk-manager position limits
-                        bumped_amount = min(bumped_amount, _cash_balance, _max_position)
+                        # Cap at available cash, risk-manager position limits,
+                        # allocator budget, and AbsoluteRules' current cap.
+                        bumped_amount = min(bumped_amount, _max_fee_bump)
 
                         if bumped_amount > trade_amount:
                             worthwhile, fee_est = orch.fee_manager.is_trade_worthwhile(
@@ -1500,18 +1541,35 @@ class PipelineManager:
                                 is_maker=_is_maker,
                             )
                             if worthwhile:
-                                logger.info(
-                                    f"📈 {pair}: Fee gate auto-bumped amount "
-                                    f"{trade_amount:.2f} → {bumped_amount:.2f} "
-                                    f"(min_viable={min_viable:.2f}, "
-                                    f"cash={_cash_balance:.2f}, "
-                                    f"max_pos={_max_position:.2f})"
+                                from src.models.trade import TradeAction
+                                _rules_ok, _rule_violations, _needs_approval = orch.rules.check_trade(
+                                    pair=pair,
+                                    action=TradeAction.BUY,
+                                    quote_value=bumped_amount,
+                                    portfolio_value=_portfolio_value,
+                                    cash_balance=_cash_balance,
+                                    has_stop_loss=bool(risk_result.get("stop_loss")),
                                 )
-                                risk_result["quote_amount"] = bumped_amount
-                                if trade_price > 0:
-                                    risk_result["quantity"] = bumped_amount / trade_price
-                                trade_amount = bumped_amount
-                                bumped = True
+                                if _rules_ok:
+                                    logger.info(
+                                        f"📈 {pair}: Fee gate auto-bumped amount "
+                                        f"{trade_amount:.2f} → {bumped_amount:.2f} "
+                                        f"(min_viable={min_viable:.2f}, "
+                                        f"cash={_cash_balance:.2f}, "
+                                        f"max_pos={_max_position:.2f})"
+                                    )
+                                    risk_result["quote_amount"] = bumped_amount
+                                    risk_result["needs_approval"] = _needs_approval
+                                    if trade_price > 0:
+                                        risk_result["quantity"] = bumped_amount / trade_price
+                                    trade_amount = bumped_amount
+                                    bumped = True
+                                else:
+                                    fee_bump_meta["absolute_rule_blocked_bump"] = 1.0
+                                    logger.info(
+                                        f"🚫 {pair}: Fee bump {bumped_amount:.2f} blocked by "
+                                        f"AbsoluteRules: {'; '.join(str(v) for v in _rule_violations)}"
+                                    )
 
                     if not bumped and not worthwhile:
                         _fg_reason = (
