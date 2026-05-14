@@ -22,10 +22,26 @@ _HISTORY_PATH = Path("data/llm_optimizer_history.json")
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
     "news_max_chars": 1500,
+    "fear_greed_max_chars": 300,
+    "multi_timeframe_max_chars": 500,
+    "sentiment_max_chars": 300,
     "strategic_context_max_chars": 800,
     "recent_outcomes_n": 10,
     "strategist_skip_signals": ["neutral", "weak_buy", "weak_sell"],
     "articles_for_analysis": 8,
+    "analyst_skip_llm_neutral": True,
+    "trader_tool_payload_max_chars": 2400,
+    "trader_news_excerpt_chars": 220,
+    "trader_recent_outcomes_chars": 300,
+    "trader_context_excerpt_chars": 300,
+    "trader_max_contributors": 4,
+    "trader_max_edges": 4,
+    "trader_max_positions": 8,
+    "trader_retry_on_veto": True,
+    "trader_hard_veto_skip_enabled": True,
+    "reasoning_judge_sample_pct": 0.005,
+    "reasoning_judge_max_judgments": 15,
+    "reasoning_judge_reasoning_max_chars": 1200,
     # ── Adaptive Learning Engine (ALE) ────────────────────────────────────
     "learning_enabled": True,
     "calibration_min_samples": 50,
@@ -46,6 +62,36 @@ PARAM_META: dict[str, dict] = {
         "type": "int",
         "impact_category": "news",
         "token_weight": 0.22,  # share of avg analyst prompt that is news
+    },
+    "fear_greed_max_chars": {
+        "label": "Fear/Greed cap (chars)",
+        "description": "Maximum Fear & Greed text included in analyst prompts.",
+        "min": 0,
+        "max": 2000,
+        "step": 50,
+        "type": "int",
+        "impact_category": "context",
+        "token_weight": 0.03,
+    },
+    "multi_timeframe_max_chars": {
+        "label": "Multi-timeframe cap (chars)",
+        "description": "Maximum multi-timeframe confluence text included in analyst prompts.",
+        "min": 0,
+        "max": 3000,
+        "step": 50,
+        "type": "int",
+        "impact_category": "context",
+        "token_weight": 0.08,
+    },
+    "sentiment_max_chars": {
+        "label": "Sentiment cap (chars)",
+        "description": "Maximum sentiment summary text included in analyst prompts.",
+        "min": 0,
+        "max": 2000,
+        "step": 50,
+        "type": "int",
+        "impact_category": "context",
+        "token_weight": 0.04,
     },
     "strategic_context_max_chars": {
         "label": "Strategic context cap (chars)",
@@ -83,6 +129,118 @@ PARAM_META: dict[str, dict] = {
         "type": "int",
         "impact_category": "news",
         "token_weight": 0.08,
+    },
+    "analyst_skip_llm_neutral": {
+        "label": "Skip neutral analyst LLM",
+        "description": "Use deterministic technical-only output for quiet neutral setups with no catalyst or strategy signal.",
+        "type": "bool",
+        "impact_category": "skip",
+    },
+    "trader_tool_payload_max_chars": {
+        "label": "Trader toolkit cap (chars)",
+        "description": "Maximum deterministic toolkit JSON embedded in TraderAgent prompts.",
+        "min": 800,
+        "max": 6000,
+        "step": 100,
+        "type": "int",
+        "impact_category": "context",
+        "token_weight": 0.20,
+    },
+    "trader_news_excerpt_chars": {
+        "label": "Trader news excerpt cap (chars)",
+        "description": "Maximum news excerpt included in TraderAgent toolkit snapshots.",
+        "min": 0,
+        "max": 1000,
+        "step": 50,
+        "type": "int",
+        "impact_category": "news",
+        "token_weight": 0.05,
+    },
+    "trader_recent_outcomes_chars": {
+        "label": "Trader outcomes cap (chars)",
+        "description": "Maximum recent-outcomes excerpt included in TraderAgent toolkit snapshots.",
+        "min": 0,
+        "max": 1500,
+        "step": 50,
+        "type": "int",
+        "impact_category": "outcomes",
+        "token_weight": 0.08,
+    },
+    "trader_context_excerpt_chars": {
+        "label": "Trader plan context cap (chars)",
+        "description": "Maximum strategic-context excerpt included in TraderAgent toolkit snapshots.",
+        "min": 0,
+        "max": 1500,
+        "step": 50,
+        "type": "int",
+        "impact_category": "context",
+        "token_weight": 0.08,
+    },
+    "trader_max_contributors": {
+        "label": "Trader strategy contributors",
+        "description": "Maximum deterministic strategy contributors included in TraderAgent prompts.",
+        "min": 1,
+        "max": 12,
+        "step": 1,
+        "type": "int",
+        "impact_category": "context",
+    },
+    "trader_max_edges": {
+        "label": "Trader edge rows",
+        "description": "Maximum edge-library rows included in TraderAgent prompts.",
+        "min": 0,
+        "max": 12,
+        "step": 1,
+        "type": "int",
+        "impact_category": "context",
+    },
+    "trader_max_positions": {
+        "label": "Trader position rows",
+        "description": "Maximum open positions included in TraderAgent portfolio snapshots.",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "type": "int",
+        "impact_category": "context",
+    },
+    "trader_retry_on_veto": {
+        "label": "Trader retry on adjustable veto",
+        "description": "Allow one TraderAgent retry only when a deterministic veto can plausibly be fixed by size/stop changes.",
+        "type": "bool",
+        "impact_category": "skip",
+    },
+    "trader_hard_veto_skip_enabled": {
+        "label": "Skip hard-veto trader calls",
+        "description": "Skip TraderAgent LLM calls when deterministic state already forces a hold.",
+        "type": "bool",
+        "impact_category": "skip",
+    },
+    "reasoning_judge_sample_pct": {
+        "label": "Reasoning judge sample rate",
+        "description": "Fraction of recent reasoning rows sampled for LLM-as-judge audits.",
+        "min": 0.0,
+        "max": 0.05,
+        "step": 0.001,
+        "type": "float",
+        "impact_category": "learning",
+    },
+    "reasoning_judge_max_judgments": {
+        "label": "Reasoning judge max rows",
+        "description": "Maximum LLM judgments per reasoning-audit run.",
+        "min": 0,
+        "max": 50,
+        "step": 1,
+        "type": "int",
+        "impact_category": "learning",
+    },
+    "reasoning_judge_reasoning_max_chars": {
+        "label": "Reasoning judge input cap (chars)",
+        "description": "Maximum reasoning JSON characters sent to each judge call.",
+        "min": 300,
+        "max": 2500,
+        "step": 100,
+        "type": "int",
+        "impact_category": "learning",
     },
     # ── Adaptive Learning Engine (ALE) ────────────────────────────────────
     "learning_enabled": {
@@ -207,6 +365,24 @@ def save_settings(new_settings: dict[str, Any], changed_by: str = "dashboard") -
                 bad = [v for v in value if v not in allowed]
                 if bad:
                     errors.append(f"{key}: invalid options {bad}")
+                    continue
+            elif meta.get("type") == "bool":
+                if isinstance(value, bool):
+                    pass
+                elif isinstance(value, str) and value.lower() in {"true", "false"}:
+                    value = value.lower() == "true"
+                else:
+                    errors.append(f"{key}: expected bool")
+                    continue
+            elif meta.get("type") == "float":
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    errors.append(f"{key}: expected float")
+                    continue
+                mn, mx = meta.get("min", float("-inf")), meta.get("max", float("inf"))
+                if not (mn <= value <= mx):
+                    errors.append(f"{key}: must be between {mn} and {mx}")
                     continue
             validated[key] = value
 

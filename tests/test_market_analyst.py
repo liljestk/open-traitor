@@ -373,3 +373,58 @@ class TestMarketAnalystRun:
             "stats_db": mock_db,
         })
         assert "signal" in result
+
+    @patch("src.utils.llm_optimizer.get", side_effect=lambda k, default=None: default)
+    def test_neutral_quiet_context_skips_llm(self, mock_opt):
+        mock_db = MagicMock()
+        self.agent.technical.analyze = MagicMock(return_value={
+            "current_price": 100.0,
+            "indicators": {
+                "rsi_signal": "neutral",
+                "macd_signal": "neutral",
+                "bb_signal": "neutral",
+                "ema_signal": "neutral",
+                "volume_ratio": 1.0,
+            },
+            "price_changes": {"1h": 0.001, "24h": 0.002},
+        })
+
+        result = self._run({
+            "pair": "BTC-USD",
+            "candles": [{"close": 100.0}],
+            "news_headlines": "No news available.",
+            "cycle_id": "cycle-skip",
+            "stats_db": mock_db,
+        })
+
+        assert result["llm_skipped"] is True
+        assert result["signal"]["signal_type"] == "neutral"
+        self.llm.chat_json.assert_not_called()
+        kwargs = mock_db.save_reasoning.call_args.kwargs
+        assert kwargs["prompt_tokens"] == 0
+        assert kwargs["completion_tokens"] == 0
+        assert kwargs["reasoning_json"]["llm_skipped"] is True
+
+    @patch("src.utils.llm_optimizer.get", side_effect=lambda k, default=None: default)
+    def test_catalyst_context_still_calls_llm(self, mock_opt):
+        self.agent.technical.analyze = MagicMock(return_value={
+            "current_price": 100.0,
+            "indicators": {
+                "rsi_signal": "neutral",
+                "macd_signal": "neutral",
+                "bb_signal": "neutral",
+                "ema_signal": "neutral",
+                "volume_ratio": 1.0,
+            },
+            "price_changes": {"1h": 0.001, "24h": 0.002},
+        })
+
+        result = self._run({
+            "pair": "AAPL",
+            "candles": [{"close": 100.0}],
+            "news_headlines": "AAPL earnings are due tomorrow.",
+            "exchange": "ibkr",
+        })
+
+        assert "llm_skipped" not in result
+        self.llm.chat_json.assert_called_once()

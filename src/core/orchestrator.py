@@ -306,6 +306,7 @@ class Orchestrator:
         # line so the user can immediately see *why* a buy was skipped.
         self._buy_drops_this_cycle: list[dict] = []
         self._buy_drops_lock = threading.Lock()
+        self._last_circuit_breaker_halt_event_ts: float = 0.0
 
         # ─── Stats Database (persistent analytics) ───
         self.stats_db = StatsDB()
@@ -785,11 +786,70 @@ class Orchestrator:
 
         self.state.circuit_breaker_triggered = True
         self.state._circuit_breaker_ts = time.time()
+        if self.redis:
+            try:
+                exchange = self.config.get("trading", {}).get("exchange") or getattr(
+                    self, "_decision_profile", "coinbase"
+                )
+                self.redis.delete(f"{exchange}:circuit_breaker:acknowledged")
+            except Exception:
+                pass
         logger.warning(msg)
+        self._record_circuit_breaker_event(
+            "circuit_breaker",
+            msg,
+            severity="critical",
+            data={"reason": reason, "value": value},
+        )
         self.audit.log_circuit_breaker(reason, value)
+        self.state_manager.sync_to_redis()
         # queue_event("CRITICAL: ...") already sends 🚨 ALERT immediately via ProactiveEngine
         self.chat_handler.queue_event(f"CRITICAL: {msg}", severity="critical")
         self.event_manager.trigger_emergency_replan(f"Circuit breaker: {reason} {value}")
+
+    def _record_circuit_breaker_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        severity: str = "warning",
+        data: dict | None = None,
+    ) -> None:
+        """Persist circuit-breaker events to the dashboard event stream."""
+        try:
+            db = getattr(self, "stats_db", None)
+            if not db:
+                return
+            exchange = self.config.get("trading", {}).get("exchange") or getattr(
+                self, "_decision_profile", "coinbase"
+            )
+            db.record_event(
+                event_type,
+                message,
+                severity=severity,
+                data=data or {},
+                exchange=exchange,
+            )
+        except Exception as exc:
+            logger.debug(f"Circuit breaker event persistence skipped: {exc}")
+
+    def _record_circuit_breaker_halt_event(self) -> None:
+        """Rate-limited heartbeat for the dashboard logs while halted."""
+        now = time.time()
+        if now - self._last_circuit_breaker_halt_event_ts < 300:
+            return
+        self._last_circuit_breaker_halt_event_ts = now
+        self._record_circuit_breaker_event(
+            "circuit_breaker_active",
+            "🛑 Circuit breaker active — trading halted",
+            severity="warning",
+            data={
+                "current_drawdown": self.state.current_drawdown,
+                "max_drawdown_pct": self.config.get("risk", {}).get("max_drawdown_pct", 0.10),
+                "daily_loss": self.rules.daily_loss,
+                "max_daily_loss": self.rules.max_daily_loss,
+            },
+        )
 
     def record_buy_drop(
         self,
@@ -1181,14 +1241,18 @@ class Orchestrator:
 
         while self.state.is_running:
             self._cycle_heartbeat = time.monotonic()
+            self.dashboard_commands.process_commands()
             if self.state.is_paused:
+                self.state_manager.sync_to_redis()
                 logger.debug("Trading paused, waiting...")
                 time.sleep(10)
                 continue
 
             if self.state.circuit_breaker_triggered:
                 logger.warning("🛑 Circuit breaker active — trading halted")
+                self._record_circuit_breaker_halt_event()
                 self._try_circuit_breaker_recovery()
+                self.state_manager.sync_to_redis()
                 time.sleep(60)
                 continue
 

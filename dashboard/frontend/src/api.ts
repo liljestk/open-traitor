@@ -403,6 +403,22 @@ export interface SettingsResponse {
   telegram_tiers: Record<string, { sections: string[]; description: string }>
   schema: Record<string, SectionSchema>
   rpm_budget?: RpmBudget
+  runtime_status?: RuntimeStatus
+}
+
+export interface CircuitBreakerStatus {
+  active: boolean
+  paused: boolean
+  acknowledged: boolean
+  acknowledged_at: string | null
+  triggered_at: string | number | null
+  last_event: EventLog | null
+  last_resume: EventLog | null
+  runtime_source: 'redis' | 'unavailable' | string
+}
+
+export interface RuntimeStatus {
+  circuit_breaker?: CircuitBreakerStatus
 }
 
 export interface SettingsUpdateResult {
@@ -460,6 +476,12 @@ export interface StyleModifiersResponse {
 
 export const fetchStyleModifiers = () =>
   apiFetch<StyleModifiersResponse>('/settings/style-modifiers')
+
+export const acknowledgeCircuitBreaker = () =>
+  apiFetch<{ ok: boolean; status: CircuitBreakerStatus }>('/settings/circuit-breaker/acknowledge', { method: 'POST' })
+
+export const resumeAfterCircuitBreaker = () =>
+  apiFetch<{ ok: boolean; queued: boolean; message: string; status: CircuitBreakerStatus }>('/settings/circuit-breaker/resume', { method: 'POST' })
 
 // ─── LLM Providers ────────────────────────────────────────────────────────
 
@@ -864,7 +886,7 @@ export const fetchLLMAnalytics = (hours = 168) =>
 export interface OptimizerParamMeta {
   label: string
   description: string
-  type: 'int' | 'multiselect'
+  type: 'int' | 'float' | 'bool' | 'multiselect'
   min?: number
   max?: number
   step?: number

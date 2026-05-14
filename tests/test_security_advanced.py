@@ -565,6 +565,28 @@ class TestCommandVerification:
         valid, reason = mgr._validate_command(cmd)
         assert valid is True, f"Expected valid, got: {reason}"
 
+    def test_resume_command_clears_circuit_breaker(self):
+        from src.core.managers.dashboard_commands import DashboardCommandManager
+
+        orch = self._make_orchestrator()
+        orch.state.circuit_breaker_triggered = True
+        orch.state.is_paused = True
+        orch.state._circuit_breaker_ts = 123.0
+        orch.audit = MagicMock()
+        orch.telegram = None
+        orch.chat_handler = MagicMock()
+        orch.state_manager = MagicMock()
+        orch.stats_db = MagicMock()
+
+        mgr = DashboardCommandManager(orch)
+        mgr._handle_resume_trading({"source": "dashboard", "ts": datetime.now(timezone.utc).isoformat()})
+
+        assert orch.state.circuit_breaker_triggered is False
+        assert orch.state.is_paused is False
+        assert orch.state._circuit_breaker_ts == 0.0
+        orch.state_manager.sync_to_redis.assert_called_once()
+        orch.stats_db.record_event.assert_called_once()
+
     def test_tampered_action_rejected(self):
         from src.core.managers.dashboard_commands import DashboardCommandManager
         orch = self._make_orchestrator()

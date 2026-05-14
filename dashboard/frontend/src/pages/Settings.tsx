@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchSettings, updateSettings, fetchPresets,
   fetchStyleModifiers,
+  acknowledgeCircuitBreaker, resumeAfterCircuitBreaker,
 } from '../api'
 import {
   X, AlertTriangle, Check,
@@ -27,6 +28,7 @@ import {
   TelegramSetupGuide, DensityToggle, TelegramNotificationsCard,
   SecurityCard,
 } from './settings/SettingsComponents'
+import { useLiveStore } from '../store'
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Quick Settings helpers
@@ -323,13 +325,38 @@ function ConfigHealthPanel({ settings }: { settings: Record<string, unknown> }) 
 
 export default function Settings() {
   const queryClient = useQueryClient()
-  const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
-  const { data: presetsData } = useQuery({ queryKey: ['presets'], queryFn: fetchPresets })
-  const { data: modifiersData } = useQuery({ queryKey: ['style-modifiers'], queryFn: fetchStyleModifiers })
+  const profile = useLiveStore((s) => s.profile)
+  const { data, isLoading, error } = useQuery({ queryKey: ['settings', profile], queryFn: fetchSettings, refetchInterval: 15000 })
+  const { data: presetsData } = useQuery({ queryKey: ['presets', profile], queryFn: fetchPresets })
+  const { data: modifiersData } = useQuery({ queryKey: ['style-modifiers', profile], queryFn: fetchStyleModifiers })
 
   const mutation = useMutation({
     mutationFn: updateSettings,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['settings'] }) },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['settings', profile] }) },
+  })
+
+  const acknowledgeMutation = useMutation({
+    mutationFn: acknowledgeCircuitBreaker,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings', profile] })
+      queryClient.invalidateQueries({ queryKey: ['events'] })
+      setToast({ message: 'Circuit breaker acknowledged', type: 'success' })
+    },
+    onError: (e: unknown) => {
+      setToast({ message: `Acknowledge failed: ${e instanceof Error ? e.message : String(e)}`, type: 'error' })
+    },
+  })
+
+  const resumeMutation = useMutation({
+    mutationFn: resumeAfterCircuitBreaker,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings', profile] })
+      queryClient.invalidateQueries({ queryKey: ['events'] })
+      setToast({ message: 'Resume command queued', type: 'success' })
+    },
+    onError: (e: unknown) => {
+      setToast({ message: `Resume failed: ${e instanceof Error ? e.message : String(e)}`, type: 'error' })
+    },
   })
 
   const [activeTab, setActiveTab] = useState<CategoryKey>('trading')
@@ -361,7 +388,7 @@ export default function Settings() {
     const next = current.includes(key) ? current.filter(m => m !== key) : [...current, key]
     try {
       await mutation.mutateAsync({ section: 'trading', updates: { style_modifiers: next } })
-      queryClient.invalidateQueries({ queryKey: ['style-modifiers'] })
+      queryClient.invalidateQueries({ queryKey: ['style-modifiers', profile] })
       const label = modifiersData?.modifiers?.[key]?.label ?? key
       const action = next.includes(key) ? 'enabled' : 'disabled'
       setToast({ message: `${label} ${action}`, type: 'success' })
@@ -443,6 +470,16 @@ export default function Settings() {
 
   // Status chips for header
   const tradingSettings = (settings.trading ?? {}) as Record<string, unknown>
+  const circuitBreaker = data.runtime_status?.circuit_breaker
+  const circuitBreakerActive = Boolean(circuitBreaker?.active)
+  const circuitBreakerColor = circuitBreakerActive ? '#f59e0b' : trading_enabled ? '#22c55e' : '#ef4444'
+  const circuitBreakerBorder = circuitBreakerActive ? '#f59e0b44' : trading_enabled ? '#22c55e33' : '#ef444433'
+  const fmtRuntimeTime = (value: string | number | null | undefined) => {
+    if (!value) return ''
+    const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
+    if (Number.isNaN(d.getTime())) return ''
+    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  }
 
   return (
     <PageTransition>
@@ -472,33 +509,69 @@ export default function Settings() {
       {/* ─── Trading Status Banner ─── */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px',
-        background: trading_enabled
-          ? 'linear-gradient(135deg, #22c55e08, #22c55e15)'
-          : 'linear-gradient(135deg, #ef444408, #ef444415)',
-        border: `1px solid ${trading_enabled ? '#22c55e33' : '#ef444433'}`,
+        background: circuitBreakerActive
+          ? 'linear-gradient(135deg, #f59e0b08, #f59e0b15)'
+          : trading_enabled
+            ? 'linear-gradient(135deg, #22c55e08, #22c55e15)'
+            : 'linear-gradient(135deg, #ef444408, #ef444415)',
+        border: `1px solid ${circuitBreakerBorder}`,
         borderRadius: 10, marginBottom: 16,
       }}>
         <span style={{
           width: 10, height: 10, borderRadius: '50%',
-          background: trading_enabled ? '#22c55e' : '#ef4444',
-          boxShadow: `0 0 8px ${trading_enabled ? '#22c55e60' : '#ef444460'}`,
-          animation: trading_enabled ? 'pulse 2s infinite' : undefined,
+          background: circuitBreakerColor,
+          boxShadow: `0 0 8px ${circuitBreakerColor}60`,
+          animation: trading_enabled && !circuitBreakerActive ? 'pulse 2s infinite' : undefined,
         }} />
         <div style={{ flex: 1 }}>
           <span style={{ fontWeight: 600, fontSize: 14, color: '#e6edf3' }}>
-            Trading is {trading_enabled ? 'ENABLED' : 'DISABLED'}
+            {circuitBreakerActive ? 'Circuit breaker active' : `Trading is ${trading_enabled ? 'ENABLED' : 'DISABLED'}`}
           </span>
           <span style={{ fontSize: 11, color: '#8b949e', marginLeft: 10 }}>
-            {trading_enabled ? 'Bot is actively analyzing markets and executing trades' : 'All trading activity is halted'}
+            {circuitBreakerActive
+              ? `${circuitBreaker?.last_event?.message ?? 'Trading is halted'}${fmtRuntimeTime(circuitBreaker?.triggered_at) ? ` since ${fmtRuntimeTime(circuitBreaker?.triggered_at)}` : ''}`
+              : trading_enabled ? 'Bot is actively analyzing markets and executing trades' : 'All trading activity is halted'}
           </span>
+          {circuitBreakerActive && circuitBreaker?.acknowledged && (
+            <span style={{ fontSize: 11, color: '#d29922', marginLeft: 10 }}>
+              Acknowledged{fmtRuntimeTime(circuitBreaker.acknowledged_at) ? ` ${fmtRuntimeTime(circuitBreaker.acknowledged_at)}` : ''}
+            </span>
+          )}
         </div>
-        <button onClick={() => handlePreset(trading_enabled ? 'disabled' : 'moderate')} style={{
-          ...btnStyle(trading_enabled ? '#21262d' : '#238636'),
-          padding: '8px 18px', fontSize: 13,
-          borderColor: trading_enabled ? '#30363d' : '#238636',
-        }}>
-          {trading_enabled ? 'Pause Trading' : 'Enable Trading'}
-        </button>
+        {circuitBreakerActive ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button
+              onClick={() => acknowledgeMutation.mutate()}
+              disabled={acknowledgeMutation.isPending || Boolean(circuitBreaker?.acknowledged)}
+              style={{
+                ...btnStyle(circuitBreaker?.acknowledged ? '#21262d' : '#8b5cf6'),
+                padding: '8px 12px', fontSize: 13,
+                opacity: circuitBreaker?.acknowledged ? 0.65 : 1,
+              }}
+            >
+              <Check size={13} /> {circuitBreaker?.acknowledged ? 'Acknowledged' : 'Acknowledge'}
+            </button>
+            <button
+              onClick={() => resumeMutation.mutate()}
+              disabled={resumeMutation.isPending}
+              style={{
+                ...btnStyle('#238636'),
+                padding: '8px 14px', fontSize: 13,
+                borderColor: '#238636',
+              }}
+            >
+              <RefreshCw size={13} className={resumeMutation.isPending ? 'animate-spin' : ''} /> Resume Trading
+            </button>
+          </div>
+        ) : (
+          <button onClick={() => handlePreset(trading_enabled ? 'disabled' : 'moderate')} style={{
+            ...btnStyle(trading_enabled ? '#21262d' : '#238636'),
+            padding: '8px 18px', fontSize: 13,
+            borderColor: trading_enabled ? '#30363d' : '#238636',
+          }}>
+            {trading_enabled ? 'Pause Trading' : 'Enable Trading'}
+          </button>
+        )}
       </div>
 
       {/* ─── Simple Presets (3 cards) ─── */}

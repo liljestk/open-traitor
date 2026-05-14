@@ -6,6 +6,7 @@ import { fetchEvents } from '../api'
 import { SkeletonLogEntries } from '../components/Skeleton'
 import EmptyState from '../components/EmptyState'
 import PageTransition from '../components/PageTransition'
+import { useLiveStore } from '../store'
 
 type Severity = 'info' | 'warning' | 'error' | 'critical' | string
 
@@ -34,13 +35,14 @@ const btnBase: React.CSSProperties = {
 }
 
 export default function SystemLogs() {
+    const profile = useLiveStore((s) => s.profile)
     const [eventTypeFilter, setEventTypeFilter] = useState('')
     const [hours, setHours] = useState(168)
     const [limit, setLimit] = useState(500)
     const [expandedId, setExpandedId] = useState<number | null>(null)
 
     const { data, isLoading, isFetching, refetch } = useQuery({
-        queryKey: ['events', eventTypeFilter, limit, hours],
+        queryKey: ['events', eventTypeFilter, limit, hours, profile],
         queryFn: () => fetchEvents(eventTypeFilter || undefined, limit, hours),
         refetchInterval: 10000,
     })

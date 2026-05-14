@@ -28,6 +28,7 @@ logger = get_logger("dashboard.deps")
 # ═══════════════════════════════════════════════════════════════════════════
 
 stats_db = None           # StatsDB instance
+_stats_db_init_lock = threading.Lock()
 redis_client = None       # redis.Redis instance (optional)
 temporal_client = None    # temporalio.client.Client instance (optional)
 temporal_host: str = os.environ.get("TEMPORAL_HOST", "localhost:7233")
@@ -333,13 +334,32 @@ def check_confirmation_rate(client_ip: str, max_per_window: int = 5, window_seco
 # Database helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _ensure_stats_db():
+    """Lazily initialise StatsDB after startup races with Postgres."""
+    global stats_db
+    if stats_db is not None:
+        return stats_db
+
+    with _stats_db_init_lock:
+        if stats_db is not None:
+            return stats_db
+        try:
+            from src.utils.stats import StatsDB
+            stats_db = StatsDB()
+            logger.info("Stats DB lazy-initialised")
+        except Exception as exc:
+            logger.warning(f"Stats DB lazy initialisation failed: {exc}")
+            stats_db = None
+    return stats_db
+
+
 def require_db(profile: str = ""):
     """Return the shared StatsDB singleton.
 
     All profiles now share a single PostgreSQL database; exchange-level
     filtering is done via the ``exchange`` column in each table.
     """
-    if stats_db is None:
+    if _ensure_stats_db() is None:
         raise HTTPException(status_code=503, detail="Stats DB not initialised")
     return stats_db
 

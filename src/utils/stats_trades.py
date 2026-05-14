@@ -331,6 +331,8 @@ class TradesMixin:
         with self._get_conn() as conn:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
             qc_frag, qc_params = qc_where(quote_currency)
+            if qc_frag:
+                qc_frag = f" AND (pair IS NULL OR {qc_frag.removeprefix(' AND ')})"
             exch_frag = " AND exchange = %s" if exchange else ""
             exch_params = [exchange] if exchange else []
             if event_type:

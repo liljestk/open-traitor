@@ -90,6 +90,10 @@ class DashboardCommandManager:
                     self._handle_add_watchlist_pair(pair)
                 elif action == "remove_watchlist_pair":
                     self._handle_remove_watchlist_pair(pair)
+                elif action == "acknowledge_circuit_breaker":
+                    self._handle_acknowledge_circuit_breaker(cmd)
+                elif action == "resume_trading":
+                    self._handle_resume_trading(cmd)
                 else:
                     logger.warning(f"Unknown dashboard command: {action}")
         except Exception as e:
@@ -240,6 +244,96 @@ class DashboardCommandManager:
                 logger.info(f"{pair} already in never_trade list")
         except Exception as e:
             logger.error(f"Dashboard pause-pair failed for {pair}: {e}")
+
+    def _record_control_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        severity: str = "info",
+        data: dict | None = None,
+    ) -> None:
+        """Best-effort persistence for dashboard control actions."""
+        try:
+            stats_db = getattr(self.orch, "stats_db", None)
+            if stats_db:
+                stats_db.record_event(
+                    event_type,
+                    message,
+                    severity=severity,
+                    data=data or {},
+                    exchange=self._profile,
+                )
+        except Exception as e:
+            logger.debug(f"Dashboard control event persistence skipped: {e}")
+
+    def _handle_acknowledge_circuit_breaker(self, cmd: dict) -> None:
+        """Record that an operator has seen the active circuit breaker."""
+        orch = self.orch
+        try:
+            payload = {
+                "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+                "source": cmd.get("source", "dashboard"),
+                "command_ts": cmd.get("ts", ""),
+            }
+            if orch.redis:
+                import json as _json
+                orch.redis.set(
+                    f"{self._profile}:circuit_breaker:acknowledged",
+                    _json.dumps(payload, default=str),
+                    ex=86400,
+                )
+            msg = "Circuit breaker acknowledged from dashboard"
+            logger.warning(msg)
+            self._record_control_event(
+                "circuit_breaker_acknowledged",
+                msg,
+                severity="warning",
+                data=payload,
+            )
+            if getattr(orch, "chat_handler", None):
+                orch.chat_handler.queue_event(msg, severity="warning")
+        except Exception as e:
+            logger.error(f"Dashboard circuit-breaker acknowledgement failed: {e}")
+
+    def _handle_resume_trading(self, cmd: dict) -> None:
+        """Clear runtime pause/circuit-breaker state after operator action."""
+        orch = self.orch
+        try:
+            was_circuit_breaker = bool(orch.state.circuit_breaker_triggered)
+            was_paused = bool(orch.state.is_paused)
+            orch.state.is_paused = False
+            orch.state.circuit_breaker_triggered = False
+            orch.state._circuit_breaker_ts = 0.0
+            if orch.redis:
+                try:
+                    orch.redis.delete(f"{self._profile}:circuit_breaker:acknowledged")
+                except Exception:
+                    pass
+            msg = "Circuit breaker manually reset and trading resumed from dashboard"
+            logger.warning(msg)
+            event_data = {
+                "source": cmd.get("source", "dashboard"),
+                "command_ts": cmd.get("ts", ""),
+                "was_circuit_breaker": was_circuit_breaker,
+                "was_paused": was_paused,
+            }
+            self._record_control_event(
+                "circuit_breaker_resumed",
+                msg,
+                severity="warning",
+                data=event_data,
+            )
+            if getattr(orch, "audit", None):
+                orch.audit.log("circuit_breaker_resumed", event_data, severity="warning")
+            if getattr(orch, "telegram", None):
+                orch.telegram.send_alert(f"⚠️ {msg}.")
+            if getattr(orch, "chat_handler", None):
+                orch.chat_handler.queue_event(msg, severity="warning")
+            if getattr(orch, "state_manager", None):
+                orch.state_manager.sync_to_redis()
+        except Exception as e:
+            logger.error(f"Dashboard resume trading failed: {e}")
 
     def _handle_add_watchlist_pair(self, pair: str) -> None:
         """Add a human-followed pair to the live trading pipeline."""

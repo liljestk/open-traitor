@@ -19,9 +19,26 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from src.core.decision_engine import DecisionEngine, DecisionVerdict, TradeProposal
+from src.utils import llm_optimizer
 from src.utils.logger import get_logger
 
 logger = get_logger("core.trading_toolkit")
+
+
+def _cap_text(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + " [...]"
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -88,6 +105,7 @@ class TradingToolkit:
 
     def get_market_snapshot(self) -> dict:
         c = self.ctx
+        news_cap = int(llm_optimizer.get("trader_news_excerpt_chars", 220) or 0)
         return {
             "pair": c.pair,
             "exchange": c.exchange,
@@ -99,23 +117,30 @@ class TradingToolkit:
             "reasoning": (c.market_signal.get("reasoning") or "")[:300],
             "sentiment_label": c.sentiment.get("sentiment_label", "neutral"),
             "sentiment_score": c.sentiment.get("sentiment_score", 0.0),
-            "news_excerpt": c.news_headlines[:500],
+            "news_excerpt": _cap_text(c.news_headlines, news_cap),
         }
 
     def get_strategy_signals(self) -> dict:
         """Per-strategy signal contributions plus the ensemble verdict."""
         signals = self.ctx.strategy_signals or {}
+        max_contributors = int(llm_optimizer.get("trader_max_contributors", 4) or 4)
+        contributors = []
+        for name, value in signals.items():
+            if name.startswith("_") or not isinstance(value, dict):
+                continue
+            contributor = {
+                "action": value.get("action"),
+                "confidence": value.get("confidence"),
+                "regime": value.get("market_regime"),
+            }
+            contributors.append((name, contributor))
+        contributors.sort(
+            key=lambda item: _safe_float(item[1].get("confidence")),
+            reverse=True,
+        )
         out = {
             "ensemble": signals.get("_ensemble"),
-            "contributors": {
-                name: {
-                    "action": v.get("action"),
-                    "confidence": v.get("confidence"),
-                    "regime": v.get("market_regime"),
-                }
-                for name, v in signals.items()
-                if not name.startswith("_") and isinstance(v, dict)
-            },
+            "contributors": dict(contributors[:max_contributors]),
         }
         return out
 
@@ -146,10 +171,21 @@ class TradingToolkit:
                     "edge": e.to_dict() if hasattr(e, "to_dict") else None,
                 }
             edges = self.edges.all_edges(regime) or []
+            max_edges = int(llm_optimizer.get("trader_max_edges", 4) or 0)
+            edge_rows = [e.to_dict() for e in edges if hasattr(e, "to_dict")]
+            edge_rows.sort(
+                key=lambda row: (
+                    _safe_float(row.get("n_samples")),
+                    abs(_safe_float(row.get("sharpe"))),
+                ),
+                reverse=True,
+            )
+            if max_edges >= 0:
+                edge_rows = edge_rows[:max_edges]
             return {
                 "available": True,
                 "regime": regime,
-                "edges": [e.to_dict() for e in edges if hasattr(e, "to_dict")],
+                "edges": edge_rows,
             }
         except Exception as exc:
             logger.debug("toolkit.get_edge_stats failed: %s", exc)
@@ -160,22 +196,37 @@ class TradingToolkit:
         if self.allocator is None:
             return {"available": False, "reason": "allocator unavailable"}
         try:
-            return {"available": True, "weights": dict(self.allocator.weights() or {})}
+            weights = dict(self.allocator.weights() or {})
+            max_weights = int(llm_optimizer.get("trader_max_contributors", 4) or 4)
+            ranked = sorted(weights.items(), key=lambda item: _safe_float(item[1]), reverse=True)
+            return {"available": True, "weights": dict(ranked[:max_weights])}
         except Exception as exc:
             return {"available": False, "reason": str(exc)}
 
     def get_portfolio_state(self) -> dict:
         c = self.ctx
+        max_positions = int(llm_optimizer.get("trader_max_positions", 8) or 8)
+        positions = dict(c.open_positions or {})
+        if len(positions) > max_positions:
+            ranked_positions = sorted(
+                positions.items(),
+                key=lambda item: abs(_safe_float(item[1])),
+                reverse=True,
+            )
+            positions = dict(ranked_positions[:max_positions])
+            positions["_omitted_count"] = len(ranked_positions) - max_positions
+        outcomes_cap = int(llm_optimizer.get("trader_recent_outcomes_chars", 300) or 0)
+        context_cap = int(llm_optimizer.get("trader_context_excerpt_chars", 300) or 0)
         return {
             "portfolio_value": c.portfolio_value,
             "cash_balance": c.cash_balance,
-            "open_positions": dict(c.open_positions or {}),
+            "open_positions": positions,
             "kelly_win_rate": c.kelly_stats.get("win_rate", 0.0),
             "kelly_sample_size": c.kelly_stats.get("sample_size", 0),
             "fee_round_trip_pct": c.fee_context.get("round_trip_fee_pct", 0.0),
             "fee_min_gain_pct": c.fee_context.get("min_gain_pct", 0.0),
-            "recent_outcomes_excerpt": (c.recent_outcomes or "")[:600],
-            "strategic_context_excerpt": (c.strategic_context or "")[:600],
+            "recent_outcomes_excerpt": _cap_text(c.recent_outcomes, outcomes_cap),
+            "strategic_context_excerpt": _cap_text(c.strategic_context, context_cap),
         }
 
     # ---------------------------------------------------------------- #

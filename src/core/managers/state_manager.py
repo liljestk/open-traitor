@@ -13,7 +13,11 @@ class StateManager:
         self.orchestrator = orchestrator
 
     def _get_redis_key(self, base_key: str) -> str:
-        profile = os.environ.get("AUTO_TRAITOR_PROFILE", "")
+        profile = (
+            os.environ.get("AUTO_TRAITOR_PROFILE", "")
+            or self.orchestrator.config.get("trading", {}).get("exchange", "")
+        ).strip().lower()
+        profile = {"crypto": "coinbase", "equity": "ibkr"}.get(profile, profile)
         return f"{profile}:{base_key}" if profile else base_key
 
     def sync_to_redis(self):

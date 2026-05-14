@@ -44,6 +44,139 @@ def _resolve_config_path(profile: str) -> str | None:
     return deps.PROFILE_CONFIG_FILES.get(resolved)
 
 
+def _profile_prefix(profile: str) -> str:
+    """Redis/event prefix for an exchange profile."""
+    return deps.resolve_profile(profile) or "coinbase"
+
+
+def _decode_json_payload(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _timestamp_epoch(value) -> float:
+    if not value:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
+def _read_runtime_state(profile: str) -> dict:
+    """Read the profile-scoped runtime state published by the orchestrator."""
+    if not deps.redis_client:
+        return {}
+    raw = deps.redis_client.get(f"{_profile_prefix(profile)}:agent:state")
+    return _decode_json_payload(raw)
+
+
+def _latest_event(event_type: str, profile: str) -> dict:
+    db = deps.stats_db
+    if not db:
+        return {}
+    try:
+        rows = db.get_events(
+            hours=24 * 30,
+            event_type=event_type,
+            limit=1,
+            exchange=_profile_prefix(profile),
+        )
+        if not rows:
+            return {}
+        event = dict(rows[0])
+        if isinstance(event.get("data"), str):
+            event["data"] = _decode_json_payload(event["data"])
+        return event
+    except Exception as exc:
+        logger.debug(f"Circuit-breaker event lookup skipped: {exc}")
+        return {}
+
+
+def _circuit_breaker_status(profile: str) -> dict:
+    state = _read_runtime_state(profile)
+    ack = _decode_json_payload(
+        deps.redis_client.get(f"{_profile_prefix(profile)}:circuit_breaker:acknowledged")
+        if deps.redis_client else None
+    )
+    latest_breaker = _latest_event("circuit_breaker", profile)
+    latest_ack = _latest_event("circuit_breaker_acknowledged", profile)
+    latest_resume = _latest_event("circuit_breaker_resumed", profile)
+
+    triggered_at = state.get("circuit_breaker_ts") or latest_breaker.get("ts")
+    acknowledged_at = ack.get("acknowledged_at") or latest_ack.get("ts")
+    if acknowledged_at and triggered_at:
+        if _timestamp_epoch(acknowledged_at) < _timestamp_epoch(triggered_at):
+            acknowledged_at = None
+    return {
+        "active": bool(state.get("circuit_breaker", False)),
+        "paused": bool(state.get("is_paused", False)),
+        "acknowledged": bool(acknowledged_at),
+        "acknowledged_at": acknowledged_at,
+        "triggered_at": triggered_at,
+        "last_event": latest_breaker or None,
+        "last_resume": latest_resume or None,
+        "runtime_source": "redis" if state else "unavailable",
+    }
+
+
+def _record_control_event(event_type: str, message: str, profile: str, *, severity: str = "info", data: dict | None = None) -> None:
+    if not deps.stats_db:
+        return
+    deps.stats_db.record_event(
+        event_type,
+        message,
+        severity=severity,
+        data=data or {},
+        exchange=_profile_prefix(profile),
+    )
+
+
+def _publish_dashboard_control_command(action: str, profile: str, source_ip: str) -> dict:
+    if not deps.redis_client:
+        raise HTTPException(status_code=503, detail="Redis not available — cannot send control commands")
+    if not deps.DASHBOARD_COMMAND_SIGNING_KEY:
+        raise HTTPException(status_code=503, detail="Dashboard command signing key not configured")
+
+    ts = datetime.now(timezone.utc).isoformat()
+    nonce = secrets.token_hex(16)
+    pair = "__system__"
+    command = {
+        "action": action,
+        "pair": pair,
+        "ts": ts,
+        "source": "dashboard",
+        "nonce": nonce,
+        "source_ip": source_ip,
+    }
+    command["signature"] = deps.sign_dashboard_command(
+        action=action,
+        pair=pair,
+        ts=ts,
+        source=command["source"],
+        nonce=nonce,
+    )
+    prefix = _profile_prefix(profile)
+    deps.redis_client.rpush(f"{prefix}:dashboard:commands_queue", json.dumps(command))
+    deps.redis_client.publish("dashboard:commands", json.dumps(command))
+    deps.redis_client.lpush(f"{prefix}:dashboard:command_history", json.dumps(command))
+    deps.redis_client.ltrim(f"{prefix}:dashboard:command_history", 0, 99)
+    return command
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Settings-manager imports
 # ═══════════════════════════════════════════════════════════════════════════
@@ -780,9 +913,78 @@ def get_settings(profile: str = Query("")):
         except Exception as _rpm_err:
             logger.debug(f"rpm_budget enrichment skipped: {_rpm_err}")
 
+        full["runtime_status"] = {
+            "circuit_breaker": _circuit_breaker_status(profile),
+        }
+
         return full
     except Exception as exc:
         logger.exception("settings GET error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/settings/circuit-breaker/acknowledge", summary="Acknowledge active circuit breaker")
+def acknowledge_circuit_breaker(request: Request, profile: str = Query("")):
+    source_ip = request.client.host if request.client else "unknown"
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "acknowledged_at": now,
+        "source": "dashboard",
+        "source_ip": source_ip,
+        "profile": _profile_prefix(profile),
+    }
+    try:
+        if deps.redis_client:
+            deps.redis_client.set(
+                f"{_profile_prefix(profile)}:circuit_breaker:acknowledged",
+                json.dumps(payload, default=str),
+                ex=86400,
+            )
+        _record_control_event(
+            "circuit_breaker_acknowledged",
+            "Circuit breaker acknowledged from dashboard settings",
+            profile,
+            severity="warning",
+            data=payload,
+        )
+        logger.warning(
+            f"Circuit breaker acknowledged from dashboard settings "
+            f"(profile={_profile_prefix(profile)}, ip={source_ip})"
+        )
+        return {"ok": True, "status": _circuit_breaker_status(profile)}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("circuit breaker acknowledge error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/api/settings/circuit-breaker/resume", summary="Resume trading after circuit breaker")
+def resume_after_circuit_breaker(request: Request, profile: str = Query("")):
+    source_ip = request.client.host if request.client else "unknown"
+    try:
+        command = _publish_dashboard_control_command("resume_trading", profile, source_ip)
+        _record_control_event(
+            "circuit_breaker_resume_requested",
+            "Dashboard settings requested circuit breaker reset and trading resume",
+            profile,
+            severity="warning",
+            data={"command_ts": command["ts"], "source_ip": source_ip},
+        )
+        logger.warning(
+            f"Dashboard settings queued resume_trading "
+            f"(profile={_profile_prefix(profile)}, ip={source_ip})"
+        )
+        return {
+            "ok": True,
+            "queued": True,
+            "message": "Resume command queued for the trading runtime.",
+            "status": _circuit_breaker_status(profile),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("circuit breaker resume error")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

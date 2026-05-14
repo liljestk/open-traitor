@@ -114,6 +114,53 @@ class MarketAnalystAgent(BaseAgent):
         indicators = tech_analysis["indicators"]
         price_changes = tech_analysis["price_changes"]
 
+        skip_reason = self._llm_skip_reason(
+            indicators=indicators,
+            price_changes=price_changes,
+            news=news_headlines,
+            fear_greed=fear_greed,
+            multi_timeframe=multi_timeframe,
+            sentiment=sentiment,
+            strategy_signals=strategy_signals,
+            strategic_context=strategic_context,
+        )
+        if skip_reason:
+            result = self._technical_only_signal(pair, current_price, indicators)
+            signal_payload = result.get("signal", {})
+            llm_response = {
+                "signal_type": signal_payload.get("signal_type", "neutral"),
+                "confidence": signal_payload.get("confidence", 0.0),
+                "market_condition": signal_payload.get("market_condition", "neutral"),
+                "sentiment_overall": "neutral",
+                "sentiment_score": 0.0,
+                "key_factors": ["deterministic neutral skip"],
+                "reasoning": skip_reason,
+                "suggested_entry": None,
+                "suggested_stop_loss": None,
+                "suggested_take_profit": None,
+            }
+            if stats_db and cycle_id:
+                try:
+                    stats_db.save_reasoning(
+                        cycle_id=cycle_id,
+                        pair=pair,
+                        agent_name="market_analyst",
+                        reasoning_json={**llm_response, "llm_skipped": True},
+                        signal_type=llm_response["signal_type"],
+                        confidence=float(llm_response.get("confidence", 0)),
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        latency_ms=0.0,
+                        raw_prompt="deterministic neutral skip",
+                        exchange=exchange,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Failed to save skipped reasoning trace: {e}")
+            result["technical"] = tech_analysis
+            result["llm_analysis"] = llm_response
+            result["llm_skipped"] = True
+            return result
+
         # Step 2: Send to LLM for combined analysis
         user_message = self._build_analysis_prompt(
             pair, current_price, indicators, price_changes, news_headlines,
@@ -235,6 +282,9 @@ class MarketAnalystAgent(BaseAgent):
         news_max = llm_optimizer.get("news_max_chars", 1500)
         if len(news) > news_max:
             news = news[:news_max].rsplit("\n", 1)[0] + "\n[...truncated]"
+        fear_greed = _cap_text(fear_greed, int(llm_optimizer.get("fear_greed_max_chars", 300) or 0))
+        multi_timeframe = _cap_text(multi_timeframe, int(llm_optimizer.get("multi_timeframe_max_chars", 500) or 0))
+        sentiment = _cap_text(sentiment, int(llm_optimizer.get("sentiment_max_chars", 300) or 0))
 
         # Cap strategic context
         ctx_max = llm_optimizer.get("strategic_context_max_chars", 800)
@@ -395,6 +445,64 @@ Provide your analysis as JSON."""
             reasoning=llm_analysis.get("reasoning", ""),
         )
 
+    def _llm_skip_reason(
+        self,
+        *,
+        indicators: dict,
+        price_changes: dict,
+        news: str,
+        fear_greed: str,
+        multi_timeframe: str,
+        sentiment: str,
+        strategy_signals: dict | None,
+        strategic_context: str,
+    ) -> str:
+        if not bool(llm_optimizer.get("analyst_skip_llm_neutral", True)):
+            return ""
+        score, _factors = self._technical_score(indicators)
+        if abs(score) > 0:
+            return ""
+        if self._has_actionable_strategy_signal(strategy_signals):
+            return ""
+        if self._has_urgent_context(news, fear_greed, multi_timeframe, sentiment, strategic_context):
+            return ""
+        change_1h = price_changes.get("1h")
+        change_24h = price_changes.get("24h")
+        if isinstance(change_1h, (int, float)) and abs(change_1h) >= 0.005:
+            return ""
+        if isinstance(change_24h, (int, float)) and abs(change_24h) >= 0.015:
+            return ""
+        vol_ratio = indicators.get("volume_ratio")
+        if isinstance(vol_ratio, (int, float)) and vol_ratio >= 1.2:
+            return ""
+        return "LLM skipped: neutral technicals, quiet price action, and no actionable catalyst or strategy signal."
+
+    @staticmethod
+    def _has_actionable_strategy_signal(strategy_signals: dict | None) -> bool:
+        if not isinstance(strategy_signals, dict):
+            return False
+        for sig in strategy_signals.values():
+            if not isinstance(sig, dict):
+                continue
+            action = str(sig.get("action", "hold") or "hold").lower()
+            try:
+                confidence = float(sig.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if action in {"buy", "sell"} and confidence >= 0.55:
+                return True
+        return False
+
+    @staticmethod
+    def _has_urgent_context(*parts: str) -> bool:
+        text = "\n".join(str(part or "") for part in parts).lower()
+        markers = (
+            "earnings", "ex-div", "dividend", "fomc", "ecb", "catalyst",
+            "warning", "urgent", "breaking", "hack", "lawsuit", "sec ",
+            "etf", "approval", "rejection", "gap risk",
+        )
+        return any(marker in text for marker in markers)
+
     def _technical_only_signal(
         self, pair: str, price: float, indicators: dict
     ) -> dict:
@@ -403,70 +511,7 @@ Provide your analysis as JSON."""
         Uses all available indicators for a comprehensive score:
         RSI, MACD, Bollinger Bands, EMA, Volume, ADX.
         """
-        score = 0
-        factors = []
-
-        # RSI signal (weight: 2)
-        rsi_signal = indicators.get("rsi_signal", "neutral")
-        if rsi_signal == "oversold":
-            score += 2
-            factors.append("RSI oversold")
-        elif rsi_signal == "overbought":
-            score -= 2
-            factors.append("RSI overbought")
-        elif rsi_signal == "bullish":
-            score += 1
-            factors.append("RSI bullish")
-        elif rsi_signal == "bearish":
-            score -= 1
-            factors.append("RSI bearish")
-
-        # MACD signal (weight: 1)
-        macd_signal = indicators.get("macd_signal", "neutral")
-        if "bullish" in macd_signal:
-            score += 1
-            factors.append("MACD bullish")
-        elif "bearish" in macd_signal:
-            score -= 1
-            factors.append("MACD bearish")
-
-        # Bollinger Bands (weight: 1)
-        bb_signal = indicators.get("bb_signal", "neutral")
-        if bb_signal in ("oversold", "lower_band"):
-            score += 1
-            factors.append("BB lower band")
-        elif bb_signal in ("overbought", "upper_band"):
-            score -= 1
-            factors.append("BB upper band")
-
-        # EMA alignment (weight: 1)
-        ema_signal = indicators.get("ema_signal", "neutral")
-        if "bullish" in str(ema_signal):
-            score += 1
-            factors.append("EMA bullish")
-        elif "bearish" in str(ema_signal):
-            score -= 1
-            factors.append("EMA bearish")
-
-        # Volume confirmation (weight: 1)
-        vol_signal = indicators.get("volume_signal", "normal")
-        vol_ratio = indicators.get("volume_ratio", 1.0)
-        if isinstance(vol_ratio, (int, float)) and vol_ratio > 1.5:
-            # High volume confirms the direction
-            if score > 0:
-                score += 1
-                factors.append("High volume confirms bullish")
-            elif score < 0:
-                score -= 1
-                factors.append("High volume confirms bearish")
-
-        # ADX trend strength (weight: modifier)
-        adx = indicators.get("adx")
-        if isinstance(adx, (int, float)) and adx > 25:
-            factors.append(f"Strong trend (ADX={adx:.0f})")
-            # Amplify directional signals in trending markets
-            if abs(score) >= 2:
-                score = int(score * 1.2)
+        score, factors = self._technical_score(indicators)
 
         # Score → signal type mapping
         if score >= 4:
@@ -495,3 +540,71 @@ Provide your analysis as JSON."""
         )
         self.state.add_signal(signal)
         return {"signal": signal.model_dump(mode="json"), "fallback": True}
+
+    @staticmethod
+    def _technical_score(indicators: dict) -> tuple[int, list[str]]:
+        score = 0
+        factors: list[str] = []
+
+        rsi_signal = indicators.get("rsi_signal", "neutral")
+        if rsi_signal == "oversold":
+            score += 2
+            factors.append("RSI oversold")
+        elif rsi_signal == "overbought":
+            score -= 2
+            factors.append("RSI overbought")
+        elif rsi_signal == "bullish":
+            score += 1
+            factors.append("RSI bullish")
+        elif rsi_signal == "bearish":
+            score -= 1
+            factors.append("RSI bearish")
+
+        macd_signal = str(indicators.get("macd_signal", "neutral"))
+        if "bullish" in macd_signal:
+            score += 1
+            factors.append("MACD bullish")
+        elif "bearish" in macd_signal:
+            score -= 1
+            factors.append("MACD bearish")
+
+        bb_signal = indicators.get("bb_signal", "neutral")
+        if bb_signal in ("oversold", "lower_band"):
+            score += 1
+            factors.append("BB lower band")
+        elif bb_signal in ("overbought", "upper_band"):
+            score -= 1
+            factors.append("BB upper band")
+
+        ema_signal = indicators.get("ema_signal", "neutral")
+        if "bullish" in str(ema_signal):
+            score += 1
+            factors.append("EMA bullish")
+        elif "bearish" in str(ema_signal):
+            score -= 1
+            factors.append("EMA bearish")
+
+        vol_ratio = indicators.get("volume_ratio", 1.0)
+        if isinstance(vol_ratio, (int, float)) and vol_ratio > 1.5:
+            if score > 0:
+                score += 1
+                factors.append("High volume confirms bullish")
+            elif score < 0:
+                score -= 1
+                factors.append("High volume confirms bearish")
+
+        adx = indicators.get("adx")
+        if isinstance(adx, (int, float)) and adx > 25:
+            factors.append(f"Strong trend (ADX={adx:.0f})")
+            if abs(score) >= 2:
+                score = int(score * 1.2)
+        return score, factors
+
+
+def _cap_text(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + " [...]"

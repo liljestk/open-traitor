@@ -742,6 +742,7 @@ class TradingState:
                 "is_running": self.is_running,
                 "is_paused": self.is_paused,
                 "circuit_breaker": self.circuit_breaker_triggered,
+                "circuit_breaker_ts": self._circuit_breaker_ts,
             }
 
     def save_state(self, filepath: str = None) -> None:
@@ -768,6 +769,7 @@ class TradingState:
                 "is_running": self.is_running,
                 "is_paused": self.is_paused,
                 "circuit_breaker": self.circuit_breaker_triggered,
+                "circuit_breaker_ts": self._circuit_breaker_ts,
             }
             # HIGH-9: always include ALL open trades even if they fall
             # outside the last-100 window, so warm-restart never loses

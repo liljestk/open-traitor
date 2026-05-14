@@ -5,7 +5,7 @@ Samples a small fraction of recent ``agent_reasoning`` rows, prompts a
 local LLM (Ollama) to score each on actionable / generic / confused, and
 persists scores into ``reasoning_judge``.
 
-Cheap by design: 1% sample, low temperature, ≤200 tokens. Skipped if the
+Cheap by design: small sample, low temperature, capped input, <=200 tokens. Skipped if the
 LLM is unavailable.
 """
 
@@ -33,9 +33,11 @@ _JUDGE_SYSTEM = (
 
 
 def _fetch_sample(db, exchange: str, *, lookback_hours: int, sample_pct: float) -> list[dict]:
+    if sample_pct <= 0:
+        return []
     since = datetime.now(timezone.utc) - timedelta(hours=int(lookback_hours))
     sql = (
-        "SELECT cycle_id, agent_name, pair, reasoning_json, ts "
+        "SELECT cycle_id, agent_name, pair, signal_type, confidence, reasoning_json, ts "
         "FROM agent_reasoning "
         "WHERE exchange = %s AND ts >= %s "
         "AND reasoning_json IS NOT NULL "
@@ -49,15 +51,41 @@ def _fetch_sample(db, exchange: str, *, lookback_hours: int, sample_pct: float) 
         return []
     rows = [dict(r) for r in rows]
     rng = random.Random(42)
-    return [r for r in rows if rng.random() < float(sample_pct)]
+    sampled = [r for r in rows if rng.random() < float(sample_pct)]
+    anomalies = [r for r in rows if _reasoning_is_anomaly(r)]
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for row in anomalies + sampled:
+        key = (row.get("cycle_id"), row.get("agent_name"), row.get("pair"), row.get("ts"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
 
 
-async def _judge_one(llm, row: dict) -> Optional[dict]:
+def _reasoning_is_anomaly(row: dict) -> bool:
+    blob = str(row.get("reasoning_json") or "")
+    if any(marker in blob.lower() for marker in ("error", "fallback", "schema", "invalid")):
+        return True
+    try:
+        confidence = float(row.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    signal = str(row.get("signal_type") or "").lower()
+    if signal in {"strong_buy", "strong_sell"} and confidence < 0.65:
+        return True
+    if signal == "neutral" and confidence > 0.80:
+        return True
+    return False
+
+
+async def _judge_one(llm, row: dict, *, reasoning_max_chars: int = 1200) -> Optional[dict]:
     blob = row.get("reasoning_json") or "{}"
     user_msg = (
         f"Agent: {row.get('agent_name')}\n"
         f"Pair: {row.get('pair') or 'N/A'}\n"
-        f"Reasoning JSON (truncated):\n{blob[:2500]}"
+        f"Reasoning JSON (truncated):\n{blob[:reasoning_max_chars]}"
     )
     try:
         resp = await llm.chat_json(
@@ -96,6 +124,7 @@ async def sample_and_judge(
     lookback_hours: int = 24,
     sample_pct: float = 0.01,
     max_judgments: int = 50,
+    reasoning_max_chars: int = 1200,
 ) -> dict:
     """Sample reasoning rows and score with the LLM."""
     if llm is None:
@@ -109,7 +138,7 @@ async def sample_and_judge(
 
     async def _bounded(row):
         async with sem:
-            j = await _judge_one(llm, row)
+            j = await _judge_one(llm, row, reasoning_max_chars=reasoning_max_chars)
             if j:
                 judgments.append(j)
 

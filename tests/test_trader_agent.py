@@ -36,6 +36,7 @@ def _make_engine_kit():
 
 
 def _ctx(action="buy", confidence=0.8):
+    signal_type = "neutral" if action == "hold" else action
     return {
         "pair": "BTC-USD",
         "exchange": "coinbase",
@@ -44,8 +45,8 @@ def _ctx(action="buy", confidence=0.8):
         "portfolio_value": 10_000.0,
         "cash_balance": 10_000.0,
         "open_positions": {},
-        "market_signal": {"action": action, "confidence": confidence,
-                          "market_regime": "trending"},
+        "market_signal": {"action": action, "signal_type": signal_type,
+                  "confidence": confidence, "market_regime": "trending"},
         "strategy_signals": {
             "ema_crossover": {"action": action, "confidence": confidence,
                               "market_regime": "trending"},
@@ -111,3 +112,71 @@ def test_trader_proposal_routed_through_engine_records_verdict():
     agent = TraderAgent(llm, state, config, decision_engine=eng)
     result = _run(agent.execute(_ctx(action="buy", confidence=0.85)))
     assert "decision_engine_verdict" in result
+
+
+def test_trader_persists_llm_token_metrics():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+
+    async def _ok(*a, **kw):
+        span = kw.get("span")
+        span.prompt_tokens = 123
+        span.completion_tokens = 45
+        span.latency_ms = 67.8
+        return {
+            "action": "buy",
+            "confidence": 0.85,
+            "strategy": "ema_crossover",
+            "reasoning": "test",
+            "stop_loss_price": 48000.0,
+            "take_profit_price": 53000.0,
+            "quote_amount": 500.0,
+        }
+
+    class _Span:
+        trace_id = "trace-1"
+        span_id = "span-1"
+        prompt_tokens = 0
+        completion_tokens = 0
+        latency_ms = 0.0
+
+    class _Trace:
+        def start_span(self, *args, **kwargs):
+            return _Span()
+
+    llm.chat_json = _ok
+    state = MagicMock()
+    state.save_state = MagicMock()
+    stats_db = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.85)
+    ctx.update({"cycle_id": "cycle-1", "stats_db": stats_db, "trace_ctx": _Trace()})
+
+    _run(agent.execute(ctx))
+
+    kwargs = stats_db.save_reasoning.call_args.kwargs
+    assert kwargs["prompt_tokens"] == 123
+    assert kwargs["completion_tokens"] == 45
+    assert kwargs["latency_ms"] == 67.8
+    assert kwargs["langfuse_trace_id"] == "trace-1"
+    assert kwargs["langfuse_span_id"] == "span-1"
+    assert kwargs["reasoning_json"]["llm_attempts"] == 1
+
+
+def test_trader_skips_llm_when_cashless_without_position():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+    llm.chat_json = MagicMock()
+    state = MagicMock()
+    state.save_state = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.85)
+    ctx["cash_balance"] = 0.0
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "hold"
+    assert "no available cash" in result["reason"]
+    llm.chat_json.assert_not_called()

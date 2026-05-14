@@ -31,6 +31,7 @@ from src.agents.base_agent import BaseAgent
 from src.core.decision_engine import DecisionEngine
 from src.core.trading_toolkit import ToolkitContext, TradingToolkit
 from src.models.llm_responses import validate_strategist
+from src.utils import llm_optimizer
 from src.utils.logger import get_logger
 
 logger = get_logger("agent.trader")
@@ -136,8 +137,15 @@ class TraderAgent(BaseAgent):
                 f"signal {signal_type}/{confidence:.2f} below threshold and ensemble inactive",
             )
 
+        hard_skip_reason = self._hard_veto_skip_reason(ctx, tool_payload)
+        if hard_skip_reason:
+            self.logger.info(f"📋 Trader: HOLD {ctx.pair} (pre-veto: {hard_skip_reason})")
+            return self._hold_result(ctx.pair, hard_skip_reason)
+
         # First LLM pass.
         proposal = await self._llm_propose(tool_payload, context)
+        proposal_metrics = _pop_llm_metrics(proposal)
+        llm_metrics = [proposal_metrics] if proposal_metrics else []
         verdict = toolkit.propose_trade(
             pair=proposal.get("pair", ctx.pair),
             action=proposal.get("action", "hold"),
@@ -151,7 +159,14 @@ class TraderAgent(BaseAgent):
         )
 
         # One bounded retry on veto, with the rejection reason fed back.
-        if not verdict["approved"] and verdict.get("veto") and self.max_retries > 0:
+        retry_enabled = bool(llm_optimizer.get("trader_retry_on_veto", True))
+        if (
+            retry_enabled
+            and not verdict["approved"]
+            and verdict.get("veto")
+            and self.max_retries > 0
+            and _veto_is_adjustable(str(verdict.get("veto") or ""))
+        ):
             retry_payload = dict(tool_payload)
             retry_payload["last_proposal_rejected"] = {
                 "veto": verdict["veto"],
@@ -163,6 +178,9 @@ class TraderAgent(BaseAgent):
                 ),
             }
             proposal2 = await self._llm_propose(retry_payload, context)
+            proposal2_metrics = _pop_llm_metrics(proposal2)
+            if proposal2_metrics:
+                llm_metrics.append(proposal2_metrics)
             if proposal2.get("action") != proposal.get("action") or _optional_float(
                 proposal2.get("quote_amount")
             ) != _optional_float(proposal.get("quote_amount")):
@@ -184,13 +202,25 @@ class TraderAgent(BaseAgent):
         stats_db = context.get("stats_db")
         if cycle_id and stats_db:
             try:
+                token_metrics = _sum_llm_metrics(llm_metrics)
                 stats_db.save_reasoning(
                     cycle_id=cycle_id,
                     pair=ctx.pair,
                     agent_name="trader",
-                    reasoning_json={**proposal, "verdict": verdict},
+                    reasoning_json={
+                        **proposal,
+                        "verdict": verdict,
+                        "llm_attempts": len(llm_metrics),
+                        "llm_metrics": llm_metrics,
+                    },
                     signal_type=signal_type,
                     confidence=float(proposal.get("confidence", 0.0) or 0.0),
+                    langfuse_trace_id=token_metrics.get("langfuse_trace_id") or None,
+                    langfuse_span_id=token_metrics.get("langfuse_span_id") or None,
+                    prompt_tokens=int(token_metrics.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(token_metrics.get("completion_tokens", 0) or 0),
+                    latency_ms=float(token_metrics.get("latency_ms", 0.0) or 0.0),
+                    raw_prompt=str(token_metrics.get("raw_prompt", ""))[:1000],
                     exchange=ctx.exchange,
                 )
             except Exception as exc:
@@ -246,8 +276,12 @@ class TraderAgent(BaseAgent):
         """Run the LLM proposal call. Falls back to a deterministic synthesis."""
         trace_ctx = context.get("trace_ctx")
         span = None
+        payload_text = json.dumps(tool_payload, default=str, separators=(",", ":"))
+        payload_cap = int(llm_optimizer.get("trader_tool_payload_max_chars", 2400) or 2400)
+        if len(payload_text) > payload_cap:
+            payload_text = payload_text[:payload_cap].rstrip() + " [...]"
         system_prompt = TRADER_SYSTEM_PROMPT.format(
-            tool_payload=json.dumps(tool_payload, default=str, indent=2)[:6000]
+            tool_payload=payload_text
         )
         user_msg = (
             f"Decide an action for {tool_payload.get('market', {}).get('pair', '?')}. "
@@ -269,20 +303,35 @@ class TraderAgent(BaseAgent):
             )
         except Exception as exc:
             self.logger.warning(f"trader LLM call failed: {exc} — falling back")
-            return self._deterministic_fallback(tool_payload)
+            fallback = self._deterministic_fallback(tool_payload)
+            fallback["_llm_metrics"] = _build_llm_metrics(
+                span, system_prompt, user_msg, {"error": str(exc)}, payload_text
+            )
+            return fallback
 
         if not isinstance(llm_response, dict) or "error" in llm_response:
             self.logger.warning(f"trader LLM error: {llm_response}")
-            return self._deterministic_fallback(tool_payload)
+            fallback = self._deterministic_fallback(tool_payload)
+            fallback["_llm_metrics"] = _build_llm_metrics(
+                span, system_prompt, user_msg, llm_response, payload_text
+            )
+            return fallback
 
         sanitized, schema_err = validate_strategist(llm_response)
         if schema_err:
             self.logger.warning(f"trader LLM schema invalid: {schema_err}")
-            return self._deterministic_fallback(tool_payload)
+            fallback = self._deterministic_fallback(tool_payload)
+            fallback["_llm_metrics"] = _build_llm_metrics(
+                span, system_prompt, user_msg, llm_response, payload_text
+            )
+            return fallback
         # `extra="ignore"` strips `strategy` — preserve it from the raw response.
         if "strategy" in llm_response and "strategy" not in sanitized:
             sanitized["strategy"] = str(llm_response.get("strategy") or "llm_strategist")
         sanitized.setdefault("strategy", "llm_strategist")
+        sanitized["_llm_metrics"] = _build_llm_metrics(
+            span, system_prompt, user_msg, llm_response, payload_text
+        )
         return sanitized
 
     @staticmethod
@@ -400,15 +449,40 @@ class TraderAgent(BaseAgent):
         }
 
     @staticmethod
+    def _hard_veto_skip_reason(ctx: ToolkitContext, tool_payload: dict) -> str:
+        if not bool(llm_optimizer.get("trader_hard_veto_skip_enabled", True)):
+            return ""
+        signal_type = str(ctx.market_signal.get("signal_type", "neutral") or "neutral").lower()
+        confidence = float(ctx.market_signal.get("confidence", 0.0) or 0.0)
+        held_qty = _optional_float(ctx.open_positions.get(ctx.pair)) if ctx.open_positions else None
+        has_position = held_qty is not None and held_qty != 0.0
+        actionable_signal = signal_type in {"buy", "strong_buy", "sell", "strong_sell"} and confidence >= 0.65
+        pattern = tool_payload.get("pattern") or {}
+        pattern_direction = str(pattern.get("direction", "neutral") or "neutral").lower()
+        pattern_actionable = bool(pattern.get("available")) and pattern_direction in {"bullish", "bearish"}
+        ensemble = (tool_payload.get("strategy_signals") or {}).get("ensemble")
+        if ctx.cash_balance <= 0 and not has_position and signal_type not in {"sell", "strong_sell"}:
+            return "no available cash and no held position"
+        allocator = tool_payload.get("allocator") or {}
+        weights = allocator.get("weights") if isinstance(allocator, dict) else None
+        if isinstance(weights, dict) and weights:
+            max_weight = max((_optional_float(v) or 0.0) for v in weights.values())
+            if max_weight <= 0:
+                return "allocator has no positive strategy budget"
+        if not actionable_signal and not pattern_actionable and not _ensemble_actionable(ensemble):
+            return f"no actionable signal after deterministic checks ({signal_type}/{confidence:.2f})"
+        return ""
+
+    @staticmethod
     def _snapshot_for_prompt(toolkit: TradingToolkit) -> dict:
-        return {
+        return _strip_empty_payload({
             "market": toolkit.get_market_snapshot(),
             "strategy_signals": toolkit.get_strategy_signals(),
             "pattern": toolkit.get_pattern_signal(),
             "edges": toolkit.get_edge_stats(),
             "allocator": toolkit.get_allocator_weights(),
             "portfolio": toolkit.get_portfolio_state(),
-        }
+        })
 
 
 # --------------------------------------------------------------------- #
@@ -429,7 +503,83 @@ def _ensemble_actionable(ensemble: Optional[dict]) -> bool:
         return False
     if (ensemble.get("action") or "hold").lower() == "hold":
         return False
-    return float(ensemble.get("confidence", 0.0) or 0.0) >= 0.55
+    try:
+        return float(ensemble.get("confidence", 0.0) or 0.0) >= 0.55
+    except (TypeError, ValueError):
+        return False
+
+
+def _estimate_tokens(*parts: Any) -> int:
+    chars = sum(len(str(part or "")) for part in parts)
+    return max(0, int(chars / 4))
+
+
+def _build_llm_metrics(
+    span: Any,
+    system_prompt: str,
+    user_msg: str,
+    output: Any,
+    payload_text: str,
+) -> dict:
+    prompt_tokens = int(getattr(span, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(span, "completion_tokens", 0) or 0)
+    if prompt_tokens <= 0:
+        prompt_tokens = _estimate_tokens(system_prompt, user_msg)
+    if completion_tokens <= 0 and output is not None:
+        completion_tokens = _estimate_tokens(json.dumps(output, default=str))
+    return {
+        "langfuse_trace_id": getattr(span, "trace_id", "") if span else "",
+        "langfuse_span_id": getattr(span, "span_id", "") if span else "",
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "latency_ms": float(getattr(span, "latency_ms", 0.0) or 0.0),
+        "raw_prompt": json.dumps({
+            "system_chars": len(system_prompt),
+            "payload_chars": len(payload_text),
+            "user": user_msg,
+            "payload_preview": payload_text[:500],
+        }, default=str),
+    }
+
+
+def _pop_llm_metrics(proposal: dict) -> dict:
+    if not isinstance(proposal, dict):
+        return {}
+    metrics = proposal.pop("_llm_metrics", {})
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _sum_llm_metrics(metrics: list[dict]) -> dict:
+    if not metrics:
+        return {}
+    return {
+        "langfuse_trace_id": next((m.get("langfuse_trace_id") for m in metrics if m.get("langfuse_trace_id")), ""),
+        "langfuse_span_id": next((m.get("langfuse_span_id") for m in reversed(metrics) if m.get("langfuse_span_id")), ""),
+        "prompt_tokens": sum(int(m.get("prompt_tokens", 0) or 0) for m in metrics),
+        "completion_tokens": sum(int(m.get("completion_tokens", 0) or 0) for m in metrics),
+        "latency_ms": sum(float(m.get("latency_ms", 0.0) or 0.0) for m in metrics),
+        "raw_prompt": metrics[-1].get("raw_prompt", ""),
+    }
+
+
+def _veto_is_adjustable(veto: str) -> bool:
+    return veto in {"absolute_rules"}
+
+
+def _strip_empty_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value.get("available") is False:
+            return {}
+        out = {}
+        for key, item in value.items():
+            cleaned = _strip_empty_payload(item)
+            if cleaned in ({}, [], "", None):
+                continue
+            out[key] = cleaned
+        return out
+    if isinstance(value, list):
+        return [item for item in (_strip_empty_payload(item) for item in value) if item not in ({}, [], "", None)]
+    return value
 
 
 __all__ = ["TraderAgent"]

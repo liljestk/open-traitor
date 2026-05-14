@@ -158,6 +158,34 @@ class TestDashboardCommandsRedisKeys:
         assert key == "ibkr:trailing_stops:state"
 
 
+class TestStateManagerRedisKeys:
+    """Runtime Redis state keys must be profile-scoped."""
+
+    def test_state_key_uses_exchange_when_env_profile_missing(self):
+        from src.core.managers.state_manager import StateManager
+
+        orch = SimpleNamespace(config={"trading": {"exchange": "ibkr"}})
+        with patch.dict("os.environ", {"AUTO_TRAITOR_PROFILE": ""}, clear=False):
+            mgr = StateManager(orch)
+            assert mgr._get_redis_key("agent:state") == "ibkr:agent:state"
+
+    def test_state_key_env_profile_overrides_config(self):
+        from src.core.managers.state_manager import StateManager
+
+        orch = SimpleNamespace(config={"trading": {"exchange": "coinbase"}})
+        with patch.dict("os.environ", {"AUTO_TRAITOR_PROFILE": "ibkr"}, clear=False):
+            mgr = StateManager(orch)
+            assert mgr._get_redis_key("agent:state") == "ibkr:agent:state"
+
+    def test_state_key_normalizes_frontend_profile_alias(self):
+        from src.core.managers.state_manager import StateManager
+
+        orch = SimpleNamespace(config={"trading": {"exchange": "coinbase"}})
+        with patch.dict("os.environ", {"AUTO_TRAITOR_PROFILE": "crypto"}, clear=False):
+            mgr = StateManager(orch)
+            assert mgr._get_redis_key("agent:state") == "coinbase:agent:state"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # News pipeline — profile-scoped Redis key reads
 # ═══════════════════════════════════════════════════════════════════════════
@@ -365,6 +393,35 @@ class TestSimulatedMixinExchangeFilter:
 
         sql = conn.execute.call_args[0][0]
         assert "exchange = %s" not in sql
+
+
+class TestEventsMixinSystemEvents:
+    """System events without a pair must still appear in profile logs."""
+
+    def _make_mixin(self):
+        from src.utils.stats_trades import TradesMixin
+
+        mixin = TradesMixin.__new__(TradesMixin)
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.execute.return_value = mock_cursor
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mixin._get_conn = MagicMock(return_value=mock_conn)
+        return mixin, mock_conn
+
+    def test_get_events_keeps_pairless_events_with_quote_filter(self):
+        mixin, conn = self._make_mixin()
+        mixin.get_events(quote_currency=["EUR"], exchange="coinbase")
+
+        sql = conn.execute.call_args[0][0]
+        params = conn.execute.call_args[0][1]
+        assert "pair IS NULL OR" in sql
+        assert "UPPER(pair) LIKE %s" in sql
+        assert "exchange = %s" in sql
+        assert "%-EUR" in params
+        assert "coinbase" in params
 
 
 # ═══════════════════════════════════════════════════════════════════════════

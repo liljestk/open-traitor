@@ -206,6 +206,33 @@ def _execute(conn, sql, params=None):
     return cur
 
 
+def _compact_reasoning_loss_row(row: dict) -> dict:
+    """Keep only the fields the planning prompt uses from reasoning rows."""
+    data = dict(row)
+    factors: list[str] = []
+    reasoning = ""
+    try:
+        raw_reasoning = data.get("reasoning_json") or {}
+        parsed = raw_reasoning if isinstance(raw_reasoning, dict) else json.loads(raw_reasoning or "{}")
+        if isinstance(parsed, dict):
+            raw_factors = parsed.get("key_factors") or []
+            if isinstance(raw_factors, list):
+                factors = [str(f)[:160] for f in raw_factors[:2]]
+            reasoning = str(parsed.get("reasoning") or "")[:240]
+    except Exception:
+        pass
+    return {
+        "ts": data.get("ts"),
+        "pair": data.get("pair"),
+        "signal_type": data.get("signal_type"),
+        "confidence": data.get("confidence"),
+        "action": data.get("action"),
+        "pnl": data.get("pnl"),
+        "key_factors": factors,
+        "reasoning_excerpt": reasoning,
+    }
+
+
 # --- Activities ---------------------------------------------------------------
 
 @activity.defn
@@ -408,7 +435,7 @@ async def fetch_portfolio_history(days: int = 7, profile: str = "") -> dict:
         "trade_stats": dict(trade_stats) if trade_stats else {},
         "pair_breakdown": [dict(r) for r in pair_breakdown],
         "portfolio_range": dict(portfolio_range) if portfolio_range else {},
-        "reasoning_sample": [dict(r) for r in reasoning_sample],
+        "reasoning_sample": [_compact_reasoning_loss_row(dict(r)) for r in reasoning_sample],
         "currency_symbol": currency_symbol,
         "native_currency": native_currency,
     }
@@ -579,15 +606,18 @@ Respond ONLY with JSON:
     loss_reasoning = []
     for r in reasoning_sample[:5]:
         if r.get("pnl") and r["pnl"] < 0:
-            try:
-                rj = json.loads(r.get("reasoning_json") or "{}")
-                factors = rj.get("key_factors", [])[:2]
-                loss_reasoning.append(
-                    f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r.get('signal_type', '?')}"
-                    f" conf={(r.get('confidence') or 0):.0%} factors={factors}"
-                )
-            except Exception:
-                pass
+            factors = r.get("key_factors")
+            if factors is None and r.get("reasoning_json"):
+                try:
+                    raw_reasoning = r.get("reasoning_json") or {}
+                    rj = raw_reasoning if isinstance(raw_reasoning, dict) else json.loads(raw_reasoning or "{}")
+                    factors = rj.get("key_factors", [])[:2]
+                except Exception:
+                    factors = []
+            loss_reasoning.append(
+                f"  {r['pair']} LOSS {sym}{r['pnl']:.2f}: sig={r.get('signal_type', '?')}"
+                f" conf={(r.get('confidence') or 0):.0%} factors={(factors or [])[:2]}"
+            )
 
     loss_text = "\n".join(loss_reasoning) or "  No recent losses with reasoning."
 
@@ -770,6 +800,7 @@ Respond ONLY with JSON:
             user_message=user_message,
             span=span,
             agent_name=f"planning_{horizon}",
+            max_tokens=1400,
         )
         logger.info(
             f"Planning LLM response for {horizon} ({domain}): "
@@ -2030,15 +2061,28 @@ async def run_decision_drift(profile: str = "") -> dict:
 
 @activity.defn
 async def run_reasoning_judge(profile: str = "") -> dict:
-    """Phase 6: LLM-judge a 1% sample of recent reasoning outputs."""
+    """Phase 6: LLM-judge a capped sample of recent reasoning outputs."""
     from src.utils.stats import StatsDB
     from src.utils.llm_judge import sample_and_judge
+    from src.utils import llm_optimizer
     exch = _smart_exchange(profile)
     db = StatsDB()
     try:
         llm = _get_llm_client()
-        n = await sample_and_judge(db, llm, exchange=exch, lookback_hours=24, sample_pct=0.01)
-        return {"profile": profile, "exchange": exch, "judged": int(n)}
+        result = await sample_and_judge(
+            db,
+            llm,
+            exchange=exch,
+            lookback_hours=24,
+            sample_pct=float(llm_optimizer.get("reasoning_judge_sample_pct", 0.005) or 0.0),
+            max_judgments=int(llm_optimizer.get("reasoning_judge_max_judgments", 15) or 0),
+            reasoning_max_chars=int(llm_optimizer.get("reasoning_judge_reasoning_max_chars", 1200) or 1200),
+        )
+        return {
+            "profile": profile,
+            "exchange": exch,
+            **(result if isinstance(result, dict) else {"judged": int(result)}),
+        }
     except Exception as e:
         logger.warning(f"run_reasoning_judge failed: {e}")
         return {"profile": profile, "exchange": exch, "error": str(e)}
