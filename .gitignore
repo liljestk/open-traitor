@@ -45,6 +45,7 @@ dashboard/frontend/dist/
 dashboard/frontend/.vite/
 dashboard/frontend/.cache/
 dashboard/frontend/.eslintcache
+dashboard/frontend/config/
 *.tsbuildinfo
 
 # IDE / Editor
