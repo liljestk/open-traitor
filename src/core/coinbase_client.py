@@ -777,6 +777,57 @@ class CoinbaseClient(
 
         return {"success": False, "error": "No client available"}
 
+    def limit_order_ioc_sell(
+        self,
+        product_id: str,
+        base_size: str,
+        limit_price: str,
+    ) -> dict:
+        """Place an immediate-or-cancel limit sell order for limit-only books."""
+        try:
+            base_size = self._format_base_size(product_id, float(base_size))
+            limit_price = self._format_limit_price(product_id, float(limit_price), "SELL")
+        except (TypeError, ValueError):
+            pass
+        if self.paper_mode:
+            return self._paper_limit_sell(product_id, base_size, limit_price)
+
+        if self._rest_client:
+            try:
+                order = self._throttled_request(
+                    "limit_order_ioc_sell",
+                    client_order_id=str(uuid.uuid4()),
+                    product_id=product_id,
+                    base_size=base_size,
+                    limit_price=limit_price,
+                )
+                result = (
+                    order.to_dict()
+                    if hasattr(order, "to_dict")
+                    else dict(order)
+                )
+                if result.get("success", True):
+                    logger.info(
+                        f"✅ IOC Limit SELL order placed: {product_id} @ {limit_price} | "
+                        f"order_id={result.get('order_id', '?')}"
+                    )
+                else:
+                    _err = _extract_cb_error(result)
+                    logger.error(
+                        f"❌ IOC Limit SELL rejected by Coinbase: {product_id} @ {limit_price} | {_err}"
+                    )
+                    result.setdefault("error", _err)
+                logger.debug(f"IOC Limit SELL detail: {result}")
+                return result
+            except Exception as e:
+                logger.error(f"❌ Failed to place IOC limit sell order: {e}")
+                return {
+                    "success": False,
+                    "error": f"IOC limit sell exception: {e}",
+                }
+
+        return {"success": False, "error": "No client available"}
+
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order."""
         if self.paper_mode:

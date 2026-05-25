@@ -161,6 +161,45 @@ class ExecutorAgent(BaseAgent):
         # Normal buy → limit order to save on fees
         return action == "buy"
 
+    @staticmethod
+    def _is_limit_only_rejection(result: dict) -> bool:
+        text = " ".join(
+            str(result.get(key, ""))
+            for key in ("error", "error_response", "message", "failure_reason")
+        ).lower()
+        return "limit only mode" in text and "limit order" in text
+
+    def _place_limit_only_sell(self, pair: str, quantity: float, price: float, reason: str) -> dict:
+        limit_price = price * (1 - max(float(self.limit_price_offset_pct or 0.0), 0.001))
+        self.logger.warning(
+            f"⚠️ {pair}: market sell rejected in limit-only mode; "
+            f"placing IOC limit sell @ {limit_price:,.8f} ({reason})"
+        )
+        limit_ioc_sell = getattr(self.exchange, "limit_order_ioc_sell", None)
+        if callable(limit_ioc_sell):
+            return limit_ioc_sell(
+                pair,
+                base_size=str(quantity),
+                limit_price=str(limit_price),
+            )
+        return self.exchange.place_limit_order(
+            pair=pair,
+            side="SELL",
+            size=quantity,
+            price=limit_price,
+        )
+
+    def _place_sell_order(self, pair: str, quantity: float, price: float, reason: str) -> dict:
+        result = self.exchange.place_market_order(
+            pair=pair,
+            side="SELL",
+            amount=quantity,
+            amount_is_base=True,
+        )
+        if self._is_limit_only_rejection(result):
+            return self._place_limit_only_sell(pair, quantity, price, reason)
+        return result
+
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Execute an approved trade.
@@ -356,6 +395,13 @@ class ExecutorAgent(BaseAgent):
             take_profit=take_profit,
             confidence=confidence,
             reasoning=reasoning,
+            strategy_posture=trade_info.get("strategy_posture"),
+            strategy_horizon_days=trade_info.get("strategy_horizon_days"),
+            exit_policy=trade_info.get("exit_policy"),
+            min_hold_until=trade_info.get("min_hold_until"),
+            expected_gross_return_pct=trade_info.get("expected_gross_return_pct"),
+            expected_net_return_pct=trade_info.get("expected_net_return_pct"),
+            strategy_thesis=trade_info.get("strategy_thesis", ""),
         )
 
         # Execute on Coinbase
@@ -384,12 +430,7 @@ class ExecutorAgent(BaseAgent):
                     amount_is_base=False,
                 )
             else:
-                result = self.exchange.place_market_order(
-                    pair=pair,
-                    side="SELL",
-                    amount=quantity,
-                    amount_is_base=True,
-                )
+                result = self._place_sell_order(pair, quantity, price, reasoning or "sell")
 
             if result.get("success", True) and "error" not in result:
                 order = result.get("order", result)
@@ -668,12 +709,7 @@ class ExecutorAgent(BaseAgent):
                 "pnl": 0, "success": False,
             }
 
-        result = self.exchange.place_market_order(
-            pair=trade.pair,
-            side="SELL",
-            amount=quantity,
-            amount_is_base=True,
-        )
+        result = self._place_sell_order(trade.pair, quantity, price, reason)
 
         success = result.get("success", True) and "error" not in result
         close_price = price
@@ -840,12 +876,7 @@ class ExecutorAgent(BaseAgent):
                 "success": True,  # position is gone; nothing left to sell
             }
 
-        result = self.exchange.place_market_order(
-            pair=trade.pair,
-            side="SELL",
-            amount=qty,
-            amount_is_base=True,
-        )
+        result = self._place_sell_order(trade.pair, qty, price, reason)
 
         success = result.get("success", True) and "error" not in result
         close_price = price

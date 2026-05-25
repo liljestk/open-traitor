@@ -50,6 +50,13 @@ class Trade(BaseModel):
     pnl: Optional[float] = None
     fees: float = 0.0
     closed_at: Optional[datetime] = None
+    strategy_posture: Optional[str] = None
+    strategy_horizon_days: Optional[int] = None
+    exit_policy: Optional[str] = None
+    min_hold_until: Optional[datetime] = None
+    expected_gross_return_pct: Optional[float] = None
+    expected_net_return_pct: Optional[float] = None
+    strategy_thesis: str = ""
 
     @property
     def is_open(self) -> bool:

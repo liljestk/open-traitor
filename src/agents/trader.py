@@ -53,6 +53,7 @@ DECISION RULES:
 - Always set a stop-loss for buys.
 - For sells, use the exact quantity from portfolio.open_positions for the pair.
 - Honour fee context: do not propose a trade that cannot exceed the breakeven fee with reasonable probability.
+- Honour strategy governance: new buys require posture=trade, or posture=watch with very high confidence and a clear fee-clearing target.
 - Sizes must be positive and within ``allocator_budget_cap``.
 
 Respond with EXACTLY this JSON shape (no prose, no markdown fences):
@@ -110,6 +111,7 @@ class TraderAgent(BaseAgent):
             kelly_stats=dict(context.get("kelly_stats") or {}),
             recent_outcomes=str(context.get("recent_outcomes") or ""),
             strategic_context=str(context.get("strategic_context") or ""),
+            strategy_policy=dict(context.get("strategy_policy") or {}),
         )
         toolkit = TradingToolkit(
             ctx=ctx,
@@ -129,19 +131,37 @@ class TraderAgent(BaseAgent):
             and confidence < self.min_confidence
             and not _ensemble_actionable(ctx.strategy_signals.get("_ensemble"))
         ):
+            reason = (
+                f"signal {signal_type}/{confidence:.2f} below threshold and ensemble inactive"
+            )
             self.logger.info(
                 f"📋 Trader: HOLD {ctx.pair} (pre-screen: "
                 f"signal={signal_type}/{confidence:.2f}, ensemble inactive)"
             )
-            return self._hold_result(
-                ctx.pair,
-                f"signal {signal_type}/{confidence:.2f} below threshold and ensemble inactive",
+            result = self._hold_result(ctx.pair, reason)
+            self._persist_reasoning(
+                context=context,
+                ctx=ctx,
+                result=result,
+                verdict=result["decision_engine_verdict"],
+                llm_metrics=[],
+                signal_type=signal_type,
             )
+            return result
 
         hard_skip_reason = self._hard_veto_skip_reason(ctx, tool_payload)
         if hard_skip_reason:
             self.logger.info(f"📋 Trader: HOLD {ctx.pair} (pre-veto: {hard_skip_reason})")
-            return self._hold_result(ctx.pair, hard_skip_reason)
+            result = self._hold_result(ctx.pair, hard_skip_reason)
+            self._persist_reasoning(
+                context=context,
+                ctx=ctx,
+                result=result,
+                verdict=result["decision_engine_verdict"],
+                llm_metrics=[],
+                signal_type=signal_type,
+            )
+            return result
 
         # First LLM pass.
         proposal = await self._llm_propose(tool_payload, context)
@@ -198,35 +218,6 @@ class TraderAgent(BaseAgent):
                 )
                 proposal = proposal2
 
-        # Persist reasoning trace if a stats_db is available.
-        cycle_id = context.get("cycle_id")
-        stats_db = context.get("stats_db")
-        if cycle_id and stats_db:
-            try:
-                token_metrics = _sum_llm_metrics(llm_metrics)
-                stats_db.save_reasoning(
-                    cycle_id=cycle_id,
-                    pair=ctx.pair,
-                    agent_name="trader",
-                    reasoning_json={
-                        **proposal,
-                        "verdict": verdict,
-                        "llm_attempts": len(llm_metrics),
-                        "llm_metrics": llm_metrics,
-                    },
-                    signal_type=signal_type,
-                    confidence=float(proposal.get("confidence", 0.0) or 0.0),
-                    langfuse_trace_id=token_metrics.get("langfuse_trace_id") or None,
-                    langfuse_span_id=token_metrics.get("langfuse_span_id") or None,
-                    prompt_tokens=int(token_metrics.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(token_metrics.get("completion_tokens", 0) or 0),
-                    latency_ms=float(token_metrics.get("latency_ms", 0.0) or 0.0),
-                    raw_prompt=str(token_metrics.get("raw_prompt", ""))[:1000],
-                    exchange=ctx.exchange,
-                )
-            except Exception as exc:
-                self.logger.debug(f"trader reasoning persist failed: {exc}")
-
         # Pipeline expects a strategist-shaped dict.
         result = dict(verdict["proposal"])
         # Keep backward-compatible fields the pipeline reads.
@@ -259,12 +250,17 @@ class TraderAgent(BaseAgent):
                         f"allocator_cap {cap:.2f} for {ctx.pair}"
                     )
         elif verdict["approved"] and result.get("action") == "sell":
-            if (
+            result_pair = str(result.get("pair") or ctx.pair)
+            held_quantity = _position_quantity(ctx.open_positions, result_pair)
+            if held_quantity is None or held_quantity <= 0:
+                reason = f"Sell signal for {result_pair} but no held position is available to size."
+                result["action"] = "hold"
+                result["reason"] = reason
+                result["reasoning"] = _append_reason(result.get("reasoning"), reason)
+            elif (
                 (quote_amount_value is None or quote_amount_value <= 0)
                 and (quantity_value is None or quantity_value <= 0)
             ):
-                result_pair = str(result.get("pair") or ctx.pair)
-                held_quantity = _position_quantity(ctx.open_positions, result_pair)
                 price = _optional_float(result.get("current_price")) or ctx.current_price
                 if held_quantity is not None and held_quantity > 0 and price > 0:
                     result["quantity"] = held_quantity
@@ -284,6 +280,14 @@ class TraderAgent(BaseAgent):
             f"📋 Trader: {result['action'].upper()} {ctx.pair} "
             f"conf={result.get('confidence', 0):.2f} "
             f"approved={verdict['approved']} veto={verdict.get('veto')}"
+        )
+        self._persist_reasoning(
+            context=context,
+            ctx=ctx,
+            result=result,
+            verdict=verdict,
+            llm_metrics=llm_metrics,
+            signal_type=signal_type,
         )
         return result
 
@@ -368,6 +372,7 @@ class TraderAgent(BaseAgent):
         ensemble = (tool_payload.get("strategy_signals") or {}).get("ensemble") or {}
         pattern = tool_payload.get("pattern") or {}
         market = tool_payload.get("market") or {}
+        portfolio = tool_payload.get("portfolio") or {}
         pair = market.get("pair", "")
 
         ens_action = (ensemble.get("action") or "hold").lower()
@@ -379,6 +384,8 @@ class TraderAgent(BaseAgent):
         current_price = _optional_float(market.get("current_price"))
         stop_loss = _optional_float(market.get("suggested_stop_loss"))
         take_profit = _optional_float(market.get("suggested_take_profit"))
+        quote_amount = None
+        quantity = None
 
         reason_bits = [
             f"deterministic fallback: ensemble={ens_action}@{ens_conf:.2f}"
@@ -443,12 +450,26 @@ class TraderAgent(BaseAgent):
             take_profit = None
             reason_bits.append("confidence below buy floor")
 
+        if action == "sell":
+            held_quantity = _position_quantity(portfolio.get("open_positions") or {}, pair)
+            if held_quantity is None or held_quantity <= 0:
+                action = "hold"
+                confidence = 0.0
+                stop_loss = None
+                take_profit = None
+                reason_bits.append("sell signal ignored because no held position is available")
+            else:
+                quantity = held_quantity
+                if current_price and current_price > 0:
+                    quote_amount = held_quantity * current_price
+                reason_bits.append("sized sell from held position")
+
         return {
             "action": action,
             "pair": pair,
             "confidence": confidence,
-            "quote_amount": None,
-            "quantity": None,
+            "quote_amount": quote_amount,
+            "quantity": quantity,
             "stop_loss_price": stop_loss,
             "take_profit_price": take_profit,
             "strategy": "llm_strategist",
@@ -477,13 +498,16 @@ class TraderAgent(BaseAgent):
             return ""
         signal_type = str(ctx.market_signal.get("signal_type", "neutral") or "neutral").lower()
         confidence = float(ctx.market_signal.get("confidence", 0.0) or 0.0)
-        held_qty = _optional_float(ctx.open_positions.get(ctx.pair)) if ctx.open_positions else None
+        held_qty = _position_quantity(ctx.open_positions, ctx.pair)
         has_position = held_qty is not None and held_qty != 0.0
         actionable_signal = signal_type in {"buy", "strong_buy", "sell", "strong_sell"} and confidence >= 0.65
         pattern = tool_payload.get("pattern") or {}
         pattern_direction = str(pattern.get("direction", "neutral") or "neutral").lower()
         pattern_actionable = bool(pattern.get("available")) and pattern_direction in {"bullish", "bearish"}
         ensemble = (tool_payload.get("strategy_signals") or {}).get("ensemble")
+        ensemble_action = str((ensemble or {}).get("action", "") or "").lower()
+        if not has_position and (signal_type in {"sell", "strong_sell", "weak_sell"} or ensemble_action == "sell"):
+            return "sell signal but no held position"
         if ctx.cash_balance <= 0 and not has_position and signal_type not in {"sell", "strong_sell"}:
             return "no available cash and no held position"
         allocator = tool_payload.get("allocator") or {}
@@ -504,8 +528,48 @@ class TraderAgent(BaseAgent):
             "pattern": toolkit.get_pattern_signal(),
             "edges": toolkit.get_edge_stats(),
             "allocator": toolkit.get_allocator_weights(),
+            "strategy_policy": toolkit.get_strategy_policy(),
             "portfolio": toolkit.get_portfolio_state(),
         })
+
+    def _persist_reasoning(
+        self,
+        *,
+        context: dict[str, Any],
+        ctx: ToolkitContext,
+        result: dict[str, Any],
+        verdict: dict[str, Any],
+        llm_metrics: list[dict[str, Any]],
+        signal_type: str,
+    ) -> None:
+        cycle_id = context.get("cycle_id")
+        stats_db = context.get("stats_db")
+        if not cycle_id or not stats_db:
+            return
+        try:
+            token_metrics = _sum_llm_metrics(llm_metrics)
+            stats_db.save_reasoning(
+                cycle_id=cycle_id,
+                pair=ctx.pair,
+                agent_name="trader",
+                reasoning_json={
+                    **dict(result or {}),
+                    "verdict": verdict,
+                    "llm_attempts": len(llm_metrics),
+                    "llm_metrics": llm_metrics,
+                },
+                signal_type=signal_type,
+                confidence=float((result or {}).get("confidence", 0.0) or 0.0),
+                langfuse_trace_id=token_metrics.get("langfuse_trace_id") or None,
+                langfuse_span_id=token_metrics.get("langfuse_span_id") or None,
+                prompt_tokens=int(token_metrics.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(token_metrics.get("completion_tokens", 0) or 0),
+                latency_ms=float(token_metrics.get("latency_ms", 0.0) or 0.0),
+                raw_prompt=str(token_metrics.get("raw_prompt", ""))[:1000],
+                exchange=ctx.exchange,
+            )
+        except Exception as exc:
+            self.logger.debug(f"trader reasoning persist failed: {exc}")
 
 
 # --------------------------------------------------------------------- #
@@ -524,12 +588,37 @@ def _optional_float(v: Any) -> Optional[float]:
 def _position_quantity(positions: dict, pair: str) -> Optional[float]:
     if not isinstance(positions, dict) or not pair:
         return None
-    raw_position = positions.get(pair)
+    aliases = _pair_aliases(pair)
+    raw_position = None
+    found = False
+    for pos_pair, candidate in positions.items():
+        if aliases.intersection(_pair_aliases(str(pos_pair))):
+            raw_position = candidate
+            found = True
+            break
+    if not found:
+        return None
     if isinstance(raw_position, dict):
         raw_position = raw_position.get("quantity", raw_position.get("amount"))
     elif hasattr(raw_position, "quantity"):
         raw_position = getattr(raw_position, "quantity")
     return _optional_float(raw_position)
+
+
+def _pair_aliases(pair: str) -> set[str]:
+    value = str(pair or "").strip().upper()
+    aliases = {value} if value else set()
+    for separator in ("-", "/"):
+        if separator in value:
+            aliases.add(value.rsplit(separator, 1)[0])
+    return aliases
+
+
+def _append_reason(existing: Any, reason: str) -> str:
+    text = str(existing or "").strip()
+    if not text:
+        return reason
+    return f"{text}; {reason}"
 
 
 def _ensemble_actionable(ensemble: Optional[dict]) -> bool:

@@ -114,6 +114,39 @@ def test_trader_proposal_routed_through_engine_records_verdict():
     assert "decision_engine_verdict" in result
 
 
+def test_trader_honors_strategy_policy_veto():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+
+    async def _ok(*a, **kw):
+        return {
+            "action": "buy",
+            "confidence": 0.95,
+            "strategy": "ema_crossover",
+            "reasoning": "test",
+            "stop_loss_price": 48000.0,
+            "take_profit_price": 56000.0,
+            "quote_amount": 500.0,
+        }
+
+    llm.chat_json = _ok
+    state = MagicMock()
+    state.save_state = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.95)
+    ctx["strategy_policy"] = {
+        "posture": "block",
+        "evidence_score": -0.4,
+        "thesis": "negative expectancy",
+    }
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "hold"
+    assert result["decision_engine_verdict"]["veto"] == "strategy_policy"
+
+
 def test_trader_autosizes_sell_from_open_position_when_llm_omits_amount():
     eng, _, _ = _make_engine_kit()
     llm = MagicMock()
@@ -142,6 +175,89 @@ def test_trader_autosizes_sell_from_open_position_when_llm_omits_amount():
     assert result["action"] == "sell"
     assert result["quantity"] == pytest.approx(0.01)
     assert result["quote_amount"] == pytest.approx(500.0)
+
+
+def test_trader_holds_sell_when_no_position_available():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+
+    async def _ok(*a, **kw):
+        return {
+            "action": "sell",
+            "pair": "BTC-USD",
+            "confidence": 0.75,
+            "strategy": "llm_strategist",
+            "reasoning": "test sell",
+            "quote_amount": None,
+            "quantity": None,
+        }
+
+    llm.chat_json = _ok
+    state = MagicMock()
+    state.save_state = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.75)
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "hold"
+    assert "no held position" in result["reason"]
+
+
+def test_trader_autosizes_sell_from_alias_position_key():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+
+    async def _ok(*a, **kw):
+        return {
+            "action": "sell",
+            "pair": "SAN.MC-EUR",
+            "confidence": 0.75,
+            "strategy": "llm_strategist",
+            "reasoning": "test sell",
+            "quote_amount": None,
+            "quantity": None,
+        }
+
+    llm.chat_json = _ok
+    state = MagicMock()
+    state.save_state = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.75)
+    ctx["pair"] = "SAN.MC-EUR"
+    ctx["current_price"] = 10.0
+    ctx["open_positions"] = {"SAN.MC": 3.0}
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "sell"
+    assert result["quantity"] == pytest.approx(3.0)
+    assert result["quote_amount"] == pytest.approx(30.0)
+
+
+def test_trader_persists_early_hold_reasoning():
+    eng, _, _ = _make_engine_kit()
+    llm = MagicMock()
+    llm.chat_json = MagicMock()
+    state = MagicMock()
+    state.save_state = MagicMock()
+    stats_db = MagicMock()
+    config = {"trading": {"min_confidence": 0.5}}
+    agent = TraderAgent(llm, state, config, decision_engine=eng)
+    ctx = _ctx(action="buy", confidence=0.6)
+    ctx["strategy_signals"] = {}
+    ctx.update({"cycle_id": "cycle-early-hold", "stats_db": stats_db})
+
+    result = _run(agent.execute(ctx))
+
+    assert result["action"] == "hold"
+    llm.chat_json.assert_not_called()
+    kwargs = stats_db.save_reasoning.call_args.kwargs
+    assert kwargs["agent_name"] == "trader"
+    assert kwargs["reasoning_json"]["action"] == "hold"
+    assert "no actionable signal" in kwargs["reasoning_json"]["reason"]
 
 
 def test_trader_persists_llm_token_metrics():

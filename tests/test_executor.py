@@ -180,6 +180,69 @@ class TestExecution:
         args = exchange.place_market_order.call_args
         assert args[1]["side"] == "SELL"
 
+    def test_market_sell_limit_only_falls_back_to_ioc_limit(self):
+        ex, exchange, state = _make_executor()
+        exchange.place_market_order.return_value = {
+            "success": False,
+            "error": "Market sell exception: Orderbook is in limit only mode - please use limit order type",
+        }
+        exchange.limit_order_ioc_sell = MagicMock(return_value={
+            "success": True,
+            "order": {
+                "order_id": "ioc-sell-1",
+                "status": "FILLED",
+                "average_filled_price": "49950.0",
+                "fee": "0.2",
+            },
+        })
+
+        result = self._run(ex.run({"approved_trade": {
+            "approved": True, "action": "sell", "pair": "BTC-EUR",
+            "quote_amount": 100, "quantity": 0.002, "price": 50000,
+            "confidence": 0.7, "reasoning": "exit",
+        }}))
+
+        assert result["executed"] is True
+        exchange.place_market_order.assert_called_once()
+        exchange.limit_order_ioc_sell.assert_called_once()
+
+    def test_stop_loss_limit_only_falls_back_to_ioc_limit(self):
+        from src.models.trade import Trade
+
+        ex, exchange, state = _make_executor()
+        trade = Trade(
+            pair="SNX-EUR",
+            action=TradeAction.BUY,
+            status=TradeStatus.FILLED,
+            quantity=5.5,
+            price=0.289,
+            filled_price=0.289,
+            filled_quantity=5.5,
+            confidence=0.7,
+        )
+        exchange.balance = {"SNX": 5.5}
+        exchange.place_market_order.return_value = {
+            "success": False,
+            "error": "Market sell exception: Orderbook is in limit only mode - please use limit order type",
+        }
+        exchange.limit_order_ioc_sell = MagicMock(return_value={
+            "success": True,
+            "order": {
+                "order_id": "ioc-sell-2",
+                "status": "FILLED",
+                "average_filled_price": "0.2700",
+                "fee": "0.01",
+            },
+        })
+        state.close_trade.return_value = MagicMock(pnl=-0.1145)
+
+        result = ex._close_position_inner(trade, price=0.27, reason="stop_loss")
+
+        assert result["success"] is True
+        exchange.place_market_order.assert_called_once()
+        exchange.limit_order_ioc_sell.assert_called_once()
+        state.close_trade.assert_called_once_with(trade.id, 0.27, 0.01)
+
     def test_limit_buy_used_for_low_confidence(self):
         ex, exchange, state = _make_executor()
         result = self._run(ex.run({"approved_trade": {

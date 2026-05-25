@@ -11,6 +11,7 @@ from src.utils.logger import get_logger
 from src.utils.helpers import format_currency, format_percentage
 from src.utils.tracer import get_llm_tracer
 from src.utils import llm_optimizer
+from src.core.strategy_governance import build_strategy_policy
 
 logger = get_logger("core.pipeline")
 
@@ -1120,6 +1121,47 @@ class PipelineManager:
             "single_trade_cap": float(_buy_caps.get("single_trade_cap") or 0.0),
         }
 
+        planning_outlook = orch.context_manager.get_pair_expected_gain(pair)
+        strategy_policy = build_strategy_policy(
+            pair=pair,
+            exchange=exchange_name,
+            current_price=price,
+            config=orch.config,
+            market_signal=signal,
+            strategy_signals=strategy_signals,
+            pattern_signal=pattern_signal,
+            regression_factor=regression_factor,
+            cross_asset_signal=cross_asset_signal,
+            news_knn_prior=smarts_prior,
+            quant_context=quant_context,
+            kelly_stats=kelly_stats,
+            prediction_accuracy=_build_accuracy_ctx(pair_accuracy, weighted_acc),
+            fee_context=fee_context,
+            planning_outlook=planning_outlook,
+            upcoming_events=upcoming_events,
+        )
+        logger.info(
+            f"🧭 Strategy policy {pair}: {strategy_policy.get('posture')} "
+            f"score={float(strategy_policy.get('evidence_score') or 0):+.2f} "
+            f"horizon={strategy_policy.get('strategy_horizon_days')}d "
+            f"target={float(strategy_policy.get('target_gain_pct') or 0):.1%} "
+            f"net={float(strategy_policy.get('expected_net_return_pct') or 0):.1%}"
+        )
+        try:
+            if cycle_id and orch.stats_db:
+                await asyncio.to_thread(
+                    orch.stats_db.save_reasoning,
+                    cycle_id=cycle_id,
+                    pair=pair,
+                    agent_name="strategy_governance",
+                    reasoning_json=strategy_policy,
+                    signal_type=strategy_policy.get("posture", "watch"),
+                    confidence=float(strategy_policy.get("evidence_score") or 0.0),
+                    exchange=exchange_name,
+                )
+        except Exception as _sg_e:
+            logger.debug(f"strategy_governance persist failed for {pair}: {_sg_e}")
+
         # Build strategist payload up front but defer the call. When the
         # TraderAgent is enabled and succeeds, its output overwrites
         # strategy_result anyway — so invoking the strategist eagerly is pure
@@ -1144,6 +1186,7 @@ class PipelineManager:
             "confidence_adjustment": pair_confidence_adj,
             "prediction_accuracy": _build_accuracy_ctx(pair_accuracy, weighted_acc),
             "fee_context": fee_context,
+            "strategy_policy": strategy_policy,
             "cycle_id": cycle_id,
             "stats_db": orch.stats_db,
             "trace_ctx": trace_ctx,
@@ -1194,6 +1237,7 @@ class PipelineManager:
                     "sentiment": sentiment_data,
                     "news_headlines": news_headlines,
                     "fee_context": fee_context,
+                    "strategy_policy": strategy_policy,
                     "kelly_stats": kelly_stats,
                     "recent_outcomes": recent_outcomes,
                     "strategic_context": _effective_strategic_ctx,
@@ -1336,6 +1380,8 @@ class PipelineManager:
             "correlation_matrix": correlation_matrix,
             "atr": tech_analysis.get("atr") if tech_analysis else None,
             "exchange": exchange_name,
+            "fee_context": fee_context,
+            "strategy_policy": strategy_policy,
             # Signal strength context for position sizing
             "signal_type": signal_type,
             "signal_type_win_rate": signal_type_win_rate,
@@ -1737,6 +1783,12 @@ class PipelineManager:
                     fee_quote=float(_fee),
                     exchange=exchange_name,
                     entry_score=_entry_score,
+                    strategy_posture=risk_result.get("strategy_posture"),
+                    strategy_horizon_days=risk_result.get("strategy_horizon_days"),
+                    exit_policy=risk_result.get("exit_policy"),
+                    expected_gross_return_pct=risk_result.get("expected_gross_return_pct"),
+                    expected_net_return_pct=risk_result.get("expected_net_return_pct"),
+                    strategy_thesis=risk_result.get("strategy_thesis", ""),
                 )
             except Exception as e:
                 logger.debug(f"Failed to record trade in StatsDB: {e}")
@@ -1780,6 +1832,7 @@ class PipelineManager:
                     entry_price=float(_filled_price),
                     initial_stop=risk_result.get('stop_loss'),
                     total_quantity=float(_filled_qty) if _filled_qty else 0.0,
+                    min_hold_minutes=risk_result.get("min_hold_minutes"),
                 )
 
             # ─── FIFO tax tracking ───

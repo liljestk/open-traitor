@@ -15,7 +15,7 @@ def _payload(*, ensemble_action="hold", ensemble_conf=0.0,
              analyst="neutral", analyst_conf=0.0,
              pattern_dir=None, pattern_avail=False,
              stop_loss=None, take_profit=None, current_price=1.0,
-             pair="FIL-EUR"):
+             pair="FIL-EUR", open_positions=None):
     return {
         "market": {
             "pair": pair,
@@ -29,6 +29,7 @@ def _payload(*, ensemble_action="hold", ensemble_conf=0.0,
             "ensemble": {"action": ensemble_action, "confidence": ensemble_conf},
         },
         "pattern": {"available": pattern_avail, "direction": pattern_dir or ""},
+        "portfolio": {"open_positions": open_positions or {}},
     }
 
 
@@ -70,6 +71,25 @@ def test_fallback_uses_ensemble_when_actionable():
     ))
     assert out["action"] == "buy"
     assert "ensemble=buy" in out["reasoning"]
+
+
+def test_fallback_ignores_sell_without_held_position():
+    out = TraderAgent._deterministic_fallback(_payload(
+        ensemble_action="sell", ensemble_conf=0.75,
+    ))
+    assert out["action"] == "hold"
+    assert "no held position" in out["reasoning"]
+
+
+def test_fallback_sizes_sell_from_alias_position():
+    out = TraderAgent._deterministic_fallback(_payload(
+        ensemble_action="sell", ensemble_conf=0.75,
+        pair="SAN.MC-EUR", current_price=10.0,
+        open_positions={"SAN.MC": 3.0},
+    ))
+    assert out["action"] == "sell"
+    assert out["quantity"] == pytest.approx(3.0)
+    assert out["quote_amount"] == pytest.approx(30.0)
 
 
 def test_fallback_holds_when_no_signal_available():

@@ -942,6 +942,36 @@ class Orchestrator:
             logger.info(msg)
             self.chat_handler.queue_event(msg, severity="info")
 
+    def _handle_circuit_breaker_halt(self, cycle_count: int) -> None:
+        """Maintain observability and recovery checks while trading is halted."""
+        logger.warning("🛑 Circuit breaker active — trading halted")
+        self._record_circuit_breaker_halt_event()
+
+        try:
+            self.holdings_manager.maybe_refresh_holdings()
+        except Exception as exc:
+            logger.warning(f"⚠️ Circuit-breaker recovery holdings refresh failed: {exc}")
+
+        self._try_circuit_breaker_recovery()
+        self.state_manager.sync_to_redis()
+
+        try:
+            components = check_component_health(
+                ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+                redis_client=self.redis,
+            )
+            components["trading"] = {
+                "status": "halted" if self.state.circuit_breaker_triggered else "recovered",
+                "reason": "circuit_breaker",
+            }
+            update_health(
+                status="ok",
+                cycle_count=cycle_count,
+                components=components,
+            )
+        except Exception as exc:
+            logger.debug(f"Circuit-breaker health update skipped: {exc}")
+
     def bump_heartbeat(self) -> None:
         """Refresh the cycle watchdog heartbeat. Safe to call from any thread or
         asyncio task. Pipelines/managers should call this between long-running
@@ -1267,10 +1297,7 @@ class Orchestrator:
                 continue
 
             if self.state.circuit_breaker_triggered:
-                logger.warning("🛑 Circuit breaker active — trading halted")
-                self._record_circuit_breaker_halt_event()
-                self._try_circuit_breaker_recovery()
-                self.state_manager.sync_to_redis()
+                self._handle_circuit_breaker_halt(cycle_count)
                 time.sleep(60)
                 continue
 

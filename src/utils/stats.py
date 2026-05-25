@@ -211,7 +211,13 @@ class StatsDB(
                         fee_quote REAL DEFAULT 0,
                         is_rotation INTEGER DEFAULT 0,
                         approved_by TEXT DEFAULT 'auto',
-                        entry_score REAL DEFAULT NULL
+                        entry_score REAL DEFAULT NULL,
+                        strategy_posture TEXT DEFAULT NULL,
+                        strategy_horizon_days INTEGER DEFAULT NULL,
+                        exit_policy TEXT DEFAULT NULL,
+                        expected_gross_return_pct REAL DEFAULT NULL,
+                        expected_net_return_pct REAL DEFAULT NULL,
+                        strategy_thesis TEXT DEFAULT ''
                     )
                 """)
 
@@ -433,6 +439,12 @@ class StatsDB(
         ("trades",               "exchange"),
         ("trades",               "external_id"),
         ("trades",               "entry_score"),
+        ("trades",               "strategy_posture"),
+        ("trades",               "strategy_horizon_days"),
+        ("trades",               "exit_policy"),
+        ("trades",               "expected_gross_return_pct"),
+        ("trades",               "expected_net_return_pct"),
+        ("trades",               "strategy_thesis"),
         ("simulated_trades",     "exchange"),
         ("scan_results",         "exchange"),
         ("events",               "exchange"),
@@ -460,6 +472,12 @@ class StatsDB(
             ("daily_summaries",     "exchange",             "TEXT NOT NULL DEFAULT 'coinbase'"),
             ("trades",              "external_id",          "TEXT DEFAULT NULL"),
             ("trades",              "entry_score",           "REAL DEFAULT NULL"),
+            ("trades",              "strategy_posture",      "TEXT DEFAULT NULL"),
+            ("trades",              "strategy_horizon_days", "INTEGER DEFAULT NULL"),
+            ("trades",              "exit_policy",           "TEXT DEFAULT NULL"),
+            ("trades",              "expected_gross_return_pct", "REAL DEFAULT NULL"),
+            ("trades",              "expected_net_return_pct", "REAL DEFAULT NULL"),
+            ("trades",              "strategy_thesis",       "TEXT DEFAULT ''"),
         ]
         with self._get_conn() as conn:
             with conn.cursor() as cur:

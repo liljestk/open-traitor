@@ -60,6 +60,7 @@ class TradeProposal:
     take_profit_price: Optional[float] = None
     current_price: Optional[float] = None
     fee_context: Optional[dict] = None
+    strategy_policy: Optional[dict] = None
     reasoning: str = ""
 
     def to_proposal_dict(self) -> dict:
@@ -79,6 +80,18 @@ class TradeProposal:
             out["take_profit_price"] = float(self.take_profit_price)
         if self.current_price is not None:
             out["current_price"] = float(self.current_price)
+        if isinstance(self.strategy_policy, dict) and self.strategy_policy:
+            out["strategy_policy"] = dict(self.strategy_policy)
+            for key in (
+                "strategy_horizon_days", "exit_policy",
+                "expected_gross_return_pct", "expected_net_return_pct",
+                "strategy_posture", "strategy_thesis",
+            ):
+                source_key = "posture" if key == "strategy_posture" else (
+                    "thesis" if key == "strategy_thesis" else key
+                )
+                if source_key in self.strategy_policy:
+                    out[key] = self.strategy_policy[source_key]
         return out
 
 
@@ -192,6 +205,14 @@ class DecisionEngine:
             fee_reason = self._fee_hurdle_reason(proposal)
             if fee_reason:
                 return self._veto(proposal, "fee_hurdle", [fee_reason])
+
+            policy_reason = self._strategy_policy_reason(proposal)
+            if policy_reason:
+                return self._veto(proposal, "strategy_policy", [policy_reason])
+            if isinstance(proposal.strategy_policy, dict) and proposal.strategy_policy:
+                posture = proposal.strategy_policy.get("posture", "watch")
+                score = float(proposal.strategy_policy.get("evidence_score") or 0.0)
+                reasons.append(f"strategy policy {posture} (score={score:.2f})")
 
         # ---- 2. Edge-library veto (buy side only) ------------------- #
         edge_dict: Optional[dict] = None
@@ -391,6 +412,41 @@ class DecisionEngine:
             f"take-profit implies {expected_gain:.2%} expected gain, below "
             f"fee hurdle {required_gain:.2%}"
         )
+
+    def _strategy_policy_reason(self, proposal: TradeProposal) -> str:
+        policy = proposal.strategy_policy or {}
+        if not isinstance(policy, dict) or not policy:
+            return ""
+        posture = str(policy.get("posture") or "watch").lower()
+        if posture == "block":
+            return "strategy governance blocks new buys: " + str(
+                policy.get("thesis") or "; ".join(policy.get("invalidation_reasons") or [])
+            )[:300]
+        if posture == "reduce":
+            return "strategy governance says reduce/watch only; no new buy exposure"
+        confidence_adjustment = float(policy.get("confidence_adjustment") or 0.0)
+        required_confidence = _clamp(self.min_confidence + confidence_adjustment, 0.0, 0.98)
+        if posture == "watch":
+            required_confidence = max(required_confidence, 0.75)
+        if proposal.confidence < required_confidence:
+            return (
+                f"strategy governance requires confidence >= {required_confidence:.2f} "
+                f"for posture '{posture}' (got {proposal.confidence:.2f})"
+            )
+        expected_net = float(policy.get("expected_net_return_pct") or 0.0)
+        min_expected = float(
+            (policy.get("adjustments") or {}).get("min_expected_net_return_pct") or 0.0
+        )
+        if expected_net < min_expected and posture != "trade":
+            return (
+                f"strategy governance expected net return {expected_net:.2%} below "
+                f"minimum {min_expected:.2%}"
+            )
+        return ""
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 __all__ = ["DecisionEngine", "TradeProposal", "DecisionVerdict"]

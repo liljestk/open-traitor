@@ -199,6 +199,7 @@ class TestHighConvictionOnly:
     async def test_sell_always_allowed(self):
         """Sell orders should never be blocked by modifiers."""
         rm = _make_risk_manager(["high_conviction_only"])
+        rm.state.open_positions = {"BTC-EUR": 0.001}
         proposal = {
             "action": "sell",
             "pair": "BTC-EUR",

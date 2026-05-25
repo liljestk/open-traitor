@@ -11,8 +11,11 @@ IBKR's tiered commission schedule.
 
 from __future__ import annotations
 
+import concurrent.futures
 import math
 import os
+import queue
+import threading
 from typing import Any, Optional
 
 from src.utils.logger import get_logger
@@ -23,9 +26,8 @@ logger = get_logger("ib_client")
 # Paper mode works without it.
 try:
     from ib_insync import IB as _IB  # noqa: F401
-    _HAS_IB_INSYNC = True
-except ImportError:
-    _HAS_IB_INSYNC = False
+except Exception:
+    _IB = None
 
 from src.core.exchange_client import ExchangeClient
 from src.core.paper_trading import PaperTradingMixin
@@ -105,6 +107,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         self._paper_fee_max_pct: float = 0.01
         self._last_prices: dict[str, float] = {}
         self._known_pairs: set[str] = set()
+        self._ib_jobs: queue.Queue | None = None
+        self._ib_thread: threading.Thread | None = None
+        self._ib_thread_id: int | None = None
 
         if not paper_mode:
             self._init_live_session()
@@ -134,68 +139,72 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
     def _init_live_session(self) -> None:
         """Connect to IB Gateway / TWS via ib_insync."""
-        if not _HAS_IB_INSYNC:
-            raise ImportError(
-                "Live IB trading requires the 'ib_insync' package. "
-                "Install with: pip install ib_insync"
-            )
         import asyncio
-        import threading
 
-        # ib_insync's IB() captures the current event loop on instantiation,
-        # and connect() calls loop.run_until_complete() internally.
-        # Both fail if a loop is already running (e.g. FastAPI/AnyIO lifespan).
-        # Fix: when inside a running loop, do everything in a dedicated thread
-        # that owns its own fresh event loop.
-        try:
-            asyncio.get_running_loop()
-            _in_async = True
-        except RuntimeError:
-            _in_async = False
+        # ib_insync's synchronous APIs drive the thread-current event loop.
+        # The orchestrator also drives an event loop in the main trading thread,
+        # so live IB calls must stay on a dedicated IB thread that owns a fresh
+        # loop. Otherwise calls like qualifyContracts() fail with
+        # "This event loop is already running" from inside an active pipeline.
+        self._ib_jobs = queue.Queue()
+        ready = threading.Event()
+        connect_error: list[BaseException | None] = [None]
 
-        if _in_async:
-            _exc: list = [None]
-            _done = threading.Event()
+        def _ib_worker() -> None:
+            self._ib_thread_id = threading.get_ident()
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                ib_cls = _IB
+                if ib_cls is None:
+                    from ib_insync import IB as ib_cls
+                self.ib = ib_cls()
+                self.ib.connect(
+                    self._ib_host,
+                    self._ib_port,
+                    clientId=self._ib_client_id,
+                )
+            except BaseException as exc:
+                connect_error[0] = exc
+                ready.set()
+                return
 
-            def _connect_thread() -> None:
-                # L11/C1 fix: Use thread-local loop without set_event_loop to avoid
-                # conflicts with orchestrator's main loop and Temporal replans.
-                new_loop = asyncio.new_event_loop()
+            ready.set()
+            while True:
+                job = self._ib_jobs.get()
+                if job is None:
+                    break
+                fn, fut = job
+                if not fut.set_running_or_notify_cancel():
+                    continue
                 try:
-                    # ib_insync captures the running loop internally; pass ours explicitly
-                    # by running in this dedicated thread that owns new_loop.
-                    asyncio.set_event_loop(new_loop)  # Required by ib_insync internals
-                    self.ib = _IB()
-                    self.ib.connect(
-                        self._ib_host, self._ib_port,
-                        clientId=self._ib_client_id,
-                    )
-                except Exception as e:
-                    _exc[0] = e
-                finally:
-                    _done.set()
-                    # Do NOT close the loop here — ib_insync needs it for callbacks
+                    fut.set_result(fn())
+                except BaseException as exc:
+                    fut.set_exception(exc)
 
-            t = threading.Thread(target=_connect_thread, daemon=True)
-            t.start()
-            if not _done.wait(timeout=30):
-                raise TimeoutError("IB Gateway connection timed out after 30 s")
-            if _exc[0]:
-                logger.error(f"❌ IBClient LIVE connection failed: {_exc[0]}")
-                raise _exc[0]
-        else:
-            try:
-                asyncio.get_event_loop()
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-            self.ib = _IB()
-            try:
-                self.ib.connect(self._ib_host, self._ib_port, clientId=self._ib_client_id)
-            except Exception as e:
-                logger.error(f"❌ IBClient LIVE connection failed: {e}")
-                raise
+        self._ib_thread = threading.Thread(
+            target=_ib_worker,
+            name=f"ibkr-client-{self._ib_client_id}",
+            daemon=True,
+        )
+        self._ib_thread.start()
+        if not ready.wait(timeout=30):
+            raise TimeoutError("IB Gateway connection timed out after 30 s")
+        if connect_error[0]:
+            logger.error(f"❌ IBClient LIVE connection failed: {connect_error[0]}")
+            raise connect_error[0]
 
         logger.info(f"✅ IBClient LIVE connected to {self._ib_host}:{self._ib_port} (Client ID: {self._ib_client_id})")
+
+    def _run_on_ib_thread(self, fn, timeout: float = 30.0):
+        """Run a live ib_insync operation on the dedicated IB thread."""
+        if self.paper_mode or self._ib_thread_id == threading.get_ident():
+            return fn()
+        if self._ib_jobs is None:
+            raise RuntimeError("IB worker thread is not initialised")
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._ib_jobs.put((fn, fut))
+        return fut.result(timeout=timeout)
 
     # ── Connection / account methods ─────────────────────────────────────
 
@@ -209,62 +218,80 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                     1 for v in self._paper_balance.values() if v > 0
                 ),
             }
-        
-        is_connected = getattr(self, "ib", None) and self.ib.isConnected()
-        if not is_connected:
+
+        def _check() -> dict[str, Any]:
+            is_connected = getattr(self, "ib", None) and self.ib.isConnected()
+            if not is_connected:
+                return {
+                    "ok": False,
+                    "mode": "live",
+                    "message": "IB Gateway not connected",
+                    "error": "disconnected",
+                }
+            accounts = self.ib.managedAccounts()
             return {
-                "ok": False,
+                "ok": True,
                 "mode": "live",
-                "message": "IB Gateway not connected",
-                "error": "disconnected",
+                "message": f"IB Gateway live connected. Accounts: {', '.join(accounts)}",
+                "non_zero_accounts": len(accounts),
+                "total_accounts": len(accounts),
             }
-        
-        accounts = self.ib.managedAccounts()
-        return {
-            "ok": True,
-            "mode": "live",
-            "message": f"IB Gateway live connected. Accounts: {', '.join(accounts)}",
-            "non_zero_accounts": len(accounts),
-            "total_accounts": len(accounts),
-        }
+
+        return self._run_on_ib_thread(_check)
 
     def get_accounts(self) -> list[dict[str, Any]]:
         if self.paper_mode:
             return self.paper_get_accounts()
-        
-        accounts_data = []
-        for acc in self.ib.managedAccounts():
-            vals = self.ib.accountValues(acc)
-            acc_info = {"id": acc, "currency": self._native_currency, "balances": {}}
-            for v in vals:
-                if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
-                    acc_info["balances"][self._native_currency] = float(v.value)
-                elif v.tag == "CashBalance" and v.currency == self._native_currency:
-                    acc_info["available_cash"] = float(v.value)
-            accounts_data.append(acc_info)
-        return accounts_data
+
+        def _get_accounts() -> list[dict[str, Any]]:
+            accounts_data = []
+            for acc in self.ib.managedAccounts():
+                vals = self.ib.accountValues(acc)
+                acc_info = {"id": acc, "currency": self._native_currency, "balances": {}}
+                for v in vals:
+                    if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
+                        acc_info["balances"][self._native_currency] = float(v.value)
+                    elif v.tag == "CashBalance" and v.currency == self._native_currency:
+                        acc_info["available_cash"] = float(v.value)
+                accounts_data.append(acc_info)
+            return accounts_data
+
+        return self._run_on_ib_thread(_get_accounts)
 
     @property
     def balance(self) -> dict[str, float]:
         if self.paper_mode:
             return self.paper_get_all_balances()
-        
-        # Return portfolio positions and cash
-        balances: dict[str, float] = {}
-        
-        vals = self.ib.accountValues()
-        for v in vals:
-            if v.tag == "CashBalance":
-                balances[v.currency] = float(v.value)
 
-        for pos in self.ib.positions():
-            # Ticker symbol in live mode is position.contract.symbol
-            sym = pos.contract.symbol
-            balances[sym] = float(pos.position)
-        
-        # Make sure native currency is present
-        balances.setdefault(self._native_currency, 0.0)
-        return balances
+        def _balance() -> dict[str, float]:
+            balances: dict[str, float] = {}
+            vals = self.ib.accountValues()
+            for v in vals:
+                if v.tag == "CashBalance":
+                    balances[v.currency] = float(v.value)
+            for pos in self.ib.positions():
+                sym = pos.contract.symbol
+                balances[sym] = float(pos.position)
+            balances.setdefault(self._native_currency, 0.0)
+            return balances
+
+        return self._run_on_ib_thread(_balance)
+
+    def get_portfolio_value(self) -> float:
+        if self.paper_mode:
+            return super().get_portfolio_value()
+
+        def _portfolio_value() -> float:
+            vals = self.ib.accountValues()
+            for v in vals:
+                if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
+                    return float(v.value)
+            for v in vals:
+                if v.tag == "NetLiquidation":
+                    return float(v.value)
+            return 0.0
+
+        return self._run_on_ib_thread(_portfolio_value)
 
     def detect_native_currency(self) -> str:
         return self._native_currency
@@ -279,6 +306,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
         For US stocks, currency should be USD even if the account holds EUR
         (IBKR handles FX conversion automatically on trade execution).
         """
+        if not self.paper_mode and self._ib_thread_id != threading.get_ident():
+            return self._run_on_ib_thread(lambda: self._get_contract(pair))
+
         from ib_insync import Stock
         parts = pair.upper().split("-")
         symbol = parts[0]
@@ -474,11 +504,11 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 return self._paper_market_buy(pair, amount, amount_is_base)
             else:
                 return self._paper_market_sell(pair, amount, amount_is_base)
-        
-        from ib_insync import MarketOrder
-        try:
+
+        def _place() -> dict:
+            from ib_insync import MarketOrder
+
             contract = self._get_contract(pair)
-            
             if not amount_is_base:
                 # IBKR requires quantity in shares (base asset)
                 price = self.get_current_price(pair)
@@ -509,6 +539,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "fee": "0",
                 "ts": self.paper_now_iso(),
             }
+
+        try:
+            return self._run_on_ib_thread(_place)
         except Exception as e:
             logger.error(f"Live market order failed: {e}")
             return {"success": False, "error": str(e)}
@@ -527,8 +560,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 pair, side, size, amount_is_base=True, client_oid=client_oid
             )
 
-        from ib_insync import LimitOrder
-        try:
+        def _place() -> dict:
+            from ib_insync import LimitOrder
+
             contract = self._get_contract(pair)
             shares = int(size)
             if shares < 1:
@@ -551,6 +585,9 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 "fee": "0",
                 "ts": self.paper_now_iso(),
             }
+
+        try:
+            return self._run_on_ib_thread(_place)
         except Exception as e:
             logger.error(f"Live limit order failed: {e}")
             return {"success": False, "error": str(e)}
@@ -558,47 +595,58 @@ class IBClient(PaperTradingMixin, ExchangeClient):
     def cancel_order(self, order_id: str) -> dict:
         if self.paper_mode:
             return {"success": False, "error": "Paper orders are instant-fill"}
-        try:
+
+        def _cancel() -> dict:
             for trade in self.ib.openTrades():
                 if str(trade.order.orderId) == order_id:
                     self.ib.cancelOrder(trade.order)
                     return {"success": True, "order_id": order_id}
             return {"success": False, "error": "Order not found or not active"}
+
+        try:
+            return self._run_on_ib_thread(_cancel)
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def get_order(self, order_id: str) -> Optional[dict]:
         if self.paper_mode:
             return self.paper_get_order(order_id)
-        # Scan through trades
-        for trade in self.ib.trades():
-            if str(trade.order.orderId) == order_id:
-                return {
-                    "order_id": str(trade.order.orderId),
-                    "status": trade.orderStatus.status.upper(),
-                    "side": trade.order.action,
-                    "filled_size": str(trade.orderStatus.filled),
-                    "average_filled_price": str(trade.orderStatus.avgFillPrice),
-                }
-        return None
+
+        def _get_order() -> Optional[dict]:
+            for trade in self.ib.trades():
+                if str(trade.order.orderId) == order_id:
+                    return {
+                        "order_id": str(trade.order.orderId),
+                        "status": trade.orderStatus.status.upper(),
+                        "side": trade.order.action,
+                        "filled_size": str(trade.orderStatus.filled),
+                        "average_filled_price": str(trade.orderStatus.avgFillPrice),
+                    }
+            return None
+
+        return self._run_on_ib_thread(_get_order)
 
     def get_open_orders(self, pair: str | None = None) -> list[dict]:
         if self.paper_mode:
             return self.paper_get_open_orders()
-        open_orders = []
-        for trade in self.ib.openTrades():
-            sym = trade.contract.symbol
-            if pair and sym not in pair:
-                continue
-            open_orders.append({
-                "order_id": str(trade.order.orderId),
-                "pair": f"{sym}-{self._native_currency}",
-                "side": trade.order.action,
-                "size": str(trade.order.totalQuantity),
-                "price": str(getattr(trade.order, 'lmtPrice', 0)),
-                "status": trade.orderStatus.status.upper()
-            })
-        return open_orders
+
+        def _get_open_orders() -> list[dict]:
+            open_orders = []
+            for trade in self.ib.openTrades():
+                sym = trade.contract.symbol
+                if pair and sym not in pair:
+                    continue
+                open_orders.append({
+                    "order_id": str(trade.order.orderId),
+                    "pair": f"{sym}-{self._native_currency}",
+                    "side": trade.order.action,
+                    "size": str(trade.order.totalQuantity),
+                    "price": str(getattr(trade.order, 'lmtPrice', 0)),
+                    "status": trade.orderStatus.status.upper()
+                })
+            return open_orders
+
+        return self._run_on_ib_thread(_get_open_orders)
 
     # ── Paper trading engine ─────────────────────────────────────────────
 

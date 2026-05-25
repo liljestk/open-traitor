@@ -153,6 +153,10 @@ class StrategistResponse(BaseModel):
     quantity: Optional[float] = None
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
+    strategy_horizon_days: Optional[int] = None
+    expected_gross_return_pct: Optional[float] = None
+    expected_net_return_pct: Optional[float] = None
+    exit_policy: str = ""
     reasoning: str = ""
     task_alignment: str = ""
 
@@ -188,7 +192,25 @@ class StrategistResponse(BaseModel):
             return None
         return f
 
-    @field_validator("pair", "reasoning", "task_alignment", mode="before")
+    @field_validator("expected_gross_return_pct", "expected_net_return_pct", mode="before")
+    @classmethod
+    def _sanitize_return_pct(cls, v: Any) -> Optional[float]:
+        f = _coerce_float(v)
+        if f is None:
+            return None
+        if abs(f) > 1.0:
+            f /= 100.0
+        return max(-1.0, min(1.0, f))
+
+    @field_validator("strategy_horizon_days", mode="before")
+    @classmethod
+    def _sanitize_horizon(cls, v: Any) -> Optional[int]:
+        f = _coerce_float(v)
+        if f is None or f <= 0:
+            return None
+        return max(1, min(365, int(f)))
+
+    @field_validator("pair", "reasoning", "task_alignment", "exit_policy", mode="before")
     @classmethod
     def _normalize_str(cls, v: Any) -> str:
         return "" if v is None else str(v)

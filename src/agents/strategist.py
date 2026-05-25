@@ -18,7 +18,7 @@ logger = get_logger("agent.strategist")
 
 STRATEGY_SYSTEM_PROMPT = """You are a trading strategist. Decide buy/sell/hold from the market signal and user tasks.
 
-Consider: signal confidence/type; portfolio positions; task spending limits; risk params; recent trade history (avoid overtrading); past outcomes (adapt to repeated losses); strategic context = regime background; live holdings (may propose sells).
+Consider: signal confidence/type; portfolio positions; task spending limits; risk params; recent trade history (avoid overtrading); past outcomes (adapt to repeated losses); strategic context = regime background; strategy governance = evidence-weighted posture/horizon; live holdings (may propose sells).
 {asset_class_notes}
 
 Respond with JSON:
@@ -41,6 +41,7 @@ Rules:
 - Don't add to a position already held unless conviction is high.
 - For existing-holding sells, use quantity from ACTUAL HOLDINGS.
 - CRITICAL: Only trade if expected move CLEARLY exceeds breakeven in FEE CONTEXT — otherwise hold.
+- CRITICAL: Do not open new buy exposure when STRATEGY GOVERNANCE says block or reduce.
 
 Respond ONLY with valid JSON."""
 
@@ -94,6 +95,7 @@ class StrategistAgent(BaseAgent):
         strategy_signals = context.get("strategy_signals", {})
         fee_context = context.get("fee_context", {})
         prediction_accuracy = context.get("prediction_accuracy")
+        strategy_policy = context.get("strategy_policy") or {}
         cycle_id = context.get("cycle_id", "")
         stats_db = context.get("stats_db")
         trace_ctx = context.get("trace_ctx")
@@ -146,6 +148,7 @@ class StrategistAgent(BaseAgent):
             strategy_signals=strategy_signals,
             fee_context=fee_context,
             prediction_accuracy=prediction_accuracy,
+            strategy_policy=strategy_policy,
         )
 
         # Create a tracing span for this LLM call
@@ -262,6 +265,7 @@ class StrategistAgent(BaseAgent):
         strategy_signals: dict | None = None,
         fee_context: dict | None = None,
         prediction_accuracy: dict | None = None,
+        strategy_policy: dict | None = None,
     ) -> str:
         """Build the strategy generation prompt."""
         pair = signal.get("pair", "?")
@@ -322,6 +326,7 @@ class StrategistAgent(BaseAgent):
             holdings_section = f"\n{live_holdings_summary}\n"
 
         accuracy_section = self._format_prediction_accuracy(prediction_accuracy)
+        policy_section = self._format_strategy_policy(strategy_policy)
 
         return f"""MARKET SIGNAL for {pair}:
 - Type: {signal.get('signal_type', 'neutral')}
@@ -346,9 +351,25 @@ ACTIVE USER TASKS:
 RECENT TRADES:
 {recent_text}
 {outcomes_section}{strategy_section}
+{policy_section}
 {self._format_fee_context(fee_context)}
 {self._format_sentiment_strategy(sentiment_data, strategy_signals)}
 What action should we take? Respond with JSON."""
+
+    @staticmethod
+    def _format_strategy_policy(policy: dict | None) -> str:
+        if not isinstance(policy, dict) or not policy:
+            return ""
+        return (
+            "\nSTRATEGY GOVERNANCE (deterministic policy):\n"
+            f"- Posture: {policy.get('posture', 'watch')}\n"
+            f"- Evidence Score: {float(policy.get('evidence_score') or 0):+.2f}\n"
+            f"- Horizon: {policy.get('strategy_horizon_days', 1)} days\n"
+            f"- Exit Policy: {policy.get('exit_policy', 'target_or_stop')}\n"
+            f"- Target Gain: {float(policy.get('target_gain_pct') or 0):.1%}\n"
+            f"- Expected Net: {float(policy.get('expected_net_return_pct') or 0):.1%}\n"
+            f"- Thesis: {str(policy.get('thesis') or '')[:240]}\n"
+        )
 
     @staticmethod
     def _format_prediction_accuracy(accuracy: dict | None) -> str:

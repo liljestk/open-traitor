@@ -222,6 +222,7 @@ class ReasoningMixin:
         decision_reason = ""
 
         # Check agent spans for more specific outcomes
+        analyst_span = next((s for s in spans_list if s["agent_name"] == "market_analyst"), None)
         risk_span = next((s for s in spans_list if s["agent_name"] == "risk_manager"), None)
         strategist_span = next((s for s in spans_list if s["agent_name"] == "strategist"), None)
         # ``trader`` is the autonomous LLM operator that replaced ``strategist``
@@ -294,7 +295,25 @@ class ReasoningMixin:
                 )
         else:
             decision_outcome = "hold"
-            decision_reason = "No strategy generated."
+            if analyst_span:
+                rj = analyst_span.get("reasoning_json") or {}
+                analyst_signal = (
+                    rj.get("signal_type")
+                    or rj.get("action")
+                    or analyst_span.get("signal_type")
+                    or "unknown"
+                )
+                analyst_confidence = analyst_span.get("confidence")
+                try:
+                    conf_text = f" ({float(analyst_confidence):.0%})"
+                except (TypeError, ValueError):
+                    conf_text = ""
+                decision_reason = (
+                    f"Market analysis produced {analyst_signal}{conf_text}, but no "
+                    "trader/strategist or risk_manager span was recorded."
+                )
+            else:
+                decision_reason = "No strategy generated."
 
         return {
             "cycle_id": cycle_id,

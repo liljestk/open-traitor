@@ -60,6 +60,7 @@ class ToolkitContext:
     kelly_stats: dict = None
     recent_outcomes: str = ""
     strategic_context: str = ""
+    strategy_policy: dict = None
 
     def __post_init__(self) -> None:
         if self.open_positions is None:
@@ -76,6 +77,8 @@ class ToolkitContext:
             self.fee_context = {}
         if self.kelly_stats is None:
             self.kelly_stats = {}
+        if self.strategy_policy is None:
+            self.strategy_policy = {}
 
 
 class TradingToolkit:
@@ -232,6 +235,10 @@ class TradingToolkit:
             "strategic_context_excerpt": _cap_text(c.strategic_context, context_cap),
         }
 
+    def get_strategy_policy(self) -> dict:
+        """Deterministic strategy-governance posture and bounded adjustments."""
+        return dict(self.ctx.strategy_policy or {})
+
     # ---------------------------------------------------------------- #
     # Action — the only side-effecting tool
     # ---------------------------------------------------------------- #
@@ -269,6 +276,7 @@ class TradingToolkit:
             take_profit_price=take_profit_price,
             current_price=c.current_price,
             fee_context=c.fee_context,
+            strategy_policy=c.strategy_policy,
             reasoning=reasoning,
         )
         verdict = self.decision_engine.evaluate(
@@ -298,6 +306,11 @@ class TradingToolkit:
             {
                 "name": "get_strategy_signals",
                 "description": "Per-strategy actions/confidence + ensemble verdict.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "get_strategy_policy",
+                "description": "Strategy-governance posture, horizon, expected return, and bounded sizing adjustments.",
                 "parameters": {"type": "object", "properties": {}},
             },
             {

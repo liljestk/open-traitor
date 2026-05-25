@@ -102,19 +102,29 @@ class TradesMixin:
         approved_by: str = "auto",
         exchange: str = "coinbase",
         entry_score: Optional[float] = None,
+        strategy_posture: Optional[str] = None,
+        strategy_horizon_days: Optional[int] = None,
+        exit_policy: Optional[str] = None,
+        expected_gross_return_pct: Optional[float] = None,
+        expected_net_return_pct: Optional[float] = None,
+        strategy_thesis: str = "",
     ) -> int:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO trades
                    (exchange, pair, action, quantity, price, quote_amount, confidence,
                     signal_type, stop_loss, take_profit, reasoning, pnl,
-                    fee_quote, is_rotation, approved_by, entry_score)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    fee_quote, is_rotation, approved_by, entry_score,
+                    strategy_posture, strategy_horizon_days, exit_policy,
+                    expected_gross_return_pct, expected_net_return_pct, strategy_thesis)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (
                     exchange, pair, action, quantity, price, quote_amount, confidence,
                     signal_type, stop_loss, take_profit, reasoning, pnl,
                     fee_quote, 1 if is_rotation else 0, approved_by, entry_score,
+                    strategy_posture, strategy_horizon_days, exit_policy,
+                    expected_gross_return_pct, expected_net_return_pct, strategy_thesis,
                 ),
             )
             row = cursor.fetchone()

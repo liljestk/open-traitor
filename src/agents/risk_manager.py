@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
@@ -271,6 +272,10 @@ class RiskManagerAgent(BaseAgent):
         correlation_matrix = context.get("correlation_matrix")
         signal_type = context.get("signal_type", "neutral")
         signal_type_win_rate = context.get("signal_type_win_rate")  # float | None
+        strategy_policy = _strategy_policy_dict(
+            proposal.get("strategy_policy") or context.get("strategy_policy")
+        )
+        fee_context = context.get("fee_context") or proposal.get("fee_context") or {}
 
         action = proposal.get("action", "hold")
 
@@ -290,6 +295,35 @@ class RiskManagerAgent(BaseAgent):
             or self.trading_config.get("min_confidence")
             or 0.55
         )
+        if action == "buy" and strategy_policy:
+            posture = str(strategy_policy.get("posture") or "watch").lower()
+            if posture == "block":
+                return _reject({
+                    "approved": False,
+                    "action": action,
+                    "pair": proposal.get("pair", "?"),
+                    "reason": (
+                        "Strategy governance blocked new buy exposure: "
+                        + str(strategy_policy.get("thesis") or "insufficient profitable evidence")
+                    ),
+                    "strategy_policy": strategy_policy,
+                })
+            if posture == "reduce":
+                return _reject({
+                    "approved": False,
+                    "action": action,
+                    "pair": proposal.get("pair", "?"),
+                    "reason": "Strategy governance says reduce/watch only; no new buy exposure.",
+                    "strategy_policy": strategy_policy,
+                })
+            min_signal_confidence = max(
+                0.1,
+                min(0.98, min_signal_confidence + _safe_float(
+                    strategy_policy.get("confidence_adjustment"), 0.0
+                )),
+            )
+            if posture == "watch":
+                min_signal_confidence = max(min_signal_confidence, 0.75)
         proposal_confidence = float(proposal.get("confidence", 0))
         if proposal_confidence < min_signal_confidence and action == "buy":
             self.logger.info(
@@ -346,6 +380,22 @@ class RiskManagerAgent(BaseAgent):
                 f"SL→{effective_stop_loss_pct:.1%}"
             )
 
+        if action == "buy" and strategy_policy:
+            stop_mult = max(0.5, min(2.5, _safe_float(
+                strategy_policy.get("stop_multiplier"), 1.0
+            )))
+            tp_mult = max(0.5, min(3.0, _safe_float(
+                strategy_policy.get("take_profit_multiplier"), 1.0
+            )))
+            effective_stop_loss_pct *= stop_mult
+            effective_take_profit_pct *= tp_mult
+            if abs(stop_mult - 1.0) > 0.01 or abs(tp_mult - 1.0) > 0.01:
+                self.logger.info(
+                    f"🧭 Strategy policy targets: SL×{stop_mult:.2f}, TP×{tp_mult:.2f} "
+                    f"({strategy_policy.get('posture', 'watch')}, "
+                    f"{strategy_policy.get('strategy_horizon_days', 1)}d)"
+                )
+
         pair = proposal.get("pair", "BTC-EUR")
         quote_amount = float(proposal.get("quote_amount", proposal.get("usd_amount", 0)) or 0)
         price = float(proposal.get("current_price", 0) or self.state.current_prices.get(pair, 0))
@@ -359,23 +409,29 @@ class RiskManagerAgent(BaseAgent):
 
         if action == "sell":
             held_quantity = self._held_quantity_for_pair(pair)
+            if held_quantity <= 0:
+                return _reject({
+                    "approved": False,
+                    "action": action,
+                    "pair": pair,
+                    "reason": f"Sell requested for {pair}, but no held position is available to size.",
+                })
             if quantity <= 0 and quote_amount > 0 and price > 0:
                 quantity = quote_amount / price
-            if held_quantity > 0:
-                if quantity <= 0:
-                    quantity = held_quantity
-                    self.logger.info(
-                        f"💡 Auto-sized {pair} sell: trader returned no amount, "
-                        f"using held quantity {quantity:.8f}"
-                    )
-                elif quantity > held_quantity:
-                    self.logger.info(
-                        f"🪚 Clamped {pair} sell quantity from {quantity:.8f} → "
-                        f"{held_quantity:.8f} (held quantity)"
-                    )
-                    quantity = held_quantity
-                if price > 0:
-                    quote_amount = quantity * price
+            if quantity <= 0:
+                quantity = held_quantity
+                self.logger.info(
+                    f"💡 Auto-sized {pair} sell: trader returned no amount, "
+                    f"using held quantity {quantity:.8f}"
+                )
+            elif quantity > held_quantity:
+                self.logger.info(
+                    f"🪚 Clamped {pair} sell quantity from {quantity:.8f} → "
+                    f"{held_quantity:.8f} (held quantity)"
+                )
+                quantity = held_quantity
+            if price > 0:
+                quote_amount = quantity * price
 
         # If no amount specified, use quantity * price
         if quote_amount <= 0 and quantity > 0 and price > 0:
@@ -531,6 +587,22 @@ class RiskManagerAgent(BaseAgent):
             else:
                 take_profit = price * (1 + effective_take_profit_pct)
                 self.logger.info(f"Added default percentage take-profit ({effective_take_profit_pct:.1%}): {take_profit:,.2f}")
+
+        if action == "buy" and price > 0 and strategy_policy:
+            policy_target_gain = _safe_float(strategy_policy.get("target_gain_pct"), 0.0)
+            if policy_target_gain > 0:
+                policy_take_profit = price * (1 + policy_target_gain)
+                current_tp_gain = (
+                    ((float(take_profit) - price) / price)
+                    if take_profit and price > 0 else 0.0
+                )
+                if policy_target_gain > current_tp_gain:
+                    take_profit = policy_take_profit
+                    self.logger.info(
+                        f"🧭 Strategy policy TP override: target {policy_target_gain:.1%} "
+                        f"({strategy_policy.get('exit_policy', 'target_or_stop')}) → "
+                        f"{take_profit:,.2f}"
+                    )
 
         # ===== CHECK ABSOLUTE RULES =====
         trade_action = TradeAction.BUY if action == "buy" else TradeAction.SELL
@@ -732,6 +804,17 @@ class RiskManagerAgent(BaseAgent):
             except (TypeError, ValueError) as _e:
                 self.logger.debug(f"regression_factor multiplier skipped: {_e}")
 
+        if action == "buy" and strategy_policy:
+            policy_size_mult = max(0.0, min(1.5, _safe_float(
+                strategy_policy.get("size_multiplier"), 1.0
+            )))
+            max_position *= policy_size_mult
+            self.logger.info(
+                f"Strategy governance ({strategy_policy.get('posture', 'watch')}, "
+                f"score={_safe_float(strategy_policy.get('evidence_score'), 0.0):.2f}) "
+                f"× {policy_size_mult:.2f} → max {max_position:,.2f}"
+            )
+
         # Step 5: Strong-signal floor (override quality penalty for new/poor-history assets)
         # A confident strong signal should not be near-zero-sized just because Kelly
         # produced a tiny fraction from a thin/bad historical track record.
@@ -837,6 +920,37 @@ class RiskManagerAgent(BaseAgent):
         elif price > 0:
             quantity = quote_amount / price
 
+        expected_gross_return_pct = 0.0
+        if action == "buy" and price > 0 and take_profit:
+            expected_gross_return_pct = max(0.0, (float(take_profit) - price) / price)
+        elif strategy_policy:
+            expected_gross_return_pct = max(
+                0.0,
+                _safe_float(strategy_policy.get("expected_gross_return_pct"), 0.0),
+            )
+        fee_hurdle_pct = 0.0
+        if isinstance(fee_context, dict):
+            fee_hurdle_pct = max(
+                _safe_float(fee_context.get("min_gain_pct"), 0.0),
+                _safe_float(fee_context.get("breakeven_pct"), 0.0),
+            )
+        expected_net_return_pct = expected_gross_return_pct - fee_hurdle_pct
+
+        strategy_horizon_days = int(_safe_float(
+            strategy_policy.get("strategy_horizon_days"),
+            proposal.get("strategy_horizon_days") or 1,
+        )) if strategy_policy else int(_safe_float(proposal.get("strategy_horizon_days"), 1))
+        strategy_horizon_days = max(1, min(365, strategy_horizon_days))
+        min_hold_minutes = max(
+            _safe_float(self.trading_config.get("min_hold_minutes"), 0.0),
+            _safe_float(strategy_policy.get("min_hold_minutes"), 0.0) if strategy_policy else 0.0,
+        )
+        min_hold_until = None
+        if action == "buy" and min_hold_minutes > 0:
+            min_hold_until = (
+                datetime.now(timezone.utc) + timedelta(minutes=min_hold_minutes)
+            ).isoformat()
+
         result = {
             "approved": True,
             "needs_approval": needs_approval,
@@ -849,6 +963,16 @@ class RiskManagerAgent(BaseAgent):
             "take_profit": take_profit,
             "confidence": proposal.get("confidence", 0),
             "reasoning": proposal.get("reasoning", ""),
+            "strategy_policy": strategy_policy,
+            "strategy_posture": strategy_policy.get("posture") if strategy_policy else None,
+            "strategy_horizon_days": strategy_horizon_days,
+            "exit_policy": strategy_policy.get("exit_policy") if strategy_policy else proposal.get("exit_policy", "target_or_stop"),
+            "min_hold_minutes": min_hold_minutes,
+            "min_hold_until": min_hold_until,
+            "expected_gross_return_pct": expected_gross_return_pct,
+            "expected_net_return_pct": expected_net_return_pct,
+            "strategy_thesis": strategy_policy.get("thesis", "") if strategy_policy else "",
+            "invalidation_reasons": strategy_policy.get("invalidation_reasons", []) if strategy_policy else [],
         }
 
         status = "✅ APPROVED" if not needs_approval else "⚠️ NEEDS TELEGRAM APPROVAL"
@@ -883,9 +1007,16 @@ class RiskManagerAgent(BaseAgent):
                 positions = getattr(self.state, attr_name, {}) or {}
             except Exception:
                 continue
-            if not isinstance(positions, dict) or pair not in positions:
+            if not isinstance(positions, dict):
                 continue
-            raw_position = positions.get(pair)
+            aliases = _pair_aliases(pair)
+            raw_position = None
+            for pos_pair, candidate in positions.items():
+                if aliases.intersection(_pair_aliases(str(pos_pair))):
+                    raw_position = candidate
+                    break
+            if raw_position is None:
+                continue
             if isinstance(raw_position, dict):
                 raw_position = raw_position.get("quantity", raw_position.get("amount"))
             elif hasattr(raw_position, "quantity"):
@@ -897,3 +1028,26 @@ class RiskManagerAgent(BaseAgent):
             if quantity > 0:
                 return quantity
         return 0.0
+
+
+def _pair_aliases(pair: str) -> set[str]:
+    value = str(pair or "").strip().upper()
+    aliases = {value} if value else set()
+    for separator in ("-", "/"):
+        if separator in value:
+            aliases.add(value.rsplit(separator, 1)[0])
+    return aliases
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if result != result or result in (float("inf"), float("-inf")):
+        return default
+    return result
+
+
+def _strategy_policy_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}

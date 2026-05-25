@@ -184,6 +184,62 @@ class TestRiskManagerRun:
         assert result["stop_loss"] is not None
         assert result["take_profit"] is not None
 
+    def test_strategy_policy_applies_horizon_target_and_size(self):
+        rm = _make_rm(kelly=False)
+        result = _run(rm.run({
+            "proposal": {
+                "action": "buy",
+                "pair": "BTC-EUR",
+                "confidence": 0.9,
+                "quote_amount": 1000,
+                "current_price": 100,
+                "strategy_policy": {
+                    "posture": "trade",
+                    "evidence_score": 0.55,
+                    "size_multiplier": 0.5,
+                    "target_gain_pct": 0.12,
+                    "strategy_horizon_days": 7,
+                    "min_hold_minutes": 720,
+                    "exit_policy": "thesis_trailing",
+                    "thesis": "positive backtest and plan edge",
+                },
+            },
+            "portfolio_value": 10000,
+            "cash_balance": 5000,
+            "signal_type": "strong_buy",
+            "fee_context": {"min_gain_pct": 0.01, "breakeven_pct": 0.01},
+        }))
+
+        assert result["approved"] is True
+        assert 0 < result["quote_amount"] < 1000
+        assert result["take_profit"] == pytest.approx(112.0)
+        assert result["strategy_horizon_days"] == 7
+        assert result["exit_policy"] == "thesis_trailing"
+        assert result["min_hold_minutes"] == pytest.approx(720)
+        assert result["expected_net_return_pct"] > 0.10
+
+    def test_strategy_policy_blocks_buy_in_risk_manager_fallback_path(self):
+        rm = _make_rm()
+        result = _run(rm.run({
+            "proposal": {
+                "action": "buy",
+                "pair": "BTC-EUR",
+                "confidence": 0.95,
+                "quote_amount": 100,
+                "current_price": 50000,
+                "strategy_policy": {
+                    "posture": "block",
+                    "thesis": "negative expectancy",
+                },
+            },
+            "portfolio_value": 10000,
+            "cash_balance": 5000,
+            "signal_type": "strong_buy",
+        }))
+
+        assert result["approved"] is False
+        assert "strategy governance" in result["reason"].lower()
+
     def test_no_amount_auto_filled_when_cash_present(self):
         # Updated 2026-05-04: risk_manager now auto-sizes buys with no
         # explicit amount instead of rejecting (was the #3 silent reject in
@@ -277,6 +333,45 @@ class TestRiskManagerRun:
         assert result["approved"] is True
         assert result["quantity"] == pytest.approx(0.1)
         assert result["quote_amount"] == pytest.approx(5000.0)
+
+    def test_sell_without_amount_uses_alias_position_quantity(self):
+        rm = _make_rm(max_open=1)
+        rm.state.open_positions = {"SAN.MC": 3.0}
+        result = _run(rm.run({
+            "proposal": {
+                "action": "sell",
+                "pair": "SAN.MC-EUR",
+                "confidence": 0.8,
+                "quote_amount": None,
+                "quantity": None,
+                "current_price": 10.0,
+            },
+            "portfolio_value": 10000,
+            "cash_balance": 5000,
+        }))
+
+        assert result["approved"] is True
+        assert result["quantity"] == pytest.approx(3.0)
+        assert result["quote_amount"] == pytest.approx(30.0)
+
+    def test_sell_without_held_position_rejected(self):
+        rm = _make_rm(max_open=1)
+        rm.state.open_positions = {}
+        result = _run(rm.run({
+            "proposal": {
+                "action": "sell",
+                "pair": "SAN.MC-EUR",
+                "confidence": 0.8,
+                "quote_amount": 30.0,
+                "quantity": 3.0,
+                "current_price": 10.0,
+            },
+            "portfolio_value": 10000,
+            "cash_balance": 5000,
+        }))
+
+        assert result["approved"] is False
+        assert "no held position" in result["reason"]
 
     def test_atr_stop_loss(self):
         rm = _make_rm()

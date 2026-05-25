@@ -121,3 +121,36 @@ def test_fee_hurdle_vetoes_tight_take_profit():
 
     assert not v.approved
     assert v.veto == "fee_hurdle"
+
+
+def test_strategy_policy_blocks_new_buy_exposure():
+    eng, _, _ = _engine()
+    proposal = _make_proposal()
+    proposal.strategy_policy = {
+        "posture": "block",
+        "evidence_score": -0.4,
+        "thesis": "negative expectancy and fee drag",
+    }
+
+    v = eng.evaluate(proposal, portfolio_value=1000, cash_balance=1000)
+
+    assert not v.approved
+    assert v.veto == "strategy_policy"
+    assert "blocks" in v.reasons[0]
+
+
+def test_strategy_policy_watch_requires_high_confidence():
+    eng, _, _ = _engine(min_confidence=0.55)
+    proposal = _make_proposal(confidence=0.70)
+    proposal.strategy_policy = {
+        "posture": "watch",
+        "evidence_score": 0.12,
+        "confidence_adjustment": 0.0,
+        "expected_net_return_pct": 0.02,
+        "adjustments": {"min_expected_net_return_pct": 0.003},
+    }
+
+    v = eng.evaluate(proposal, portfolio_value=1000, cash_balance=1000)
+
+    assert not v.approved
+    assert v.veto == "strategy_policy"
