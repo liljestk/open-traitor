@@ -303,6 +303,21 @@ class ExecutorAgent(BaseAgent):
             self.logger.error(f"❌ Trade rejected: invalid amounts quote_amount={quote_amount}, quantity={quantity}")
             return {"executed": False, "reason": "Invalid trade amounts"}
 
+        if action == "buy" and getattr(self.exchange, "asset_class", "crypto") == "equity":
+            reference_price = price * (1 - self.limit_price_offset_pct) if use_limit else price
+            requested_shares = int(float(quote_amount) / reference_price) if reference_price > 0 else 0
+            if requested_shares < 1:
+                reason = "Order size must be at least 1 share"
+                self.logger.warning(
+                    f"🚫 Trade rejected: {pair} {reason} "
+                    f"(amount={float(quote_amount):.2f}, min_quote={reference_price:.2f})"
+                )
+                return {
+                    "executed": False,
+                    "reason": reason,
+                    "min_quote_amount": reference_price,
+                }
+
         # Phase 5: smart-execution pre-trade microstructure gate.
         # Only for buys above min notional, and only when the exchange has a
         # usable order book. On rejection (spread too wide / depth too thin)
@@ -418,10 +433,11 @@ class ExecutorAgent(BaseAgent):
                     size=float(base_size),
                     price=limit_price,
                 )
-                self.logger.info(
-                    f"📋 Limit BUY placed for {pair} @ {limit_price:,.2f} "
-                    f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
-                )
+                if result.get("success", True) and "error" not in result:
+                    self.logger.info(
+                        f"📋 Limit BUY submitted for {pair} @ {limit_price:,.2f} "
+                        f"(market: {price:,.2f}, offset: {self.limit_price_offset_pct:.2%})"
+                    )
             elif action == "buy":
                 result = self.exchange.place_market_order(
                     pair=pair,

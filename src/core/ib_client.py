@@ -16,11 +16,30 @@ import math
 import os
 import queue
 import threading
+import time
 from typing import Any, Optional
 
 from src.utils.logger import get_logger
 
 logger = get_logger("ib_client")
+
+
+_IB_SUFFIX_INFO: dict[str, tuple[str, tuple[str, ...]]] = {
+    "AS": ("EUR", ("AEB",)),
+    "BR": ("EUR", ("EBR",)),
+    "CO": ("DKK", ("CPH",)),
+    "DE": ("EUR", ("IBIS", "XETRA")),
+    "HE": ("EUR", ("HEX",)),
+    "L": ("GBP", ("LSE",)),
+    "MC": ("EUR", ("BM",)),
+    "MI": ("EUR", ("BVME",)),
+    "OL": ("NOK", ("OSE",)),
+    "PA": ("EUR", ("SBF",)),
+    "ST": ("SEK", ("SFB",)),
+    "SW": ("CHF", ("EBS",)),
+}
+
+_IB_ORDER_ACK_TIMEOUT_SECONDS = 3.0
 
 # Try importing ib_insync for real IB API connectivity.
 # Paper mode works without it.
@@ -298,46 +317,89 @@ class IBClient(PaperTradingMixin, ExchangeClient):
 
     # ── Market data ──────────────────────────────────────────────────────
 
+    def _ib_contract_candidates(self, pair: str) -> list[tuple[str, str, str | None]]:
+        yahoo_symbol = equity_feed.pair_to_yahoo(pair).upper()
+        pair_parts = pair.upper().split("-")
+        quote_currency = (
+            pair_parts[-1]
+            if len(pair_parts) > 1 and len(pair_parts[-1]) == 3 and pair_parts[-1].isalpha()
+            else self._native_currency
+        )
+
+        if "." in yahoo_symbol:
+            symbol, suffix = yahoo_symbol.rsplit(".", 1)
+            suffix_currency, primary_exchanges = _IB_SUFFIX_INFO.get(
+                suffix,
+                (quote_currency, ()),
+            )
+            currency = quote_currency or suffix_currency
+            if suffix in _IB_SUFFIX_INFO:
+                currency = suffix_currency
+
+            candidates = [
+                (symbol, currency, primary_exchange)
+                for primary_exchange in primary_exchanges
+            ]
+            candidates.append((symbol, currency, None))
+            return candidates
+
+        currency_candidates = [quote_currency or "USD"]
+        if "USD" not in currency_candidates:
+            currency_candidates.append("USD")
+        return [(yahoo_symbol, currency, None) for currency in currency_candidates]
+
+    @staticmethod
+    def _stock_contract(stock_cls, symbol: str, currency: str, primary_exchange: str | None):
+        if primary_exchange:
+            try:
+                return stock_cls(
+                    symbol,
+                    "SMART",
+                    currency,
+                    primaryExchange=primary_exchange,
+                )
+            except TypeError:
+                contract = stock_cls(symbol, "SMART", currency)
+                setattr(contract, "primaryExchange", primary_exchange)
+                return contract
+        return stock_cls(symbol, "SMART", currency)
+
     def _get_contract(self, pair: str):
         """
-        Helper to create and qualify an ib_insync Stock contract.
-        
-        Pair format: 'AAPL-USD', 'MSFT-EUR', or just 'AAPL'.
-        For US stocks, currency should be USD even if the account holds EUR
-        (IBKR handles FX conversion automatically on trade execution).
+        Create and qualify an ib_insync Stock contract for IBKR.
+
+        Internal equity pairs often carry Yahoo suffixes such as
+        ``ENEL.MI-EUR``. IBKR expects the root symbol with an optional primary
+        exchange (``ENEL`` + ``BVME``), not the Yahoo symbol as the IB symbol.
         """
         if not self.paper_mode and self._ib_thread_id != threading.get_ident():
             return self._run_on_ib_thread(lambda: self._get_contract(pair))
 
         from ib_insync import Stock
-        parts = pair.upper().split("-")
-        symbol = parts[0]
-        currency = parts[1] if len(parts) > 1 else "USD"
-        
-        # US equities always trade in USD on SMART routing
-        contract = Stock(symbol, 'SMART', currency)
-        qualified = self.ib.qualifyContracts(contract)
-        
-        if not qualified or not contract.conId:
-            # Retry with USD if alternate currency failed
-            if currency != "USD":
-                contract = Stock(symbol, 'SMART', 'USD')
-                qualified = self.ib.qualifyContracts(contract)
-                if qualified and contract.conId:
-                    logger.debug(f"Contract {symbol} not available in {currency}, using USD")
-            
-            # Try specific exchanges for European stocks
-            if not qualified or not contract.conId:
-                for exch_currency in ["EUR", "GBP", "CHF"]:
-                    if exch_currency == currency:
-                        continue
-                    contract = Stock(symbol, 'SMART', exch_currency)
-                    qualified = self.ib.qualifyContracts(contract)
-                    if qualified and contract.conId:
-                        logger.debug(f"Contract {symbol} found with currency {exch_currency}")
-                        break
-        
-        return contract
+
+        attempted: list[str] = []
+        for symbol, currency, primary_exchange in self._ib_contract_candidates(pair):
+            contract = self._stock_contract(Stock, symbol, currency, primary_exchange)
+            attempted.append(
+                f"{symbol}/{currency}"
+                + (f" primary={primary_exchange}" if primary_exchange else "")
+            )
+            qualified = self.ib.qualifyContracts(contract)
+            qualified_contract = qualified[0] if qualified else contract
+            if qualified and getattr(qualified_contract, "conId", 0):
+                if qualified_contract is not contract:
+                    contract = qualified_contract
+                logger.debug(
+                    f"Qualified IBKR contract for {pair}: "
+                    f"symbol={getattr(contract, 'symbol', symbol)} "
+                    f"currency={getattr(contract, 'currency', currency)} "
+                    f"primaryExchange={getattr(contract, 'primaryExchange', primary_exchange)}"
+                )
+                return contract
+
+        raise ValueError(
+            f"Unable to qualify IBKR contract for {pair}; attempted {', '.join(attempted)}"
+        )
 
     def get_current_price(self, pair: str) -> float:
         """
@@ -489,6 +551,95 @@ class IBClient(PaperTradingMixin, ExchangeClient):
             }
         raise NotImplementedError
 
+    @staticmethod
+    def _normalise_order_status(status: Any) -> str:
+        return str(status or "").upper().replace(" ", "")
+
+    @staticmethod
+    def _ib_failure_message(trade, fallback: str) -> str:
+        for entry in reversed(getattr(trade, "log", []) or []):
+            message = str(getattr(entry, "message", "") or "").strip()
+            error_code = getattr(entry, "errorCode", 0) or 0
+            if message:
+                return message
+            if error_code:
+                return f"IBKR order rejected with error {error_code}"
+        advanced_error = str(getattr(trade, "advancedError", "") or "").strip()
+        if advanced_error:
+            return advanced_error
+        return fallback
+
+    def _wait_for_order_ack(self, trade) -> str:
+        deadline = time.monotonic() + _IB_ORDER_ACK_TIMEOUT_SECONDS
+        status = self._normalise_order_status(
+            getattr(getattr(trade, "orderStatus", None), "status", "")
+        )
+        sleep_fn = getattr(self.ib, "sleep", None)
+        while callable(sleep_fn) and time.monotonic() < deadline:
+            if status in {"SUBMITTED", "PRESUBMITTED", "FILLED", "CANCELLED", "INACTIVE"}:
+                break
+            sleep_fn(0.2)
+            status = self._normalise_order_status(
+                getattr(getattr(trade, "orderStatus", None), "status", "")
+            )
+        return status
+
+    def _live_order_response(self, trade, *, side: str, pair: str) -> dict:
+        status = self._wait_for_order_ack(trade)
+        order = getattr(trade, "order", None)
+        order_status = getattr(trade, "orderStatus", None)
+        order_id = str(getattr(order, "orderId", "") or "")
+
+        if status in {"CANCELLED", "INACTIVE"}:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "status": status,
+                "side": side.upper(),
+                "pair": pair,
+                "error": self._ib_failure_message(
+                    trade,
+                    f"IBKR order {order_id or '<unknown>'} ended with status {status}",
+                ),
+            }
+
+        if status not in {"SUBMITTED", "PRESUBMITTED", "FILLED"}:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "status": status or "UNKNOWN",
+                "side": side.upper(),
+                "pair": pair,
+                "error": self._ib_failure_message(
+                    trade,
+                    f"IBKR order {order_id or '<unknown>'} was not acknowledged "
+                    f"by the broker (status={status or 'UNKNOWN'})",
+                ),
+            }
+
+        filled_size = str(getattr(order_status, "filled", 0) or 0)
+        avg_fill_price = str(getattr(order_status, "avgFillPrice", 0) or 0)
+        filled_value = "0"
+        try:
+            filled_value = str(float(filled_size) * float(avg_fill_price))
+        except (TypeError, ValueError):
+            filled_value = "0"
+
+        exchange_status = "FILLED" if status == "FILLED" else "OPEN"
+        return {
+            "success": True,
+            "order_id": order_id,
+            "status": exchange_status,
+            "ib_status": status or "UNKNOWN",
+            "side": side.upper(),
+            "pair": pair,
+            "filled_size": filled_size,
+            "filled_value": filled_value,
+            "average_filled_price": avg_fill_price,
+            "fee": "0",
+            "ts": self.paper_now_iso(),
+        }
+
     # ── Order execution ──────────────────────────────────────────────────
 
     def place_market_order(
@@ -526,19 +677,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 order.orderRef = client_oid
                 
             trade = self.ib.placeOrder(contract, order)
-            # We don't wait for execution here, just return the order details
-            return {
-                "success": True,
-                "order_id": str(trade.order.orderId),
-                "status": "OPEN",  # It might execute soon, but returning OPEN
-                "side": side.upper(),
-                "pair": pair,
-                "filled_size": "0",
-                "filled_value": "0",
-                "average_filled_price": "0",
-                "fee": "0",
-                "ts": self.paper_now_iso(),
-            }
+            return self._live_order_response(trade, side=side, pair=pair)
 
         try:
             return self._run_on_ib_thread(_place)
@@ -573,18 +712,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 order.orderRef = client_oid
                 
             trade = self.ib.placeOrder(contract, order)
-            return {
-                "success": True,
-                "order_id": str(trade.order.orderId),
-                "status": "OPEN",
-                "side": side.upper(),
-                "pair": pair,
-                "filled_size": "0",
-                "filled_value": "0",
-                "average_filled_price": "0",
-                "fee": "0",
-                "ts": self.paper_now_iso(),
-            }
+            return self._live_order_response(trade, side=side, pair=pair)
 
         try:
             return self._run_on_ib_thread(_place)
@@ -782,7 +910,7 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                         px = self._last_prices.get(pair, 0.0)
                         total += amount * px
             return total
-        else:
+        def _portfolio_value() -> float:
             vals = self.ib.accountValues()
             for v in vals:
                 if v.tag == "NetLiquidationByCurrency" and v.currency == self._native_currency:
@@ -793,6 +921,8 @@ class IBClient(PaperTradingMixin, ExchangeClient):
                 if v.tag == "NetLiquidation":
                     return float(v.value)
             return 0.0
+
+        return self._run_on_ib_thread(_portfolio_value)
 
     def reconcile_positions(self, expected: dict[str, float]) -> dict:
         mismatches: list[dict] = []

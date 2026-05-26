@@ -15,7 +15,12 @@ _executor_mod = importlib.import_module("src.agents.executor")
 ExecutorAgent = _executor_mod.ExecutorAgent
 
 
-def _make_executor(style_modifiers=None, use_limit=True, urgency_threshold=0.8):
+def _make_executor(
+    style_modifiers=None,
+    use_limit=True,
+    urgency_threshold=0.8,
+    asset_class="crypto",
+):
     llm = MagicMock()
     state = MagicMock()
     state.add_trade = MagicMock(return_value=True)
@@ -36,7 +41,7 @@ def _make_executor(style_modifiers=None, use_limit=True, urgency_threshold=0.8):
 
     exchange = MagicMock()
     exchange.paper_mode = True
-    exchange.asset_class = "crypto"
+    exchange.asset_class = asset_class
     exchange.place_market_order = MagicMock(return_value={
         "success": True,
         "order": {
@@ -252,6 +257,20 @@ class TestExecution:
         }}))
         assert result["executed"] is True
         exchange.place_limit_order.assert_called_once()
+
+    def test_equity_buy_below_one_share_rejected_before_order(self):
+        ex, exchange, state = _make_executor(asset_class="equity")
+        result = self._run(ex.run({"approved_trade": {
+            "approved": True, "action": "buy", "pair": "ALV.DE-EUR",
+            "quote_amount": 50, "quantity": 0.12, "price": 392.30,
+            "confidence": 0.6, "reasoning": "moderate signal",
+        }}))
+
+        assert result["executed"] is False
+        assert result["reason"] == "Order size must be at least 1 share"
+        exchange.place_limit_order.assert_not_called()
+        exchange.place_market_order.assert_not_called()
+        state.add_trade.assert_not_called()
 
     def test_failed_order_not_recorded(self):
         ex, exchange, state = _make_executor()
