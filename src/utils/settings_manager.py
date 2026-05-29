@@ -1086,6 +1086,7 @@ _LLM_PROVIDER_SCHEMA: dict[str, dict[str, Any]] = {
     "cooldown_seconds":  {"type": int,  "min": 5,  "max": 3600},
     "is_local":          {"type": bool},
     "tier":              {"type": str},   # "free" or "paid"
+    "capability_tier":   {"type": int,  "min": 1,  "max": 3},
 }
 
 

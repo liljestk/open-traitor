@@ -258,6 +258,7 @@ async def replay_strategist(
                     max_tokens=300,
                     agent_name="counterfactual_replay",
                     priority="low",
+                    route_tier=1,
                 )
             except Exception as e:
                 logger.debug(f"replay: llm call failed: {e}")

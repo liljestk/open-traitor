@@ -163,10 +163,50 @@ class TraderAgent(BaseAgent):
             )
             return result
 
-        # First LLM pass.
-        proposal = await self._llm_propose(tool_payload, context)
+        # First LLM pass. Normal live-cycle reasoning uses Tier 2 unless the
+        # deterministic context already marks the decision as high risk.
+        route_tier, route_reasons = self._route_tier_for_decision(
+            tool_payload,
+            context,
+        )
+        route_attempts: list[dict[str, Any]] = [{
+            "phase": "initial",
+            "route_tier": route_tier,
+            "reasons": list(route_reasons),
+        }]
+        proposal = await self._llm_propose(
+            tool_payload,
+            context,
+            route_tier=route_tier,
+            route_reasons=route_reasons,
+        )
         proposal_metrics = _pop_llm_metrics(proposal)
         llm_metrics = [proposal_metrics] if proposal_metrics else []
+
+        large_notional_reasons = self._large_notional_triggers(proposal, ctx)
+        if route_tier < 3 and large_notional_reasons:
+            route_tier = 3
+            route_reasons = large_notional_reasons
+            escalation_payload = dict(tool_payload)
+            escalation_payload["tier3_escalation"] = {
+                "reasons": route_reasons,
+                "previous_proposal": _proposal_audit_view(proposal),
+            }
+            route_attempts.append({
+                "phase": "large_notional_escalation",
+                "route_tier": route_tier,
+                "reasons": list(route_reasons),
+            })
+            proposal = await self._llm_propose(
+                escalation_payload,
+                context,
+                route_tier=route_tier,
+                route_reasons=route_reasons,
+            )
+            proposal_metrics = _pop_llm_metrics(proposal)
+            if proposal_metrics:
+                llm_metrics.append(proposal_metrics)
+
         verdict = toolkit.propose_trade(
             pair=proposal.get("pair", ctx.pair),
             action=proposal.get("action", "hold"),
@@ -198,7 +238,18 @@ class TraderAgent(BaseAgent):
                     "decide to hold."
                 ),
             }
-            proposal2 = await self._llm_propose(retry_payload, context)
+            retry_reasons = ["retry_after_veto"]
+            route_attempts.append({
+                "phase": "retry_after_veto",
+                "route_tier": 3,
+                "reasons": retry_reasons,
+            })
+            proposal2 = await self._llm_propose(
+                retry_payload,
+                context,
+                route_tier=3,
+                route_reasons=retry_reasons,
+            )
             proposal2_metrics = _pop_llm_metrics(proposal2)
             if proposal2_metrics:
                 llm_metrics.append(proposal2_metrics)
@@ -225,6 +276,9 @@ class TraderAgent(BaseAgent):
         result.setdefault("action", verdict["action"])
         result.setdefault("confidence", float(proposal.get("confidence", 0.0) or 0.0))
         result["decision_engine_verdict"] = verdict
+        result["llm_route_tier"] = int(route_attempts[-1]["route_tier"])
+        result["llm_route_reasons"] = list(route_attempts[-1]["reasons"])
+        result["llm_route_attempts"] = route_attempts
 
         # Sizing fallback: an LLM proposal that omits quote_amount/quantity
         # would otherwise be silently rejected downstream by RiskManager
@@ -299,6 +353,9 @@ class TraderAgent(BaseAgent):
         self,
         tool_payload: dict,
         context: dict,
+        *,
+        route_tier: int = 2,
+        route_reasons: Optional[list[str]] = None,
     ) -> dict:
         """Run the LLM proposal call. Falls back to a deterministic synthesis."""
         trace_ctx = context.get("trace_ctx")
@@ -327,12 +384,16 @@ class TraderAgent(BaseAgent):
                 max_tokens=600,
                 span=span,
                 agent_name=self.name,
+                priority="high" if route_tier >= 3 else None,
+                route_tier=route_tier,
             )
         except Exception as exc:
             self.logger.warning(f"trader LLM call failed: {exc} — falling back")
             fallback = self._deterministic_fallback(tool_payload)
             fallback["_llm_metrics"] = _build_llm_metrics(
-                span, system_prompt, user_msg, {"error": str(exc)}, payload_text
+                span, system_prompt, user_msg, {"error": str(exc)}, payload_text,
+                route_tier=route_tier,
+                route_reasons=route_reasons,
             )
             return fallback
 
@@ -340,7 +401,9 @@ class TraderAgent(BaseAgent):
             self.logger.warning(f"trader LLM error: {llm_response}")
             fallback = self._deterministic_fallback(tool_payload)
             fallback["_llm_metrics"] = _build_llm_metrics(
-                span, system_prompt, user_msg, llm_response, payload_text
+                span, system_prompt, user_msg, llm_response, payload_text,
+                route_tier=route_tier,
+                route_reasons=route_reasons,
             )
             return fallback
 
@@ -349,7 +412,9 @@ class TraderAgent(BaseAgent):
             self.logger.warning(f"trader LLM schema invalid: {schema_err}")
             fallback = self._deterministic_fallback(tool_payload)
             fallback["_llm_metrics"] = _build_llm_metrics(
-                span, system_prompt, user_msg, llm_response, payload_text
+                span, system_prompt, user_msg, llm_response, payload_text,
+                route_tier=route_tier,
+                route_reasons=route_reasons,
             )
             return fallback
         # `extra="ignore"` strips `strategy` — preserve it from the raw response.
@@ -357,7 +422,9 @@ class TraderAgent(BaseAgent):
             sanitized["strategy"] = str(llm_response.get("strategy") or "llm_strategist")
         sanitized.setdefault("strategy", "llm_strategist")
         sanitized["_llm_metrics"] = _build_llm_metrics(
-            span, system_prompt, user_msg, llm_response, payload_text
+            span, system_prompt, user_msg, llm_response, payload_text,
+            route_tier=route_tier,
+            route_reasons=route_reasons,
         )
         return sanitized
 
@@ -520,6 +587,80 @@ class TraderAgent(BaseAgent):
             return f"no actionable signal after deterministic checks ({signal_type}/{confidence:.2f})"
         return ""
 
+    def _route_tier_for_decision(
+        self,
+        tool_payload: dict,
+        context: dict[str, Any],
+    ) -> tuple[int, list[str]]:
+        reasons: list[str] = []
+        if bool(context.get("high_stakes_active")):
+            reasons.append("high_stakes_mode")
+        reasons.extend(self._signal_uncertainty_triggers(tool_payload))
+        if reasons:
+            return 3, _dedupe(reasons)
+        return 2, ["normal_cycle"]
+
+    def _signal_uncertainty_triggers(self, tool_payload: dict) -> list[str]:
+        market = tool_payload.get("market") or {}
+        strategy_signals = tool_payload.get("strategy_signals") or {}
+        ensemble = strategy_signals.get("ensemble") or {}
+        pattern = tool_payload.get("pattern") or {}
+
+        market_action = _market_signal_action(market.get("signal_type"))
+        market_confidence = _optional_float(market.get("signal_confidence")) or 0.0
+        ensemble_action = _trade_action(ensemble.get("action"))
+        pattern_action = _pattern_direction_action(pattern.get("direction"))
+        directional_actions = {
+            action for action in (market_action, ensemble_action, pattern_action)
+            if action in {"buy", "sell"}
+        }
+
+        reasons: list[str] = []
+        if len(directional_actions) > 1:
+            reasons.append("conflicting_signals")
+
+        ambiguous_floor = float(llm_optimizer.get("trader_tier3_ambiguous_confidence", 0.70) or 0.70)
+        if (
+            market_action in {"buy", "sell"}
+            and market_confidence >= 0.55
+            and market_confidence < max(self.min_confidence, ambiguous_floor)
+        ):
+            reasons.append("ambiguous_market_signal")
+
+        ensemble_agreement = _optional_float(ensemble.get("agreement"))
+        ensemble_count = int(_optional_float(ensemble.get("n_strategies")) or 0)
+        if (
+            ensemble_action in {"buy", "sell"}
+            and ensemble_count >= 2
+            and ensemble_agreement is not None
+            and ensemble_agreement < 0.50
+        ):
+            reasons.append("low_ensemble_agreement")
+
+        return reasons
+
+    @staticmethod
+    def _large_notional_triggers(proposal: dict, ctx: ToolkitContext) -> list[str]:
+        notional = _proposal_notional(proposal, ctx.current_price)
+        if notional is None or notional <= 0:
+            return []
+
+        reasons: list[str] = []
+        notional_threshold = float(
+            llm_optimizer.get("trader_tier3_notional_threshold", 750.0) or 0.0
+        )
+        portfolio_pct_threshold = float(
+            llm_optimizer.get("trader_tier3_portfolio_pct", 0.10) or 0.0
+        )
+
+        if notional_threshold > 0 and notional >= notional_threshold:
+            reasons.append(f"large_notional:{notional:.2f}")
+        if ctx.portfolio_value > 0 and portfolio_pct_threshold > 0:
+            portfolio_pct = notional / ctx.portfolio_value
+            if portfolio_pct >= portfolio_pct_threshold:
+                reasons.append(f"large_portfolio_pct:{portfolio_pct:.2%}")
+        return reasons
+
     @staticmethod
     def _snapshot_for_prompt(toolkit: TradingToolkit) -> dict:
         return _strip_empty_payload({
@@ -621,6 +762,67 @@ def _append_reason(existing: Any, reason: str) -> str:
     return f"{text}; {reason}"
 
 
+def _trade_action(value: Any) -> str:
+    action = str(value or "").strip().lower()
+    return action if action in {"buy", "sell", "hold"} else ""
+
+
+def _market_signal_action(value: Any) -> str:
+    signal = str(value or "").strip().lower()
+    if signal in {"buy", "strong_buy", "weak_buy"}:
+        return "buy"
+    if signal in {"sell", "strong_sell", "weak_sell"}:
+        return "sell"
+    if signal == "neutral":
+        return "hold"
+    return ""
+
+
+def _pattern_direction_action(value: Any) -> str:
+    direction = str(value or "").strip().lower()
+    if direction in {"bullish", "up", "buy"}:
+        return "buy"
+    if direction in {"bearish", "down", "sell"}:
+        return "sell"
+    if direction == "neutral":
+        return "hold"
+    return ""
+
+
+def _proposal_notional(proposal: dict, current_price: float) -> Optional[float]:
+    if not isinstance(proposal, dict):
+        return None
+    quote_amount = _optional_float(proposal.get("quote_amount"))
+    if quote_amount is not None and quote_amount > 0:
+        return abs(quote_amount)
+    quantity = _optional_float(proposal.get("quantity"))
+    price = _optional_float(proposal.get("current_price")) or current_price
+    if quantity is not None and quantity > 0 and price > 0:
+        return abs(quantity * price)
+    return None
+
+
+def _proposal_audit_view(proposal: dict) -> dict:
+    if not isinstance(proposal, dict):
+        return {}
+    return {
+        key: proposal.get(key)
+        for key in (
+            "action", "pair", "confidence", "quote_amount", "quantity",
+            "stop_loss_price", "take_profit_price", "reasoning",
+        )
+        if key in proposal
+    }
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
 def _ensemble_actionable(ensemble: Optional[dict]) -> bool:
     if not isinstance(ensemble, dict):
         return False
@@ -643,6 +845,9 @@ def _build_llm_metrics(
     user_msg: str,
     output: Any,
     payload_text: str,
+    *,
+    route_tier: int = 2,
+    route_reasons: Optional[list[str]] = None,
 ) -> dict:
     prompt_tokens = int(getattr(span, "prompt_tokens", 0) or 0)
     completion_tokens = int(getattr(span, "completion_tokens", 0) or 0)
@@ -656,10 +861,14 @@ def _build_llm_metrics(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "latency_ms": float(getattr(span, "latency_ms", 0.0) or 0.0),
+        "route_tier": int(route_tier),
+        "route_reasons": list(route_reasons or []),
         "raw_prompt": json.dumps({
             "system_chars": len(system_prompt),
             "payload_chars": len(payload_text),
             "user": user_msg,
+            "route_tier": int(route_tier),
+            "route_reasons": list(route_reasons or []),
             "payload_preview": payload_text[:500],
         }, default=str),
     }

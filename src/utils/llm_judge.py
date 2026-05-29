@@ -95,6 +95,7 @@ async def _judge_one(llm, row: dict, *, reasoning_max_chars: int = 1200) -> Opti
             max_tokens=200,
             agent_name="reasoning_judge",
             priority="low",
+            route_tier=1,
         )
     except Exception as e:
         logger.debug(f"llm_judge: call failed: {e}")

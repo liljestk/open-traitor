@@ -315,6 +315,7 @@ Ex-Dividend Date: {metrics.get('ex_dividend_date', 'N/A')}"""
             user_message=f"Provide a financial overview for:\n\n{data_block}",
             agent_name="financial_summary",
             priority="low",
+            route_tier=1,
         )
     except Exception as e:
         logger.warning(f"LLM summary generation failed for {ticker}: {e}")

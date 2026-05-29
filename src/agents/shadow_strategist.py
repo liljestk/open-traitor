@@ -91,6 +91,7 @@ class ShadowStrategist:
                     max_tokens=200,
                     agent_name=f"shadow_{name}",
                     priority="low",
+                    route_tier=1,
                 )
             except Exception as e:
                 logger.debug(f"shadow {name} llm failed: {e}")

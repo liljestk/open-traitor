@@ -1189,7 +1189,7 @@ def get_llm_providers():
             "name", "model", "is_local", "enabled", "priority",
             "base_url", "base_url_env", "api_key_env", "model_env",
             "rpm_limit", "daily_token_limit", "daily_request_limit",
-            "cooldown_seconds", "tier", "timeout",
+            "cooldown_seconds", "tier", "capability_tier", "timeout",
             "reserve_for_priority",
         }
         # Import env resolver to check config/.env as well as os.environ

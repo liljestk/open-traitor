@@ -193,6 +193,7 @@ class MarketAnalystAgent(BaseAgent):
                 max_tokens=800,
                 span=span,
                 agent_name=self.name,
+                route_tier=2,
             )
         except _LLM_FALLBACK_EXCEPTIONS as e:
             self.logger.warning(

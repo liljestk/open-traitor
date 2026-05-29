@@ -28,6 +28,15 @@ from src.utils.logger import get_logger
 
 logger = get_logger("core.llm")
 
+LLM_ROUTE_TIER_LOCAL = 1
+LLM_ROUTE_TIER_CHEAP_HOSTED = 2
+LLM_ROUTE_TIER_STRONG_HOSTED = 3
+LLM_ROUTE_TIERS = {
+    LLM_ROUTE_TIER_LOCAL,
+    LLM_ROUTE_TIER_CHEAP_HOSTED,
+    LLM_ROUTE_TIER_STRONG_HOSTED,
+}
+
 # ─── Config .env file reading (live-reload across containers) ────────────────
 # Docker env_file vars are only injected at container creation.
 # When the dashboard writes new API keys to config/.env, other containers
@@ -221,6 +230,20 @@ async def check_openrouter_credits(api_key: str) -> dict[str, Any]:
         return {"ok": False, "error": "Failed to check OpenRouter credits"}
 
 
+def _coerce_capability_tier(value: Any, *, is_local: bool, billing_tier: str) -> int:
+    try:
+        tier = int(value)
+    except (TypeError, ValueError):
+        tier = 0
+    if tier in LLM_ROUTE_TIERS:
+        return tier
+    if is_local:
+        return LLM_ROUTE_TIER_LOCAL
+    if str(billing_tier or "").lower() == "paid":
+        return LLM_ROUTE_TIER_STRONG_HOSTED
+    return LLM_ROUTE_TIER_CHEAP_HOSTED
+
+
 # ─── Provider dataclass ───────────────────────────────────────────────────────
 
 @dataclass
@@ -235,6 +258,7 @@ class LLMProvider:
     daily_request_limit: int = 0  # 0 = unlimited; max requests/day for this provider
     cooldown_seconds: int = 60
     tier: str = "free"          # "free" or "paid" — controls smart routing
+    capability_tier: int = 0    # 1=local, 2=cheap hosted, 3=strong hosted
     reserve_for_priority: str = ""  # "" = available for all; "high" = only high-priority calls
     # Hard wall-clock cap for a single completion call. Distinct from the
     # AsyncOpenAI httpx `timeout` (which is per-read/idle). Without a hard cap a
@@ -255,6 +279,13 @@ class LLMProvider:
     _free_model_index: int = field(default=0, repr=False)  # current free model rotation
     # Consecutive 429 counter for escalating cooldown (Gemini free tier)
     _consecutive_429s: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        self.capability_tier = _coerce_capability_tier(
+            self.capability_tier,
+            is_local=bool(self.is_local),
+            billing_tier=self.tier,
+        )
 
 
 def build_providers(
@@ -334,6 +365,11 @@ def build_providers(
 
         tier = pc.get("tier", "free")
         reserve_for = pc.get("reserve_for_priority", "")
+        capability_tier = _coerce_capability_tier(
+            pc.get("capability_tier", pc.get("route_tier")),
+            is_local=is_local,
+            billing_tier=tier,
+        )
         providers.append(LLMProvider(
             name=name,
             client=client,
@@ -344,13 +380,14 @@ def build_providers(
             daily_request_limit=pc.get("daily_request_limit", 0),
             cooldown_seconds=pc.get("cooldown_seconds", 60),
             tier=tier,
+            capability_tier=capability_tier,
             reserve_for_priority=reserve_for,
             request_timeout=float(timeout),
         ))
 
         logger.info(
             f"  Provider '{name}' ready | model={model} | local={is_local} | "
-            f"tier={tier} | timeout={timeout}s"
+            f"tier={tier} | route_tier={capability_tier} | timeout={timeout}s"
             + (f" | reserved={reserve_for}" if reserve_for else "")
         )
 

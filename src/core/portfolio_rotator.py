@@ -504,6 +504,7 @@ class PortfolioRotator(RotationExecutorMixin):
                 user_message=user_message,
                 temperature=self.llm_validation_temperature,
                 agent_name="portfolio_rotator",
+                route_tier=2,
             )
 
             return self._apply_llm_decisions(proposals, llm_response)

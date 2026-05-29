@@ -329,6 +329,7 @@ class CrossAssetAgent(BaseAgent):
                 temperature=0.2,
                 agent_name=self.name,
                 priority="low",
+                route_tier=1,
             )
         except Exception as e:
             self.logger.debug(f"llm.chat narrate failed: {e}")

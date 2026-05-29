@@ -397,6 +397,7 @@ class Orchestrator:
                         user_message=prompt,
                         max_tokens=400,
                         agent_name="advisor",
+                        route_tier=1,
                     )
                     if asyncio.iscoroutine(coro):
                         loop = asyncio.new_event_loop()

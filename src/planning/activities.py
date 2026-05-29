@@ -801,6 +801,7 @@ Respond ONLY with JSON:
             span=span,
             agent_name=f"planning_{horizon}",
             max_tokens=1400,
+            route_tier=2,
         )
         logger.info(
             f"Planning LLM response for {horizon} ({domain}): "

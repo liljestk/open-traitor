@@ -422,6 +422,7 @@ class TelegramChatHandler:
             temperature=0.5,
             max_tokens=600,
             agent_name="telegram_chat",
+            route_tier=2,
         )
 
         # Model responded with no tool calls — just return the text.
@@ -457,6 +458,7 @@ class TelegramChatHandler:
                             temperature=0.5,
                             max_tokens=600,
                             agent_name="telegram_chat",
+                            route_tier=2,
                         )
                         logger.debug("Re-answered with live price injection")
                         return final_text or "👍"
@@ -493,6 +495,7 @@ class TelegramChatHandler:
             temperature=0.5,
             max_tokens=600,
             agent_name="telegram_chat",
+            route_tier=2,
         )
 
         if remaining_calls:
@@ -547,6 +550,7 @@ class TelegramChatHandler:
             temperature=0.5,
             max_tokens=600,
             agent_name="telegram_chat",
+            route_tier=2,
         )
         return self._parse_and_execute_actions(raw)
 

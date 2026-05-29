@@ -167,6 +167,7 @@ class StrategistAgent(BaseAgent):
             max_tokens=600,
             span=span,
             agent_name=self.name,
+            route_tier=2,
         )
 
         if "error" in llm_response:

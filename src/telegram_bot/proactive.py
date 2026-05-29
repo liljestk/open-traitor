@@ -357,6 +357,7 @@ RULES:
             r = await self._llm.chat(
                 system_prompt=f"Pro {self._trader_type}, quick Telegram update.",
                 user_message=prompt, temperature=0.6, max_tokens=300,
+                agent_name="telegram_proactive", route_tier=2,
             )
             if r.strip().upper() != "SKIP":
                 self._send(r)
@@ -410,6 +411,7 @@ Keep it under 12 lines. Specific prices and levels."""
             r = await self._llm.chat(
                 system_prompt=f"Pro {self._trader_type}, morning briefing.",
                 user_message=prompt, temperature=0.5, max_tokens=600,
+                agent_name="telegram_proactive", route_tier=2,
             )
             self._send(r)
         except Exception as e:
@@ -481,6 +483,7 @@ Keep it under 10 lines. Be honest about losses."""
             r = await self._llm.chat(
                 system_prompt=f"Pro {self._trader_type}, evening recap.",
                 user_message=prompt, temperature=0.5, max_tokens=500,
+                agent_name="telegram_proactive", route_tier=2,
             )
             self._send(r)
         except Exception as e:

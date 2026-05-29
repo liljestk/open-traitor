@@ -32,6 +32,10 @@ from src.utils.logger import get_logger
 # Re-export provider infrastructure for backward compatibility
 from src.core.llm_providers import (  # noqa: F401
     LLMProvider,
+    LLM_ROUTE_TIER_LOCAL,
+    LLM_ROUTE_TIER_CHEAP_HOSTED,
+    LLM_ROUTE_TIER_STRONG_HOSTED,
+    LLM_ROUTE_TIERS,
     block_openrouter_free_model,
     build_providers,
     check_openrouter_credits,
@@ -504,9 +508,12 @@ class LLMClient:
         return info
 
     def _select_providers(
-        self, agent_name: Optional[str] = None, priority: Optional[str] = None,
+        self,
+        agent_name: Optional[str] = None,
+        priority: Optional[str] = None,
+        route_tier: Optional[int] = None,
     ) -> list[LLMProvider]:
-        """Return the provider list, filtered by call priority.
+        """Return the provider list, filtered by call priority and route tier.
 
         Priority-aware routing:
           - Providers with ``reserve_for_priority`` set (e.g. "high") are only
@@ -520,6 +527,7 @@ class LLMClient:
         Args:
             agent_name: the calling agent (mapped via AGENT_PRIORITIES).
             priority:   explicit override — if set, agent_name mapping is ignored.
+            route_tier: 1=local, 2=cheap hosted, 3=strong hosted.
         """
         effective_priority = priority or self.AGENT_PRIORITIES.get(
             agent_name or "", "normal"
@@ -532,8 +540,16 @@ class LLMClient:
         with self._providers_lock:
             all_providers = list(self._providers)
 
+        normalized_route_tier = self._normalize_route_tier(route_tier)
+        candidate_providers = all_providers
+        if normalized_route_tier is not None:
+            candidate_providers = self._providers_for_route_tier(
+                all_providers,
+                normalized_route_tier,
+            )
+
         result: list[LLMProvider] = []
-        for p in all_providers:
+        for p in candidate_providers:
             if p.reserve_for_priority:
                 # Only include this provider if the call meets the reservation
                 required_rank = _PRIORITY_RANK.get(p.reserve_for_priority, 2)
@@ -543,12 +559,12 @@ class LLMClient:
 
         # Safety: always include at least one provider (local fallback)
         if not result:
-            for p in all_providers:
+            for p in candidate_providers:
                 if p.is_local:
                     result.append(p)
                     break
             if not result:
-                result = all_providers  # shouldn't happen, but don't break
+                result = candidate_providers or all_providers  # shouldn't happen, but don't break
 
         if logger.isEnabledFor(10):  # DEBUG
             names = [p.name for p in result]
@@ -556,11 +572,47 @@ class LLMClient:
             if skipped:
                 logger.debug(
                     f"Provider chain for {agent_name or 'unknown'} "
-                    f"(priority={effective_priority}): "
+                    f"(priority={effective_priority}, route_tier={normalized_route_tier or 'default'}): "
                     f"{' → '.join(names)} (skipped: {', '.join(skipped)})"
                 )
 
         return result
+
+    @staticmethod
+    def _normalize_route_tier(route_tier: Optional[int]) -> Optional[int]:
+        if route_tier is None:
+            return None
+        try:
+            value = int(route_tier)
+        except (TypeError, ValueError):
+            return None
+        return value if value in LLM_ROUTE_TIERS else None
+
+    @staticmethod
+    def _providers_for_route_tier(
+        providers: list[LLMProvider],
+        route_tier: int,
+    ) -> list[LLMProvider]:
+        if not providers:
+            return []
+
+        if route_tier == LLM_ROUTE_TIER_LOCAL:
+            preferred_order = [LLM_ROUTE_TIER_LOCAL]
+        elif route_tier == LLM_ROUTE_TIER_CHEAP_HOSTED:
+            preferred_order = [LLM_ROUTE_TIER_CHEAP_HOSTED, LLM_ROUTE_TIER_LOCAL]
+        elif route_tier == LLM_ROUTE_TIER_STRONG_HOSTED:
+            preferred_order = [
+                LLM_ROUTE_TIER_STRONG_HOSTED,
+                LLM_ROUTE_TIER_CHEAP_HOSTED,
+                LLM_ROUTE_TIER_LOCAL,
+            ]
+        else:
+            return providers
+
+        ordered: list[LLMProvider] = []
+        for tier in preferred_order:
+            ordered.extend(p for p in providers if p.capability_tier == tier)
+        return ordered or providers
 
     @staticmethod
     def _is_rate_or_quota_error(exc: Exception) -> bool:
@@ -679,13 +731,18 @@ class LLMClient:
         span: Optional["SpanContext"] = None,
         agent_name: Optional[str] = None,
         priority: Optional[str] = None,
+        route_tier: Optional[int] = None,
     ) -> str:
         """Send a chat completion request, trying providers in chain order."""
         start_time = time.time()
         temp = temperature or self.temperature
         tokens = max_tokens or self.max_tokens
         last_error: Optional[Exception] = None
-        providers = self._select_providers(agent_name=agent_name, priority=priority)
+        providers = self._select_providers(
+            agent_name=agent_name,
+            priority=priority,
+            route_tier=route_tier,
+        )
 
         for provider in providers:
             if not self._is_provider_available(provider):
@@ -822,6 +879,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         agent_name: Optional[str] = None,
         priority: Optional[str] = None,
+        route_tier: Optional[int] = None,
     ) -> tuple[Optional[str], list[dict], Optional[dict]]:
         """
         Send a chat completion with OpenAI-format tool definitions.
@@ -846,7 +904,11 @@ class LLMClient:
             chat_messages.append({"role": "user", "content": user_message})
 
         # Smart routing: reorder providers based on tier + priority
-        providers = self._select_providers(agent_name=agent_name, priority=priority)
+        providers = self._select_providers(
+            agent_name=agent_name,
+            priority=priority,
+            route_tier=route_tier,
+        )
 
         for provider in providers:
             if not self._is_provider_available(provider):
@@ -956,6 +1018,7 @@ class LLMClient:
         span: Optional["SpanContext"] = None,
         agent_name: Optional[str] = None,
         priority: Optional[str] = None,
+        route_tier: Optional[int] = None,
     ) -> dict:
         """
         Send a chat request and parse the response as JSON.
@@ -969,6 +1032,7 @@ class LLMClient:
             span=span,
             agent_name=agent_name,
             priority=priority,
+            route_tier=route_tier,
         )
 
         try:
@@ -1255,6 +1319,7 @@ class LLMClient:
                 "is_local": p.is_local,
                 "available": self._is_provider_available(p),
                 "tier": p.tier,
+                "capability_tier": p.capability_tier,
                 "reserve_for_priority": p.reserve_for_priority,
             }
             if not p.is_local:

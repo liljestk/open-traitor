@@ -491,6 +491,7 @@ export interface LLMProviderLiveStatus {
   is_local: boolean
   available: boolean
   tier?: string
+  capability_tier?: number
   in_cooldown?: boolean
   cooldown_remaining_s?: number
   daily_tokens?: number
@@ -520,6 +521,7 @@ export interface LLMProviderConfig {
   cooldown_seconds?: number
   is_local?: boolean
   tier?: string
+  capability_tier?: number
   api_key_set?: boolean
   live_status?: LLMProviderLiveStatus
 }

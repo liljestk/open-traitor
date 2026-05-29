@@ -412,6 +412,7 @@ class UniverseScanner:
                     user_message=prompt,
                     temperature=0.2,
                     max_tokens=200,
+                    route_tier=2,
                 ),
                 orch._loop,
             )

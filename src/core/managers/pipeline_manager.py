@@ -1244,6 +1244,7 @@ class PipelineManager:
                     "portfolio_value": _portfolio_value,
                     "cash_balance": _cash_balance,
                     "open_positions": orch.state.open_positions,
+                    "high_stakes_active": bool(getattr(getattr(orch, "high_stakes", None), "is_active", False)),
                     "edges": getattr(orch.quant, "edges", None) if orch.quant else None,
                     "allocator": getattr(orch.quant, "allocator", None) if orch.quant else None,
                     "cycle_id": cycle_id,

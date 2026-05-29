@@ -834,6 +834,7 @@ COST SENSITIVITY:
                 user_message=f"Interpret these backtest results:\n\n{data_block}",
                 agent_name="backtest_analyst",
                 priority="low",
+                route_tier=1,
             )
         except Exception as e:
             logger.warning("LLM interpretation failed for run %d: %s", run_id, e)
